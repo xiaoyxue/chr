@@ -166,6 +166,12 @@ This experiment leaves no persistent listener and does not advertise port 9001.
 - The first nine no-Ti frames decode identically to the Dawn bypass pipeline;
   frames with Ti differ. An encoded preview visibly contains the projected
   artwork with scene occlusion.
+- Independent first-use check against the **original MP4**, not merely bypass:
+  decoded RGB MAE for ordinals 0–8 was **0.6820, 0.8796, 0.8882, 0.8982,
+  0.9350, 0.9841, 0.9494, 0.9693, 0.9607** code values. Frame zero visually
+  contains the correct soccer scene, not a cleared/green image. Absolute-error
+  p99 was 4 for frame zero and 5 for the other eight. Private verification
+  images and `first-frames-reference.json` are in mode-700 `.runtime/`.
 - Independent CPU-decoded comparison against the authorized 1,482-frame
   `render/logo.mp4`: SSIM **0.988869** overall (Y 0.987295, U 0.991603,
   V 0.992433). This is a **post-lossy-encoding** comparison, not pre-encode
