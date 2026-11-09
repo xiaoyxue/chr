@@ -1,0 +1,15 @@
+.venv/
+.runtime/
+.worktrees/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+target/
+result
+result-*
+.env
+.env.*
+!.env.example

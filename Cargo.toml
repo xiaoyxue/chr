@@ -1,0 +1,20 @@
+[package]
+name = "chr"
+version = "0.1.0"
+edition = "2024"
+description = "GPU-resident SRT video composition with FFmpeg and wgpu"
+
+[dependencies]
+anyhow = "1"
+ash = "0.38"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+wgpu-hal = { version = "=30.0.1", features = ["vulkan"] }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
