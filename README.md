@@ -22,7 +22,7 @@ frame transfers.
 ```text
 MP4 -> FFmpeg hardware decode -> uncompressed GPU images
     -> SDI-like frame pacing, source identity, and continuous timecode
-    -> native wgpu composition -> GPU images
+    -> native Dawn or wgpu composition -> GPU images
     -> FFmpeg hardware encode -> MPEG-TS/SRT
     -> Windows SRT player
 ```
@@ -33,7 +33,7 @@ configuration, and CPU orchestration are not subject to that restriction.
 Uploading source artwork and cached masks is separate from transferring video
 frames to the CPU.
 
-The compositor must integrate FFmpeg libraries and native wgpu in one process,
+The compositor must integrate FFmpeg libraries and the native renderer in one process,
 with explicit Vulkan resource lifetime, image-layout, and synchronization
 handling. An ordinary FFmpeg `rawvideo` pipe cannot transport GPU image handles
 and is not an acceptable substitute.
@@ -115,19 +115,35 @@ development machine, FFmpeg has successfully decoded the SC1464 clip into both
 CUDA and Vulkan hardware frames, and completed a Vulkan hardware
 decode/encode probe. Native wgpu enumerates the NVIDIA Vulkan adapters.
 
-The shared-image compositor and the SRT playback service are not yet
-implemented. No playback endpoint is currently advertised as ready.
+This `experiment/dawn-cpp` worktree implements the native Dawn compositor.
+The GPU-resident Vulkan decode/Dawn composition/Vulkan encode pipeline has passed
+a 1,500-frame loop test and a 150-frame, paced, localhost SRT test. Exact source
+PTS selects the prepared transforms and masks. No persistent playback service is
+left running. See [Dawn build, implementation, and validation](docs/dawn.md).
+
+The wgpu experiment remains isolated in its own worktree. This worktree does not
+claim to implement or validate that backend.
 
 ## Dependencies
 
 Use Nix for all dependencies; do not install packages with pip or uv.
-`flake.lock` pins the package collection. Host NVIDIA user-space libraries must
+`flake.lock` pins the package collection. The Dawn dependency is Google's official
+native static release, hash-pinned and imported through Nix; nixpkgs' unrelated
+`dawn` PostScript package is not used. CMake builds this backend with Clang.
+Host NVIDIA user-space libraries must
 match the already-installed kernel driver; `nix/host-gpu.sh` exposes only these
 driver libraries to Nix programs without adding the host libc to their search
 path. It does not replace the system driver or change Home Manager.
 
 ```sh
 nix develop
+```
+
+```sh
+nix build --max-jobs 1 --cores 4
+mkdir -p .runtime
+./result/bin/chr-dawn --scene /private/scene/scene.json \
+  --output .runtime/output.ts --ledger .runtime/frames.jsonl --frames 1482
 ```
 
 FFmpeg hardware-decode probe, using an authorized local asset:

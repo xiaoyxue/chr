@@ -47,8 +47,8 @@ def frame_quad(ti, world, texture, width, height):
     ):
         return {"valid": False, "texture": texture}
     pixels = corners[:2] / denominator
-    low = np.maximum(0, np.floor(pixels.min(axis=1) - 2)).astype(int)
-    high = np.minimum([width, height], np.ceil(pixels.max(axis=1) + 3)).astype(int)
+    low = np.clip(np.floor(pixels.min(axis=1) - 2), [0, 0], [width, height]).astype(int)
+    high = np.clip(np.ceil(pixels.max(axis=1) + 3), [0, 0], [width, height]).astype(int)
     return {
         "valid": bool(np.all(high > low)),
         "texture": texture,

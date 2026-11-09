@@ -1,5 +1,9 @@
 # Server and player modules
 
+The Dawn worktree implements these boundaries in native C++; see
+[Dawn implementation and validation](dawn.md) for the actual shared-resource
+protocol, build commands, test results, and remaining qualification limits.
+
 ## Selected simulation
 
 The server reads a private MP4 and simulates an uncompressed, timecoded input.

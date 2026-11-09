@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr const char* sceneShader = R"WGSL(@CHR_SHADER@)WGSL";
