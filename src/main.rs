@@ -147,7 +147,11 @@ fn main() -> Result<()> {
             }
         }
         let began = Instant::now();
-        let Some(info) = media.next()? else {
+        let next = media.next();
+        if Media::stopped() {
+            break;
+        }
+        let Some(info) = next? else {
             ensure!(
                 expected_source == scene.frames.len(),
                 "Unexpected early source EOF"
@@ -174,7 +178,11 @@ fn main() -> Result<()> {
                 bypass: args.bypass,
             },
         )?;
-        media.encode(&renderer.packed, sequence)?;
+        let encoded = media.encode(&renderer.packed, sequence);
+        if Media::stopped() {
+            break;
+        }
+        encoded?;
         if let Some(ledger) = &mut ledger {
             writeln!(
                 ledger,
@@ -220,7 +228,8 @@ fn main() -> Result<()> {
         ledger.flush()?;
     }
     let completed = json!({
-        "state": "complete", "frames": sequence, "adapter": gpu.name,
+        "state": if Media::stopped() { "stopped" } else { "complete" },
+        "frames": sequence, "adapter": gpu.name,
         "elapsed_seconds": clock.elapsed().as_secs_f64(),
         "average_processing_ms": total_processing.as_secs_f64() * 1000.0 / sequence.max(1) as f64,
         "timestamp_mismatches": 0, "host_video_frames": false,

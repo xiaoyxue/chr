@@ -17,6 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+start_server() {
 systemd-run --user --unit="$unit" --collect \
     --property=RuntimeMaxSec=120 --property=TimeoutStopSec=10 \
     --property=UMask=0077 --property="WorkingDirectory=$PWD" \
@@ -24,7 +25,7 @@ systemd-run --user --unit="$unit" --collect \
     --property="StandardError=append:$runtime/srt-server.log" \
     "$server" --scene "$scene" \
     --output 'srt://127.0.0.1:19001?mode=listener&latency=120000&timeout=5000000&listen_timeout=15000000&linger=1' \
-    --frames 150 --status "$runtime/srt-status.json" --timecode-overlay
+    --frames "$1" --status "$runtime/srt-status.json" --timecode-overlay
 
 ready=false
 for ((attempt = 0; attempt < 100; attempt++)); do
@@ -39,7 +40,9 @@ if [ "$ready" != true ]; then
     journalctl --user -u "$unit" --no-pager -n 25
     exit 1
 fi
+}
 
+start_server 150
 timeout 30 ffmpeg -hide_banner -nostdin -loglevel warning -y \
     -i 'srt://127.0.0.1:19001?mode=caller&latency=120000&timeout=5000000' \
     -c copy "$runtime/srt.ts" > "$runtime/srt-receiver.log" 2>&1
@@ -62,3 +65,24 @@ with av.open(sys.argv[1]) as container:
 assert count == 150, count
 print(json.dumps({"srt_frames": count, "pts_mismatches": 0, "timecode_overlay": True}))
 PY
+
+cleanup
+unit="chr-wgpu-disconnect-$$"
+start_server 3000
+timeout 30 ffmpeg -hide_banner -nostdin -loglevel warning -y \
+    -i 'srt://127.0.0.1:19001?mode=caller&latency=120000&timeout=5000000' \
+    -frames:v 30 -c copy "$runtime/early-disconnect.ts" \
+    > "$runtime/early-disconnect-receiver.log" 2>&1
+disconnected=false
+for ((attempt = 0; attempt < 100; attempt++)); do
+    if ! systemctl --user is-active --quiet "$unit"; then
+        disconnected=true
+        break
+    fi
+    sleep 0.1
+done
+if [ "$disconnected" != true ]; then
+    echo "The server ignored its disconnected output." >&2
+    exit 1
+fi
+printf '{"early_disconnect_exits":true}\n'

@@ -452,6 +452,8 @@ static int write_packets(ChrMedia *media) {
         result = av_interleaved_write_frame(media->output, media->encoded_packet);
         av_packet_unref(media->encoded_packet);
         AV_TRY(result);
+        avio_flush(media->output->pb);
+        AV_TRY(media->output->pb->error);
     }
 }
 
@@ -472,6 +474,7 @@ int chr_finish(ChrMedia *media) {
     AV_TRY(write_packets(media));
     AV_TRY(av_write_trailer(media->output));
     avio_flush(media->output->pb);
+    AV_TRY(media->output->pb->error);
     if (strncmp(media->output->url, "srt://", 6) == 0 && !stopped) {
         av_usleep(1000000);
     }
