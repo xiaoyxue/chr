@@ -148,6 +148,20 @@ an already-running unit. A one-second final drain keeps the last frames
 available across the tested 120 ms SRT latency; arbitrary larger latency and
 network reconnection are not implemented. Receiver EOF can be reported by
 FFmpeg as an SRT input/output error after successful complete delivery.
+Every encoded packet write is flushed and the sticky `AVIOContext.error` is
+checked explicitly: muxer success alone does not establish transport health.
+An early client disconnect exits the sender with failure so a supervisor can
+restart it; it does not continue encoding into a failed socket.
+
+```sh
+nix develop --command bash tools/test_dawn_disconnect.sh "$SCENE"
+```
+
+This second bounded loopback test requests 1,800 paced/looping server frames,
+disconnects its client after 90 frames, and requires sender exit status 1
+within ten seconds rather than accepting a runtime-limit kill. The verified
+run exited after 113 submitted frames and released the listener. Restarting a
+service begins a new epoch/source replay, not a seamless connection handoff.
 
 The H.264 High / 8-bit 4:2:0 MPEG-TS stream is suitable for a Windows VLC or
 ffplay build with SRT support. Windows playback itself has not been exercised

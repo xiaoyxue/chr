@@ -111,6 +111,8 @@ void Output::drain() {
         av_packet_rescale_ts(packet, encoder->time_base, stream->time_base);
         packet->stream_index = stream->index;
         avcheck(av_interleaved_write_frame(format, packet), "Mux encoded packet");
+        avio_flush(format->pb);
+        avcheck(format->pb->error, "Write encoded transport");
         av_packet_unref(packet);
     }
     av_packet_free(&packet);
