@@ -20,9 +20,12 @@ Source::Source(const std::string& path) {
         throw std::runtime_error("RTX 3090 hardware is required; software fallback forbidden");
     std::cout << "FFmpeg adapter: " << properties.deviceName << "\n";
     avcheck(avformat_open_input(&format, path.c_str(), nullptr, nullptr), "Open MP4");
-    avcheck(avformat_find_stream_info(format, nullptr), "MP4 stream info");
+    if (std::string(format->iformat->name) != "mov,mp4,m4a,3gp,3g2,mj2")
+        throw std::runtime_error("Only header-complete MP4 input is supported");
     stream = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     avcheck(stream, "Video stream");
+    requireCompleteVideoHeader(*format->streams[stream]->codecpar, format->streams[stream]->time_base);
+    std::cout << "Input metadata: MP4 header only; frame probing disabled\n";
     auto* codec = avcodec_find_decoder(format->streams[stream]->codecpar->codec_id);
     decoder = avcodec_alloc_context3(codec);
     avcheck(avcodec_parameters_to_context(decoder, format->streams[stream]->codecpar), "Decoder parameters");

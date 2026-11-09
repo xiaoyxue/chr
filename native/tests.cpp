@@ -12,6 +12,22 @@ template<class F> void rejects(F action, const char* message) {
 }
 
 int main() try {
+    AVCodecParameters header{};
+    uint8_t extradata = 1;
+    header.codec_type = AVMEDIA_TYPE_VIDEO;
+    header.codec_id = AV_CODEC_ID_H264;
+    header.width = 1212;
+    header.height = 654;
+    header.extradata = &extradata;
+    header.extradata_size = 1;
+    requireCompleteVideoHeader(header, {1, 15360});
+    header.extradata_size = 0;
+    rejects([&] { requireCompleteVideoHeader(header, {1, 15360}); }, "Missing extradata triggered no rejection");
+    header.extradata_size = 1;
+    header.width = 0;
+    rejects([&] { requireCompleteVideoHeader(header, {1, 15360}); }, "Missing raster triggered no rejection");
+    header.width = 1212;
+    rejects([&] { requireCompleteVideoHeader(header, {0, 15360}); }, "Missing time base triggered no rejection");
     auto directory = std::filesystem::path("scene-test-data");
     std::filesystem::create_directory(directory);
     auto path = directory / "scene.json";

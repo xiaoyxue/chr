@@ -6,6 +6,11 @@ Implemented and tested on the NVIDIA GeForce RTX 3090 with FFmpeg 8.1.2,
 Dawn `66f899221d41dbc6d6257350c4b654a9b375c7f2` (20261106.204713),
 Clang 21.1.8, and CMake. The input is MP4 replay, not electrical SDI.
 The application rejects non-Vulkan decoded frames and software adapters.
+Input metadata comes only from the MP4 container header. The server does not
+call `avformat_find_stream_info`, which can otherwise decode software probe
+frames before hardware decoder configuration. Missing H.264 codec parameters,
+extradata, dimensions, or time base fail closed; there is no frame-probing
+fallback for incomplete headers.
 
 The default mode renders the existing prepared scene. `--mode bypass` still
 passes video through a Dawn shader but preserves the NV12 bytes.
@@ -155,7 +160,10 @@ This experiment leaves no persistent listener and does not advertise port 9001.
 
 - Unit tests: equivalent rational PTS, rejected near-but-not-exact PTS, absent
   PTS, mask seeking/missing masks, missing Ti, independent loop/timecode identity,
-  24-hour wrap, and rejected non-CFR scene passed.
+  24-hour wrap, rejected non-CFR scene, and incomplete MP4 header rejection passed.
+- After removing stream-info frame probing, the rebuilt Nix application
+  independently verified **60/60 hardware-processed frames**, 51 with Ti,
+  exact timestamps, and unchanged initial no-Ti output.
 - Marker shader: three hardware-encoded frames independently decoded; the
   entire 160x80 marker had `YMIN=YMAX=YAVG=204`.
 - Full scene plus loop: **1,500 frames**, **1,473 with Ti**, one source wrap,

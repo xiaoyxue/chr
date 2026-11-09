@@ -16,6 +16,14 @@ inline void avcheck(int result, const char* operation) {
     }
 }
 
+inline void requireCompleteVideoHeader(const AVCodecParameters& parameters, AVRational timebase) {
+    if (parameters.codec_type != AVMEDIA_TYPE_VIDEO || parameters.codec_id != AV_CODEC_ID_H264 ||
+        parameters.width <= 0 || parameters.height <= 0 ||
+        !parameters.extradata || parameters.extradata_size <= 0 ||
+        timebase.num <= 0 || timebase.den <= 0)
+        throw std::runtime_error("Incomplete H.264 MP4 header; software frame probing is forbidden");
+}
+
 class Source {
 public:
     AVBufferRef* device = nullptr;
