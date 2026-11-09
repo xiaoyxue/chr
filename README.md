@@ -1,10 +1,10 @@
 # chr
 
-A GPU-resident streaming compositor under development.
+A GPU-resident, video-only streaming compositor and SDI-like replay simulator.
 
 ## Backend trials
 
-Two isolated Git worktrees will implement the same frame and scene contract:
+Two isolated Git worktrees implement the same frame and scene contract:
 
 | Backend | Implementation | Build system | Dependencies |
 |---|---|---|---|
@@ -110,13 +110,37 @@ not sufficient evidence that decoded/captured video pixels avoid host RAM.
 
 ## Current status
 
-The Nix environment and host NVIDIA driver bridge are available. On the
-development machine, FFmpeg has successfully decoded the SC1464 clip into both
-CUDA and Vulkan hardware frames, and completed a Vulkan hardware
-decode/encode probe. Native wgpu enumerates the NVIDIA Vulkan adapters.
+The wgpu backend implements hardware decode, GPU-resident logo composition,
+hardware encode, source-PTS association, source looping, simulated timecode,
+and SRT output. A 1,500-frame trial crossed a source loop with no timestamp
+mismatches; a separate SRT receiver decoded all 150 frames in a bounded test.
+Initial uncovered frames were also compared against the original video, not
+only against a bypass of the same renderer.
 
-The shared-image compositor and the SRT playback service are not yet
-implemented. No playback endpoint is currently advertised as ready.
+The implementation targets the validated RTX 3090/Vulkan setup. It makes four
+GPU-local plane copies per frame; it is not literal zero-copy. Software decoder
+probing and CPU video-frame fallback are forbidden. This remains an experimental
+replay system, not a production SDI or camera-tracking implementation.
+
+See `docs/architecture.md` for module boundaries and `docs/wgpu-backend.md`
+for the memory handoff and detailed commands.
+
+## Quick start
+
+Create a private asset configuration from `config/example.toml`, then:
+
+```sh
+nix develop --command python tools/prepare_scene.py \
+  --config /private/assets.toml --output /private/prepared
+nix build --cores 4 --max-jobs 1
+result/bin/chr --scene /private/prepared/scene.json \
+  --output 'srt://127.0.0.1:19001?mode=listener&latency=120000&timeout=5000000&linger=1' \
+  --status /private/status.json --timecode-overlay
+```
+
+The listener waits for a player. Use an explicitly authorized private interface
+instead of localhost for Windows playback. Reconnecting after an output error
+requires restarting the server, or supervising it with a user service.
 
 ## Dependencies
 

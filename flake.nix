@@ -32,6 +32,8 @@
           fileset = pkgs.lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
+            ./build.rs
+            ./native
             ./src
           ];
         };
@@ -43,11 +45,18 @@
           pkgs.vulkan-loader
         ];
       };
+      cargoConfig = pkgs.writeText "chr-cargo-config.toml" ''
+        [source.crates-io]
+        replace-with = "nix-vendor"
+        [source.nix-vendor]
+        directory = "${native.cargoDeps}"
+        [net]
+        offline = true
+      '';
       app = pkgs.writeShellApplication {
         name = "chr";
         excludeShellChecks = [ "SC1091" ];
         runtimeInputs = [
-          python
           pkgs.ffmpeg
         ];
         text = ''
@@ -87,10 +96,21 @@
         LD_LIBRARY_PATH = libraries;
         WGPU_BACKEND_TYPE = "Vulkan";
         shellHook = ''
-          export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
+          export CARGO_HOME="$PWD/.runtime/cargo-home"
+          mkdir -p -m 700 "$CARGO_HOME"
+          ln -sfn ${cargoConfig} "$CARGO_HOME/config.toml"
           source ${./nix/host-gpu.sh}
         '';
       };
-      formatter.${system} = pkgs.nixfmt;
+      formatter.${system} = pkgs.writeShellApplication {
+        name = "chr-format-nix";
+        runtimeInputs = [ pkgs.nixfmt ];
+        text = ''
+          if [ "$#" -eq 0 ]; then
+            exec nixfmt flake.nix
+          fi
+          exec nixfmt "$@"
+        '';
+      };
     };
 }

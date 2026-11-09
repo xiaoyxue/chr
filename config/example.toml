@@ -2,13 +2,3 @@ bundle = "/path/to/cam-estimate"
 case = "SC1464"
 quads = "shots/SC1464/output/SC1464-ground-quads-1.json"
 reference_run = "shots/SC1464/output/ti-logos-initial-half-alpha05-20261106"
-runtime = ".runtime"
-
-# Bind localhost unless a private network interface is explicitly authorized.
-listen_host = "127.0.0.1"
-output_port = 9001
-input_port = 19000
-health_port = 9080
-latency_ms = 120
-encoder = "h264_nvenc"
-bitrate = "8M"
