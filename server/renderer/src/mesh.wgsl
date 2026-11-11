@@ -4,7 +4,8 @@ struct Object {
     emissive_cutoff: vec4<f32>, factors: vec4<f32>, flags: vec4<u32>
 };
 struct Light {
-    position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>
+    position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>,
+    shadow_matrix: mat4x4<f32>, shadow_params: vec4<f32>
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
@@ -19,6 +20,8 @@ struct Light {
 @group(2) @binding(8) var ao_map: texture_2d<f32>;
 @group(2) @binding(9) var ao_sampler: sampler;
 @group(3) @binding(0) var<storage,read> lights: array<Light>;
+@group(3) @binding(1) var shadow_maps: texture_depth_2d_array;
+@group(3) @binding(2) var shadow_sampler: sampler_comparison;
 
 struct Vertex {
     @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
@@ -45,6 +48,67 @@ fn vs_main(vertex: Vertex) -> Surface {
 }
 
 fn pow5(x: f32) -> f32 { let x2=x*x; return x2*x2*x; }
+
+struct ShadowSurface {
+    @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) alpha: f32
+};
+
+@vertex
+fn vs_shadow(vertex:Vertex)->ShadowSurface {
+    var out:ShadowSurface;
+    let world=object.model*vec4(vertex.position,1.0);
+    out.clip=camera.clip_from_world*world;
+    out.uv=vertex.uv;
+    out.alpha=vertex.color.a;
+    return out;
+}
+
+@fragment
+fn fs_shadow(surface:ShadowSurface,@builtin(front_facing) front_facing:bool) {
+    let alpha=textureSample(base_map,base_sampler,surface.uv).a*object.color.a*surface.alpha;
+    let front=select(front_facing,!front_facing,object.flags.w!=0u);
+    if !front && object.flags.z==0u {discard;}
+    if object.emissive_cutoff.w>=0.0 && alpha<object.emissive_cutoff.w {discard;}
+}
+
+fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+    if camera.options.z==0u || light.shadow_params.x<0.0 {return 1.0;}
+    let clip=light.shadow_matrix*vec4(position+normal*light.shadow_params.z,1.0);
+    if clip.w<=0.0 {return 1.0;}
+    let ndc=clip.xyz/clip.w;
+    let uv=ndc.xy*vec2(0.5,-0.5)+vec2(0.5);
+    if any(uv<vec2(0.0)) || any(uv>=vec2(1.0)) || ndc.z<0.0 || ndc.z>1.0 {return 1.0;}
+    let layer=i32(light.shadow_params.x);
+    let depth=ndc.z-light.shadow_params.y;
+    let size=textureDimensions(shadow_maps);
+    let hx=light.shadow_matrix*vec4(px,0.0);
+    let hy=light.shadow_matrix*vec4(py,0.0);
+    let dx=(hx.xyz-ndc*hx.w)/clip.w;
+    let dy=(hy.xyz-ndc*hy.w)/clip.w;
+    let ux=dx.xy*vec2(0.5,-0.5);
+    let uy=dy.xy*vec2(0.5,-0.5);
+    let determinant=ux.x*uy.y-ux.y*uy.x;
+    var gradient=vec2(0.0);
+    if abs(determinant)>1e-12 {
+        gradient=vec2(dx.z*uy.y-dy.z*ux.y,ux.x*dy.z-uy.x*dx.z)/determinant;
+    }
+    if camera.options.z==1u {
+        let pixel=clamp(vec2<i32>(uv*vec2<f32>(size)),vec2(0),vec2<i32>(size)-vec2(1));
+        let offset=(vec2<f32>(pixel)+vec2(0.5))/vec2<f32>(size)-uv;
+        return select(0.0,1.0,depth+dot(gradient,offset)<=textureLoad(shadow_maps,pixel,layer,0));
+    }
+    var visibility=0.0;
+    let step=light.shadow_params.w/vec2<f32>(size);
+    // Correct the receiver plane per tap; cover the bilinear footprint's depth slope.
+    let receiver_bias=dot(abs(gradient),1.0/vec2<f32>(size));
+    for(var y=-1;y<=1;y++) {
+        for(var x=-1;x<=1;x++) {
+            let offset=vec2<f32>(f32(x),f32(y))*step;
+            visibility+=textureSampleCompareLevel(shadow_maps,shadow_sampler,uv+offset,layer,depth+dot(gradient,offset)-receiver_bias);
+        }
+    }
+    return visibility/9.0;
+}
 
 // GGX with height-correlated Smith visibility and Burley diffuse.
 fn brdf(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
@@ -90,6 +154,7 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
         n=normalize(n);
         if !front {n=-n;}
     }
+    let shadow_normal=n;
     if object.flags.x!=0u {
         var t=surface.tangent.xyz;
         var b=vec3(0.0);
@@ -132,7 +197,9 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
                 }
             }
         }
-        radiance+=light.emission_outer.rgb*attenuation*brdf(n,v,l,base.rgb,metal,rough);
+        if dot(n,l)>0.0 {
+            radiance+=light.emission_outer.rgb*attenuation*shadow_visibility(light,surface.position,shadow_normal,px,py)*brdf(n,v,l,base.rgb,metal,rough);
+        }
     }
     return vec4(clamp(radiance,vec3(0.0),vec3(65504.0)),1.0);
 }

@@ -24,6 +24,7 @@ fn capture(
             PbrSettings {
                 exposure,
                 tone_map: ToneMap::Reinhard,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -219,6 +220,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
             PbrSettings {
                 exposure: 1.0,
                 tone_map: ToneMap::Reinhard,
+                ..Default::default()
             },
         )
         .unwrap();

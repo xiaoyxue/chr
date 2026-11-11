@@ -15,7 +15,7 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: EXR/IBL, shadows, area/atmosphere lighting
+not a live scene-control protocol: EXR/IBL, point shadows/PCSS, area/atmosphere lighting
 and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
@@ -57,6 +57,20 @@ attenuation is inverse-square. The raster roughness floor is 0.045. Radiance is
 bounded by the RGBA16F range before one output exposure and Reinhard/ACES pass.
 Environment lighting is explicitly rejected until the IBL increment; shadow
 controls, area lighting and atmosphere are not claimed by M2.
+
+M3 adds directional/spot `Hard` and `Pcf` shadow maps through
+`PbrSettings::shadows`. A directional map fits the retained scene bounds,
+independently of the viewing camera; spot maps use their light cones.
+Alpha masks, model transforms and sidedness are shared with main rendering.
+Receiver-plane depth correction, explicit depth/normal bias and configurable
+PCF texel radius handle sampling artifacts. Texture limits and a configurable
+memory budget are checked before map allocation.
+
+Unchanged scene state reuses its depth maps across camera motion and Hard/PCF
+mode changes. The M3 overview captures compare Off/Hard/PCF with identical
+sun-plus-four-spot illumination and ordinary pinhole framing. They remain
+owner-local diagnostics, not full interactive acceptance. Cascades, point-light
+cubemaps, PCSS and sky occlusion are not implemented by this increment.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,
