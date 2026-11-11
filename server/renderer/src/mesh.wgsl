@@ -1,4 +1,7 @@
-struct Camera { clip_from_world: mat4x4<f32>, eye: vec4<f32>, options: vec4<u32> };
+struct Camera {
+    clip_from_world: mat4x4<f32>, eye: vec4<f32>, options: vec4<u32>,
+    optical_depth: vec4<f32>
+};
 struct Object {
     model: mat4x4<f32>, normal: mat3x3<f32>, color: vec4<f32>,
     emissive_cutoff: vec4<f32>, factors: vec4<f32>, flags: vec4<u32>
@@ -370,7 +373,7 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     }
     let count=u32(light.pcss_samples.w);
     if count<=1u {return planar_visibility(light,position,normal,px,py,0u);}
-    let depth=(camera.clip_from_world*vec4(position,1.0)).w;
+    let depth=dot(camera.optical_depth,vec4(position,1.0));
     if depth<light.cascade_params.x || depth>=light.cascade_splits[count-1u] {return 1.0;}
     var cascade=0u;
     while cascade+1u<count && depth>light.cascade_splits[cascade] {cascade++;}
@@ -421,7 +424,8 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     if !front && object.flags.z==0u {discard;}
     if object.emissive_cutoff.w>=0.0 && base.a<object.emissive_cutoff.w {discard;}
     if object.flags.y!=0u {return vec4(min(base.rgb+emissive,vec3(65504.0)),1.0);}
-    let v=normalize(camera.eye.xyz-surface.position);
+    var v=-camera.optical_depth.xyz;
+    if camera.options.z==0u {v=normalize(camera.eye.xyz-surface.position);}
     var n=surface.normal;
     if dot(n,n)<1e-12 {
         n=normalize(cross(px,py));

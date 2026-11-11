@@ -7,7 +7,7 @@ use wgpu::util::DeviceExt;
 
 use crate::{
     Gpu,
-    camera::Camera,
+    camera::CameraView,
     coordinates::ImageExtent,
     environment::{self, EnvironmentGpu, EnvironmentSettings},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
@@ -58,7 +58,10 @@ struct CameraUniform {
     clip: [[f32; 4]; 4],
     eye: [f32; 4],
     options: [u32; 4],
+    optical_depth: [f32; 4],
 }
+
+const CAMERA_UNIFORM_SIZE: u64 = size_of::<CameraUniform>() as u64;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -157,10 +160,10 @@ pub struct MeshRenderer {
 impl MeshRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let light_size = std::mem::size_of::<LightUniform>() as u64;
-        let camera_layout = uniform_layout(device, false, 96);
+        let camera_layout = uniform_layout(device, false, CAMERA_UNIFORM_SIZE);
         let object_layout = uniform_layout(device, true, 176);
-        let camera = uniform_buffer(device, 96);
-        let camera_group = uniform_group(device, &camera_layout, &camera, 96);
+        let camera = uniform_buffer(device, CAMERA_UNIFORM_SIZE);
+        let camera_group = uniform_group(device, &camera_layout, &camera, CAMERA_UNIFORM_SIZE);
         let maps = MaterialMapCache::new(device);
         let environment = EnvironmentGpu::new(device);
         let mut light_entries = vec![
@@ -402,7 +405,7 @@ impl MeshRenderer {
         &mut self,
         gpu: &Gpu,
         scene: &SceneView,
-        camera: &Camera,
+        camera: &dyn CameraView,
     ) -> Result<(), BoxError> {
         self.prepare_mode(gpu, scene, camera, None)
     }
@@ -412,7 +415,7 @@ impl MeshRenderer {
         &mut self,
         gpu: &Gpu,
         scene: &SceneView,
-        camera: &Camera,
+        camera: &dyn CameraView,
         settings: PbrSettings,
     ) -> Result<(), BoxError> {
         if !settings.exposure.is_finite() || settings.exposure < 0.0 {
@@ -452,7 +455,7 @@ impl MeshRenderer {
         &mut self,
         gpu: &Gpu,
         scene: &SceneView,
-        camera: &Camera,
+        camera: &dyn CameraView,
         settings: Option<PbrSettings>,
     ) -> Result<(), BoxError> {
         let matrix = camera.clip_from_world()?;
@@ -726,13 +729,30 @@ impl MeshRenderer {
                 .write_buffer(&self.lights, 0, bytemuck::cast_slice(&lights));
         }
         let eye = camera.center().map(|v| v as f32);
-        if !eye.into_iter().all(f32::is_finite) {
+        let forward = camera.forward();
+        let optical_depth = [
+            forward[0] as f32,
+            forward[1] as f32,
+            forward[2] as f32,
+            -forward
+                .iter()
+                .zip(camera.center())
+                .map(|(a, b)| a * b)
+                .sum::<f64>() as f32,
+        ];
+        if !eye.into_iter().chain(optical_depth).all(f32::is_finite) {
             return Err("camera exceeds GPU float range".into());
         }
         let camera_uniform = CameraUniform {
             clip: matrix,
             eye: [eye[0], eye[1], eye[2], 0.0],
-            options: [u32::from(settings.is_some()), lights.len() as u32, 0, 0],
+            options: [
+                u32::from(settings.is_some()),
+                lights.len() as u32,
+                u32::from(camera.is_orthographic()),
+                0,
+            ],
+            optical_depth,
         };
         gpu.queue
             .write_buffer(&self.camera, 0, bytemuck::bytes_of(&camera_uniform));
@@ -960,7 +980,7 @@ impl MeshRenderer {
         &mut self,
         gpu: &Gpu,
         scene: &SceneView,
-        camera: &Camera,
+        camera: &dyn CameraView,
         settings: Option<ShadowSettings>,
     ) -> Result<bool, BoxError> {
         let pbr = settings.is_some();
@@ -1047,6 +1067,7 @@ impl MeshRenderer {
                         .map_or([0.0; 4], |p| [p[0], p[1], p[2], matrix.depth_scale[1]]),
                     // Radial near distance is bit-packed in the shared camera options.
                     options: [0, matrix.depth_scale[0].to_bits(), 0, 0],
+                    optical_depth: [0.0; 4],
                 };
                 let buffer = gpu
                     .device
@@ -1058,7 +1079,12 @@ impl MeshRenderer {
                 cameras.push((
                     index,
                     matrix.point_position.is_some(),
-                    uniform_group(&gpu.device, &self.camera_layout, &buffer, 96),
+                    uniform_group(
+                        &gpu.device,
+                        &self.camera_layout,
+                        &buffer,
+                        CAMERA_UNIFORM_SIZE,
+                    ),
                 ));
             }
         }

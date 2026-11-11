@@ -3,7 +3,7 @@ use wgpu::util::DeviceExt;
 
 use crate::{
     Gpu,
-    camera::Camera,
+    camera::CameraView,
     offscreen::BoxError,
     scene::{EnvironmentMap, SkyLight},
 };
@@ -207,7 +207,7 @@ impl EnvironmentGpu {
         &mut self,
         gpu: &Gpu,
         sky: Option<&SkyLight>,
-        camera: &Camera,
+        camera: &dyn CameraView,
         settings: EnvironmentSettings,
     ) -> Result<bool, BoxError> {
         self.preprocessed = false;
@@ -255,8 +255,7 @@ impl EnvironmentGpu {
             ];
             data.flags = [1.0, cache.scale, u32::from(sky.visible) as f32, 0.0];
             let extent = camera.extent();
-            let k = camera.intrinsics();
-            let forward = camera.ray([k.cx, k.cy])?.direction;
+            let forward = camera.forward();
             let ray = |pixel| -> Result<[f64; 3], BoxError> {
                 let direction = camera.ray(pixel)?.direction;
                 let depth: f64 = direction.iter().zip(forward).map(|(a, b)| a * b).sum();
