@@ -1,6 +1,6 @@
 # 精简渲染器功能范围与设计
 
-状态：**路线图；场景、针孔相机和 unlit 网格基础已实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
+状态：**路线图；静态 GLB 和直接光 PBR 已实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
 的 `dcebb33`，提出更小的渲染器，而不是移植参考项目的整套应用。
 英文配对文档为 [renderer-design.md](renderer-design.md)。
 
@@ -13,15 +13,14 @@
 并拒绝过期或跨 scene 的句柄。仍被当前实例引用的资源不能删除；
 拒绝奇异 model matrix，隐藏使用显隐状态。
 几何与材质值共享保存，不随每个实例更新而复制。
-这是库级基础，不是直播控制协议：EXR 解码、GPU 纹理绑定、GPU PBR 渲染、
-面光/大气以及 runtime 适配仍属后续工作。现有三角形路径不变。
+这是库级基础，不是直播控制协议：EXR/IBL、阴影、面光/大气以及 runtime 适配仍属后续工作。现有三角形路径不变。
 
 `glb::import_glb` 已支持不访问文件系统的静态 BIN 内嵌 GLB 几何及 PNG/JPEG 贴图解码。
 默认节点变换与 glTF 到 chr 的坐标轴旋转只烘焙一次；保留材质分组、法线、UV0、
 tangent、顶点颜色及 sampler 元数据。缺少法线时采用三角形平面法线，
 解码后的 RGBA8 图像在贴图/材质间共享。
 骨骼、Morph、alpha blending、外部资源和未支持扩展会明确报错；
-动画片段忽略并给出诊断。本增量保存贴图，但尚未在 GPU 上对其着色。
+动画片段忽略并给出诊断。贴图数据由下述共享 PBR 路径使用。
 
 `chr_renderer::camera` 已实现经过校验的 K/pose、FOV/look-at 和 Ti+C 针孔相机，
 提供原生像素投影、像素到世界射线，以及包含度量 near/far 深度的列主序 WGSL clip 矩阵。
@@ -35,6 +34,24 @@ M1 样例将合成球场和贴地、按面着色的方盒渲染到
 在仓库根开发环境执行 `cargo run --locked -p chr-app --example mesh_milestone`。
 该图用于展示相机投影、网格放置和遮挡，不是 PBR 或阴影效果，
 也不等于 #40 的 Socket/WebSocket 交互验收。
+
+`MeshRenderer::prepare_pbr` 已采用 GGX、height-correlated Smith 可见性及 Burley
+漫反射进行金属度-粗糙度 PBR，绑定基础色、金属度/粗糙度、法线和自发光贴图，
+支持导入或导数切线基、顶点颜色、alpha mask 和双面/镜像表面。
+颜色纹理及 mipmap 在线性光照域过滤，数据贴图保持线性。
+遮蔽贴图为间接照明保留，不用于压暗点状直接光；不添加隐藏环境补光或固定灯光组。
+
+scene 的方向光/点光/聚光已参与无阴影的直接照明。
+理想点源在精确奇异中心不产生贡献，其他位置采用平方反比衰减。
+光栅粗糙度下限为 0.045，辐亮度限制在 RGBA16F 范围内，
+再统一进行一次输出曝光及 Reinhard/ACES 变换。
+IBL 尚未实现时显式拒绝环境照明；M2 不宣称阴影控制、面光或大气已完成。
+
+离线 `pbr_milestone` 样例读取本地准备的 camera fixture 及用户 GLB，
+渲染虚拟地面和贴地模型，并输出太阳/点光/聚光对比 PNG。
+相机输入仍为条件性 Ti+C 射影估计，不是物理标定验收；
+私有输入和输出仅留在本地。该样例不定义新的公共 wire schema，
+也不代替要求的 NativeSocket/WebSocket 交互路径。
 
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
 `server/runtime`（`chr-server`）、`server/viewer`（`chr-app`）和

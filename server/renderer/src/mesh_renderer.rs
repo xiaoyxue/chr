@@ -9,15 +9,68 @@ use crate::{
     Gpu,
     camera::Camera,
     coordinates::ImageExtent,
+    material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
-    scene::{MeshId, SceneView},
+    scene::{Light, MaterialId, MaterialMaps, MeshId, SceneView},
 };
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ToneMap {
+    Reinhard,
+    #[default]
+    Aces,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PbrSettings {
+    pub exposure: f32,
+    pub tone_map: ToneMap,
+}
+
+impl Default for PbrSettings {
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            tone_map: ToneMap::Aces,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+    tangent: [f32; 4],
+    color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    clip: [[f32; 4]; 4],
+    eye: [f32; 4],
+    options: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightUniform {
+    position_kind: [f32; 4],
+    direction_inner: [f32; 4],
+    emission_outer: [f32; 4],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DrawUniform {
     model: [[f32; 4]; 4],
+    normal: [[f32; 4]; 3],
     color: [f32; 4],
+    emissive_cutoff: [f32; 4],
+    factors: [f32; 4],
+    flags: [u32; 4],
 }
 
 struct MeshBuffers {
@@ -29,12 +82,14 @@ struct Draw {
     mesh: MeshId,
     indices: Range<u32>,
     offset: u32,
+    material: MaterialId,
 }
 
-/// Shared opaque, unlit mesh/depth baseline. PBR/light evaluation is a later path.
+/// Shared mesh/depth renderer with diagnostic unlit and textured PBR paths.
 /// Prepare and submit a frame before preparing another frame with these uniforms.
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
+    pbr_pipeline: wgpu::RenderPipeline,
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
@@ -45,26 +100,88 @@ pub struct MeshRenderer {
     depth: Option<(ImageExtent, wgpu::TextureView)>,
     meshes: HashMap<MeshId, MeshBuffers>,
     draws: Vec<Draw>,
+    maps: MaterialMapCache,
+    lights: wgpu::Buffer,
+    light_group: wgpu::BindGroup,
+    light_layout: wgpu::BindGroupLayout,
+    light_capacity: u64,
+    tone_pipeline: wgpu::RenderPipeline,
+    tone_layout: wgpu::BindGroupLayout,
+    tone_settings: wgpu::Buffer,
+    hdr: Option<(ImageExtent, wgpu::TextureView, wgpu::BindGroup)>,
+    pbr_active: bool,
 }
 
 impl MeshRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let camera_layout = uniform_layout(device, false, 64);
-        let object_layout = uniform_layout(device, true, 80);
-        let camera = uniform_buffer(device, 64);
-        let camera_group = uniform_group(device, &camera_layout, &camera, 64);
-        let stride = 80_u64.div_ceil(u64::from(
+        let camera_layout = uniform_layout(device, false, 96);
+        let object_layout = uniform_layout(device, true, 176);
+        let camera = uniform_buffer(device, 96);
+        let camera_group = uniform_group(device, &camera_layout, &camera, 96);
+        let maps = MaterialMapCache::new(device);
+        let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene lights"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(48),
+                },
+                count: None,
+            }],
+        });
+        let lights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene lights"),
+            size: 48,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let light_group = uniform_group(device, &light_layout, &lights, 48);
+        let tone_settings = uniform_buffer(device, 16);
+        let tone_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tone map"),
+            entries: &[
+                texture_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let tone_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tone map"),
+            bind_group_layouts: &[Some(&tone_layout)],
+            immediate_size: 0,
+        });
+        let tone_shader = device.create_shader_module(wgpu::include_wgsl!("tone_map.wgsl"));
+        let tone_pipeline =
+            fullscreen_pipeline(device, &tone_pipeline_layout, &tone_shader, format);
+        let stride = 176_u64.div_ceil(u64::from(
             device.limits().min_uniform_buffer_offset_alignment,
         )) * u64::from(device.limits().min_uniform_buffer_offset_alignment);
         let objects = uniform_buffer(device, stride);
-        let object_group = uniform_group(device, &object_layout, &objects, 80);
+        let object_group = uniform_group(device, &object_layout, &objects, 176);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&object_layout)],
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&object_layout),
+                Some(&maps.layout),
+                Some(&light_layout),
+            ],
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::include_wgsl!("mesh.wgsl"));
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let create_pipeline = |format: wgpu::TextureFormat| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("unlit indexed meshes"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -72,9 +189,9 @@ impl MeshRenderer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 12,
+                    array_stride: 64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3,1=>Float32x3,2=>Float32x2,3=>Float32x4,4=>Float32x4],
                 })],
             },
             fragment: Some(wgpu::FragmentState {
@@ -95,7 +212,10 @@ impl MeshRenderer {
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
-        });
+        })
+        };
+        let pipeline = create_pipeline(format);
+        let pbr_pipeline = create_pipeline(wgpu::TextureFormat::Rgba16Float);
         Self {
             pipeline,
             camera,
@@ -108,6 +228,17 @@ impl MeshRenderer {
             depth: None,
             meshes: HashMap::new(),
             draws: Vec::new(),
+            pbr_pipeline,
+            maps,
+            lights,
+            light_group,
+            light_layout,
+            light_capacity: 48,
+            tone_pipeline,
+            tone_layout,
+            tone_settings,
+            hdr: None,
+            pbr_active: false,
         }
     }
 
@@ -117,6 +248,35 @@ impl MeshRenderer {
         gpu: &Gpu,
         scene: &SceneView,
         camera: &Camera,
+    ) -> Result<(), BoxError> {
+        self.prepare_mode(gpu, scene, camera, None)
+    }
+
+    /// Scene-linear HDR shading followed by one output exposure/tone-map pass.
+    pub fn prepare_pbr(
+        &mut self,
+        gpu: &Gpu,
+        scene: &SceneView,
+        camera: &Camera,
+        settings: PbrSettings,
+    ) -> Result<(), BoxError> {
+        if !settings.exposure.is_finite() || settings.exposure < 0.0 {
+            return Err("exposure must be finite and nonnegative".into());
+        }
+        if scene.lighting().sky().is_some() {
+            return Err(
+                "environment lighting is not implemented in the direct-light PBR path".into(),
+            );
+        }
+        self.prepare_mode(gpu, scene, camera, Some(settings))
+    }
+
+    fn prepare_mode(
+        &mut self,
+        gpu: &Gpu,
+        scene: &SceneView,
+        camera: &Camera,
+        settings: Option<PbrSettings>,
     ) -> Result<(), BoxError> {
         let matrix = camera.clip_from_world()?;
         let extent = camera.extent();
@@ -129,48 +289,110 @@ impl MeshRenderer {
         let mut uniforms = Vec::new();
         let mut draws = Vec::new();
         let mut used = HashSet::new();
+        let mut used_materials = HashSet::new();
+        let unlit_maps = MaterialMaps::default();
         for (_, instance) in scene.instances().filter(|(_, i)| i.visible()) {
             let id = instance.mesh();
             let mesh = scene.mesh(id)?;
             let rows = instance.model().rows();
             let model: [[f32; 4]; 4] =
                 std::array::from_fn(|column| std::array::from_fn(|row| rows[row][column] as f32));
-            if !model.iter().flatten().all(|v| v.is_finite()) {
+            let n = instance.model().normal_matrix();
+            let normal =
+                std::array::from_fn(|c| [n[0][c] as f32, n[1][c] as f32, n[2][c] as f32, 0.0]);
+            if !model
+                .iter()
+                .flatten()
+                .chain(normal.iter().flatten())
+                .all(|v| v.is_finite())
+            {
                 return Err("model exceeds GPU float range".into());
             }
             for (part, material) in mesh.parts().iter().zip(instance.materials()) {
-                let mut color = scene.material(*material)?.base_color;
-                color[3] = 1.0;
+                let factors = scene.material(*material)?;
+                let maps = scene.material_maps(*material)?;
+                self.maps.prepare(
+                    gpu,
+                    *material,
+                    if settings.is_some() {
+                        maps
+                    } else {
+                        &unlit_maps
+                    },
+                )?;
+                used_materials.insert(*material);
                 let offset = u32::try_from(self.stride * uniforms.len() as u64)?;
                 draws.push(Draw {
                     mesh: id,
                     indices: part.clone(),
                     offset,
+                    material: *material,
                 });
-                uniforms.push(DrawUniform { model, color });
+                uniforms.push(DrawUniform {
+                    model,
+                    normal,
+                    color: factors.base_color,
+                    emissive_cutoff: [
+                        factors.emissive[0],
+                        factors.emissive[1],
+                        factors.emissive[2],
+                        factors.alpha_cutoff.unwrap_or(-1.0),
+                    ],
+                    factors: [
+                        factors.metallic,
+                        factors.roughness,
+                        factors.normal_scale,
+                        factors.occlusion_strength,
+                    ],
+                    flags: [
+                        u32::from(maps.normal.is_some()),
+                        u32::from(factors.unlit),
+                        u32::from(factors.double_sided),
+                        u32::from(instance.model().is_mirrored()),
+                    ],
+                });
             }
-            let positions = bytemuck::cast_slice(mesh.positions());
             let indices = bytemuck::cast_slice(mesh.indices());
-            if positions.len() as u64 > limits.max_buffer_size
-                || indices.len() as u64 > limits.max_buffer_size
-            {
+            if indices.len() as u64 > limits.max_buffer_size {
                 return Err("mesh exceeds device buffer limits".into());
             }
-            self.meshes.entry(id).or_insert_with(|| MeshBuffers {
-                vertices: gpu
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("mesh positions"),
-                        contents: positions,
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-                indices: gpu
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("mesh indices"),
-                        contents: indices,
-                        usage: wgpu::BufferUsages::INDEX,
-                    }),
+            if mesh.positions().len() as u64 * 64 > limits.max_buffer_size {
+                return Err("mesh vertex attributes exceed GPU limits".into());
+            }
+            self.meshes.entry(id).or_insert_with(|| {
+                let attrs = mesh.attributes();
+                let vertices: Vec<_> = mesh
+                    .positions()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &position)| Vertex {
+                        position,
+                        normal: attrs.normals.get(i).copied().unwrap_or([0.0; 3]),
+                        uv: attrs.tex_coords.get(i).copied().unwrap_or([0.0; 2]),
+                        tangent: attrs
+                            .tangents
+                            .get(i)
+                            .copied()
+                            .unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                        color: attrs.colors.get(i).copied().unwrap_or([1.0; 4]),
+                    })
+                    .collect();
+                MeshBuffers {
+                    vertices: gpu
+                        .device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("mesh surface vertices"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        }),
+                    indices: gpu
+                        .device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("mesh indices"),
+                            contents: indices,
+                            usage: wgpu::BufferUsages::INDEX,
+                        }),
+                }
             });
             used.insert(id);
         }
@@ -180,7 +402,7 @@ impl MeshRenderer {
         }
         if bytes > self.capacity {
             self.objects = uniform_buffer(&gpu.device, bytes);
-            self.object_group = uniform_group(&gpu.device, &self.object_layout, &self.objects, 80);
+            self.object_group = uniform_group(&gpu.device, &self.object_layout, &self.objects, 176);
             self.capacity = bytes;
         }
         if self.depth.as_ref().is_none_or(|(size, _)| *size != extent) {
@@ -200,8 +422,94 @@ impl MeshRenderer {
             });
             self.depth = Some((extent, texture.create_view(&Default::default())));
         }
+        if settings.is_some() && self.hdr.as_ref().is_none_or(|(size, _, _)| *size != extent) {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene linear HDR"),
+                size: wgpu::Extent3d {
+                    width: extent.width(),
+                    height: extent.height(),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HDR output"),
+                layout: &self.tone_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.tone_settings.as_entire_binding(),
+                    },
+                ],
+            });
+            self.hdr = Some((extent, view, group));
+        }
+        let lights: Vec<_> = if settings.is_some() {
+            scene
+                .lighting()
+                .lights()
+                .iter()
+                .copied()
+                .map(Self::pack_light)
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
+        let bytes = std::mem::size_of::<LightUniform>() as u64 * lights.len().max(1) as u64;
+        if bytes > limits.max_storage_buffer_binding_size {
+            return Err("scene lights exceed storage binding limit".into());
+        }
+        if bytes > self.light_capacity {
+            self.lights = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene lights"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.light_group = uniform_group(&gpu.device, &self.light_layout, &self.lights, bytes);
+            self.light_capacity = bytes;
+        }
+        if !lights.is_empty() {
+            gpu.queue
+                .write_buffer(&self.lights, 0, bytemuck::cast_slice(&lights));
+        }
+        let eye = camera.center().map(|v| v as f32);
+        if !eye.into_iter().all(f32::is_finite) {
+            return Err("camera exceeds GPU float range".into());
+        }
+        let camera_uniform = CameraUniform {
+            clip: matrix,
+            eye: [eye[0], eye[1], eye[2], 0.0],
+            options: [u32::from(settings.is_some()), lights.len() as u32, 0, 0],
+        };
         gpu.queue
-            .write_buffer(&self.camera, 0, bytemuck::cast_slice(&matrix));
+            .write_buffer(&self.camera, 0, bytemuck::bytes_of(&camera_uniform));
+        if let Some(settings) = settings {
+            gpu.queue.write_buffer(
+                &self.tone_settings,
+                0,
+                bytemuck::cast_slice(&[
+                    settings.exposure,
+                    match settings.tone_map {
+                        ToneMap::Reinhard => 0.0,
+                        ToneMap::Aces => 1.0,
+                    },
+                    0.0,
+                    0.0,
+                ]),
+            );
+        }
         for (index, uniform) in uniforms.iter().enumerate() {
             gpu.queue.write_buffer(
                 &self.objects,
@@ -210,7 +518,9 @@ impl MeshRenderer {
             );
         }
         self.meshes.retain(|id, _| used.contains(id));
+        self.maps.retain(&used_materials);
         self.draws = draws;
+        self.pbr_active = settings.is_some();
         Ok(())
     }
 
@@ -219,10 +529,12 @@ impl MeshRenderer {
         let Some((_, depth)) = &self.depth else {
             return;
         };
+        let hdr = self.hdr.as_ref().filter(|_| self.pbr_active);
+        let destination = hdr.map_or(view, |(_, texture, _)| texture);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh scene"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
+                view: destination,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -245,15 +557,92 @@ impl MeshRenderer {
             }),
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(if self.pbr_active {
+            &self.pbr_pipeline
+        } else {
+            &self.pipeline
+        });
         pass.set_bind_group(0, &self.camera_group, &[]);
+        pass.set_bind_group(3, &self.light_group, &[]);
         for draw in &self.draws {
             let mesh = &self.meshes[&draw.mesh];
             pass.set_bind_group(1, &self.object_group, &[draw.offset]);
+            pass.set_bind_group(2, self.maps.group(draw.material), &[]);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(draw.indices.clone(), 0, 0..1);
         }
+        drop(pass);
+        if let Some((_, _, group)) = hdr {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("single output transform"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.tone_pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    fn pack_light(light: Light) -> Result<LightUniform, BoxError> {
+        let normalize = |v: [f64; 3]| {
+            let scale = v.into_iter().map(f64::abs).fold(0.0, f64::max);
+            let v = v.map(|x| x / scale);
+            let len = v.into_iter().map(|x| x * x).sum::<f64>().sqrt();
+            v.map(|x| (x / len) as f32)
+        };
+        let (position, kind, direction, emission, inner, outer) = match light {
+            Light::Directional {
+                direction,
+                irradiance,
+            } => ([0.0; 3], 0.0, normalize(direction), irradiance, 0.0, 0.0),
+            Light::Point {
+                position,
+                intensity,
+            } => (
+                position.map(|v| v as f32),
+                1.0,
+                [0.0; 3],
+                intensity,
+                0.0,
+                0.0,
+            ),
+            Light::Spot {
+                position,
+                direction,
+                intensity,
+                inner_angle,
+                outer_angle,
+            } => (
+                position.map(|v| v as f32),
+                2.0,
+                normalize(direction),
+                intensity,
+                inner_angle.cos() as f32,
+                outer_angle.cos() as f32,
+            ),
+        };
+        let uniform = LightUniform {
+            position_kind: [position[0], position[1], position[2], kind],
+            direction_inner: [direction[0], direction[1], direction[2], inner],
+            emission_outer: [emission[0], emission[1], emission[2], outer],
+        };
+        if !bytemuck::cast_slice::<_, f32>(&[uniform])
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err("light exceeds GPU float range".into());
+        }
+        Ok(uniform)
     }
 }
 

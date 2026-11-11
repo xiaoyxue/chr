@@ -1,6 +1,6 @@
 # Simplified renderer scope and design
 
-Status: **roadmap; scene, pinhole camera and unlit mesh foundations implemented**. This document compares the local `trd`
+Status: **roadmap; static GLB and direct-light PBR implemented**. This document compares the local `trd`
 reference at `9c7bccc` with the `chr` baseline at `dcebb33`. It proposes a smaller
 renderer, not a port of the reference application suite. The paired translation
 is [renderer-design.zh-CN.md](renderer-design.zh-CN.md).
@@ -15,8 +15,8 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: EXR decoding, GPU texture bindings, GPU PBR
-rendering, area/atmosphere lighting and runtime adaptation remain follow-up work.
+not a live scene-control protocol: EXR/IBL, shadows, area/atmosphere lighting
+and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
 `glb::import_glb` now decodes static BIN-backed GLB geometry and embedded PNG/JPEG
@@ -26,7 +26,7 @@ colours and sampler metadata are retained. Missing normals use flat triangle
 normals. Decoded RGBA8 images are shared across maps/materials.
 Skins, morphs, alpha blending, external resources and unsupported extensions are
 reported as unsupported; animation clips are ignored with a diagnostic.
-This import increment stores textures but does not yet shade them on the GPU.
+Texture data is consumed by the shared PBR path described below.
 
 `chr_renderer::camera` implements validated pinhole cameras from K/pose,
 FOV/look-at, or Ti+C. It provides native-pixel projection, pixel-to-world rays
@@ -42,6 +42,28 @@ Run `cargo run --locked -p chr-app --example mesh_milestone` from the repository
 root in its development environment. This image demonstrates camera projection,
 mesh placement and occlusion, not PBR or shadows; it is not the #40 interactive
 Socket/WebSocket acceptance.
+
+`MeshRenderer::prepare_pbr` now evaluates metallic-roughness PBR using GGX,
+height-correlated Smith visibility and Burley diffuse. It binds base-colour,
+metallic-roughness, normal and emissive maps, authored or derivative tangent
+frames, vertex colours, alpha masks and double-sided/mirrored surfaces.
+Colour textures and their mipmaps are filtered in linear light; data maps stay
+linear. Occlusion maps are retained for indirect lighting and do not darken
+punctual direct light. No implicit ambient fill or fixed light rig is added.
+
+Scene directional/point/spot inputs feed unshadowed direct illumination.
+An ideal point source contributes nothing at its exact singular centre; otherwise
+attenuation is inverse-square. The raster roughness floor is 0.045. Radiance is
+bounded by the RGBA16F range before one output exposure and Reinhard/ACES pass.
+Environment lighting is explicitly rejected until the IBL increment; shadow
+controls, area lighting and atmosphere are not claimed by M2.
+
+The offline `pbr_milestone` example consumes a locally prepared camera fixture
+and owner-provided GLBs, renders the virtual ground plane and grounded models,
+and writes sun/point/spot comparison PNGs. Camera input remains a conditional
+Ti+C projective estimate, not accepted physical calibration. Private input and
+output remain local-only. This example is not a new public wire schema or a
+replacement for the required NativeSocket/WebSocket interactive path.
 
 The current workspace is rooted at the repository root: `server/renderer`
 (`chr-renderer`), `server/runtime` (`chr-server`), `server/viewer` (`chr-app`),
