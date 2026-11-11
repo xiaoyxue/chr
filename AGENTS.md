@@ -2,9 +2,10 @@
 
 ## Project Structure
 
-- `client/`: Primarily TypeScript. Source code belongs in `client/src/`.
-- `render/`: Primarily Rust. Source code belongs in `render/src/`.
-- `algorithm/`: Language and technology stack are undecided. Source code belongs in `algorithm/src/`; do not choose a stack without confirmation.
+- `client/`: Client-side code, primarily written in TypeScript. Source code belongs in `client/src/`.
+- `render/`: Rendering code, primarily written in Rust. Source code belongs in `render/src/`.
+- `common/`: Shared communication protocols, such as socket protocols. Source code belongs in `common/src/`.
+- `algorithm/`: Scene reconstruction algorithms. Language and technology stack are undecided. Source code belongs in `algorithm/src/`; do not choose a stack without confirmation.
 - `docs/`: Project documentation.
 - `reference/`: Reference materials.
 
