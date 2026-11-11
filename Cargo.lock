@@ -573,6 +573,7 @@ dependencies = [
  "chr-common",
  "chr-renderer",
  "env_logger",
+ "futures-util",
  "log",
  "openh264",
  "pollster",
@@ -581,6 +582,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite",
  "webrtc",
  "wgpu",
 ]

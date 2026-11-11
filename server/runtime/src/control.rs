@@ -26,6 +26,7 @@ pub struct ControlHandler {
     commands: mpsc::Sender<Command>,
     webrtc: Arc<WebRtcHub>,
     sdi: SdiStats,
+    scenes: Option<crate::retained::SceneControl>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -38,7 +39,14 @@ impl ControlHandler {
             commands,
             webrtc,
             sdi,
+            scenes: None,
         }
+    }
+
+    /// Native opt-in only: the default daemon continues to render its triangle.
+    pub fn with_scenes(mut self, scenes: crate::retained::SceneControl) -> Self {
+        self.scenes = Some(scenes);
+        self
     }
 
     /// Queues a render command and waits until the worker applied it.
@@ -116,6 +124,10 @@ impl Handler for ControlHandler {
         raw_params: Option<Value>,
     ) -> Result<Value, ErrorObject> {
         match method {
+            method if chr_common::scene_frame::METHODS.contains(&method) => match &self.scenes {
+                Some(scenes) => scenes.call(method, raw_params).await,
+                None => Err(ErrorObject::method_not_found(method)),
+            },
             triangle::START_ROTATION => {
                 let request: StartRotationParams = params(raw_params)?;
                 let state = self

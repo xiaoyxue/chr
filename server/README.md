@@ -13,8 +13,14 @@ repository root; its server crates live here:
 | `scripts/` | | Windows development helpers |
 
 The current slice draws an RGB triangle using the same pipeline in a native
-window, an offscreen hardware test, and the render server. No scene
-serialization, video input, or calibration pipeline is included yet.
+window, an offscreen hardware test, and the render server. No live scene-output,
+video input, or calibration pipeline is included yet.
+
+The runtime library now provides an explicitly installed
+[retained scene control adapter](docs/retained-control.md), using the shared
+scene/frame DTOs and the same handler over both IPC transports. Its synthetic
+admission-port tests do not replace the daemon's triangle or establish live GPU,
+frame-resource, SDI or monitor integration.
 
 The runtime library also exposes an isolated, bounded
 [native synthetic frame-resource owner](docs/frame-resources.md). It is not yet
