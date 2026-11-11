@@ -76,7 +76,11 @@
                 "node_modules"
               ]
               && !(pkgs.lib.hasPrefix "result-" (builtins.baseNameOf path))
-              && (craneLib.filterCargoSources path type || pkgs.lib.hasSuffix ".wgsl" path);
+              && (
+                craneLib.filterCargoSources path type
+                || pkgs.lib.hasSuffix ".wgsl" path
+                || relative == "common/tests/fixtures/scene_frame.json"
+              );
           };
           common = {
             inherit src;
