@@ -2,6 +2,8 @@
 
 pub mod camera;
 pub mod coordinates;
+mod diagnostics;
+pub use diagnostics::{DiagnosticOverlays, DiagnosticView, RenderSettings};
 mod environment;
 pub mod exr;
 pub use environment::EnvironmentSettings;

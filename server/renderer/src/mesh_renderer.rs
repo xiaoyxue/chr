@@ -9,6 +9,7 @@ use crate::{
     Gpu,
     camera::Camera,
     coordinates::ImageExtent,
+    diagnostics::{DiagnosticView, Overlays, RenderSettings, line_indices},
     environment::{self, EnvironmentGpu, EnvironmentSettings},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
@@ -90,6 +91,7 @@ struct DrawUniform {
 struct MeshBuffers {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
+    lines: Option<wgpu::Buffer>,
 }
 
 struct Draw {
@@ -115,9 +117,84 @@ struct ShadowCache {
     cascades: Option<CascadeKey>,
 }
 
+#[derive(Clone, Copy)]
+enum PipelineKind {
+    Mesh,
+    Wire,
+    Sky,
+}
+
+fn scene_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    samples: u32,
+    kind: PipelineKind,
+) -> wgpu::RenderPipeline {
+    let sky = matches!(kind, PipelineKind::Sky);
+    let wire = matches!(kind, PipelineKind::Wire);
+    let buffers = [Some(vertex_layout())];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shared scene raster"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(if sky { "vs_sky" } else { "vs_main" }),
+            compilation_options: Default::default(),
+            buffers: if sky { &[] } else { &buffers },
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(if sky {
+                "fs_sky"
+            } else if wire {
+                "fs_wire"
+            } else {
+                "fs_main"
+            }),
+            compilation_options: Default::default(),
+            targets: &[Some(format.into())],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: if wire {
+                wgpu::PrimitiveTopology::LineList
+            } else {
+                wgpu::PrimitiveTopology::TriangleList
+            },
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(!sky),
+            depth_compare: Some(if sky {
+                wgpu::CompareFunction::Always
+            } else {
+                wgpu::CompareFunction::Less
+            }),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: samples,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// Shared mesh/depth renderer with diagnostic unlit and textured PBR paths.
 /// Prepare and submit a frame before preparing another frame with these uniforms.
 pub struct MeshRenderer {
+    settings: RenderSettings,
+    format: wgpu::TextureFormat,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    sky_layout: wgpu::PipelineLayout,
+    wire_pipeline: wgpu::RenderPipeline,
+    overlays: Overlays,
+    msaa: Option<(ImageExtent, wgpu::TextureFormat, wgpu::TextureView)>,
     pipeline: wgpu::RenderPipeline,
     pbr_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
@@ -260,33 +337,14 @@ impl MeshRenderer {
             bind_group_layouts: &[None, None, None, Some(&light_layout)],
             immediate_size: 0,
         });
-        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene-linear sky"),
-            layout: Some(&sky_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_sky"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_sky"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
-            }),
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let sky_pipeline = scene_pipeline(
+            device,
+            &sky_layout,
+            &shader,
+            wgpu::TextureFormat::Rgba16Float,
+            1,
+            PipelineKind::Sky,
+        );
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow layout"),
             bind_group_layouts: &[
@@ -327,39 +385,21 @@ impl MeshRenderer {
         };
         let shadow_pipeline = create_shadow_pipeline("fs_shadow");
         let point_shadow_pipeline = create_shadow_pipeline("fs_shadow_point");
-        let create_pipeline = |format: wgpu::TextureFormat| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("unlit indexed meshes"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(vertex_layout())],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(format.into())],
-                }),
-                // No culling in this diagnostic path; reflected instances remain visible.
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let create_pipeline =
+            |format| scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Mesh);
         let pipeline = create_pipeline(format);
         let pbr_pipeline = create_pipeline(wgpu::TextureFormat::Rgba16Float);
+        let wire_pipeline = scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Wire);
+        let overlays = Overlays::new(device, format, &camera_layout);
         Self {
+            settings: RenderSettings::default(),
+            format,
+            shader,
+            pipeline_layout: layout,
+            sky_layout,
+            wire_pipeline,
+            overlays,
+            msaa: None,
             pipeline,
             camera,
             camera_group,
@@ -395,6 +435,47 @@ impl MeshRenderer {
             shadow_dirty: false,
             shadow_passes_last_frame: 0,
         }
+    }
+
+    /// Validate before changing state. Prepare again before encoding after any change.
+    /// Only main raster pipelines/attachments change; scene, IBL and shadow caches survive.
+    pub fn set_render_settings(
+        &mut self,
+        gpu: &Gpu,
+        settings: RenderSettings,
+    ) -> Result<(), BoxError> {
+        settings.validate(gpu, self.format)?;
+        if self.settings.sample_count != settings.sample_count {
+            let create = |format, kind| {
+                scene_pipeline(
+                    &gpu.device,
+                    &self.pipeline_layout,
+                    &self.shader,
+                    format,
+                    settings.sample_count,
+                    kind,
+                )
+            };
+            self.pipeline = create(self.format, PipelineKind::Mesh);
+            self.pbr_pipeline = create(wgpu::TextureFormat::Rgba16Float, PipelineKind::Mesh);
+            self.wire_pipeline = create(self.format, PipelineKind::Wire);
+            self.sky_pipeline = scene_pipeline(
+                &gpu.device,
+                &self.sky_layout,
+                &self.shader,
+                wgpu::TextureFormat::Rgba16Float,
+                settings.sample_count,
+                PipelineKind::Sky,
+            );
+            self.depth = None;
+            self.msaa = None;
+        }
+        self.settings = settings;
+        Ok(())
+    }
+
+    pub fn render_settings(&self) -> RenderSettings {
+        self.settings
     }
 
     /// The destination must have the camera's extent, the constructor's format and one sample.
@@ -455,6 +536,7 @@ impl MeshRenderer {
         camera: &Camera,
         settings: Option<PbrSettings>,
     ) -> Result<(), BoxError> {
+        self.settings.validate(gpu, self.format)?;
         let matrix = camera.clip_from_world()?;
         let extent = camera.extent();
         let limits = gpu.device.limits();
@@ -555,6 +637,7 @@ impl MeshRenderer {
                     })
                     .collect();
                 MeshBuffers {
+                    lines: None,
                     vertices: gpu
                         .device
                         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -571,6 +654,21 @@ impl MeshRenderer {
                         }),
                 }
             });
+            if self.settings.view == DiagnosticView::Wireframe {
+                let count = mesh.indices().len() as u64 * 2;
+                if count > u64::from(u32::MAX) || count * 4 > limits.max_buffer_size {
+                    return Err("wireframe indices exceed GPU limits".into());
+                }
+                let buffers = self.meshes.get_mut(&id).expect("mesh inserted above");
+                buffers.lines.get_or_insert_with(|| {
+                    gpu.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("derived mesh line indices"),
+                            contents: bytemuck::cast_slice(&line_indices(mesh.indices())),
+                            usage: wgpu::BufferUsages::INDEX,
+                        })
+                });
+            }
             used.insert(id);
         }
         let bytes = self.stride * uniforms.len().max(1) as u64;
@@ -591,13 +689,45 @@ impl MeshRenderer {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: self.settings.sample_count,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             self.depth = Some((extent, texture.create_view(&Default::default())));
+        }
+        let physical = settings.is_some() && self.settings.view == DiagnosticView::Shaded;
+        let color_format = if physical {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            self.format
+        };
+        if self.settings.sample_count > 1
+            && self
+                .msaa
+                .as_ref()
+                .is_none_or(|(size, format, _)| *size != extent || *format != color_format)
+        {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("multisampled scene colour"),
+                size: wgpu::Extent3d {
+                    width: extent.width(),
+                    height: extent.height(),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.settings.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: color_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.msaa = Some((
+                extent,
+                color_format,
+                texture.create_view(&Default::default()),
+            ));
         }
         if settings.is_some() && self.hdr.as_ref().is_none_or(|(size, _, _)| *size != extent) {
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -732,7 +862,12 @@ impl MeshRenderer {
         let camera_uniform = CameraUniform {
             clip: matrix,
             eye: [eye[0], eye[1], eye[2], 0.0],
-            options: [u32::from(settings.is_some()), lights.len() as u32, 0, 0],
+            options: [
+                u32::from(settings.is_some()),
+                lights.len() as u32,
+                0,
+                self.settings.view as u32,
+            ],
         };
         gpu.queue
             .write_buffer(&self.camera, 0, bytemuck::bytes_of(&camera_uniform));
@@ -762,6 +897,7 @@ impl MeshRenderer {
         self.maps.retain(&used_materials);
         self.draws = draws;
         self.pbr_active = settings.is_some();
+        self.overlays.prepare(gpu, scene, self.settings.overlays)?;
         Ok(())
     }
 
@@ -804,14 +940,15 @@ impl MeshRenderer {
             }
             self.shadow_dirty = false;
         }
-        let hdr = self.hdr.as_ref().filter(|_| self.pbr_active);
+        let physical = self.pbr_active && self.settings.view == DiagnosticView::Shaded;
+        let hdr = self.hdr.as_ref().filter(|_| physical);
         let destination = hdr.map_or(view, |(_, texture, _)| texture);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh scene"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: destination,
+                view: self.msaa.as_ref().map_or(destination, |(_, _, view)| view),
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: self.msaa.as_ref().map(|_| destination),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.018,
@@ -832,12 +969,14 @@ impl MeshRenderer {
             }),
             ..Default::default()
         });
-        if self.pbr_active && self.environment.visible {
+        if physical && self.environment.visible {
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(3, &self.light_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        pass.set_pipeline(if self.pbr_active {
+        pass.set_pipeline(if self.settings.view == DiagnosticView::Wireframe {
+            &self.wire_pipeline
+        } else if physical {
             &self.pbr_pipeline
         } else {
             &self.pipeline
@@ -849,8 +988,14 @@ impl MeshRenderer {
             pass.set_bind_group(1, &self.object_group, &[draw.offset]);
             pass.set_bind_group(2, self.maps.group(draw.material), &[]);
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(draw.indices.clone(), 0, 0..1);
+            if self.settings.view == DiagnosticView::Wireframe {
+                let lines = mesh.lines.as_ref().expect("wireframe prepared");
+                pass.set_index_buffer(lines.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(draw.indices.start * 2..draw.indices.end * 2, 0, 0..1);
+            } else {
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(draw.indices.clone(), 0, 0..1);
+            }
         }
         drop(pass);
         if let Some((_, _, group)) = hdr {
@@ -871,6 +1016,7 @@ impl MeshRenderer {
             pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         }
+        self.overlays.encode(encoder, view, &self.camera_group);
     }
 
     fn pack_light(light: Light) -> Result<LightUniform, BoxError> {
