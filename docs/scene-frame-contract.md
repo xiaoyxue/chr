@@ -52,7 +52,7 @@ Existing triangle, SDI-status and WebRTC-signaling methods remain compatible.
 | Renderer | `scene::{Scene, SceneView, ModelMatrix, Lighting}`, `camera::Camera`, `PbrSettings`, `RenderSettings`, `composition::FrameCompositor`. No networking or frame scheduler. |
 | #20 | One Rust DTO/validation definition and its TypeScript mirror. No renderer resource lookup or camera math in `common/`. |
 | #21 | Registered producers, published resources, readiness and physical release. Opaque refs never expose a slot, pointer or texture-array layer. |
-| #38 | Resolve assets and map validated controls into retained renderer state. |
+| #38 | [Opt-in retained control adapter](../server/docs/retained-control.md): asset/camera mapping, atomic scenes and immutable binding through an explicit admission port. Default daemon output is unchanged. |
 | #22 | Join input/geometry, serialize scene binding, schedule bounded work and preserve submission provenance. |
 | #31 | Connect the completed renderer result to the existing SDI port and its monitor; no render-direct second stream. |
 

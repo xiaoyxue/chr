@@ -17,20 +17,14 @@ use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duratio
 use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
 use chr_renderer::coordinates::ImageExtent;
 
-mod control;
-mod monitor;
-mod pipeline;
-mod scene;
-mod sdi;
-
-use control::ControlHandler;
-use monitor::{
+use chr_server::control::ControlHandler;
+use chr_server::monitor::{
     Monitor,
     encoder::VideoFeed,
     webrtc::{IceConfig, WebRtcHub},
 };
-use pipeline::{RenderConfig, RenderWorker};
-use sdi::{SdiOutput, VideoMode};
+use chr_server::pipeline::{RenderConfig, RenderWorker};
+use chr_server::sdi::{self, SdiOutput, VideoMode};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 

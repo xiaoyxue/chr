@@ -33,6 +33,12 @@ pub struct VideoFeed {
     keyframe_requested: AtomicBool,
 }
 
+impl Default for VideoFeed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VideoFeed {
     /// Frames kept for a slow viewer before it is considered lagged.
     const CAPACITY: usize = 4;
