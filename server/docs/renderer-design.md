@@ -760,10 +760,59 @@ general participating media are deferred.
 
 #### Review candidate: portable LUT profile (#35 / #28)
 
-**Proposed, not approved or implemented.** This independent method-gate slice
-does not freeze #28/#35, approve #12/#63, or deliver runtime/SDI integration.
-The numbers below are starting limits to test, not measured GPU performance or
-proof that the whole parameter domain meets the quality targets.
+**Approved for candidate implementation/evaluation only, not production
+acceptance.** On 2026-11-12, the user explicitly approved the focused choices
+`sun_contract=true`, `observer=true`, `sun_evaluation=true` and
+`evaluation_budget=true`. This documentation records that limited approval;
+it does not implement a GPU atmosphere, freeze or complete #28/#35, approve
+#12/#63, or deliver runtime/SDI integration. The numbers below are starting
+limits to test, not measured GPU performance or proof that the whole parameter
+domain meets the quality targets.
+
+**Approved evaluation defaults and boundaries:**
+
+1. **Sun contract/domain.** Preserve existing `Light::Directional.irradiance`:
+   linear RGB W/m² on a plane perpendicular to the light, consumed directly
+   with shadows but without atmospheric attenuation. It is not currently a
+   TOA declaration; its angular radius controls PCSS, not finite-angular BRDF
+   evaluation. Evaluate a separate, explicitly tagged atmospheric-sun source
+   with one authoritative direction/emission/angular radius/shadow state.
+   Require explicit TOA normal irradiance `Etoa` in `[0,2000]` per RGB channel,
+   with no implicit daylight intensity or lux conversion; initial angular
+   radius `0.004675 rad`, allowed `[0.001,0.01]`. Use the Earth reference
+   coefficients/ranges below, density multipliers 1, `g=0.8` and black planet
+   ground; reject out-of-domain input. Do not also emit the linked sun as an
+   ordinary unattenuated directional light. Ground-irradiance inversion is
+   deferred. This approves the evaluation concept, not a new production API,
+   wire schema or changed interpretation of existing light inputs.
+2. **Observer.** Scene atmosphere owns `ground_altitude`, initially 0 m.
+   Each renderer/view derives the shared sky/IBL observer altitude from
+   `ground_altitude-camera_center.z`, including orthographic views.
+   Direct solar transmission uses each surface's altitude. No initial altitude
+   quantization or independent authored lighting-probe altitude; the cache
+   dependencies below apply. Camera-derived distant IBL remains a declared
+   approximation, not spatial indirect lighting.
+3. **Finite sun.** Evaluate normalized Karis spherical representative-point
+   GGX in the distant fixed-angular-size limit, projected-disk diffuse,
+   `Ldisk=Etoa/(π sin²α)`, disk-free IBL and shared-radius PCSS with the stated
+   visibility decorrelation approximation. This is approval to compare the
+   candidate, not to adopt it for production. Partial-disk horizon treatment,
+   transmission variation and low-roughness specular remain gated by
+   independent disk/BRDF comparisons. No silent centre-ray on/off horizon
+   fallback, punctual-BRDF substitution or production brute-force default.
+4. **Evaluation budget.** Use the resource table below: Float32 T 256×64/64
+   segments, MS 32×32/64 directions × 32 segments, sky-view 192×108/up to 64
+   segments, panorama 256×128, six specular layers/64 GGX samples, existing
+   64×64 split-sum LUT and two-pass nine-coefficient GPU SH. The 16 MiB
+   allocation ceiling includes concurrent generations and scratch. Isolated
+   1080p incremental cold ≤4 ms/warm ≤0.5 ms are evaluation targets, not passed
+   results. Lower precision/resolution or higher sampling needs measured
+   error/cost evidence; do not silently downgrade on allocation failure.
+
+These choices authorize bounded implementation/evaluation work. Production
+API integration, method adoption and acceptance still require their own review
+and the missing evidence below; this approval is not permission to close either
+owning issue.
 
 **Source verification (2026-11-11).** Primary references:
 
@@ -989,9 +1038,10 @@ marching/path tracing is an oracle only. RGB/non-spectral transport,
 isotropic higher orders, shared distant IBL and point-sun atmospheric
 scattering are declared approximations. Clouds, aerial perspective,
 refraction, scene volumetric shadows, spatial sky visibility (#29) and general
-GI are unsupported here. Before production work, approve the numerical domain,
-radiometric linkage/API, observer/probe ownership, finite-sun method and
-resource/quality targets, then collect the missing GPU/reference evidence.
+GI are unsupported here. The four choices above are approved for evaluation.
+Before production adoption, collect the missing GPU/reference evidence and
+separately review the actual production API/linkage, supported domain,
+observer/probe behavior, finite-sun/horizon method and resource/quality results.
 
 ### 4.3 Shadow techniques and honest approximations
 
