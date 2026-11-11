@@ -1,1 +1,3 @@
 .worktree/
+/reference/*
+!/reference/.gitkeep

@@ -17,7 +17,8 @@
   PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in core.
 - This first slice is a native RGB triangle. Browser delivery, scene formats,
   video, meshes, and camera calibration are not implemented.
-- `reference/` is private, local-only material. Never stage, upload, redistribute,
+- The repository root's `reference/` (`../reference/` from this workspace) holds
+  all private, local-only reference material. Never stage, upload, redistribute,
   or embed its assets or experimental data in public fixtures. Use synthetic data.
 
 ## Rust conventions
@@ -65,7 +66,7 @@ documents informed it; their private measurements are not part of this project.
 - Validate Linux on the designated native Linux GPU host over SSH, not WSL.
   Keep machine-specific connection details out of public project files.
 - Nix flakes in Git see tracked files only. Stage explicit project paths before
-  Nix checks, never `reference/`. Keep platform build artifacts separate.
+  Nix checks, never the repository root's `reference/`. Keep platform build artifacts separate.
 - Select high-performance hardware and log the adapter. Software rendering does
   not count as hardware acceptance. Non-NixOS NVIDIA systems may need nixGL.
   Do not assume a GPU exists because compilation passed.
