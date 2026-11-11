@@ -1,5 +1,6 @@
 //! Shared rendering independent of window ownership and operating system.
 
+pub mod camera;
 pub mod coordinates;
 mod gpu;
 mod offscreen;

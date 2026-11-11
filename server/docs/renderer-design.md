@@ -19,6 +19,12 @@ not a live scene-control protocol: GLB/EXR decoding, texture bindings, GPU mesh/
 rendering, area/atmosphere lighting and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
+`chr_renderer::camera` implements validated pinhole cameras from K/pose,
+FOV/look-at, or Ti+C. It provides native-pixel projection, pixel-to-world rays
+and a column-major WGSL clip matrix with metric near/far depth. Ti+C uses a
+derived proper optical frame while retaining the original Ti coefficients.
+This does not add lens distortion or change the live input protocol.
+
 The current workspace is rooted at the repository root: `server/renderer`
 (`chr-renderer`), `server/runtime` (`chr-server`), `server/viewer` (`chr-app`),
 and `common` (`chr-common`). The current server renders a rotating triangle to
