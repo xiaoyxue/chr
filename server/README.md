@@ -100,7 +100,7 @@ spot lights. Directional lights use a stable scene-fitted orthographic map;
 spots use a cone-matched perspective map. This bounded-scene implementation does
 not yet provide cascades. M5 below adds point-light cubemaps.
 
-Settings expose resolution, a 3x3 bilinear-comparison PCF radius in texels,
+Settings expose resolution, a square bilinear-comparison PCF radius in texels,
 normalized depth bias, world-metre normal bias, and a memory budget. Defaults
 are shadow-off, 2048 texels and a 256 MiB budget. Receiver-plane depth correction
 prevents sloping surfaces from shadowing themselves. Caster alpha masks and
@@ -126,7 +126,8 @@ parameters affect shadow softness, not the punctual BRDF or emitted power.
 M5 below extends this path to point shadows.
 
 `ShadowSettings::pcss` defaults to 32 blocker + 32 filter samples, independent
-64-texel search/filter caps and a 1024-sample-per-fragment budget across lights.
+64-texel search/filter caps. The shared shadow sample budget defaults to 1024
+logical operations per fragment across lights.
 Each stage accepts 1..=64 samples; invalid settings and budget overflow fail,
 never silently downgrade to PCF. Counts represent logical texture operations;
 comparison samples use hardware bilinear filtering. Deterministic disk sampling
@@ -172,8 +173,8 @@ not its illumination. Explicit Hard/PCF/PCSS overrides also work when the
 frame default is Off. `ShadowMode` remains available at the crate root and is
 also exported from the GPU-independent `scene` module.
 
-Only enabled shadow lights consume map layers. Only effective PCSS lights
-consume the PCSS sample budget, and their quality is validated even if the
+Only enabled shadow lights consume map layers. Effective PCSS lights
+validate their quality even if the
 frame default is Off. The cache includes the active light set; changing the
 default between filtering modes reuses maps when that set is unchanged.
 Editing authored overrides changes the scene snapshot and conservatively
@@ -185,6 +186,25 @@ order. This uses 19 depth layers (76 MiB); the last point still illuminates.
 Automatic GPU checks isolate coloured light contributions, allocation/cache
 changes and invalid quality/budget cases. This remains offline diagnostics,
 not NativeSocket/WebSocket scene-control acceptance.
+
+## M7: PCF quality and shared sample budgets
+
+`ShadowSettings::pcf_samples` selects a square kernel with
+1, 4, 9, 16, 25, 36, 49 or 64 bilinear comparisons. The default remains 9;
+1 performs a single centre comparison. Larger kernels distribute samples over
+the same `filter_radius` footprint rather than inventing a physical penumbra.
+Point kernels retain their cross-face remapping. Sample-count changes reuse maps.
+
+`max_samples_per_fragment` now belongs to `ShadowSettings`, not `PcssSettings`.
+It counts effective Hard as 1, PCF as `pcf_samples`, and PCSS as blocker + filter
+samples; Off costs zero. Invalid active quality or total-budget overflow is an
+error, without lowering quality or dropping lights. This is a logical-operation
+budget: one filtered comparison can access four depth texels.
+
+The example adds `point-pcf-64.png` and `point-mixed-all.png`. The latter keeps
+all five lights shadow-enabled, unlike the explicitly labelled one-shadow-Off
+`point-mixed.png` fixture. Both retain unchanged illumination. Directional
+cascades and broader performance acceptance remain the next shadow work.
 
 ## Render server
 

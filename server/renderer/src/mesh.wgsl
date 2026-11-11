@@ -162,13 +162,15 @@ fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f
     let texel=2.0/f32(textureDimensions(shadow_maps).x);
     if mode==2u {
         var visibility=0.0;
-        let step=texel*light.shadow_params.w;
-        for(var y=-1;y<=1;y++) {
-            for(var x=-1;x<=1;x++) {
-                visibility+=point_compare(light,direction+step*(f32(x)*tangent+f32(y)*bitangent),receiver,plane);
+        let side=u32(sqrt(light.pcss_samples.z));
+        let center=(f32(side)-1.0)*0.5;
+        let step=texel*light.shadow_params.w*2.0/max(f32(side)-1.0,1.0);
+        for(var y=0u;y<side;y++) {
+            for(var x=0u;x<side;x++) {
+                visibility+=point_compare(light,direction+step*((f32(x)-center)*tangent+(f32(y)-center)*bitangent),receiver,plane);
             }
         }
-        return visibility/9.0;
+        return visibility/light.pcss_samples.z;
     }
     let near=light.shadow_depth.z;
     let search=min(light.pcss.x*max(radius-near,0.0)/(near*radius),texel*light.pcss.y);
@@ -294,16 +296,18 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     }
     if mode==3u {return pcss_visibility(light,uv,depth,gradient);}
     var visibility=0.0;
-    let step=light.shadow_params.w/vec2<f32>(size);
+    let side=u32(sqrt(light.pcss_samples.z));
+    let center=(f32(side)-1.0)*0.5;
+    let step=light.shadow_params.w/vec2<f32>(size)*2.0/max(f32(side)-1.0,1.0);
     // Correct the receiver plane per tap; cover the bilinear footprint's depth slope.
     let receiver_bias=dot(abs(gradient),1.0/vec2<f32>(size));
-    for(var y=-1;y<=1;y++) {
-        for(var x=-1;x<=1;x++) {
-            let offset=vec2<f32>(f32(x),f32(y))*step;
+    for(var y=0u;y<side;y++) {
+        for(var x=0u;x<side;x++) {
+            let offset=(vec2<f32>(f32(x),f32(y))-vec2(center))*step;
             visibility+=textureSampleCompareLevel(shadow_maps,shadow_sampler,uv+offset,layer,depth+dot(gradient,offset)-receiver_bias);
         }
     }
-    return visibility/9.0;
+    return visibility/light.pcss_samples.z;
 }
 
 // GGX with height-correlated Smith visibility and Burley diffuse.

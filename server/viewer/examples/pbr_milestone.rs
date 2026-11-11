@@ -408,6 +408,20 @@ fn main() -> Result<()> {
             renderer.shadow_passes_last_frame()
         );
     }
+    capture(
+        &gpu,
+        &mut renderer,
+        &scene,
+        &overview,
+        &target,
+        &directory.join("point-pcf-64.png"),
+        ShadowSettings {
+            mode: ShadowMode::Pcf,
+            resolution: 1024,
+            pcf_samples: 64,
+            ..Default::default()
+        },
+    )?;
     let mut mixed = scene.snapshot().lighting().lights().to_vec();
     for (light, mode) in mixed.iter_mut().zip([
         ShadowMode::Pcss,
@@ -439,6 +453,24 @@ fn main() -> Result<()> {
         "Rendered point-mixed: {} shadow depth passes.",
         renderer.shadow_passes_last_frame()
     );
+    let mut all_enabled = scene.snapshot().lighting().lights().to_vec();
+    if let Some(Light::Point { shadow_mode, .. }) = all_enabled.last_mut() {
+        *shadow_mode = Some(ShadowMode::Hard);
+    }
+    scene.set_lighting(Lighting::new(all_enabled, None)?)?;
+    capture(
+        &gpu,
+        &mut renderer,
+        &scene,
+        &overview,
+        &target,
+        &directory.join("point-mixed-all.png"),
+        ShadowSettings {
+            mode: ShadowMode::Off,
+            resolution: 1024,
+            ..Default::default()
+        },
+    )?;
     Ok(())
 }
 

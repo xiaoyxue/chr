@@ -81,8 +81,8 @@ Zero size is exactly Hard; no blockers is fully lit. Punctual BRDF evaluation an
 emission units do not change.
 
 Shared `PcssSettings` expose 1..=64 samples per stage (32+32 by default), separate
-search/filter caps (64 shadow texels each), and a worst-case per-fragment budget
-(1024 logical samples across lights). Invalid quality or budget overflow is an
+search/filter caps (64 shadow texels each). A shared shadow budget limits
+worst-case per-fragment work (1024 logical samples across lights). Invalid quality or budget overflow is an
 error. Fixed disk sampling is deterministic without screen-space random noise
 or temporal accumulation; receiver-plane correction applies to both stages.
 Quality-only changes and camera motion reuse the maps. Large kernels are capped
@@ -134,7 +134,7 @@ frame default. The enum lives in GPU-independent scene state and keeps its
 crate-root re-export.
 
 Map allocation and cache identity include the effective active light set, and
-only effective PCSS lights contribute to PCSS quality validation/sample budgets.
+only effective PCSS lights require PCSS quality validation.
 Default filter changes reuse maps if the active set stays unchanged; authored
 override edits change the scene snapshot and conservatively rebuild maps.
 The unlit path ignores overrides. GPU tests isolate coloured light contributions
@@ -144,6 +144,20 @@ The `point-mixed.png` diagnostic keeps the same sun/four-point energy and 1024
 resolution, assigning sun PCSS and corner points Hard/PCF/PCSS/Off in X/Y order.
 It needs 19 layers (76 MiB); the shadow-disabled point still illuminates.
 This does not add live scene-control protocol support.
+
+M7 makes PCF quality explicit with square 1/4/9/16/25/36/49/64-sample kernels.
+The default 3x3 footprint is preserved; the single-sample mode uses its centre.
+Other counts sample the same texel-radius footprint more or less densely, with
+the same point-face remapping. Changing sample count does not redraw depth maps.
+The common `ShadowSettings::max_samples_per_fragment` replaces the former
+PCSS-only budget: effective Off/Hard/PCF/PCSS cost 0/1/PCF count/blocker+filter
+logical samples respectively. Active quality and combined budgets are checked
+before GPU work; inactive modes do not force irrelevant quality validation.
+The private example distinguishes mixed modes with one shadow disabled
+(`point-mixed.png`) from all-shadow-enabled mixed modes (`point-mixed-all.png`),
+and adds a 64-sample PCF capture. Disabled shadows do not disable illumination.
+Automated tests exercise each supported kernel for all three light kinds,
+cache reuse, invalid kernels and mixed-mode budget accounting.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,

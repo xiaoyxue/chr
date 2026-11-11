@@ -220,6 +220,63 @@ fn pcss_contact_source_size_and_sampled_visibility() {
             let repeated = render_settings(&gpu, &mut renderer, &scene, &camera, settings);
             assert_eq!(soft, repeated, "PCSS sampling must be deterministic");
             assert_eq!(renderer.shadow_passes_last_frame(), 0);
+            if height == 1.5 && size == 1.0 {
+                let mut single = Vec::new();
+                for samples in [1, 4, 9, 16, 25, 36, 49, 64] {
+                    let pcf = ShadowSettings {
+                        mode: ShadowMode::Pcf,
+                        pcf_samples: samples,
+                        ..settings
+                    };
+                    let image = render_settings(&gpu, &mut renderer, &scene, &camera, pcf);
+                    assert_eq!(
+                        renderer.shadow_passes_last_frame(),
+                        0,
+                        "PCF sample changes reuse maps"
+                    );
+                    if samples == 1 {
+                        single = image.clone();
+                    }
+                    if samples == 64 {
+                        assert_ne!(single, image, "PCF quality must change the sampled edge");
+                    }
+                    assert!(
+                        renderer
+                            .prepare_pbr(
+                                &gpu,
+                                &scene.snapshot(),
+                                &camera,
+                                PbrSettings {
+                                    shadows: ShadowSettings {
+                                        max_samples_per_fragment: u64::from(samples) - 1,
+                                        ..pcf
+                                    },
+                                    ..Default::default()
+                                }
+                            )
+                            .is_err(),
+                        "PCF samples must count against the shared budget"
+                    );
+                }
+                assert!(
+                    renderer
+                        .prepare_pbr(
+                            &gpu,
+                            &scene.snapshot(),
+                            &camera,
+                            PbrSettings {
+                                shadows: ShadowSettings {
+                                    mode: ShadowMode::Pcf,
+                                    pcf_samples: 7,
+                                    ..settings
+                                },
+                                ..Default::default()
+                            }
+                        )
+                        .is_err(),
+                    "unsupported PCF kernels must not silently fall back"
+                );
+            }
             let edge = if spot {
                 (3.0 * height + 2.5) / (5.0 - height)
             } else {
@@ -323,8 +380,6 @@ fn pcss_contact_source_size_and_sampled_visibility() {
         ),
         "no blockers is fully lit"
     );
-    let mut quality = settings.pcss;
-    quality.max_samples_per_fragment = 1;
     assert!(
         renderer
             .prepare_pbr(
@@ -333,7 +388,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                 &camera,
                 PbrSettings {
                     shadows: ShadowSettings {
-                        pcss: quality,
+                        max_samples_per_fragment: 1,
                         ..settings
                     },
                     ..Default::default()
@@ -342,7 +397,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
             .is_err(),
         "both PCSS stages count against the sample budget"
     );
-    quality = settings.pcss;
+    let mut quality = settings.pcss;
     quality.blocker_samples = 0;
     assert!(
         renderer
@@ -486,10 +541,7 @@ fn per_light_modes_control_visibility_allocation_and_budgets() {
         depth_bias: 0.0001,
         normal_bias: 0.003,
         max_bytes: 2 * 256 * 256 * 4,
-        pcss: chr_renderer::PcssSettings {
-            max_samples_per_fragment: 64,
-            ..Default::default()
-        },
+        max_samples_per_fragment: 66,
         ..Default::default()
     };
     let rgb = |image: &[u8]| -> [u8; 3] {
@@ -587,10 +639,7 @@ fn per_light_modes_control_visibility_allocation_and_budgets() {
         "an explicit PCSS override validates quality even when the frame default is Off"
     );
     let low_budget = ShadowSettings {
-        pcss: chr_renderer::PcssSettings {
-            max_samples_per_fragment: 63,
-            ..settings.pcss
-        },
+        max_samples_per_fragment: 64,
         ..settings
     };
     assert!(
