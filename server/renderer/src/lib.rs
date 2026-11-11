@@ -2,6 +2,7 @@
 
 pub mod camera;
 pub mod coordinates;
+pub mod glb;
 mod gpu;
 mod mesh_renderer;
 mod offscreen;

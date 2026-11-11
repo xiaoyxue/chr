@@ -15,9 +15,18 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: GLB/EXR decoding, texture bindings, GPU PBR
+not a live scene-control protocol: EXR decoding, GPU texture bindings, GPU PBR
 rendering, area/atmosphere lighting and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
+
+`glb::import_glb` now decodes static BIN-backed GLB geometry and embedded PNG/JPEG
+maps without filesystem access. Default node transforms and the glTF-to-chr
+axis rotation are baked once; material parts, normals, UV0, tangents, vertex
+colours and sampler metadata are retained. Missing normals use flat triangle
+normals. Decoded RGBA8 images are shared across maps/materials.
+Skins, morphs, alpha blending, external resources and unsupported extensions are
+reported as unsupported; animation clips are ignored with a diagnostic.
+This import increment stores textures but does not yet shade them on the GPU.
 
 `chr_renderer::camera` implements validated pinhole cameras from K/pose,
 FOV/look-at, or Ti+C. It provides native-pixel projection, pixel-to-world rays
@@ -605,12 +614,19 @@ for the entire server, although the final socket-controlled demo does.
 
 ### High-priority football scene demonstration
 
+Schedule contingency [#45](https://github.com/xiaoyxue/chr/issues/45) evaluates
+existing renderers, including bgfx and the intended tinyrender candidate, if
+integration time threatens delivery. It does not automatically replace wgpu
+or block current implementation; a backend change needs an explicit decision.
+
 Tracked separately in [#40](https://github.com/xiaoyxue/chr/issues/40).
 The independent algorithm-selection gate is [#35](https://github.com/xiaoyxue/chr/issues/35);
 wire-facing schema decisions are [#12](https://github.com/xiaoyxue/chr/issues/12).
 
-Use the user-provided local SC1464 bundle and local GLB directory as optional,
-private acceptance inputs. Inspection confirmed source Ti, explicit frame
+Use the latest owner-provided private scene/camera package and local GLB directory as optional,
+private acceptance inputs. Resolve the package metadata index and relative
+operational paths, not historical absolute provenance paths. This source
+supersedes the earlier SC1464 selection. Inspection confirmed source Ti, explicit frame
 mapping/provenance, an estimated world camera centre and ground-plane metadata.
 These do not by themselves prove a physically exact full K/pose calibration.
 Choose an explicit source frame, validate a compatible pinhole view, and retain

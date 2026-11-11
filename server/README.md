@@ -47,6 +47,23 @@ NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -
 This is an offline core validation artifact, not a new client media stream or
 an alternative control channel.
 
+## Static GLB import
+
+`chr_renderer::glb::import_glb` reads caller-owned GLB bytes into static mesh
+parts, PBR factors and shared embedded textures. It preserves default node
+transforms and converts glTF +Y-up to chr -Z-up once. Supported textures are
+embedded PNG/JPEG decoded to RGBA8. No animation, skinning, morph evaluation,
+alpha blending or external resource loading is performed.
+
+Inspect a locally supplied model without adding it to the repository:
+
+```sh
+cargo run --locked -p chr-app --example glb_info -- /path/to/model.glb
+```
+
+The importer is independent of rendering; the M1 shader still uses unlit factor
+colours until the PBR increment is connected.
+
 ## Render server
 
 `chr-server` renders the triangle offscreen (1280x720p50 by default) and takes

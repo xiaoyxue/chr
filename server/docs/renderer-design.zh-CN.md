@@ -13,8 +13,15 @@
 并拒绝过期或跨 scene 的句柄。仍被当前实例引用的资源不能删除；
 拒绝奇异 model matrix，隐藏使用显隐状态。
 几何与材质值共享保存，不随每个实例更新而复制。
-这是库级基础，不是直播控制协议：GLB/EXR 解码、纹理绑定、GPU PBR 渲染、
+这是库级基础，不是直播控制协议：EXR 解码、GPU 纹理绑定、GPU PBR 渲染、
 面光/大气以及 runtime 适配仍属后续工作。现有三角形路径不变。
+
+`glb::import_glb` 已支持不访问文件系统的静态 BIN 内嵌 GLB 几何及 PNG/JPEG 贴图解码。
+默认节点变换与 glTF 到 chr 的坐标轴旋转只烘焙一次；保留材质分组、法线、UV0、
+tangent、顶点颜色及 sampler 元数据。缺少法线时采用三角形平面法线，
+解码后的 RGBA8 图像在贴图/材质间共享。
+骨骼、Morph、alpha blending、外部资源和未支持扩展会明确报错；
+动画片段忽略并给出诊断。本增量保存贴图，但尚未在 GPU 上对其着色。
 
 `chr_renderer::camera` 已实现经过校验的 K/pose、FOV/look-at 和 Ti+C 针孔相机，
 提供原生像素投影、像素到世界射线，以及包含度量 near/far 深度的列主序 WGSL clip 矩阵。
@@ -517,11 +524,17 @@ renderer CPU/GPU 开发不等待整个 server，但最终 socket 控制 demo 需
 
 ### 高优先级球场演示场景
 
+进度预案 [#45](https://github.com/xiaoyxue/chr/issues/45) 在集成时间影响交付时，
+评估 bgfx 和待确认的 tinyrender 等现成方案；不自动替换 wgpu，也不阻塞当前实现，
+切换后端需要明确决定。
+
 单独由 [#40](https://github.com/xiaoyxue/chr/issues/40) 跟踪。
 独立算法选型前置任务为 [#35](https://github.com/xiaoyxue/chr/issues/35)，
 线协议 schema 决策为 [#12](https://github.com/xiaoyxue/chr/issues/12)。
 
-以用户提供的本地 SC1464 数据和本地 GLB 目录作为可选、私有验收输入。
+以用户最新提供的私有 scene/camera 数据包和本地 GLB 目录作为可选、私有验收输入。
+从包内 metadata 索引解析相对运行路径，不使用历史来源中的绝对路径；
+该输入替代早期 SC1464 选择。
 已检查到原始 Ti、明确的帧映射/来源、估计的世界光心及地面元数据；
 这些本身不证明完整 K/pose 标定在物理上精确。
 选择明确源帧，验证相容 pinhole 视角并保留原始值用于 reset。

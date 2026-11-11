@@ -169,6 +169,16 @@ pub struct MeshData {
     indices: Arc<[u32]>,
     parts: Arc<[Range<u32>]>,
     bounds: Aabb,
+    attributes: Arc<MeshAttributes>,
+}
+
+/// Optional per-vertex surface attributes. Empty arrays mean the attribute is absent.
+#[derive(Clone, Debug, Default)]
+pub struct MeshAttributes {
+    pub normals: Vec<[f32; 3]>,
+    pub tex_coords: Vec<[f32; 2]>,
+    pub tangents: Vec<[f32; 4]>,
+    pub colors: Vec<[f32; 4]>,
 }
 
 impl MeshData {
@@ -215,7 +225,37 @@ impl MeshData {
             indices: indices.into(),
             parts: parts.into(),
             bounds,
+            attributes: Arc::new(MeshAttributes::default()),
         })
+    }
+
+    pub fn with_attributes(mut self, attributes: MeshAttributes) -> Result<Self, SceneError> {
+        let count = self.positions.len();
+        if [
+            attributes.normals.len(),
+            attributes.tex_coords.len(),
+            attributes.tangents.len(),
+            attributes.colors.len(),
+        ]
+        .into_iter()
+        .any(|n| n != 0 && n != count)
+            || !attributes
+                .normals
+                .iter()
+                .flatten()
+                .chain(attributes.tex_coords.iter().flatten())
+                .chain(attributes.tangents.iter().flatten())
+                .chain(attributes.colors.iter().flatten())
+                .all(|v| v.is_finite())
+        {
+            return Err(SceneError::InvalidMeshAttributes);
+        }
+        self.attributes = Arc::new(attributes);
+        Ok(self)
+    }
+
+    pub fn attributes(&self) -> &MeshAttributes {
+        &self.attributes
     }
 
     pub fn positions(&self) -> &[[f32; 3]] {

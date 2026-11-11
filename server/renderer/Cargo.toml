@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 wgpu.workspace = true
 log.workspace = true
+gltf.workspace = true
+image.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "2"
 
