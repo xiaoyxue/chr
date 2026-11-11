@@ -1,33 +1,36 @@
 # Render Server and Client Design
 
-Status: proposed design, not yet implemented. No SDI signal source or output
-card is available yet, so Phase 1 uses simulated input, tracking, and SDI
-output (section 6).
+Status: Phase 1 slice implemented in #10, on the repository layout from #9: local
+IPC, the render pipeline, a simulated SDI output, and its WebRTC monitor. Video
+input, tracking, compositing, and all hardware paths are not implemented yet
+(section 7).
 
-All software components run on the same Linux machine.
-An installed SDI output card can send video to external SDI equipment. This
-design does not include Windows support, cross-machine software connections,
-or remote deployment.
+All server software runs on the same Linux machine. An installed SDI output card
+sends the program video to external SDI equipment. This design does not include
+Windows support, cross-machine control connections, or remote deployment. For
+development, a browser elsewhere may reach the loopback endpoints through an SSH
+port forward (section 9).
 
 Chinese version: `render-server-client-design.zh-CN.md`.
 Keep both versions synchronized when updating this design.
 
 ## 1. Control and Output Channels
 
-**WebSocket and Socket for control; one GPU render feeds WebRTC and SDI outputs.**
+**The renderer produces exactly one output: the SDI program frame. Clients watch
+that program output, encoded and streamed back over WebRTC.**
 
 | Channel | Purpose | Endpoint |
 | --- | --- | --- |
-| WebSocket | Send instructions, receive results/status, and exchange WebRTC signaling. | Browser or Node.js TypeScript client. |
-| Socket | Send the same instructions and receive the same results/status. | Node.js client or native tool. |
-| Agent IPC (Socket) | Send instructions and receive results/status through the same command protocol. | Agent process. |
-| WebRTC | Deliver encoded rendering output as a live video stream. | Browser TypeScript client. |
-| SDI | Deliver uncompressed video through a local output card. | External SDI equipment. |
+| WebSocket | Send commands (args), receive results/status, and exchange WebRTC signaling. | Browser or Node.js TypeScript client. |
+| NativeSocket | Send the same commands and receive the same results/status. | Node.js client or native tool. |
+| Agent IPC (NativeSocket) | Send commands and receive results/status through the same protocol. | Agent process. |
+| SDI | The program output: uncompressed video through a local output card. | External SDI equipment. |
+| WebRTC | A monitor of the SDI program output, encoded as H.264. | Browser client. |
 
-Socket means Unix Domain Socket (UDS). The Agent uses this same Socket backend;
-it does not require a separate protocol or privileged command path.
-Browsers use WebSocket because they cannot directly access these Socket
-endpoints. The choice is based on client runtime, not machine location.
+NativeSocket means a Unix Domain Socket (UDS). The Agent uses this same backend;
+it does not require a separate protocol or privileged command path. Browsers use
+WebSocket because they cannot open Unix sockets. The choice is based on client
+runtime, not machine location.
 
 ## 2. Overview
 
@@ -35,206 +38,291 @@ endpoints. The choice is based on client runtime, not machine location.
 flowchart LR
     subgraph host["Single Linux machine"]
         subgraph clients["Control clients"]
-            client["Client: Browser TS / Node.js / Native"]
+            client["Client: browser (three.js UI) / Node.js / native"]
             agent["Agent process"]
         end
-        subgraph process["One Rust server process: app + core"]
-            control["WebSocket / Socket command handler"]
-            input["Video input source"]
-            track["Tracking result source"]
-            core["wgpu Render Core + compositing"]
-            encode["GPU conversion + hardware encoder"]
-            sdi["GPU conversion + SDI output adapter"]
+        subgraph process["chr-server: one process, one GPU context"]
+            control["control: JSON-RPC commands (args)"]
+            input["Video input (planned)"]
+            track["Tracking results (planned)"]
+            pipeline["pipeline + renderer: render / composite, convert to SDI frame"]
+            sdi["sdi: program output port (own clock)"]
+            monitor["monitor: SDI frame -> encoder -> WebRTC"]
 
-            control -->|"Scene and camera instructions"| core
-            input -->|"Frames with frame identity"| core
-            track -->|"Per-frame Ti"| core
-            core -->|"GPU frames"| encode
-            core -->|"GPU frames"| sdi
+            control -->|"Scene changes"| pipeline
+            input -->|"Frames with frame identity"| pipeline
+            track -->|"Per-frame Ti"| pipeline
+            pipeline -->|"SDI frames (UYVY)"| sdi
+            sdi -->|"Transmitted slots"| monitor
         end
-        client <-->|"WebSocket: control and signaling"| control
-        client <-->|"Socket: control"| control
-        agent <-->|"Unix Socket: IPC control"| control
-        encode -->|"WebRTC: encoded video"| client
+        client <-->|"WebSocket: commands and signaling"| control
+        client <-->|"NativeSocket: commands"| control
+        agent <-->|"NativeSocket: commands"| control
+        monitor -->|"WebRTC: program monitor"| client
     end
-    sdi -->|"Local SDI card and cable"| equipment["SDI equipment"]
+    sdi -->|"SDI card and cable"| equipment["SDI equipment"]
 ```
 
-The input source, tracking result source, and SDI output adapter are
-replaceable boundaries. Phase 1 uses simulated implementations; Phase 2
-replaces them with hardware and the tracking service (section 6).
+WebSocket and NativeSocket are alternative entrances to the **same command
+handler**. The Agent shares the same validation, authorization, command queue,
+and authoritative scene state as the UI. Do not maintain a separate
+Agent-owned renderer or bypass normal command handling.
 
-WebSocket and Socket are alternative entrances to the **same command handler**.
-The Agent connects over Socket and shares the same validation, authorization,
-command queue, and authoritative scene state as the UI. Do not maintain a
-separate Agent-owned renderer or bypass normal command handling.
-WebRTC and SDI are independent output paths, not instruction transports.
-The client node groups alternative runtimes, not a requirement to use all
-channels at once. Browsers use WebSocket and WebRTC; Node.js/native clients
-can use Socket for control. Browser playback and SDI output consume the same
-rendered scene, without routing SDI through the browser or WebRTC.
+The program output is the single source of video. The monitor encodes exactly
+what the SDI port transmitted, repeats included, so a client sees the program as
+it went out. Do not add a second, render-direct client stream. WebRTC and SDI
+carry video only; neither transports commands.
 
-## 3. Responsibilities
+The video input and tracking boundaries are replaceable. Phase 1 will simulate
+them; Phase 2 replaces them with capture hardware and the tracking service
+(section 7).
 
-| Component | Responsibility |
+## 3. Code Layout and Server Roles
+
+| Path | Crate | Responsibility |
+| --- | --- | --- |
+| `common/` | `chr-common` | Shared protocol: JSON-RPC 2.0 messages, business methods, and the NativeSocket/WebSocket IPC transports. Rust is the source of truth; TypeScript clients mirror its types. |
+| `server/renderer/` | `chr-renderer` | GPU rendering and GPU format conversion to the SDI pixel format. No networking, capture-card, or output-card dependencies. |
+| `server/runtime/` | `chr-server` | The server process; modules listed below. |
+| `server/viewer/` | `chr-app` | Native window and headless PNG export for renderer development. |
+| `client/` | | The WebUI uses three.js for its own control and virtual-venue views; it does not reuse the Rust renderer. `client/example/render-harness/` is the example program monitor and verification harness. |
+
+The server process has four roles. Only the last two are network services:
+
+| Role | Module in `server/runtime/src/` |
 | --- | --- |
-| `client/src/` | Send instructions and display WebRTC video; provide a local Socket adapter for Node.js clients. |
-| `render/crates/app/` | Host the renderer and server in one process. Handle UI/Agent commands, the input and tracking sources, and the independent WebRTC/SDI output modules. |
-| `render/crates/core/` | A library managing scene/camera state and rendering GPU frames with wgpu. No networking, capture-card, or output-card dependencies. |
-| `common/src/` | Define the shared command, response, and event protocol for Rust and TypeScript. |
+| Pipeline host: the renderer and outputs share one process and one GPU context. | `main.rs` |
+| Clock and scheduling: advance frames in logical time and hand each frame to the SDI port. | `pipeline.rs`, `scene.rs` |
+| Control plane: apply commands (args) to the authoritative scene state and report the frame at which they take effect. | `control.rs` |
+| Program monitor: encode the transmitted SDI output and stream it over WebRTC. | `monitor/` |
+
+The SDI output port itself is `sdi.rs`. **The renderer and server run in the same
+process**, not in separate services, which avoids cross-process GPU texture
+sharing. The three.js client and the Rust renderer share no code, but they must
+share the scene description and coordinate contract (pitch coordinates, Ti/SNC,
+placement parameters); define those in `common/` as they are introduced.
 
 The Agent is a separate control process using the shared protocol. Its runtime
 and code location are not prescribed by this design.
 
-These are the target directories. Cargo package names remain `chr-app` and
-`chr-core`. **The wgpu renderer and server run in the same process**, not in
-separate services. The client remains separate. This avoids cross-process GPU
-texture sharing between the server and renderer.
-
-Same process does not mean same thread: use a render worker and asynchronous
-network tasks with bounded command queues. Do not block network I/O on GPU work.
-Keep the two output modules in `app`; no extra services or transport framework
-are required.
+Same process does not mean same thread. The render worker, the SDI output
+clock, the monitor encoder, and asynchronous network tasks run separately and
+exchange work through bounded queues. Network I/O never blocks on GPU work, and
+no output waits for another.
 
 ## 4. Basic Flow
 
-1. The UI connects through WebSocket or Socket; the Agent connects through
-   Unix Domain Socket on the same Linux machine.
-2. The browser also exchanges WebRTC signaling over WebSocket to establish video.
-3. The UI or Agent sends an instruction, such as changing the camera. The server
-   validates it, applies it through the core, and returns a result.
-4. The core renders a GPU frame once. The server independently feeds it to
-   hardware encoding/WebRTC for browser playback and to the SDI output adapter.
+1. The UI connects through WebSocket or NativeSocket; the Agent connects through
+   NativeSocket on the same Linux machine.
+2. A browser that wants video sends a WebRTC offer over WebSocket (`webrtc.offer`)
+   and receives an answer that already lists every server candidate.
+3. The UI or Agent sends a command, such as `triangle.start_rotation`. The
+   control plane queues it for the render worker, which applies it between
+   frames and returns the resulting state, including the first frame rendered
+   with it.
+4. The render worker renders each frame, converts it to the SDI pixel format,
+   and queues it for the SDI output port.
+5. The port transmits one frame per slot at the video mode's cadence. Every
+   transmitted slot is also offered to the monitor, which encodes it and sends
+   it to each WebRTC peer.
 
-In the live runtime, frames are driven by the video input: the core renders
-the overlay with the matching tracking result and composites it onto the
-input frame before both outputs (section 6).
+In the live runtime, frames will be driven by the video input: the renderer
+draws the overlay with the matching tracking result and composites it onto the
+input frame before conversion (section 7).
 
-A control-only client does not need WebRTC. A command response confirms
-the operation's result, not that the resulting frame has already been displayed.
-The Agent does not need a video connection to control rendering. Requests from
-the UI and Agent must be correlated to their originating connections, and scene
-mutations must pass through the same serialized command execution path.
+A control-only client does not need WebRTC. A command response confirms the
+operation's result, not that the resulting frame has already been displayed.
+Requests from the UI and Agent are correlated to their originating connections,
+and scene mutations pass through the same serialized command path; commands on
+one connection execute in the order sent.
 
-## 5. GPU Frames and Two Outputs
+## 5. Program Output and Monitor Data Paths
 
-The goal is to avoid raw-pixel CPU readback, not to eliminate all CPU activity.
-CPU code still handles commands, resource management, scheduling, and signaling.
+The goal is to avoid raw-pixel CPU readback in the intended paths, not to
+eliminate all CPU activity. CPU code still handles commands, resource
+management, scheduling, and signaling.
 
-| Output | Intended data path | CPU involvement |
+| Path | Intended data path | Phase 1 implementation (#10) |
 | --- | --- | --- |
-| WebRTC | GPU texture -> GPU color conversion -> hardware encoder -> WebRTC -> browser hardware decode/display. | Compressed bitstreams and protocol processing normally pass through CPU/system memory. |
-| SDI | GPU texture -> required GPU format conversion -> supported direct DMA path -> SDI card. | Scheduling and synchronization; a host-memory-free pixel path depends on the exact hardware and SDK. |
+| SDI program output | GPU frame -> GPU conversion to the SDI pixel format -> supported DMA path -> SDI card. | GPU conversion to UYVY, CPU readback, simulated port. |
+| WebRTC monitor | The same GPU SDI frame -> GPU conversion to NV12 -> hardware encoder (for example NVENC) -> WebRTC -> browser decode. | Transmitted UYVY in host memory -> CPU conversion to I420 -> software H.264 (openh264). |
 
-For WebRTC, start by validating H.264 hardware encoding, such as NVENC.
-NVENC uses a dedicated hardware encoder rather than rendering shaders.
-Single-frame encoding can be millisecond-scale, but this is not a measured
-result for this project and does not describe total display latency.
+For the monitor, start by validating H.264 hardware encoding, such as NVENC.
+Single-frame encoding can be millisecond-scale, but that is not a measured
+result for this project and does not describe total display latency. Use
+low-latency encoder settings, avoid B-frame reordering and lookahead, and bound
+queues. Validate texture interoperability and browser hardware decoding on the
+target system. GPU-only conversions or copies are acceptable; do not label the
+complete path zero-copy without evidence. In production, the monitor taps the
+GPU frame; it does not need to capture the SDI signal back. A separate
+return-feed capture can be added later for confidence monitoring.
 
-Use low-latency encoder settings, avoid B-frame reordering and lookahead, and
-bound queues. Validate texture interoperability and browser hardware decoding
-on the target Linux system. GPU-only format conversions or copies are acceptable;
-do not label the complete path zero-copy without evidence.
+For SDI, validate the specific card, GPU, driver, SDK, OS, and PCIe topology
+(section 6). Capture-to-GPU support does not prove GPU-to-SDI output support, and
+a GPUDirect label alone does not prove that pixels avoid host memory. Report an
+unsupported direct path rather than silently falling back to CPU readback.
 
-For SDI, validate the specific card, GPU, driver, SDK, OS, and PCIe topology.
-Capture-to-GPU support does not prove GPU-to-SDI output support. A GPUDirect label
-alone does not prove that pixels avoid host memory. Report an unsupported direct
-path rather than silently falling back to CPU readback.
+The program output has priority. The monitor only receives slots the port could
+spare: when the encoder falls behind, slots are skipped for the monitor and
+counted, never delayed for the port. Use a bounded GPU frame pool and GPU
+completion signals; do not reuse a texture until its consumers have finished,
+and do not let a slow consumer retain frames indefinitely.
 
-The outputs must not block one another. Keep separate bounded queues; discard
-stale WebRTC frames before encoding when needed. Schedule SDI at the selected
-video mode's hardware cadence with an explicit underrun policy. If SDI is the
-program output, prioritize its timing over browser preview.
+## 6. SDI Output in Detail
 
-Use a bounded GPU frame pool and GPU completion signals. Do not reuse a texture
-until its consumers have finished; prevent a slow output from retaining frames
-indefinitely. Each output may require different pixel formats and resolutions.
+### 6.1 Pixel format
 
-## 6. Phased Delivery and Replaceable Boundaries
+Phase 1 uses 8-bit UYVY 4:2:2, the packed layout DeckLink calls "8-bit YUV"
+(`2vuy`). Each 4-byte group is `Cb Y0 Cr Y1` for two horizontally adjacent
+pixels, so a 1280-pixel row is 2560 bytes and a 720p frame is 1.84 MB.
 
-No SDI signal source or output card is available yet. Phase 1 therefore runs
-the complete pipeline with simulated boundaries. Phase 2 replaces them with
-hardware after it is selected and validated. Both phases use the same command
-semantics, frame pipeline, and output scheduling, so hardware integration
-replaces implementations instead of restructuring the pipeline. This follows
-the simulation and replay requirement in #1.
+Colors use BT.709 coefficients in 8-bit limited range:
+`Y = 16 + 219·Y'`, `Cb = 128 + 224·(B'-Y')/1.8556`, `Cr = 128 + 224·(R'-Y')/1.5748`.
+Chroma is the mean of each horizontal pixel pair. A GPU test checks white,
+black, red, green, and blue against the reference values byte for byte.
+
+The renderer's sRGB-encoded values are currently used directly as video R'G'B'.
+sRGB and BT.709/BT.1886 transfer functions differ slightly; the real color
+pipeline (transfer function, range, 10-bit) belongs to the open color topic in #1.
+
+### 6.2 Simulated port (`server/runtime/src/sdi.rs`)
+
+```text
+render worker: render -> GPU UYVY -> readback -> queue (capacity 3; full: drop the new frame)
+SDI port thread: own monotonic clock, one slot per frame period, 2 slots of preroll
+  each slot: take the next queued frame, or repeat the previous one on underrun
+  -> offer the slot to the monitor (queue capacity 2; full: skip it for the monitor)
+```
+
+`sdi.get_status` reports the port's counters:
+
+| Counter | Meaning |
+| --- | --- |
+| `frames_output` | Slots transmitted, including repeats. |
+| `repeated_frames` | Slots that repeated the previous frame because no new frame was ready. |
+| `dropped_frames` | Rendered frames discarded because the output queue was full. |
+| `monitor_dropped_frames` | Slots the monitor skipped because its encoder fell behind. |
+| `last_source_frame` | Render frame index of the most recent slot. |
+
+The port keeps ticking if the monitor stops, and the monitor never delays it.
+
+### 6.3 Timing
+
+The render loop and the port currently run on two independent clocks at the
+same nominal rate. Drift or jitter between them shows up as repeats (rendering
+fell behind) or drops (rendering ran ahead); the counters exist to observe this.
+Rendering to SDI output adds about 2-5 frames of latency (2 slots of preroll
+plus up to 3 queued frames), 40-100 ms at 50p.
+
+In production the SDI output clock should be the master: lock the card to the
+house reference (genlock), drive rendering from the card's frame-completion
+callbacks instead of a free-running timer, and keep a fixed number of frames
+scheduled ahead. The two clocks then cannot drift apart.
+
+### 6.4 Hardware mapping (DeckLink as an example, not a selection)
+
+| Simulation | Hardware equivalent |
+| --- | --- |
+| Port thread and its clock | `IDeckLinkOutput::EnableVideoOutput` (for example `bmdModeHD720p50`), `ScheduleVideoFrame`, `StartScheduledPlayback` |
+| Repeated and dropped counters | `ScheduledFrameCompleted` results: `DisplayedLate`, `Dropped`, `Flushed` |
+| 2 slots of preroll | Frames scheduled before playback starts |
+| UYVY readback into host memory | `CreateVideoFrame` with `bmdFormat8BitYUV`, or `bmdFormat10BitYUV` (v210) for 10-bit |
+
+There are two PCIe paths for the pixels. Staging through host memory (GPU ->
+host -> card) crosses PCIe twice and is DeckLink's usual model; at 720p50 that
+is about 92 MB/s each way, so the cost is latency and CPU synchronization rather
+than bandwidth. A GPUDirect peer-to-peer path (GPU -> card) crosses once but
+depends on the card, GPU model, and driver, typically professional GPUs; confirm
+support per model.
+
+### 6.5 Not simulated yet
+
+10-bit (v210), interlaced modes such as 1080i50, embedded audio, ancillary data
+(timecode and others), reference locking, fill+key dual outputs for a downstream
+keyer, SDI link identification (VPID) and 3G Level A/B, and failure bypass.
+These remain open topics in #1.
+
+## 7. Phased Delivery and Replaceable Boundaries
+
+No SDI signal source or output card is available yet. Phase 1 runs the complete
+pipeline with simulated boundaries; Phase 2 replaces them with hardware after it
+is selected and validated. Both phases use the same command semantics, frame
+pipeline, and output scheduling, so hardware integration replaces
+implementations instead of restructuring the pipeline. This follows the
+simulation and replay requirement in #1.
 
 The live runtime confirmed in #1 is input-driven: capture -> tracking ->
-render/composite -> outputs. Model each boundary as a replaceable interface
-from the start, rather than building an output-only path first.
+render/composite -> SDI output, with the monitor tapping that output.
 
-| Boundary | Phase 1 (simulated) | Phase 2 (hardware) |
-| --- | --- | --- |
-| Video input | Decoded local video file or generated test pattern; each frame carries a frame identity and timecode. | SDI capture card (Cam1). |
-| Tracking result | Recorded or synthetic per-frame Ti, matched by frame identity. | Real-time tracking service. |
-| Render and composite | Real implementation: render the overlay and composite it onto the input frame. | Unchanged. |
-| Browser preview | Real implementation: GPU hardware encoding -> WebRTC. | Unchanged. |
-| SDI output | Simulated sink: fixed-cadence output in the SDI pixel format, written to a file or frame dump. | SDI output card. |
-| Clock | Controllable clock that can pause, step, and accelerate. | Hardware reference clock or input-locked timing. |
+| Boundary | Phase 1 (simulated) | Phase 2 (hardware) | Status in #10 |
+| --- | --- | --- | --- |
+| Video input | Decoded local video file or generated test pattern; each frame carries a frame identity and timecode. | SDI capture card (Cam1). | Not yet. |
+| Tracking result | Recorded or synthetic per-frame Ti, matched by frame identity. | Real-time tracking service. | Not yet. |
+| Render and composite | Real implementation: render the overlay and composite it onto the input frame. | Unchanged. | Render only (rotating triangle). |
+| SDI output | Simulated port: fixed cadence, bounded queue, repeat on underrun, counters, GPU conversion to the SDI pixel format. | SDI output card. | Done, UYVY 8-bit. |
+| Monitor | Software encoding after readback. | GPU frame -> hardware encoder. | Done (software). |
+| Clock | Controllable clock that can pause, step, and accelerate. | Output-locked (genlocked) timing. | Frame-based logical time; free-running monotonic pacing. |
 
 Frame identity comes from the input source and travels with each frame through
-tracking, composition, and both outputs. Do not substitute buffer slots or
-output frame counters for it. The behavior when a frame has no matching
-tracking result is still open in #1; make it explicit rather than silently
-reusing a stale result.
-
-The simulated SDI sink simulates the output constraints, not only image delivery:
-
-- Emit frames at the selected video mode's cadence, driven by the controllable
-  clock.
-- Use a bounded queue, count underruns, and apply the documented underrun
-  policy, such as repeating the last frame.
-- Convert to the intended SDI pixel format on the GPU, such as 10-bit YUV
-  4:2:2, so the conversion can be reused with real hardware.
-- It may read pixels back to the CPU to write files. Label this path as
-  simulation-only; it does not relax the no-raw-readback rule for WebRTC or
-  for the hardware SDI path.
+tracking, composition, and the outputs. Do not substitute buffer slots or output
+frame counters for it. The behavior when a frame has no matching tracking result
+is still open in #1; make it explicit rather than silently reusing a stale
+result.
 
 Phase 1 does not cover selecting the SDI card or SDK, validating a direct
-GPU-to-SDI-card path, hardware genlock, or any SDI latency claims. These belong
+GPU-to-SDI-card path, hardware genlock, or any SDI latency claims; these belong
 to Phase 2. Once a card that supports both input and output is available,
 looping its output back to its own input allows self-testing without an
 external signal source.
 
-## 7. Latency and Validation
+## 8. Latency and Validation
 
-For same-machine hardware-encoded WebRTC, use approximately **50-150 ms from a
+The default video mode is 1280x720p50; each buffered frame adds 20 ms. For a
+same-machine hardware-encoded monitor, use approximately **50-150 ms from a
 completed GPU frame to browser display** as an initial planning budget, not a
-benchmark, guarantee, or fixed WebRTC delay. Measure encoding, queuing, receive
-buffering, decoding, and presentation separately, plus end-to-end P50/P95.
-Command-to-display latency also includes command handling and render scheduling.
+benchmark or guarantee. The SDI port's queue and preroll (section 6.3) add to
+it. Measure encoding, queuing, receive buffering, decoding, and presentation
+separately, plus end-to-end P50/P95. Command-to-display latency also includes
+command handling and render scheduling. Browser playback and SDI are not
+synchronized.
 
-Every additional buffered frame adds about 16.7 ms at 60 FPS or 33.3 ms at
-30 FPS. Fast encoding alone cannot compensate for a growing queue.
-Browser playback and SDI are not automatically synchronized.
+The Phase 1 slice was validated on Linux with an RTX 3090 (see #10):
 
-Start with one rendering session, a TS client, and an Agent Socket connection.
-In Phase 1, use the simulated input, tracking, and SDI sink from section 6.
-Verify that UI and Agent commands affect the same scene and that responses go
-to the correct caller. Prove camera control and browser playback at 720p/30 FPS,
-then evaluate low-latency 1080p60 where supported.
-In Phase 2, select the SDI format according to the actual output card and
-downstream equipment. These are validation targets, not performance guarantees.
+- Commands from the UI (WebSocket) and an Agent-style client (NativeSocket)
+  change the same scene, and responses reach the correct caller.
+- The SDI port ticks at 50 slots per second; the monitor stream arrives at about
+  50 fps in headless Chrome, including over ICE-TCP only.
+- Decoded monitor frames change while rotating and stay still while stopped.
+- Under a 10 s streaming load the port reported 0 repeated, 0 dropped, and
+  0 monitor-dropped frames.
+- GPU-to-host traffic measured with `nvidia-smi` was about 97 MB/s, the UYVY
+  readback.
 
-## 8. First-Version Rules
+These are development measurements, not performance guarantees. In Phase 2,
+select the SDI format according to the actual output card and downstream
+equipment.
 
-- Use the same JSON command/response definitions and request IDs for both
-  WebSocket and Socket, including the Agent connection. Share command handling,
-  not platform-specific handles.
-- One WebSocket message carries one protocol message. Local byte streams use a
-  4-byte big-endian payload length followed by the JSON bytes.
-- Limit message sizes and queue lengths. Coalesce obsolete camera updates
-  without silently dropping important commands.
-- Keep instructions on WebSocket/Socket, browser video on WebRTC, and SDI on its
-  independent output path. Do not introduce a DataChannel command path or stream
-  PNGs as the main video transport.
+## 9. First-Version Rules
+
+- Control messages use JSON-RPC 2.0 on both WebSocket and NativeSocket,
+  including the Agent connection, as decided in #1. Use string request ids.
+  Share command handling, not platform-specific handles.
+- One WebSocket text message carries one JSON-RPC message (or batch). The
+  NativeSocket uses a 4-byte big-endian payload length followed by the JSON
+  bytes.
+- Limit message sizes and queue lengths. A full command queue is reported as a
+  busy error, not silently dropped.
+- Keep commands on WebSocket/NativeSocket, the program output on SDI, and the
+  monitor on WebRTC. Do not introduce a DataChannel command path or stream PNGs
+  as the main video transport.
 - Bind the WebSocket listener to loopback addresses only, not all interfaces.
-  Validate browser origins and session identity; restrict Socket access using
-  Linux directory/socket permissions and peer credentials where needed. Apply
-  the same authorization rules to Agent and UI commands.
+  Validate browser origins; restrict the NativeSocket with owner-only
+  directory/socket permissions and peer credentials where needed. Apply the same
+  authorization rules to Agent and UI commands.
 - WebRTC still needs signaling and ICE negotiation for same-machine video.
-  Do not configure external STUN/TURN services for the first version; validate
-  local connectivity in the target browsers.
-- Validate the GPU-to-encoder path on Linux. The existing blocking
-  CPU readback helper remains useful for screenshots/tests, not the intended
-  continuous streaming path.
+  Do not configure external STUN/TURN services. For development through an SSH
+  port forward, which carries TCP only, the server can offer ICE-TCP candidates
+  on a fixed loopback port range.
+- Validate the GPU-to-encoder path on Linux. CPU readback remains acceptable for
+  screenshots, tests, and the Phase 1 monitor, not as the intended continuous
+  streaming path.
