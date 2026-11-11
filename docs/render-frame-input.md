@@ -117,3 +117,11 @@ GPU 写入就绪不代表图像对应的 tracking 结果也已就绪。
 - scene 快照的精确绑定时机、修改顺序和回执。
 - 帧池容量、消费者释放、池满、取消及超时策略。
 - 批量提交的部分失败策略和输出画面的生命周期。
+
+## Concrete contract candidate
+
+[Initial scene and frame control contract](scene-frame-contract.md) supplies the
+independently reviewable #12 candidate: exact control/submission schemas,
+resource/effect boundaries and synthetic conformance scenarios. It does not
+approve these open choices or implement #20/#21/#22. Existing renderer features
+remain separate from runtime control and actual program-output acceptance.
