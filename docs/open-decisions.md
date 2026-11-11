@@ -18,6 +18,8 @@
 - 主相机输入称为 Cam1 SDI 流；静态标定录制产物为 MP4 加配套逐帧元数据，整体交付。
 - 控制消息采用 JSON-RPC 2.0 的标准请求、响应、错误和通知封装，传输与实现库不因此定案。
 - 业务需支持模拟和重放，时间语义不依赖当前系统墙钟；具体逻辑时间编码仍待细化。
+- 仓库级协议约定集中于通用文档，协议字段、状态值、错误等具体标识使用英文。
+- 各业务方法需明确 response payload schema，不能只定义请求参数。
 
 | ID | 需要确定的问题 | 影响 |
 | --- | --- | --- |
@@ -47,7 +49,9 @@
 - 逻辑时间线、时间点/时长编码、生效记录、重放顺序及独立的运行保护时钟。
 
 JSON-RPC 2.0 封装已确认；这些问题明确之前，不冻结具体业务方法和参数 schema。
-通用设计边界见 [控制消息与模拟](control-protocol.md)。
+通用约定见 [Protocol conventions](protocol-conventions.md)，
+effect 与时间设计见 [Control effects and simulation](control-protocol.md)。
+录制 response、state 和 error schema 已提供候选定义，字段及错误码分配仍需评审确认。
 
 ## 第三层：视频、渲染与接口技术
 

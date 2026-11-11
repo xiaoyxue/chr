@@ -53,8 +53,8 @@ chr → 实时视频 → 实时追踪服务 → 逐帧 Ti/可选畸变参数 →
 
 业务命令及其 effect 应独立于发起来源：WebUI、CLI 或固定 trigger 均可发起操作。
 上图是主要用户交互路径，不排除其他控制来源。先明确业务语义，再细化模块适配和传输方式。
-控制消息已确定采用 JSON-RPC 2.0；它不规定上述传输方式，也不要求视频或批量帧数据使用 JSON。
-逻辑时间与模拟要求见 [控制消息与模拟](control-protocol.md)。
+通用消息规范见 [Protocol conventions](protocol-conventions.md)；
+逻辑时间与模拟要求见 [Control effects and simulation](control-protocol.md)。
 
 ## 准备与直播路径
 

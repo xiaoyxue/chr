@@ -12,7 +12,8 @@
   元数据编码、文件命名、目录组织以及是否打包成归档尚未确定。
 - 先定义业务操作与 effect，再细化模块接口。运行时组织录制的总体职责保持不变。
 - 控制消息采用 JSON-RPC 2.0；业务需支持模拟与重放，不依赖当前系统墙钟。
-  通用约束见 [控制消息、逻辑时间与模拟](control-protocol.md)。
+  通用约束见 [Protocol conventions](protocol-conventions.md)，
+  时间与 effect 约束见 [Control effects and simulation](control-protocol.md)。
 
 输入录制与延迟后的渲染输出录制是不同对象。本轮讨论 Cam1 输入录制，
 不以实时渲染的输出节奏或输出时间戳替代原始输入身份。
@@ -68,13 +69,13 @@ MP4 只确定容器，不确定编码质量。录制规格还需明确编码、�
 后续完成/失败通过任务状态及可能的事件报告，不重复回复同一个调用。
 建议区分以下可观察阶段，具体状态机与事件名留待进一步讨论：
 
-| 阶段 | 可观察含义 |
+| State | 可观察含义 |
 | --- | --- |
-| 已受理/准备中 | 已建立任务身份，正在准备资源；尚未承诺录到画面。 |
-| 正在录制 | 已接收用于该录制的帧，能够报告首个源帧身份。 |
-| 正在收尾 | 已确定停止边界，编码器、容器和元数据仍在完成写入。 |
-| 已完成 | 视频与配套元数据均已完成并具备一致关联，可整体交付。 |
-| 失败 | 报告原因及是否存在未完成产物，不能以文件存在代替成功。 |
+| `preparing` | 已建立任务身份，正在准备资源；尚未承诺录到画面。 |
+| `recording` | 已接收用于该录制的帧；源帧身份需要保留在录制记录中。 |
+| `finalizing` | 已确定停止边界，编码器、容器和元数据仍在完成写入。 |
+| `completed` | 视频与配套元数据均已完成并具备一致关联，可整体交付。 |
+| `failed` | 报告原因及是否存在未完成产物，不能以文件存在代替成功。 |
 
 候选约定：人工停止与达到最大时长使用同一收尾流程，并报告不同停止原因；
 停止指令受理不代表产物已完成。失败前取得的部分数据是否可用，应与任务成功分开表达。
@@ -83,6 +84,149 @@ MP4 只确定容器，不确定编码质量。录制规格还需明确编码、�
 精确帧触发、实际开始/停止边界、准备中收到 stop 的处理、重复 stop 及断线后的行为尚待确定。
 这种相对生效方式需要记录实际解析到的源帧和逻辑边界，才能在模拟中重放同一录制范围；
 仅记录 RPC 到达时间不足以复现准备完成的位置。
+
+## Response payload schemas
+
+以下是最小可评审的业务 schema 草案，不把尚未确认的时间编码塞入 response。
+使用 [Protocol conventions](protocol-conventions.md) 中的结构 schema 记法。
+除显式标注的成员外均为必填；此草案未定义额外业务字段，扩展需同步修订文档。
+所有 ID 均为非空字符串，引用同一录制时保持不变。
+
+```typescript
+type RecordingReference = {
+  recording_id: string;
+};
+
+type RecordingArtifacts = {
+  video_path: string;
+  frame_metadata_path: string;
+};
+
+type RecordingFailure = {
+  kind:
+    | "source_lost"
+    | "source_changed"
+    | "encoding_failed"
+    | "storage_failed"
+    | "internal_error";
+  message: string;
+};
+
+type RecordingSnapshot = RecordingReference & (
+  | { state: "preparing" }
+  | { state: "recording" }
+  | { state: "finalizing" }
+  | {
+      state: "completed";
+      artifacts: RecordingArtifacts;
+    }
+  | {
+      state: "failed";
+      failure: RecordingFailure;
+      partial_paths: string[];
+    }
+);
+```
+
+`video_path` 与 `frame_metadata_path` 均为执行机器上的非空绝对路径；
+前者指向 MP4，后者指向其配套逐帧元数据，具体文件布局和元数据编码仍待确认。
+这里只定义两个角色，不要求元数据采用某个后缀或序列化格式。
+`completed` 必须同时提供两者，不能用单个 MP4 路径声称整体已完成。
+
+`partial_paths` 是已知的残留文件路径列表，允许为空，不是可交付产物列表。
+`failed` 不携带 `artifacts`，不承诺残留文件完整或可用；`failure.message` 使用英文。
+失败类型集合为候选，明确输入中断、超时等策略后需同步修订。
+
+| Method | Result schema | Successful effect |
+| --- | --- | --- |
+| `recording.start` | `RecordingReference` | 已创建并受理录制任务；不承诺已取得首帧或完成文件。 |
+| `recording.stop` | `RecordingReference` | 已受理对该任务的停止意图；不承诺已经达到停止边界或完成收尾。 |
+| `recording.get` | `RecordingSnapshot` | 返回读取时的任务快照；查到 `failed` 仍是查询成功。 |
+
+`stop` 对已终止任务以及重复请求的处理仍待确认；不能从相同 result 结构推断幂等性。
+首末帧、生效逻辑时刻、停止原因和统计信息后续在相关语义明确后加入，
+当前 schema 不宣称这些已成为 response 字段。
+
+### RPC errors
+
+标准解析和参数错误遵循通用规范。以下业务拒绝码及 data 是候选注册，
+仅描述调用被拒绝，不用于替代运行中的 `RecordingFailure`：
+
+| Code | Message | Data schema | Methods |
+| --- | --- | --- | --- |
+| `1001` | `Recording not found` | `{ "recording_id": string }` | `recording.stop`, `recording.get` |
+| `1002` | `Source unavailable` | `{ "source": string }` | `recording.start` |
+| `1003` | `Output unavailable` | `{ "path": string }` | `recording.start` |
+| `1004` | `Recording resources unavailable` | `{ "source": string }` | `recording.start` |
+
+上述四种错误的 `data` 必填，其字符串字段非空。其他 namespace 定义错误时需避免
+这些候选码冲突；最终分配方式尚未冻结。`1003` 不等于允许覆盖或自动修复路径。
+资源在受理后才失败时，报告任务 `failed`，不为已完成的 start RPC 追加错误 response。
+
+### Response examples
+
+`recording.start` 的任务受理结果：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-001",
+  "result": {
+    "recording_id": "rec-001"
+  }
+}
+```
+
+`recording.get` 查询到已完成产物；`.metadata` 只是示例名称，不指定编码：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-002",
+  "result": {
+    "recording_id": "rec-001",
+    "state": "completed",
+    "artifacts": {
+      "video_path": "/recordings/cam1-scan.mp4",
+      "frame_metadata_path": "/recordings/cam1-scan.metadata"
+    }
+  }
+}
+```
+
+`recording.get` 查询到一个运行失败的任务：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-003",
+  "result": {
+    "recording_id": "rec-001",
+    "state": "failed",
+    "failure": {
+      "kind": "storage_failed",
+      "message": "Recording storage write failed"
+    },
+    "partial_paths": ["/recordings/cam1-scan.mp4"]
+  }
+}
+```
+
+`recording.get` 查询的任务不存在，属于调用失败：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-004",
+  "error": {
+    "code": 1001,
+    "message": "Recording not found",
+    "data": {
+      "recording_id": "rec-missing"
+    }
+  }
+}
+```
 
 ## 时间与逐帧元数据
 

@@ -10,8 +10,9 @@
 | [业务流程](business-workflow.md) | 谁在什么阶段做什么，使用和产出什么，怎样算完成。 |
 | [系统模块](system-architecture.md) | 各模块承担什么职责，数据怎样流动，哪些边界仍待讨论。 |
 | [功能归属](component-responsibilities.md) | 每项功能由谁操作、谁执行，跨模块需要传递什么。 |
-| [控制消息与模拟](control-protocol.md) | JSON-RPC 2.0 的标准边界，以及逻辑时间、effect 和模拟重放的设计约束。 |
-| [Cam1 输入录制](recording-control.md) | 从静态标定录制切入，讨论来源无关的命令、effect 与录制产物。 |
+| [Protocol conventions](protocol-conventions.md) | 仓库级 JSON-RPC 2.0、英文协议标识及通用 request/response/error schema。 |
+| [Control effects and simulation](control-protocol.md) | 控制 effect、逻辑时间和模拟重放约束，不重复定义通用消息规范。 |
+| [Cam1 输入录制](recording-control.md) | 录制方法、effect、英文状态及各方法的 response payload schema 草案。 |
 | [待决问题](open-decisions.md) | 哪些产品与技术问题尚未确定，以及讨论它们的先后关系。 |
 
 随着业务框架逐步明确，再按需要增加内容与投放、校准、渲染控制、素材与动画、
@@ -40,6 +41,8 @@
 
 已确认：控制消息采用 JSON-RPC 2.0，传输、实现库和具体业务方法另行确定。
 业务设计需要考虑模拟与重放，使用明确的逻辑时间语义，不依赖当前系统墙钟。
+仓库级协议约定统一放在 `protocol-conventions.md`；协议字段、状态值和错误等具体标识使用英文，
+各业务方法明确自己的 response payload，不仅列出请求参数。
 
 [Hong-Xiang/vchao#150](https://github.com/Hong-Xiang/vchao/pull/150)
 是几何、素材、控制、预览与 SDI 讨论的参考草案，不是本仓库的最终协议。
