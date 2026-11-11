@@ -87,6 +87,12 @@ Use the documented nixGL wrapper when needed. The example saves owner-local
 35 m corner towers. These are static PBR diagnostics, not shadow or physical
 camera-calibration acceptance. Do not upload private inputs or resulting images.
 
+It also writes `standard.png` and `model-1.png`, `model-2.png`, etc. using a
+level 45-degree FOV/look-at pinhole camera framed around the model bounds.
+These views have zero skew and keep world-vertical lines vertical on screen,
+without changing model orientation, placement, lighting or imported calibration.
+Use them to distinguish projection-induced tilt from the asset's own geometry.
+
 ## Render server
 
 `chr-server` renders the triangle offscreen (1280x720p50 by default) and takes

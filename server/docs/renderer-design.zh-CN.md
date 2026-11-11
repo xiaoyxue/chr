@@ -53,6 +53,11 @@ IBL 尚未实现时显式拒绝环境照明；M2 不宣称阴影控制、面光�
 私有输入和输出仅留在本地。该样例不定义新的公共 wire schema，
 也不代替要求的 NativeSocket/WebSocket 交互路径。
 
+为便于检查，样例额外输出 `standard.png` 和逐模型的 `model-N.png`，
+复用普通 FOV/look-at 针孔相机，采用水平光轴、零 skew 和基于包围盒的取景。
+模型及照明不变，原始 Ti/C 保留用于对比视角，
+从而区分相机投影造成的视觉倾斜和模型本身的朝向。
+
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
 `server/runtime`（`chr-server`）、`server/viewer`（`chr-app`）和
 `common`（`chr-common`）。当前服务已将旋转三角形送入模拟 SDI 端口，
