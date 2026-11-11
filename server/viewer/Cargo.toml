@@ -20,3 +20,8 @@ png = "0.18"
 [dev-dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[[example]]
+name = "shadow_benchmark"
+path = "examples/shadow_benchmark/main.rs"
+test = true
