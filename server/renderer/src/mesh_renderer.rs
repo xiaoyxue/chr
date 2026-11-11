@@ -12,7 +12,7 @@ use crate::{
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
     scene::{Light, MaterialId, MaterialMaps, MeshId, SceneView},
-    shadow::{self, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
+    shadow::{self, CascadeSettings, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,12 +63,14 @@ struct LightUniform {
     position_kind: [f32; 4],
     direction_inner: [f32; 4],
     emission_outer: [f32; 4],
-    shadow_matrix: [[f32; 4]; 4],
+    shadow_matrix: [[[f32; 4]; 4]; 4],
     shadow_params: [f32; 4],
-    shadow_depth: [f32; 4],
+    shadow_depth: [[f32; 4]; 4],
     // Source size, search cap, filter cap, effective shadow mode.
     pcss: [f32; 4],
     pcss_samples: [f32; 4],
+    cascade_splits: [f32; 4],
+    cascade_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -94,12 +96,20 @@ struct Draw {
     material: MaterialId,
 }
 
+#[derive(PartialEq)]
+struct CascadeKey {
+    view: [[f32; 4]; 4],
+    settings: CascadeSettings,
+    padding: f32,
+}
+
 struct ShadowCache {
     scene: SceneView,
     resolution: u32,
     filter_radius: f32,
     max_bytes: u64,
     active: Vec<usize>,
+    cascades: Option<CascadeKey>,
 }
 
 /// Shared mesh/depth renderer with diagnostic unlit and textured PBR paths.
@@ -360,7 +370,11 @@ impl MeshRenderer {
         let quality = settings.shadows.pcss;
         let mut counts = [0_u64; 4];
         for light in scene.lighting().lights() {
-            counts[light.effective_shadow_mode(settings.shadows.mode) as usize] += 1;
+            let blended = matches!(light, Light::Directional { .. })
+                && settings.shadows.cascades.count > 1
+                && settings.shadows.cascades.blend_fraction > 0.0;
+            counts[light.effective_shadow_mode(settings.shadows.mode) as usize] +=
+                if blended { 2 } else { 1 };
         }
         if counts[ShadowMode::Pcf as usize] > 0
             && ![1, 4, 9, 16, 25, 36, 49, 64].contains(&settings.shadows.pcf_samples)
@@ -583,22 +597,40 @@ impl MeshRenderer {
             Vec::new()
         };
         let shadows = settings.map_or(ShadowSettings::default(), |s| s.shadows);
-        let atlas_changed = self.prepare_shadows(gpu, scene, settings.map(|s| s.shadows))?;
+        let atlas_changed =
+            self.prepare_shadows(gpu, scene, camera, settings.map(|s| s.shadows))?;
         for (index, light) in lights.iter_mut().enumerate() {
             light.pcss[3] =
                 scene.lighting().lights()[index].effective_shadow_mode(shadows.mode) as u32 as f32;
             if let Some(layer) = self.shadow_layers.get(index).copied().flatten()
                 && let Some(projection) = self.shadow_projections.get(layer).copied().flatten()
             {
-                light.shadow_matrix = projection.matrix;
-                light.shadow_depth = projection.depth_scale;
+                let count = if matches!(scene.lighting().lights()[index], Light::Directional { .. })
+                {
+                    shadows.cascades.count as usize
+                } else {
+                    1
+                };
+                for cascade in 0..count {
+                    if let Some(map) = self.shadow_projections[layer + cascade] {
+                        light.shadow_matrix[cascade] = map.matrix;
+                        light.shadow_depth[cascade] = map.depth_scale;
+                        light.cascade_splits[cascade] = map.split[1];
+                    }
+                }
+                light.cascade_params = [
+                    projection.split[0],
+                    shadows.cascades.blend_fraction as f32,
+                    0.0,
+                    0.0,
+                ];
                 light.pcss[1] = shadows.pcss.max_search_radius;
                 light.pcss[2] = shadows.pcss.max_filter_radius;
                 light.pcss_samples = [
                     shadows.pcss.blocker_samples as f32,
                     shadows.pcss.filter_samples as f32,
                     shadows.pcf_samples as f32,
-                    0.0,
+                    count as f32,
                 ];
                 light.shadow_params = [
                     layer as f32,
@@ -823,9 +855,9 @@ impl MeshRenderer {
             position_kind: [position[0], position[1], position[2], kind],
             direction_inner: [direction[0], direction[1], direction[2], inner],
             emission_outer: [emission[0], emission[1], emission[2], outer],
-            shadow_matrix: [[0.0; 4]; 4],
+            shadow_matrix: [[[0.0; 4]; 4]; 4],
             shadow_params: [-1.0, 0.0, 0.0, 0.0],
-            shadow_depth: [0.0; 4],
+            shadow_depth: [[0.0; 4]; 4],
             pcss: [
                 match light {
                     Light::Directional { angular_radius, .. } => angular_radius.tan(),
@@ -838,6 +870,8 @@ impl MeshRenderer {
                 0.0,
             ],
             pcss_samples: [0.0; 4],
+            cascade_splits: [0.0; 4],
+            cascade_params: [0.0; 4],
         };
         if !bytemuck::cast_slice::<_, f32>(&[uniform])
             .iter()
@@ -858,6 +892,7 @@ impl MeshRenderer {
         &mut self,
         gpu: &Gpu,
         scene: &SceneView,
+        camera: &Camera,
         settings: Option<ShadowSettings>,
     ) -> Result<bool, BoxError> {
         let pbr = settings.is_some();
@@ -879,12 +914,26 @@ impl MeshRenderer {
             self.shadow_dirty = false;
             return self.shadow_atlas.ensure(&gpu.device, 1, 1, u64::MAX);
         }
+        let cascades = if settings.cascades.count > 1
+            && active
+                .iter()
+                .any(|&index| matches!(lights[index], Light::Directional { .. }))
+        {
+            Some(CascadeKey {
+                view: camera.clip_from_world()?,
+                settings: settings.cascades,
+                padding: shadow::cascade_padding(settings),
+            })
+        } else {
+            None
+        };
         if self.shadow_cache.as_ref().is_some_and(|cache| {
             cache.scene.same_snapshot(scene)
                 && cache.resolution == settings.resolution
                 && cache.filter_radius == settings.filter_radius
                 && cache.max_bytes == settings.max_bytes
                 && cache.active == active
+                && cache.cascades == cascades
         }) {
             return Ok(false);
         }
@@ -892,7 +941,7 @@ impl MeshRenderer {
         let layers = u32::try_from(
             active
                 .iter()
-                .map(|&index| shadow::face_count(lights[index]))
+                .map(|&index| shadow::face_count(lights[index], settings.cascades))
                 .sum::<usize>()
                 .max(1),
         )?;
@@ -909,12 +958,19 @@ impl MeshRenderer {
         for &index in &active {
             light_layers[index] = Some(projections.len());
             projections.extend(match bounds {
-                Some(bounds) => shadow::projections(lights[index], bounds, settings)?,
-                None => vec![None; shadow::face_count(lights[index])],
+                Some(bounds) => shadow::projections(lights[index], bounds, settings, camera)?,
+                None => vec![None; shadow::face_count(lights[index], settings.cascades)],
             });
         }
+        let dirty = changed
+            || self
+                .shadow_cache
+                .as_ref()
+                .is_none_or(|cache| !cache.scene.same_snapshot(scene))
+            || projections != self.shadow_projections
+            || light_layers != self.shadow_layers;
         let mut cameras = Vec::new();
-        for (index, matrix) in projections.iter().enumerate() {
+        for (index, matrix) in projections.iter().enumerate().filter(|_| dirty) {
             if let Some(matrix) = matrix {
                 let data = CameraUniform {
                     clip: matrix.matrix,
@@ -938,7 +994,9 @@ impl MeshRenderer {
                 ));
             }
         }
-        self.shadow_cameras = cameras;
+        if dirty {
+            self.shadow_cameras = cameras;
+        }
         self.shadow_projections = projections;
         self.shadow_layers = light_layers;
         self.shadow_cache = Some(ShadowCache {
@@ -947,8 +1005,9 @@ impl MeshRenderer {
             filter_radius: settings.filter_radius,
             max_bytes: settings.max_bytes,
             active,
+            cascades,
         });
-        self.shadow_dirty = true;
+        self.shadow_dirty |= dirty;
         Ok(changed)
     }
 }

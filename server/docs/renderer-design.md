@@ -88,7 +88,7 @@ or temporal accumulation; receiver-plane correction applies to both stages.
 Quality-only changes and camera motion reuse the maps. Large kernels are capped
 and thin blockers may be missed; this remains a single-average-blocker approximation.
 The `shadow-pcss.png` capture retains M3 lighting; `shadow-pcss-wide.png` increases
-source radii fourfold without changing energy. Cascades,
+source radii fourfold without changing energy.
 sky visibility and finite-area BRDF integration remain unimplemented.
 PCSS is high priority; area/LTC is now low priority.
 
@@ -124,7 +124,7 @@ Point contact-hardening is also compared with independent emitter visibility.
 Memory budgets count six layers per point. M5 `point-*` captures explicitly use
 1024 resolution for sun + four points (25 layers, 100 MiB); M3/M4 `shadow-*`
 retain sun + four spots at 2048. Hard/PCF/PCSS and camera changes reuse unchanged
-maps. Cascades, broad performance acceptance, sky/IBL
+maps. Broad performance acceptance, sky/IBL
 and area/LTC remain follow-ups.
 
 M6 adds `Light::shadow_mode: Option<ShadowMode>` for all three light kinds.
@@ -158,6 +158,30 @@ The private example distinguishes mixed modes with one shadow disabled
 and adds a 64-sample PCF capture. Disabled shadows do not disable illumination.
 Automated tests exercise each supported kernel for all three light kinds,
 cache reuse, invalid kernels and mixed-mode budget accounting.
+
+M8 adds optional 2..=4 directional cascades; count 1 retains the existing
+scene-fitted path. Splits interpolate linear/logarithmic optical depth over the
+camera near plane to the lesser of its far plane and an explicit maximum shadow
+distance (default 200 m). The default transition band is 10% of each interval;
+the last band fades to fully lit, making distance truncation explicit.
+
+Each overlap-aware slice uses a rotation-stable bounding sphere and a
+world-texel-snapped centre. Its light-depth range retains full visible scene
+bounds, including offscreen casters. PCSS uses common metric blocker distances
+and each map's own UV scale. The shared budgets count all cascade layers and
+two visibility evaluations for blended directional lights. View-dependent fits
+are recomputed as needed; unchanged snapped matrices reuse depth maps.
+The method follows the frustum partitioning, stable fitting and transition
+principles in Microsoft's
+[Cascaded Shadow Maps](https://learn.microsoft.com/en-us/windows/win32/dxtecharts/cascaded-shadow-maps),
+implemented in portable wgpu rather than copying its platform-specific renderer.
+
+CPU tests cover overlap and subtexel stability; GPU fixtures exercise Hard,
+PCF and PCSS around split boundaries, independent emitter visibility, offscreen
+casters, mixed point/cascade layer offsets, final-distance fading and budgets.
+`sun-single.png`/`sun-cascades.png` hold sun-only lighting, geometry, camera and
+1024 resolution constant while comparing one/four maps. General renderer
+performance acceptance remains separate from these functional tests.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,

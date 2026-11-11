@@ -471,6 +471,30 @@ fn main() -> Result<()> {
             ..Default::default()
         },
     )?;
+    scene.set_lighting(illumination(length, width, "sun")?)?;
+    for (name, count) in [("sun-single", 1), ("sun-cascades", 4)] {
+        capture(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &overview,
+            &target,
+            &directory.join(format!("{name}.png")),
+            ShadowSettings {
+                mode: ShadowMode::Pcss,
+                resolution: 1024,
+                cascades: chr_renderer::CascadeSettings {
+                    count,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )?;
+        eprintln!(
+            "Rendered {name}: {} shadow depth passes.",
+            renderer.shadow_passes_last_frame()
+        );
+    }
     Ok(())
 }
 

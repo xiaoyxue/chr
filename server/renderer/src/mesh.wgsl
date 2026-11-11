@@ -5,8 +5,9 @@ struct Object {
 };
 struct Light {
     position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>,
-    shadow_matrix: mat4x4<f32>, shadow_params: vec4<f32>,
-    shadow_depth: vec4<f32>, pcss: vec4<f32>, pcss_samples: vec4<f32>
+    shadow_matrix: array<mat4x4<f32>,4>, shadow_params: vec4<f32>,
+    shadow_depth: array<vec4<f32>,4>, pcss: vec4<f32>, pcss_samples: vec4<f32>,
+    cascade_splits: vec4<f32>, cascade_params: vec4<f32>
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
@@ -124,7 +125,7 @@ fn point_depths(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f3
     let denominator=dot(ray,plane);
     if numerator*denominator<=0.0 {return vec2(1.0,0.0);}
     let depth=textureLoad(shadow_maps,pixel,i32(light.shadow_params.x)+i32(address.face),0);
-    return vec2(depth,min(1.0,numerator/denominator/light.shadow_depth.y-light.shadow_params.y));
+    return vec2(depth,min(1.0,numerator/denominator/light.shadow_depth[0].y-light.shadow_params.y));
 }
 
 fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->f32 {
@@ -149,7 +150,7 @@ fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f
 fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
     let mode=u32(light.pcss.w);
     let radius=length(receiver);
-    if radius<light.shadow_depth.x || radius>=light.shadow_depth.y {return 1.0;}
+    if radius<light.shadow_depth[0].x || radius>=light.shadow_depth[0].y {return 1.0;}
     let direction=receiver/radius;
     let plane=cross(px,py);
     if mode==1u || (mode==3u && light.pcss.x==0.0) {
@@ -172,7 +173,7 @@ fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f
         }
         return visibility/light.pcss_samples.z;
     }
-    let near=light.shadow_depth.z;
+    let near=light.shadow_depth[0].z;
     let search=min(light.pcss.x*max(radius-near,0.0)/(near*radius),texel*light.pcss.y);
     let blocker_samples=u32(light.pcss_samples.x);
     var sum=0.0;
@@ -181,7 +182,7 @@ fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f
         let p=shadow_disk(i,blocker_samples)*search;
         let depths=point_depths(light,direction+p.x*tangent+p.y*bitangent,receiver,plane);
         if depths.x<1.0 && depths.x<depths.y {
-            sum+=depths.x*light.shadow_depth.y;
+            sum+=depths.x*light.shadow_depth[0].y;
             count++;
         }
     }
@@ -197,9 +198,9 @@ fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f
     return visibility/f32(filter_samples);
 }
 
-fn linear_shadow_depth(light:Light,depth:f32)->f32 {
-    let near=light.shadow_depth.x;
-    let far=light.shadow_depth.y;
+fn linear_shadow_depth(light:Light,depth:f32,cascade:u32)->f32 {
+    let near=light.shadow_depth[cascade].x;
+    let far=light.shadow_depth[cascade].y;
     if light.position_kind.w>0.5 {
         return near/(1.0-depth+depth*(near/far));
     }
@@ -216,12 +217,12 @@ fn bounded_shadow_radius(radius:vec2<f32>,limit:f32,size:vec2<f32>)->vec2<f32> {
     return radius*min(1.0,limit/max(largest,1e-20));
 }
 
-fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>)->f32 {
+fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>,cascade:u32)->f32 {
     let size=vec2<f32>(textureDimensions(shadow_maps));
-    let layer=i32(light.shadow_params.x);
-    let receiver=linear_shadow_depth(light,clamp(depth,0.0,1.0));
-    let near=light.shadow_depth.x;
-    var projection=light.shadow_depth.zw;
+    let layer=i32(light.shadow_params.x)+i32(cascade);
+    let receiver=linear_shadow_depth(light,clamp(depth,0.0,1.0),cascade);
+    let near=light.shadow_depth[cascade].x;
+    var projection=light.shadow_depth[cascade].zw;
     var search_world=light.pcss.x*receiver;
     if light.position_kind.w>0.5 {
         projection/=receiver;
@@ -239,7 +240,7 @@ fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>)->f32 {
         let stored=textureLoad(shadow_maps,pixel,layer,0);
         if stored<1.0 && stored<depth+dot(gradient,offset) {
             // Average reconstructed distances, never nonlinear perspective depths.
-            blocker_sum+=linear_shadow_depth(light,stored);
+            blocker_sum+=linear_shadow_depth(light,stored,cascade);
             blockers++;
         }
     }
@@ -264,22 +265,19 @@ fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>)->f32 {
     return visibility/f32(filter_samples);
 }
 
-fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>,cascade:u32)->f32 {
     let mode=u32(light.pcss.w);
-    if mode==0u || light.shadow_params.x<0.0 {return 1.0;}
-    if light.position_kind.w==1.0 {
-        return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
-    }
-    let clip=light.shadow_matrix*vec4(position+normal*light.shadow_params.z,1.0);
+    let matrix=light.shadow_matrix[cascade];
+    let clip=matrix*vec4(position+normal*light.shadow_params.z,1.0);
     if clip.w<=0.0 {return 1.0;}
     let ndc=clip.xyz/clip.w;
     let uv=ndc.xy*vec2(0.5,-0.5)+vec2(0.5);
     if any(uv<vec2(0.0)) || any(uv>=vec2(1.0)) || ndc.z<0.0 || ndc.z>1.0 {return 1.0;}
-    let layer=i32(light.shadow_params.x);
+    let layer=i32(light.shadow_params.x)+i32(cascade);
     let depth=ndc.z-light.shadow_params.y;
     let size=textureDimensions(shadow_maps);
-    let hx=light.shadow_matrix*vec4(px,0.0);
-    let hy=light.shadow_matrix*vec4(py,0.0);
+    let hx=matrix*vec4(px,0.0);
+    let hy=matrix*vec4(py,0.0);
     let dx=(hx.xyz-ndc*hx.w)/clip.w;
     let dy=(hy.xyz-ndc*hy.w)/clip.w;
     let ux=dx.xy*vec2(0.5,-0.5);
@@ -294,7 +292,7 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
         let offset=(vec2<f32>(pixel)+vec2(0.5))/vec2<f32>(size)-uv;
         return select(0.0,1.0,depth+dot(gradient,offset)<=textureLoad(shadow_maps,pixel,layer,0));
     }
-    if mode==3u {return pcss_visibility(light,uv,depth,gradient);}
+    if mode==3u {return pcss_visibility(light,uv,depth,gradient,cascade);}
     var visibility=0.0;
     let side=u32(sqrt(light.pcss_samples.z));
     let center=(f32(side)-1.0)*0.5;
@@ -308,6 +306,29 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
         }
     }
     return visibility/light.pcss_samples.z;
+}
+
+fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+    if light.pcss.w==0.0 || light.shadow_params.x<0.0 {return 1.0;}
+    if light.position_kind.w==1.0 {
+        return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
+    }
+    let count=u32(light.pcss_samples.w);
+    if count<=1u {return planar_visibility(light,position,normal,px,py,0u);}
+    let depth=(camera.clip_from_world*vec4(position,1.0)).w;
+    if depth<light.cascade_params.x || depth>=light.cascade_splits[count-1u] {return 1.0;}
+    var cascade=0u;
+    while cascade+1u<count && depth>light.cascade_splits[cascade] {cascade++;}
+    let visibility=planar_visibility(light,position,normal,px,py,cascade);
+    if light.cascade_params.y==0.0 {return visibility;}
+    var begin=light.cascade_params.x;
+    if cascade>0u {begin=light.cascade_splits[cascade-1u];}
+    let end=light.cascade_splits[cascade];
+    let blend_start=end-(end-begin)*light.cascade_params.y;
+    if depth<=blend_start {return visibility;}
+    var next=1.0;
+    if cascade+1u<count {next=planar_visibility(light,position,normal,px,py,cascade+1u);}
+    return mix(visibility,next,smoothstep(blend_start,end,depth));
 }
 
 // GGX with height-correlated Smith visibility and Burley diffuse.
