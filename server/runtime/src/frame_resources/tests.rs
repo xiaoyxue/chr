@@ -237,6 +237,7 @@ fn foreign_unknown_and_generation_mismatch_are_rejected() {
     ));
     let unknown = ImageRef {
         owner: Arc::clone(&first.identity),
+        id: id("unknown"),
         key: Key {
             slot: usize::MAX,
             generation: 1,
@@ -248,6 +249,7 @@ fn foreign_unknown_and_generation_mismatch_are_rejected() {
     ));
     let stale = ImageRef {
         owner: Arc::clone(&first.identity),
+        id: image.id().clone(),
         key: Key {
             slot: image.key.slot,
             generation: image.key.generation + 1,
@@ -367,4 +369,169 @@ fn registration_copies_content_and_requires_its_registered_stream_and_extent() {
         owner.acquire(&image).unwrap().pixels().unwrap(),
         &[5, 6, 7, 255]
     );
+}
+
+#[test]
+fn common_id_lookup_uses_the_same_bounded_ownership_and_readiness() {
+    let mut owner = owner(1, 4);
+    let producer = owner.producer(&id("synthetic")).unwrap();
+    let (ticket, guard) = register(&mut owner, 90);
+    assert!(matches!(
+        owner.acquire_id(ticket.id()),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(matches!(
+        owner.publish_id(&producer, &id("unknown"), &metadata(90)),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(matches!(
+        owner.publish_id(&producer, ticket.id(), &metadata(91)),
+        Err(ResourceError::IncompatibleInput)
+    ));
+    let image = owner
+        .publish_id(&producer, ticket.id(), &metadata(90))
+        .unwrap();
+    assert_ne!(image.id(), ticket.id());
+    assert!(matches!(
+        owner.publish_id(&producer, ticket.id(), &metadata(90)),
+        Err(ResourceError::NotFound)
+    ));
+    let lease = owner.acquire_id(image.id()).unwrap();
+    assert_eq!(lease.pixels(), Err(ResourceError::WritePending));
+    assert!(owner.release_id(image.id()));
+    assert!(!owner.release_id(image.id()));
+    assert!(matches!(
+        owner.acquire(&image),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(matches!(
+        owner.acquire_id(image.id()),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(matches!(
+        owner.register(&producer, metadata(1), &[0; 4]),
+        Err(ResourceError::Capacity)
+    ));
+    guard.ready().unwrap();
+    guard.complete();
+    let work = lease.begin_work().unwrap();
+    drop(lease);
+    owner.reclaim();
+    assert_eq!(owner.occupied_frames(), 1);
+    work.complete();
+    let (replacement, guard) = register(&mut owner, 1);
+    let next = owner.publish(&replacement, &metadata(1)).unwrap();
+    assert_eq!(next.key.slot, image.key.slot);
+    assert_ne!(next.id(), image.id());
+    assert_ne!(replacement.id(), ticket.id());
+    assert!(matches!(
+        owner.acquire_id(image.id()),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(!owner.release_id(image.id()));
+    guard.complete();
+    assert!(owner.release_id(next.id()));
+    assert_eq!(owner.occupied_frames(), 0);
+}
+
+#[test]
+fn ids_cannot_cross_owners_or_frame_asset_namespaces() {
+    let mut first = owner(1, 4);
+    let mut second = owner(1, 4);
+    let (ticket, guard) = register(&mut first, 0);
+    let (other_ticket, other_guard) = register(&mut second, 0);
+    assert_ne!(ticket.id(), other_ticket.id());
+    let other_producer = second.producer(&id("synthetic")).unwrap();
+    assert!(matches!(
+        first.publish_id(&other_producer, ticket.id(), &metadata(0)),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(matches!(
+        second.publish_id(&other_producer, ticket.id(), &metadata(0)),
+        Err(ResourceError::NotFound)
+    ));
+    let published = first.publish(&ticket, &metadata(0)).unwrap();
+    assert!(matches!(
+        second.acquire_id(published.id()),
+        Err(ResourceError::NotFound)
+    ));
+    let asset = first.register_asset(image(), &[0; 4]).unwrap();
+    assert!(matches!(
+        first.acquire_id(asset.id()),
+        Err(ResourceError::NotFound)
+    ));
+    assert!(matches!(
+        first.acquire_asset_id(published.id()),
+        Err(ResourceError::NotFound)
+    ));
+    let retained = first.acquire_asset_id(asset.id()).unwrap();
+    assert!(first.release_asset_id(asset.id()));
+    assert!(!first.release_asset_id(asset.id()));
+    assert!(matches!(
+        first.register_asset(image(), &[0; 4]),
+        Err(ResourceError::Capacity)
+    ));
+    drop(retained);
+    let next = first.register_asset(image(), &[0; 4]).unwrap();
+    assert_ne!(asset.id(), next.id());
+    assert!(matches!(
+        first.acquire_asset_id(asset.id()),
+        Err(ResourceError::NotFound)
+    ));
+    guard.complete();
+    other_guard.complete();
+}
+
+#[test]
+fn publication_by_id_requires_the_registered_producer_not_just_a_string() {
+    let mut owner = FrameResources::new(
+        ResourceConfig {
+            runtime_id: id("runtime"),
+            native_extent: image().extent,
+            max_frames: 1,
+            max_frame_bytes: 4,
+            max_assets: 1,
+            max_asset_bytes: 4,
+            max_producers: 2,
+        },
+        vec![id("synthetic"), id("other")],
+    )
+    .unwrap();
+    let (ticket, guard) = register(&mut owner, 0);
+    let unauthorized = owner.producer(&id("other")).unwrap();
+    assert!(matches!(
+        owner.publish_id(&unauthorized, ticket.id(), &metadata(0)),
+        Err(ResourceError::IncompatibleInput)
+    ));
+    let mut forged = metadata(0);
+    forged.frame.stream_id = id("other");
+    assert!(matches!(
+        owner.publish_id(&unauthorized, ticket.id(), &forged),
+        Err(ResourceError::IncompatibleInput)
+    ));
+    let authorized = owner.producer(&id("synthetic")).unwrap();
+    owner
+        .publish_id(&authorized, ticket.id(), &metadata(0))
+        .unwrap();
+    guard.complete();
+}
+
+#[test]
+fn opaque_id_counter_exhaustion_cannot_reuse_an_issued_id() {
+    let mut owner = owner(1, 4);
+    let producer = owner.producer(&id("synthetic")).unwrap();
+    owner.next_id = u64::MAX - 1;
+    let (ticket, guard) = register(&mut owner, 0);
+    owner.cancel_write(&ticket).unwrap();
+    guard.complete();
+    owner.reclaim();
+    assert!(matches!(
+        owner.register(&producer, metadata(0), &[0; 4]),
+        Err(ResourceError::Capacity)
+    ));
+    assert_eq!(owner.occupied_frames(), 0);
+    assert!(matches!(
+        owner.publish_id(&producer, ticket.id(), &metadata(0)),
+        Err(ResourceError::NotFound)
+    ));
 }

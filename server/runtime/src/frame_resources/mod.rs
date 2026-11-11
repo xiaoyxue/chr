@@ -3,18 +3,23 @@
 //!
 //! Synthetic bytes are copied at registration; readiness gates their visibility.
 //! Opaque native capabilities are owner-scoped and never encode a slot on wire.
-//! A future transport adapter must use the shared DTOs and bounded handle lookup,
-//! not serialize these capabilities or accept arbitrary filesystem paths.
+//! Opaque common IDs resolve within the same bounded cells; adapters do not need
+//! another ownership registry or arbitrary filesystem paths.
 
 mod core;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use chr_common::scene_frame::{
     Extent, FrameKey, Id, ImageDescription, ImageFormat, Position, Timeline, Validate,
 };
 
 use core::{Key, Pool};
+
+static NEXT_OWNER: AtomicU64 = AtomicU64::new(0);
 pub use core::{Lease, ProducerGuard, Readiness, WorkGuard};
 
 /// Native failures; mapping to shared wire rejection codes belongs to the adapter.
@@ -72,6 +77,13 @@ pub struct Producer {
 pub struct WriteTicket {
     owner: Arc<()>,
     key: Key,
+    id: Id,
+}
+
+impl WriteTicket {
+    pub fn id(&self) -> &Id {
+        &self.id
+    }
 }
 
 /// Opaque public input reference; not an output resource or a storage address.
@@ -79,6 +91,13 @@ pub struct WriteTicket {
 pub struct ImageRef {
     owner: Arc<()>,
     key: Key,
+    id: Id,
+}
+
+impl ImageRef {
+    pub fn id(&self) -> &Id {
+        &self.id
+    }
 }
 
 /// Immutable synthetic image asset, separate from frame and output namespaces.
@@ -86,6 +105,13 @@ pub struct ImageRef {
 pub struct AssetRef {
     owner: Arc<()>,
     key: Key,
+    id: Id,
+}
+
+impl AssetRef {
+    pub fn id(&self) -> &Id {
+        &self.id
+    }
 }
 
 /// Single-controller owner with concurrent immutable worker leases.
@@ -99,6 +125,8 @@ pub struct FrameResources {
     producers: Vec<Id>,
     inputs: Pool<FrameMetadata>,
     assets: Pool<ImageDescription>,
+    namespace: u64,
+    next_id: u64,
 }
 
 impl FrameResources {
@@ -120,6 +148,12 @@ impl FrameResources {
             assets: Pool::new(config.max_assets, config.max_asset_bytes)?,
             config,
             producers,
+            namespace: NEXT_OWNER
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |next| {
+                    next.checked_add(1)
+                })
+                .map_err(|_| ResourceError::Capacity)?,
+            next_id: 0,
         })
     }
 
@@ -155,11 +189,15 @@ impl FrameResources {
             return Err(ResourceError::IncompatibleInput);
         }
         validate_pixels(&metadata.image, pixels)?;
-        let (key, guard) = self.inputs.reserve(metadata, pixels)?;
+        let (ticket_id, image_id) = self.allocate_ids()?;
+        let (key, guard) = self
+            .inputs
+            .reserve(metadata, pixels, ticket_id.clone(), image_id)?;
         Ok((
             WriteTicket {
                 owner: Arc::clone(&self.identity),
                 key,
+                id: ticket_id,
             },
             guard,
         ))
@@ -177,6 +215,32 @@ impl FrameResources {
         Ok(ImageRef {
             owner: Arc::clone(&self.identity),
             key: ticket.key,
+            id: self.inputs.image_id(ticket.key)?.clone(),
+        })
+    }
+
+    /// Resolve a registered common ticket ID within this owner's bounded cells.
+    /// The controller supplies the authorized producer capability, not a client
+    /// boolean or a producer identity inferred from possession of the string.
+    pub fn publish_id(
+        &mut self,
+        producer: &Producer,
+        ticket_id: &Id,
+        metadata: &FrameMetadata,
+    ) -> Result<ImageRef, ResourceError> {
+        self.check_owner(&producer.owner)?;
+        if metadata.frame.stream_id != producer.stream {
+            return Err(ResourceError::IncompatibleInput);
+        }
+        let key = self
+            .inputs
+            .key_for_id(ticket_id, false)
+            .ok_or(ResourceError::NotFound)?;
+        self.inputs.publish(key, metadata)?;
+        Ok(ImageRef {
+            owner: Arc::clone(&self.identity),
+            key,
+            id: self.inputs.image_id(key)?.clone(),
         })
     }
 
@@ -192,11 +256,27 @@ impl FrameResources {
         self.inputs.acquire(image.key)
     }
 
+    /// Same retention/readiness semantics as `acquire`, without an adapter map.
+    pub fn acquire_id(&self, image_id: &Id) -> Result<Lease<FrameMetadata>, ResourceError> {
+        let key = self
+            .inputs
+            .key_for_id(image_id, true)
+            .ok_or(ResourceError::NotFound)?;
+        self.inputs.acquire(key)
+    }
+
     /// Revoke future acquisition. Existing leases and work guards remain valid.
     /// Repeated release is false; no tombstones or lifetime retry history is kept.
     pub fn release(&mut self, image: &ImageRef) -> Result<bool, ResourceError> {
         self.check_owner(&image.owner)?;
         Ok(self.inputs.revoke(image.key, true))
+    }
+
+    /// Revoke ID lookup and publisher ownership, never physical completion.
+    pub fn release_id(&mut self, image_id: &Id) -> bool {
+        self.inputs
+            .key_for_id(image_id, true)
+            .is_some_and(|key| self.inputs.revoke(key, true))
     }
 
     /// Register immutable, ready synthetic image content. No file/path adapter.
@@ -206,13 +286,17 @@ impl FrameResources {
         pixels: &[u8],
     ) -> Result<AssetRef, ResourceError> {
         validate_pixels(&image, pixels)?;
-        let (key, guard) = self.assets.reserve(image.clone(), pixels)?;
+        let (ticket_id, image_id) = self.allocate_ids()?;
+        let (key, guard) =
+            self.assets
+                .reserve(image.clone(), pixels, ticket_id, image_id.clone())?;
         guard.ready()?;
         guard.complete();
         self.assets.publish(key, &image)?;
         Ok(AssetRef {
             owner: Arc::clone(&self.identity),
             key,
+            id: image_id,
         })
     }
 
@@ -227,6 +311,23 @@ impl FrameResources {
     pub fn release_asset(&mut self, asset: &AssetRef) -> Result<bool, ResourceError> {
         self.check_owner(&asset.owner)?;
         Ok(self.assets.revoke(asset.key, true))
+    }
+
+    pub fn acquire_asset_id(
+        &self,
+        asset_id: &Id,
+    ) -> Result<Lease<ImageDescription>, ResourceError> {
+        let key = self
+            .assets
+            .key_for_id(asset_id, true)
+            .ok_or(ResourceError::NotFound)?;
+        self.assets.acquire(key)
+    }
+
+    pub fn release_asset_id(&mut self, asset_id: &Id) -> bool {
+        self.assets
+            .key_for_id(asset_id, true)
+            .is_some_and(|key| self.assets.revoke(key, true))
     }
 
     /// Reclaim physically finished, unreferenced cells. Registration also sweeps.
@@ -250,6 +351,21 @@ impl FrameResources {
         } else {
             Err(ResourceError::NotFound)
         }
+    }
+
+    fn allocate_ids(&mut self) -> Result<(Id, Id), ResourceError> {
+        let serial = self.next_id;
+        self.next_id = serial.checked_add(1).ok_or(ResourceError::Capacity)?;
+        let prefix = format!(
+            "native:{}:{}:{serial}",
+            self.config.runtime_id.as_str(),
+            self.namespace
+        );
+        let ticket = Id::try_from(format!("{prefix}:write"))
+            .map_err(|_| ResourceError::InvalidConfiguration)?;
+        let image = Id::try_from(format!("{prefix}:image"))
+            .map_err(|_| ResourceError::InvalidConfiguration)?;
+        Ok((ticket, image))
     }
 }
 

@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use super::ResourceError;
+use chr_common::scene_frame::Id;
 
 const PENDING: u8 = 0;
 const READY: u8 = 1;
@@ -26,6 +27,8 @@ pub(super) struct Key {
 struct Entry<M> {
     metadata: M,
     pixels: Box<[u8]>,
+    ticket_id: Id,
+    image_id: Id,
     readiness: AtomicU8,
     producer_complete: AtomicBool,
     work: AtomicUsize,
@@ -88,6 +91,8 @@ impl<M: PartialEq> Pool<M> {
         &mut self,
         metadata: M,
         pixels: &[u8],
+        ticket_id: Id,
+        image_id: Id,
     ) -> Result<(Key, ProducerGuard<M>), ResourceError> {
         self.reclaim();
         let used: usize = self
@@ -109,6 +114,8 @@ impl<M: PartialEq> Pool<M> {
         let entry = Arc::new(Entry {
             metadata,
             pixels: pixels.into(),
+            ticket_id,
+            image_id,
             readiness: AtomicU8::new(PENDING),
             producer_complete: AtomicBool::new(false),
             work: AtomicUsize::new(0),
@@ -130,6 +137,30 @@ impl<M: PartialEq> Pool<M> {
             .get(key.slot)
             .filter(|cell| cell.generation == key.generation && cell.public)
             .ok_or(ResourceError::NotFound)
+    }
+
+    pub fn key_for_id(&self, id: &Id, published: bool) -> Option<Key> {
+        self.cells.iter().enumerate().find_map(|(slot, cell)| {
+            let entry = cell.entry.as_ref()?;
+            let expected = if published {
+                &entry.image_id
+            } else {
+                &entry.ticket_id
+            };
+            (cell.public && cell.published == published && id == expected).then_some(Key {
+                slot,
+                generation: cell.generation,
+            })
+        })
+    }
+
+    pub fn image_id(&self, key: Key) -> Result<&Id, ResourceError> {
+        Ok(&self
+            .cell(key)?
+            .entry
+            .as_ref()
+            .ok_or(ResourceError::NotFound)?
+            .image_id)
     }
 
     pub fn publish(&mut self, key: Key, metadata: &M) -> Result<(), ResourceError> {
@@ -280,13 +311,17 @@ mod tests {
     fn exhausted_generation_never_wraps_or_resurrects_old_handles() {
         let mut pool = Pool::new(1, 4).unwrap();
         pool.cells[0].generation = u64::MAX - 1;
-        let (key, producer) = pool.reserve((), &[0; 4]).unwrap();
+        let ticket = Id::try_from("ticket".to_owned()).unwrap();
+        let image = Id::try_from("image".to_owned()).unwrap();
+        let (key, producer) = pool
+            .reserve((), &[0; 4], ticket.clone(), image.clone())
+            .unwrap();
         pool.publish(key, &()).unwrap();
         producer.complete();
         assert!(pool.revoke(key, true));
         assert_eq!(pool.occupied(), 0);
         assert!(matches!(
-            pool.reserve((), &[0; 4]),
+            pool.reserve((), &[0; 4], ticket, image),
             Err(ResourceError::Capacity)
         ));
         assert!(matches!(pool.acquire(key), Err(ResourceError::NotFound)));

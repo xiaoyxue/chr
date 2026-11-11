@@ -30,18 +30,64 @@ once. Invalid metadata does not consume it. A successful call returns an opaque
 there is no second wire scalar or `FrameKey` definition. Frame sequence is never
 derived from arrival, allocation, RPC, submission, or output order.
 
-Tickets, image refs and synthetic `AssetRef`s are nonserializable typed native
-capabilities. Internal slot/generation fields are private, with no address,
+Tickets, image refs and synthetic `AssetRef`s are typed native capabilities;
+their `id()` accessors return opaque `chr_common::scene_frame::Id` values for
+control DTOs. Internal slot/generation fields are private, with no address,
 slot, or layer exposed to callers. Owner identity rejects foreign capabilities,
 including those from an owner recreated with the same configuration. Reuse
 increments a nonwrapping generation; an exhausted cell cannot be reused.
-A future transport adapter must provide bounded opaque wire-ID lookup and
-runtime/authorization checks using common DTOs, without exposing these details.
+
+The owner allocates separate ticket/image IDs from its runtime ID, a process-local
+owner namespace, and a nonwrapping issuance counter. These are not slot numbers,
+slot generations, FrameKeys, effect sequences or output slots. Their encoding
+is private: callers only store and compare IDs. Process restart must install a
+new runtime ID, as required by the common contract. Namespace/counter exhaustion
+fails rather than reusing an ID. IDs are not cryptographic authorization tokens;
+publication by ID also requires the configured producer capability.
+
+ID lookup scans the same fixed-capacity cells that own pixels/readiness, in
+bounded O(slot count) time. Revocation immediately removes an ID from lookup,
+while its physically occupied cell remains charged until safe reclamation.
+There is no second map, ownership registry, tombstone list or draining overflow.
 There is no registration RPC, arbitrary-path loader or production auth scheme.
 
 `register_asset` separately copies immutable, immediately ready synthetic image
 assets. Asset slot/byte budgets and handle types are separate from source frames.
 This is not model loading or a #38 scene/asset resolver.
+
+## Native API and control adapter seam
+
+| API | Responsibility |
+| --- | --- |
+| `FrameResources::new(ResourceConfig, Vec<Id>)` | Install explicit limits, native extent, runtime ID and producer allowlist. |
+| `producer(&Id)` | Trusted native controller obtains a configured producer capability. |
+| `register(&Producer, FrameMetadata, &[u8])` | Copy validated synthetic pixels; return `(WriteTicket, ProducerGuard<FrameMetadata>)`. |
+| `publish(&WriteTicket, &FrameMetadata)` | Consume a native ticket and return `ImageRef`. |
+| `publish_id(&Producer, &Id, &FrameMetadata)` | Resolve the common ticket ID and validate its registered producer and full metadata, using the same ownership. |
+| `acquire(&ImageRef)` / `acquire_id(&Id)` | Retain one `Lease<FrameMetadata>`, including pending readiness. |
+| `release(&ImageRef)` / `release_id(&Id)` | Revoke future lookup/acquisition; retain physical work. |
+| `cancel_write(&WriteTicket)` | Revoke an unpublished registration without completing its producer. |
+| `register_asset(ImageDescription, &[u8])` | Return an immutable ready synthetic `AssetRef`, charged to the separate asset budget. |
+| `acquire_asset(&AssetRef)` / `acquire_asset_id(&Id)` | Retain the same asset ownership through native or common IDs. |
+| `release_asset(&AssetRef)` / `release_asset_id(&Id)` | Revoke the asset without invalidating retained leases. |
+| `reclaim`, `occupied_frames`, `occupied_assets` | Reclaim safe cells or inspect physical occupancy, including draining work. |
+
+An RPC adapter validates the common request and runtime ID before calling this
+owner. For `frame.publish`, it supplies its authorized `Producer`, passes the
+request's `producer_ticket` to `publish_id`, and builds `PublishedFrame` using
+`ImageRef::id()` and the registered frame/position. The publisher hold remains
+in the owner even if the adapter discards the returned native handle.
+`frame.release` calls `release_id`; absent/revoked IDs return false. The adapter
+must reject a mismatched request runtime ID before lookup, rather than treating
+it as an absent resource.
+
+#22 obtains input through `acquire_id`, checks the retained immutable metadata
+against submission frame/position, and keeps that lease through its own bounded
+admission/scheduling lifetime. #38 can resolve synthetic image assets through
+`acquire_asset_id`. These callers do not need a string-to-resource registry:
+this module owns that lookup and all resource lifetimes. Transport handlers,
+scene binding, batch admission/result retention and error-to-wire mapping
+remain adapter work; adding them must not duplicate the resource owner.
 
 ## Caller lifetime and synchronization duties
 
@@ -109,5 +155,8 @@ out-of-order identity, stale/foreign/unknown refs, generation exhaustion,
 pending/failing writes, concurrent consumers, public release/cancel during
 physical work, fail-closed abandoned guards, separate asset budgets, malformed
 pixels, byte/slot exhaustion, and repeated bounded reclamation. Thread tests use
-channels, not sleeps. No reference algorithms or private assets were copied;
+channels, not sleeps. Common-ID cases cover producer authorization, lookup before
+readiness, release during work, stale IDs after slot reuse, owner/asset namespace
+separation, and nonwrapping issuance exhaustion without another registry.
+No reference algorithms or private assets were copied;
 the implementation uses ordinary ownership and atomic dependency state.
