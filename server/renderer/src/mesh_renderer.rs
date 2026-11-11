@@ -358,19 +358,26 @@ impl MeshRenderer {
         }
         settings.shadows.validate()?;
         let quality = settings.shadows.pcss;
-        let pcss_lights = scene
-            .lighting()
-            .lights()
-            .iter()
-            .filter(|light| light.effective_shadow_mode(settings.shadows.mode) == ShadowMode::Pcss)
-            .count() as u64;
-        if pcss_lights > 0 {
+        let mut counts = [0_u64; 4];
+        for light in scene.lighting().lights() {
+            counts[light.effective_shadow_mode(settings.shadows.mode) as usize] += 1;
+        }
+        if counts[ShadowMode::Pcf as usize] > 0
+            && ![1, 4, 9, 16, 25, 36, 49, 64].contains(&settings.shadows.pcf_samples)
+        {
+            return Err("PCF requires a square kernel of 1..=64 samples".into());
+        }
+        if counts[ShadowMode::Pcss as usize] > 0 {
             quality.validate()?;
-            if pcss_lights * u64::from(quality.blocker_samples + quality.filter_samples)
-                > quality.max_samples_per_fragment
-            {
-                return Err("PCSS exceeds the configured per-fragment sample budget".into());
-            }
+        }
+        let samples = counts[ShadowMode::Hard as usize]
+            + counts[ShadowMode::Pcf as usize] * u64::from(settings.shadows.pcf_samples)
+            + counts[ShadowMode::Pcss as usize]
+                * (u64::from(quality.blocker_samples) + u64::from(quality.filter_samples));
+        if samples > settings.shadows.max_samples_per_fragment {
+            return Err(
+                "shadow filtering exceeds the configured per-fragment sample budget".into(),
+            );
         }
         if scene.lighting().sky().is_some() {
             return Err(
@@ -590,7 +597,7 @@ impl MeshRenderer {
                 light.pcss_samples = [
                     shadows.pcss.blocker_samples as f32,
                     shadows.pcss.filter_samples as f32,
-                    0.0,
+                    shadows.pcf_samples as f32,
                     0.0,
                 ];
                 light.shadow_params = [

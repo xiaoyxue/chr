@@ -15,8 +15,6 @@ pub struct PcssSettings {
     /// Independent search/filter caps in shadow texels, not physical source sizes.
     pub max_search_radius: f32,
     pub max_filter_radius: f32,
-    /// Worst-case blocker plus filter samples across effective PCSS lights per fragment.
-    pub max_samples_per_fragment: u64,
 }
 
 impl Default for PcssSettings {
@@ -26,7 +24,6 @@ impl Default for PcssSettings {
             filter_samples: 32,
             max_search_radius: 64.0,
             max_filter_radius: 64.0,
-            max_samples_per_fragment: 1024,
         }
     }
 }
@@ -50,13 +47,17 @@ pub struct ShadowSettings {
     /// Default for lights whose shadow_mode is None.
     pub mode: ShadowMode,
     pub resolution: u32,
-    /// Radius in shadow texels for a 3x3 kernel of bilinear comparisons.
+    /// Half-width in shadow texels of the square PCF footprint.
     pub filter_radius: f32,
+    /// Square kernel: 1, 4, 9, 16, 25, 36, 49 or 64 bilinear comparisons.
+    pub pcf_samples: u32,
     /// Bias in normalized shadow depth.
     pub depth_bias: f32,
     /// Receiver offset along its unperturbed surface normal, in world metres.
     pub normal_bias: f32,
     pub max_bytes: u64,
+    /// Worst-case logical shadow samples across effective Hard, PCF and PCSS lights.
+    pub max_samples_per_fragment: u64,
     pub pcss: PcssSettings,
 }
 
@@ -66,9 +67,11 @@ impl Default for ShadowSettings {
             mode: ShadowMode::Off,
             resolution: 2048,
             filter_radius: 1.5,
+            pcf_samples: 9,
             depth_bias: 0.0005,
             normal_bias: 0.02,
             max_bytes: 256 * 1024 * 1024,
+            max_samples_per_fragment: 1024,
             pcss: PcssSettings::default(),
         }
     }
