@@ -22,6 +22,10 @@ scene/frame DTOs and the same handler over both IPC transports. Its synthetic
 admission-port tests do not replace the daemon's triangle or establish live GPU,
 frame-resource, SDI or monitor integration.
 
+The runtime library also exposes an isolated, bounded
+[native synthetic frame-resource owner](docs/frame-resources.md). It is not yet
+wired into control, scene scheduling, or physical capture/output.
+
 The Linux renderer roadmap is described in
 [Simplified renderer scope and design](docs/renderer-design.md)
 ([Chinese](docs/renderer-design.zh-CN.md)). It distinguishes the initial
