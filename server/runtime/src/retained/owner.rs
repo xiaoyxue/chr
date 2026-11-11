@@ -55,6 +55,18 @@ pub struct BoundSubmission {
 /// Different content under a retained submission ID must return Conflict.
 /// The port owns result/cancellation/release lifecycle and physical capacity.
 pub trait RenderAdmission: Send + 'static {
+    fn publish(&mut self, _: w::FramePublish) -> Result<w::PublishedFrame, ErrorObject> {
+        Err(reject(
+            w::RejectionKind::UnsupportedProfile,
+            "no producer adapter installed",
+        ))
+    }
+    fn release_image(&mut self, _: w::ImageTarget) -> Result<w::ReleaseResult, ErrorObject> {
+        Err(reject(
+            w::RejectionKind::UnsupportedProfile,
+            "no producer adapter installed",
+        ))
+    }
     /// Validate the installed target/device support, or explicit synthetic port limits.
     fn configure(
         &mut self,
@@ -351,17 +363,11 @@ impl SceneAdapter {
             }
             w::Params::FramePublish(request) => {
                 self.runtime(&request.runtime_id)?;
-                Err(reject(
-                    w::RejectionKind::UnsupportedProfile,
-                    "frame publication requires the registered producer resource adapter",
-                ))
+                value(self.admission.publish(*request)?)
             }
             w::Params::FrameRelease(request) => {
                 self.runtime(&request.runtime_id)?;
-                Err(reject(
-                    w::RejectionKind::UnsupportedProfile,
-                    "frame release requires the registered producer resource adapter",
-                ))
+                value(self.admission.release_image(*request)?)
             }
         }
     }

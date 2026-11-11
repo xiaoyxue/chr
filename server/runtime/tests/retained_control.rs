@@ -17,6 +17,9 @@ use chr_server::retained::{
 };
 use serde_json::{Value, json};
 
+#[path = "retained_control/submissions.rs"]
+mod submissions;
+
 fn id(value: &str) -> w::Id {
     w::Id::try_from(value.to_owned()).unwrap()
 }

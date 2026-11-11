@@ -18,7 +18,8 @@ simulated SDI port, and SDI monitor encoder/WebRTC chain.
    These are trusted local native registrations, not a production authorization
    service. No RPC accepts file paths, URLs or asset bytes. Registrations freeze
    when moved into the adapter.
-3. Implement `RenderAdmission`, then construct
+3. Install the resource-backed [synthetic `FrameSubmissions`](frame-submissions.md)
+   port (or implement `RenderAdmission`), then construct
    `SceneAdapter::new(configuration, registrations, port)`.
 4. Call `SceneControl::spawn(adapter, explicit_queue_capacity)` inside Tokio and
    install the endpoint with `ControlHandler::with_scenes`. Give this **same**
@@ -69,7 +70,8 @@ Device-specific allocations/format support remain the real renderer port's gate.
 
 ## Admission seam for #22
 
-`RenderAdmission` is an explicit port, not an implemented scheduler:
+`RenderAdmission` is the adapter's explicit boundary. The opt-in
+`frame_submissions::FrameSubmissions` implements its synthetic scheduler:
 
 - `configure`: validate fixed configuration against installed port capabilities.
 - `existing`: inspect the normalized common `Submit` **before** live-scene lookup.
@@ -92,15 +94,17 @@ survive scene mutation/release and same-ID recreation. Released scene generation
 still retained by admissions count against scene capacity until their last
 snapshot is dropped.
 
-The resource owner is `chr_server::frame_resources` (#21). A production admission
-adapter should use its bounded `acquire_id` lookup, verify registered
-FrameKey/position/extent, retain consumer leases, and wait on readiness **outside**
-this control owner. It must keep physical work guards until physical completion.
-There is no additional public-image registry here. `frame.publish/release` return
-`unsupported_profile` until the separately authorized producer adapter is
-installed; possession of a ticket string alone does not authorize publication.
-Resource publication, independent input joining, deadlines, full submission
-lifecycle and live output integration are not completed by #38.
+The resource owner is `chr_server::frame_resources` (#21). The synthetic admission
+adapter uses its bounded `acquire_id` lookup, verifies registered
+FrameKey/position/extent, retains consumer leases, and checks readiness without
+blocking this control owner. It keeps physical work guards until physical completion.
+There is no additional public-image registry here. `frame.publish/release` use
+the same scene queue and narrow admission-port methods. Their default returns
+`unsupported_profile`; `FrameSubmissions` enables them only with an explicitly
+installed producer capability. Possession of a ticket string alone does not
+authorize publication. The native join, deadlines and submission lifecycle are
+documented in [frame submissions](frame-submissions.md); live output integration
+is still #31, not a daemon behavior change.
 
 ## Acceptance evidence and limits
 
@@ -114,10 +118,11 @@ lifecycle and live output integration are not completed by #38.
 - Invalid references/context/world/extent/Ti, all-or-none batch rejection,
   draining scene capacity and bounded acquisition queue behavior.
 
-The test admission port declares two retained frames, validates a fixed synthetic
+The original test admission port declares two retained frames, validates a fixed synthetic
 resource set and exposes pending/cancelled results only. It produces no GPU/SDI
 output and cannot establish #21/#22 physical integration or #31 live acceptance.
-The real port must additionally enforce the installed limits (including physical
-draining work), frame readiness and terminal result/release semantics.
+Additional resource-backed tests exercise the real synthetic port over both
+IPC transports, including installed limits, physical draining, producer readiness,
+terminal release and synthetic execution/output events.
 GPU rendering, SDI hardware, capture, codecs, production authentication/calibration,
 tracking-loss policy and Windows/UI acceptance are outside this slice.

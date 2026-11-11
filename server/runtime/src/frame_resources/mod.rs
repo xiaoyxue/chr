@@ -161,6 +161,10 @@ impl FrameResources {
         &self.config.runtime_id
     }
 
+    pub fn configuration(&self) -> &ResourceConfig {
+        &self.config
+    }
+
     pub fn producer(&self, stream: &Id) -> Result<Producer, ResourceError> {
         if !self.producers.contains(stream) {
             return Err(ResourceError::NotFound);
@@ -169,6 +173,11 @@ impl FrameResources {
             owner: Arc::clone(&self.identity),
             stream: stream.clone(),
         })
+    }
+
+    /// Check an installed native producer capability without allocating a frame.
+    pub fn validate_producer(&self, producer: &Producer) -> Result<(), ResourceError> {
+        self.check_owner(&producer.owner)
     }
 
     /// Copy tightly packed synthetic pixels. The guard models the registered
