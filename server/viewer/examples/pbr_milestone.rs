@@ -4,9 +4,12 @@ use chr_renderer::{
     camera::Camera,
     coordinates::{ImageExtent, Ti},
     glb::import_glb,
-    scene::{Aabb, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene},
+    scene::{
+        Aabb, EnvironmentMap, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene, SkyLight,
+    },
 };
 use serde::Deserialize;
+use std::sync::Arc;
 use std::{error::Error, fs, io::BufWriter, path::Path};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -136,9 +139,19 @@ fn illumination(length: f64, width: f64, mode: &str) -> Result<Lighting> {
 
 fn main() -> Result<()> {
     env_logger::init();
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let environment_path = if let Some(index) = args.iter().position(|arg| arg == "--environment") {
+        if index + 2 != args.len() {
+            return Err("--environment <local.exr> must be the final argument pair".into());
+        }
+        let path = args[index + 1].clone();
+        args.truncate(index);
+        Some(path)
+    } else {
+        None
+    };
     if args.len() < 3 {
-        return Err("usage: pbr_milestone <private-camera.json> <output-directory> <local.glb> [local.glb...]".into());
+        return Err("usage: pbr_milestone <private-camera.json> <output-directory> <local.glb> [local.glb...] [--environment <local.exr>]".into());
     }
     let fixture: CameraFixture = serde_json::from_reader(fs::File::open(&args[0])?)?;
     let extent = ImageExtent::new(fixture.width, fixture.height)?;
@@ -493,6 +506,59 @@ fn main() -> Result<()> {
         eprintln!(
             "Rendered {name}: {} shadow depth passes.",
             renderer.shadow_passes_last_frame()
+        );
+    }
+    let environment = Arc::new(if let Some(path) = environment_path {
+        chr_renderer::exr::import_exr(&fs::read(path)?)?
+    } else {
+        eprintln!("IBL diagnostic uses a synthetic studio panorama, not a physical atmosphere.");
+        let mut pixels = Vec::new();
+        for y in 0..64 {
+            let theta = (y as f32 + 0.5) * std::f32::consts::PI / 64.0;
+            for x in 0..128 {
+                let phi = ((x as f32 + 0.5) / 128.0 - 0.5) * std::f32::consts::TAU;
+                let warm = (theta.sin() * phi.cos()).max(0.0).powi(12);
+                let cool = (theta.sin() * phi.sin()).max(0.0).powi(8);
+                pixels.push([
+                    0.12 + 6.0 * warm + 0.3 * cool,
+                    0.15 + 3.0 * warm + 1.0 * cool,
+                    0.2 + warm + 4.0 * cool,
+                ]);
+            }
+        }
+        EnvironmentMap::new(ImageExtent::new(128, 64)?, pixels)?
+    });
+    let direct = scene.snapshot().lighting().lights().to_vec();
+    for (name, visible, rotation) in [
+        ("environment-background", true, 0.0),
+        ("environment-hidden", false, 0.0),
+        ("environment-rotated", true, std::f64::consts::FRAC_PI_2),
+    ] {
+        scene.set_lighting(Lighting::new(
+            direct.clone(),
+            Some(SkyLight {
+                environment: Arc::clone(&environment),
+                gain: 1.0,
+                rotation,
+                visible,
+            }),
+        )?)?;
+        capture(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &overview,
+            &target,
+            &directory.join(format!("{name}.png")),
+            ShadowSettings {
+                mode: ShadowMode::Pcss,
+                resolution: 1024,
+                ..Default::default()
+            },
+        )?;
+        eprintln!(
+            "Rendered {name}: environment preprocessed={}.",
+            renderer.environment_preprocessed_last_prepare()
         );
     }
     Ok(())

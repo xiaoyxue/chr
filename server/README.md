@@ -68,8 +68,8 @@ the same mesh renderer now also offers `prepare_pbr`.
 
 The PBR path supports material maps, correct colour-space mipmaps, normal mapping,
 alpha masking, direct directional/point/spot lights, and one HDR exposure/tone-map
-pass. M2 captures leave shadows disabled; IBL/EXR environments, area lights and
-the interactive control integration remain follow-up work.
+pass. M2 captures leave shadows and IBL disabled. Later milestones add them;
+area lights and interactive control integration remain follow-up work.
 
 The offline example uses a private native diagnostic JSON fixture containing
 `width`, `height`, forward row-major `ti`, world `center`, and `pitch` dimensions.
@@ -226,6 +226,42 @@ and four maps at 1024 with identical sun-only lighting and ordinary pinhole view
 Automated tests cover overlap, camera stability, all shadow modes at splits,
 PCSS reference visibility, offscreen casters, mixed cube/cascade offsets, range
 fading and budget failures. These are not a realtime frame-rate guarantee.
+
+## M9: OpenEXR image-based lighting
+
+`SkyLight` now supplies diffuse and specular environment illumination plus an
+independently visible background. Decode bytes with `exr::import_exr`, then share
+the resulting `Arc<EnvironmentMap>` through scene lighting. Rotation/gain are
+shared by reflections and background; exposure remains the final output step.
+Panorama coordinates put +X at (0.5, 0.5), +Y at (0.75, 0.5), and upward -Z at V=0.
+
+Diffuse IBL uses three-band SH with exact per-pixel solid-angle integrals and a
+Lambert convolution. Specular uses deterministic GGX roughness prefiltering and
+a split-sum BRDF LUT with the direct path's correlated Smith convention. Six
+full-resolution roughness layers avoid collapsing rough directional content
+into a single final panorama texel. Float32 textures use explicit bilinear reads,
+without requiring optional float32-filtering support. Normalized GPU storage
+with a separate scale retains HDR values before the existing RGBA16F output bound.
+
+`PbrSettings::environment` controls prefilter width (64..=1024, powers of two),
+sample count (1..=1024) and active resource budget (default 256 MiB). Defaults are
+256x128 layers and 64 samples; the BRDF LUT uses 64x64 texels and 256 samples.
+Source/quality changes rebuild cached data; rotation, gain, background visibility
+and output exposure do not. `environment_preprocessed_last_prepare()` reports
+actual source-dependent preprocessing. Scene switches without a sky clear it.
+
+This is explicitly **unoccluded IBL**: material AO affects indirect illumination
+only and does not implement scene sky visibility. Three-band SH, split-sum's
+normal-view prefilter and single-scattering GGX are approximations; diffuse IBL
+is Lambert rather than the direct path's Burley model. Higher-order/visibility/
+multiple-scattering methods remain separate work.
+
+The example adds background/hidden/rotated environment captures. Append
+`--environment /path/to/local.exr` to load an owner-local EXR; otherwise these
+captures use a labelled synthetic studio panorama, not physical atmosphere.
+Automated CPU/GPU checks cover HDR energy, roughness, reflection/background
+rotation, visibility independence, AO/direct-shadow separation, cache replacement
+and budget errors. No manual image approval is required.
 
 ## Render server
 

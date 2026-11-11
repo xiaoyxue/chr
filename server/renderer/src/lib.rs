@@ -2,7 +2,9 @@
 
 pub mod camera;
 pub mod coordinates;
+mod environment;
 pub mod exr;
+pub use environment::EnvironmentSettings;
 pub mod glb;
 mod gpu;
 mod material_maps;
