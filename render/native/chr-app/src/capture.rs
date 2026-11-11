@@ -1,6 +1,6 @@
 use std::{fs, io::BufWriter, path::Path};
 
-use rdc_core::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
+use chr_core::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
 
 use crate::Result;
 

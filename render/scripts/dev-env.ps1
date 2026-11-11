@@ -43,4 +43,4 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
 if ($LASTEXITCODE -ne 0) {
     throw 'Install the stable MSVC toolchain: rustup toolchain install stable-x86_64-pc-windows-msvc'
 }
-Write-Host 'rdc environment ready (Windows x64/MSVC; no global configuration changed).'
+Write-Host 'chr environment ready (Windows x64/MSVC; no global configuration changed).'

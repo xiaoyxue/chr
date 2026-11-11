@@ -303,6 +303,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "chr-app"
+version = "0.1.0"
+dependencies = [
+ "chr-core",
+ "env_logger",
+ "log",
+ "png",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "chr-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "log",
+ "pollster",
+ "thiserror 2.0.21",
+ "wgpu",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1559,30 +1583,6 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
-]
-
-[[package]]
-name = "rdc-app"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "log",
- "png",
- "pollster",
- "rdc-core",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "rdc-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "log",
- "pollster",
- "thiserror 2.0.21",
- "wgpu",
 ]
 
 [[package]]

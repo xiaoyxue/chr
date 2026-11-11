@@ -1,5 +1,5 @@
 [package]
-name = "rdc-app"
+name = "chr-app"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
@@ -9,7 +9,7 @@ description = "Native Windows/Linux hello-triangle shell"
 workspace = true
 
 [dependencies]
-rdc-core.workspace = true
+chr-core.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 log.workspace = true

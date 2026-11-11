@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rdc_core::{Gpu, TriangleRenderer, coordinates::ImageExtent};
+use chr_core::{Gpu, TriangleRenderer, coordinates::ImageExtent};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
@@ -150,7 +150,7 @@ impl ApplicationHandler for App {
         let result = (|| {
             let window = event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("rdc - Hello triangle")
+                    .with_title("chr - Hello triangle")
                     .with_inner_size(LogicalSize::new(960, 640)),
             )?;
             pollster::block_on(WindowState::new(Arc::new(window)))
@@ -222,7 +222,7 @@ fn main() -> Result<()> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: rdc-app [--headless | --smoke-test]\n\
+                    "Usage: chr-app [--headless | --smoke-test]\n\
                      Writes output/triangle.png. Escape closes the window."
                 );
                 return Ok(());

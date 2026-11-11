@@ -1,5 +1,5 @@
 {
-  description = "rdc shared Rust/wgpu renderer";
+  description = "chr shared Rust/wgpu renderer";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -60,11 +60,11 @@
             common
             // {
               inherit cargoArtifacts;
-              pname = "rdc-app";
-              cargoExtraArgs = "-p rdc-app";
+              pname = "chr-app";
+              cargoExtraArgs = "-p chr-app";
               doCheck = false;
               nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
-              postInstall = "wrapProgram $out/bin/rdc-app --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
+              postInstall = "wrapProgram $out/bin/chr-app --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
             }
           );
         in
@@ -103,12 +103,12 @@
     {
       packages = perSystem (system: {
         default = (environment system).app;
-        rdc-app = (environment system).app;
+        chr-app = (environment system).app;
       });
       apps = perSystem (system: {
         default = {
           type = "app";
-          program = "${(environment system).app}/bin/rdc-app";
+          program = "${(environment system).app}/bin/chr-app";
         };
       });
       checks = perSystem (system: (environment system).checks);

@@ -32,7 +32,7 @@ impl Gpu {
         );
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("rdc device"),
+                label: Some("chr device"),
                 required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 ..Default::default()
             })

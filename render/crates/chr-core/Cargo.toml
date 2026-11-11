@@ -1,5 +1,5 @@
 [package]
-name = "rdc-core"
+name = "chr-core"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

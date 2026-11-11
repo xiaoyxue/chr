@@ -10,7 +10,7 @@
 
 ## Architecture and scope
 
-- Keep all rendering in `crates/rdc-core`. Delivery shells in `native/` own
+- Keep all rendering in `crates/chr-core`. Delivery shells in `native/` own
   windows, events, surfaces, and presentation, not separate rendering algorithms.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
 - Keep generated PNGs in root `output/`, ignored by Git but retained locally.
@@ -80,8 +80,8 @@ passed. Do not duplicate unrelated trd browser/video gates in this smaller proje
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-cargo test --locked -p rdc-core --test triangle_gpu -- --ignored --nocapture
-cargo run --locked -p rdc-app -- --smoke-test
+cargo test --locked -p chr-core --test triangle_gpu -- --ignored --nocapture
+cargo run --locked -p chr-app -- --smoke-test
 ```
 
 Non-GPU checks also run through `nix flake check`. Rendering changes need the

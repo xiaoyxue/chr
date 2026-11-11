@@ -5,7 +5,7 @@
 | Directory | Purpose | Language |
 | --- | --- | --- |
 | `client/src/` | Client-side code | Primarily TypeScript |
-| `render/` | Rendering workspace: shared renderer in `crates/rdc-core/`, native application in `native/rdc-app/` | Primarily Rust |
+| `render/` | Rendering workspace: shared renderer in `crates/chr-core/`, native application in `native/chr-app/` | Primarily Rust |
 | `common/src/` | Shared communication protocols, such as socket protocols | To be decided |
 | `algorithm/src/` | Scene reconstruction algorithms | To be decided |
 | `docs/` | Project documentation | |

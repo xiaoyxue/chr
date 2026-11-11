@@ -1,14 +1,14 @@
 [workspace]
-members = ["crates/rdc-core", "native/rdc-app"]
+members = ["crates/chr-core", "native/chr-app"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-repository = "https://github.com/xiaoyxue/rdc"
+repository = "https://github.com/xiaoyxue/chr"
 
 [workspace.dependencies]
-rdc-core = { path = "crates/rdc-core" }
+chr-core = { path = "crates/chr-core" }
 wgpu = "30"
 pollster = "0.4"
 log = "0.4"
@@ -21,4 +21,4 @@ todo = "warn"
 dbg_macro = "warn"
 
 [workspace.metadata.crane]
-name = "rdc"
+name = "chr"

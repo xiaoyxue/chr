@@ -3,7 +3,7 @@
 ## Project Structure
 
 - `client/`: Client-side code, primarily written in TypeScript. Source code belongs in `client/src/`.
-- `render/`: Rust rendering workspace. Shared rendering code lives in `render/crates/rdc-core/`, and the native application lives in `render/native/rdc-app/`. Follow `render/AGENTS.md` and run Cargo commands from `render/`.
+- `render/`: Rust rendering workspace. Shared rendering code lives in `render/crates/chr-core/`, and the native application lives in `render/native/chr-app/`. Follow `render/AGENTS.md` and run Cargo commands from `render/`.
 - `common/`: Shared communication protocols, such as socket protocols. Source code belongs in `common/src/`.
 - `algorithm/`: Scene reconstruction algorithms. Language and technology stack are undecided. Source code belongs in `algorithm/src/`; do not choose a stack without confirmation.
 - `docs/`: Project documentation.
