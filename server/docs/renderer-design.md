@@ -679,10 +679,72 @@ full virtualized-shadow infrastructure is not mandatory without evidence.
 Any temporal reuse must define history invalidation and replay behavior.
 Hardware ray tracing, Nanite, and engine-specific APIs are not prerequisites.
 
+#### Bounded synthetic shadow benchmark
+
+Run from the workspace root:
+
+```sh
+cargo run --locked --release -p chr-app --example shadow_benchmark
+cargo test --locked -p chr-app --example shadow_benchmark
+```
+
+On the designated non-NixOS NVIDIA host, use
+`nix develop --command bash -c 'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo run --locked --release -p chr-app --example shadow_benchmark'`.
+The harness only creates synthetic quads and writes
+`output/renderer/shadow-benchmark.json`; it never reads owner assets. Its default
+180 rows cover directional, spot and point lights; Hard, all eight PCF square
+kernels, and PCSS 8/8, 32/32, 64/64 blocker/filter samples; contact, separated,
+large-penumbra, multiple-caster and grazing-view scenes. Images are 384×384,
+maps default to 512². `--resolution 256|512|1024` and `--repetitions 1..20`
+bound the workload; three repetitions per row/state are the default.
+
+Only this example requests optional wgpu `TIMESTAMP_QUERY` and
+`TIMESTAMP_QUERY_INSIDE_ENCODERS`. Two actual GPU timestamps bracket the existing
+`MeshRenderer::encode` (depth, HDR mesh and tone mapping), excluding CPU prepare,
+uploads, allocation, pixel readback and timestamp resolve. CPU prepare wall time
+is reported separately, never as GPU time. Raw GPU samples and median/min/max
+are retained; unsupported timestamp features produce null GPU metrics, an
+explicit status and unsuccessful hardware acceptance. Software/unknown adapters
+also fail hardware acceptance rather than silently qualifying.
+
+One untimed priming frame precedes each row. **Cold** means an identical caster
+model republished in a new scene revision, forcing depth regeneration while
+retaining resident resources and pipelines; it is not cold-start compilation or
+allocation latency. **Warm** repeats that snapshot. The harness checks exactly
+1 planar / 6 point depth passes versus zero warm passes, and separately compares
+cold/warm RGBA bytes. Memory is explicit `resolution² × layers × 4` Depth32Float
+texel payload (1 MiB planar / 6 MiB point at 512), not total VRAM or allocator
+padding. Per-fragment logical budgets count Hard=1, PCF=kernel count,
+PCSS=blocker+filter counts; bilinear comparisons are not single physical fetches.
+
+Quality uses distinct receiver-strip pixel centres, excluding caster coverage,
+and divides inverse-sRGB/Reinhard shadow radiance by an unshadowed baseline.
+An independent CPU ray/quad visibility integration samples a uniform emitter
+disk, with 48²/96² disk-clipped quadrature convergence recorded. Reports include
+finite-emitter and point-emitter MAE, partial-pixel counts (visibility 0.1–0.9),
+and reference counts. Automated gates reject invalid baselines, nondeterministic
+reuse, visibility >1.05, reference convergence MAE >0.01, Hard point-reference
+MAE >0.15, or PCSS 32/64 finite-reference MAE >0.15. These are bounded fixture
+regression limits, not universal quality budgets or a claim that PCSS always
+outperforms PCF.
+
+A release Vulkan run on RTX 3090 (NVIDIA 580.159.03, three repetitions, 512² maps)
+passed all 180 rows: planar cold/warm row medians ranged 0.018–0.121 /
+0.014–0.116 ms; point 0.030–0.630 / 0.015–0.615 ms. Maximum PCSS 32/64
+finite-reference MAE was 0.071, Hard point-reference MAE 0.046, and quadrature
+convergence MAE 0.006. Timings include query overhead and may be affected by
+concurrent GPU use, clocks and scheduling; tiny synthetic scenes imply no
+general realtime guarantee. This slice does not evaluate cascades, a dedicated
+offscreen-caster scene, cube seams, temporal camera trajectories, LTC, atmosphere
+or sky. Visibility-only disk integration is not BRDF-weighted transport, and
+the point-light reference is a facing disk, not sphere radiometric integration.
+Issue #35 remains open for the broader method selection.
+
 Primary references:
 
 - [Heitz et al., Real-Time Polygonal-Light Shading with Linearly Transformed Cosines (2016)](https://eheitzresearch.wordpress.com/415-2/).
 - [NVIDIA PCF/PCSS sample and original 2005/2008 references](https://archive.docs.nvidia.com/gameworks/content/gameworkslibrary/graphicssamples/opengl_samples/softshadowssample.htm).
+- [wgpu timestamp features](https://docs.rs/wgpu/30.0.0/wgpu/struct.Features.html#associatedconstant.TIMESTAMP_QUERY) and [timestamp period](https://docs.rs/wgpu/30.0.0/wgpu/struct.Queue.html#method.get_timestamp_period).
 - [Epic, Virtual Shadow Maps and SMRT documentation](https://dev.epicgames.com/documentation/en-us/unreal-engine/virtual-shadow-maps-in-unreal-engine).
 - [Hillaire, A Scalable and Production Ready Sky and Atmosphere Rendering Technique (2020)](https://sebh.github.io/publications/).
 

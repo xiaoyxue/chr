@@ -568,10 +568,64 @@ GPU 耗时、内存、时间稳定性及相对参考场景的误差。
 任何时间复用都须明确历史失效与重放行为。
 不以硬件光追、Nanite 或特定引擎 API 为前提。
 
+#### 有界合成阴影基准
+
+从 workspace 根目录运行：
+
+```sh
+cargo run --locked --release -p chr-app --example shadow_benchmark
+cargo test --locked -p chr-app --example shadow_benchmark
+```
+
+指定的非 NixOS NVIDIA 主机使用
+`nix develop --command bash -c 'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo run --locked --release -p chr-app --example shadow_benchmark'`。
+测试仅创建合成四边形并写入 `output/renderer/shadow-benchmark.json`，
+不读取所有者资产。默认 180 行覆盖方向光、聚光、点光；Hard、全部八种 PCF
+方形核、PCSS 8/8、32/32、64/64 遮挡搜索/过滤样本；接触、分离、
+大半影、多遮挡物和掠射视角场景。图像为 384×384，阴影图默认 512²；
+`--resolution 256|512|1024` 和 `--repetitions 1..20` 限定工作量，
+每行每种缓存状态默认重复三次。
+
+仅该 example 请求可选 wgpu `TIMESTAMP_QUERY` 和
+`TIMESTAMP_QUERY_INSIDE_ENCODERS`。两个实际 GPU 时间戳包围现有
+`MeshRenderer::encode`（深度、HDR 网格及 tone mapping），不包含 CPU prepare、
+上传、分配、像素回读和时间戳 resolve。CPU prepare 墙钟时间单独报告，
+绝不标为 GPU 耗时。保留原始 GPU 样本及中位数/最小/最大值；
+不支持时间戳时 GPU 指标为 null，明确记录状态，硬件验收不成功。
+软件或未知类型 adapter 同样不能悄悄通过硬件验收。
+
+每行先运行一帧不计时预热。**Cold** 表示在新 scene revision 中重新提交相同
+遮挡物模型，强制重新生成深度，但保留常驻资源和 pipeline；
+不是首次编译或分配延迟。**Warm** 重复同一快照。测试检查平面 1 / 点光 6
+个深度 pass，而 warm 必须为零，并单独比较 cold/warm RGBA 字节。
+内存明确为 `resolution² × layers × 4` 的 Depth32Float texel 数据
+（512 时平面 1 MiB / 点光 6 MiB），不是总显存或分配对齐开销。
+每片元逻辑预算计 Hard=1、PCF=核样本数、PCSS=搜索+过滤样本数；
+双线性比较不等于一次物理纹理读取。
+
+质量评估使用不重复的接收面条带像素中心，排除遮挡物自身覆盖，
+将逆 sRGB/Reinhard 后的阴影辐亮度除以无阴影基线。独立 CPU 光线/四边形
+可见性积分采样均匀发光圆盘，记录 48²/96² 网格裁圆积分的收敛差异。
+报告有限发光体和点发光体 MAE、部分可见像素数（可见性 0.1–0.9）及参考计数。
+自动门禁拒绝无效基线、非确定性复用、可见性 >1.05、参考收敛 MAE >0.01、
+Hard 点参考 MAE >0.15、PCSS 32/64 有限发光体参考 MAE >0.15。
+这些仅是有界夹具回归阈值，不是通用质量预算，也不保证 PCSS 总优于 PCF。
+
+RTX 3090（NVIDIA 580.159.03）release Vulkan 运行使用三次重复及 512²
+阴影图，180 行全部通过：平面 cold/warm 行中位数范围 0.018–0.121 /
+0.014–0.116 ms；点光为 0.030–0.630 / 0.015–0.615 ms。
+PCSS 32/64 有限发光体参考最大 MAE 为 0.071，Hard 点参考 MAE 0.046，
+积分收敛 MAE 0.006。计时包含查询开销，可能受到并发 GPU 使用、时钟和调度影响；
+微型合成场景不代表通用实时性能保证。本切片不评估级联、专门屏外遮挡物、
+cube 接缝、时间相机轨迹、LTC、大气或天空。仅可见性圆盘积分不是 BRDF 加权
+传输，点光参考是朝向场景的圆盘而非球面辐射积分。
+更广泛的方法选型仍由未关闭的 issue #35 跟踪。
+
 主要参考：
 
 - [Heitz 等，Real-Time Polygonal-Light Shading with Linearly Transformed Cosines（2016）](https://eheitzresearch.wordpress.com/415-2/)。
 - [NVIDIA PCF/PCSS 样例及原始 2005/2008 年参考](https://archive.docs.nvidia.com/gameworks/content/gameworkslibrary/graphicssamples/opengl_samples/softshadowssample.htm)。
+- [wgpu 时间戳能力](https://docs.rs/wgpu/30.0.0/wgpu/struct.Features.html#associatedconstant.TIMESTAMP_QUERY)及[时间戳周期](https://docs.rs/wgpu/30.0.0/wgpu/struct.Queue.html#method.get_timestamp_period)。
 - [Epic，Virtual Shadow Maps 与 SMRT 文档](https://dev.epicgames.com/documentation/en-us/unreal-engine/virtual-shadow-maps-in-unreal-engine)。
 - [Hillaire，A Scalable and Production Ready Sky and Atmosphere Rendering Technique（2020）](https://sebh.github.io/publications/)。
 
