@@ -1,1 +1,8 @@
 .worktree/
+/reference/*
+!/reference/.gitkeep
+/output/
+/result
+/result-*
+node_modules/
+*.tsbuildinfo
