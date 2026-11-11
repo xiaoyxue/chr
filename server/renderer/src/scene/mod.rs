@@ -5,6 +5,7 @@
 mod appearance;
 mod geometry;
 mod storage;
+mod texture;
 
 use std::sync::{
     Arc,
@@ -14,8 +15,9 @@ use std::sync::{
 use thiserror::Error;
 
 pub use appearance::{EnvironmentMap, Light, Lighting, PbrMaterial, SkyLight};
-pub use geometry::{Aabb, MeshData, ModelMatrix};
+pub use geometry::{Aabb, MeshAttributes, MeshData, ModelMatrix};
 use storage::{Key, Store};
+pub use texture::{Filter, MaterialMaps, TextureData, TextureSampler, Wrap};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SceneError {
@@ -39,6 +41,10 @@ pub enum SceneError {
     InvalidMesh,
     #[error("mesh parts must partition the complete index array into nonempty triangle ranges")]
     InvalidMeshParts,
+    #[error("mesh attributes must be finite and match the position count")]
+    InvalidMeshAttributes,
+    #[error("texture dimensions must match RGBA8 data")]
+    InvalidTexture,
     #[error("material factors are outside their finite physical ranges")]
     InvalidMaterial,
     #[error("lighting has invalid emission, position, direction, or cone parameters")]
@@ -94,9 +100,15 @@ impl Instance {
 struct State {
     revision: u64,
     meshes: Store<MeshData>,
-    materials: Store<PbrMaterial>,
+    materials: Store<MaterialEntry>,
     instances: Store<Instance>,
     lighting: Lighting,
+}
+
+#[derive(Clone, Debug)]
+struct MaterialEntry {
+    factors: PbrMaterial,
+    maps: MaterialMaps,
 }
 
 /// Not Clone: independently mutable scenes must never share a handle namespace.
@@ -122,7 +134,11 @@ impl SceneView {
     }
 
     pub fn material(&self, id: MaterialId) -> Result<&PbrMaterial, SceneError> {
-        self.state.materials.get(id.0).map(Arc::as_ref)
+        Ok(&self.state.materials.get(id.0)?.factors)
+    }
+
+    pub fn material_maps(&self, id: MaterialId) -> Result<&MaterialMaps, SceneError> {
+        Ok(&self.state.materials.get(id.0)?.maps)
     }
 
     pub fn instance(&self, id: InstanceId) -> Result<&Instance, SceneError> {
@@ -177,8 +193,21 @@ impl Scene {
     }
 
     pub fn add_material(&mut self, material: PbrMaterial) -> Result<MaterialId, SceneError> {
+        self.add_material_with_maps(material, MaterialMaps::default())
+    }
+
+    pub fn add_material_with_maps(
+        &mut self,
+        material: PbrMaterial,
+        maps: MaterialMaps,
+    ) -> Result<MaterialId, SceneError> {
         material.validate()?;
-        self.update(|state| Ok(MaterialId(state.materials.insert(material))))
+        self.update(|state| {
+            Ok(MaterialId(state.materials.insert(MaterialEntry {
+                factors: material,
+                maps,
+            })))
+        })
     }
 
     /// Keeps identity while preserving the material value in older views.
@@ -188,7 +217,19 @@ impl Scene {
         material: PbrMaterial,
     ) -> Result<(), SceneError> {
         material.validate()?;
-        self.update(|state| state.materials.replace(id.0, material))
+        let mut entry = self.state.materials.get(id.0)?.as_ref().clone();
+        entry.factors = material;
+        self.update(|state| state.materials.replace(id.0, entry))
+    }
+
+    pub fn set_material_maps(
+        &mut self,
+        id: MaterialId,
+        maps: MaterialMaps,
+    ) -> Result<(), SceneError> {
+        let mut entry = self.state.materials.get(id.0)?.as_ref().clone();
+        entry.maps = maps;
+        self.update(|state| state.materials.replace(id.0, entry))
     }
 
     pub fn remove_material(&mut self, id: MaterialId) -> Result<(), SceneError> {

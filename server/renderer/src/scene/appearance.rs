@@ -13,6 +13,9 @@ pub struct PbrMaterial {
     pub emissive: [f32; 3],
     pub alpha_cutoff: Option<f32>,
     pub double_sided: bool,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    pub unlit: bool,
 }
 
 impl Default for PbrMaterial {
@@ -24,19 +27,23 @@ impl Default for PbrMaterial {
             emissive: [0.0; 3],
             alpha_cutoff: None,
             double_sided: false,
+            normal_scale: 1.0,
+            occlusion_strength: 1.0,
+            unlit: false,
         }
     }
 }
 
 impl PbrMaterial {
-    pub(super) fn validate(self) -> Result<(), SceneError> {
+    pub(crate) fn validate(self) -> Result<(), SceneError> {
         if !self
             .base_color
             .into_iter()
-            .chain([self.metallic, self.roughness])
+            .chain([self.metallic, self.roughness, self.occlusion_strength])
             .chain(self.alpha_cutoff)
             .all(|v| (0.0..=1.0).contains(&v))
             || !nonnegative(self.emissive)
+            || !self.normal_scale.is_finite()
         {
             return Err(SceneError::InvalidMaterial);
         }
