@@ -16,6 +16,12 @@ The current slice draws an RGB triangle using the same pipeline in a native
 window, an offscreen hardware test, and the render server. No scene
 serialization, video input, or calibration pipeline is included yet.
 
+The Linux renderer roadmap is described in
+[Simplified renderer scope and design](docs/renderer-design.md)
+([Chinese](docs/renderer-design.zh-CN.md)). It distinguishes the initial
+pinhole/persistent-scene contract from later camera and lighting extensions;
+these are design targets, not implemented features.
+
 ## Render server
 
 `chr-server` renders the triangle offscreen (1280x720p50 by default) and takes

@@ -19,6 +19,7 @@
 | Frame pipeline | [Frame ingestion and rendering](render-frame-input.md) | 首期 pinhole 范围、scene 上下文、帧发布/渲染提交与资源生命周期。 |
 | Discussion | [Open decisions](open-decisions.md) | 尚未解决的问题索引，不复制各文档已确认的决定。 |
 | Renderer contract | [Coordinate contract](../server/docs/coordinates.md) | 已实现的坐标与投影契约。 |
+| Renderer roadmap | [Renderer feature design](../server/docs/renderer-design.md) / [中文](../server/docs/renderer-design.zh-CN.md) | Linux 渲染器增量、首期协议对齐及后续相机/光照扩展；不将路线图误作已实现功能。 |
 
 业务讨论按 Product → Architecture → Responsibilities 展开；方法设计使用
 Shared protocol 和 Execution 的共同基础，再在 Business methods 中逐项细化。
