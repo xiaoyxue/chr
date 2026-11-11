@@ -98,8 +98,7 @@ Use them to distinguish projection-induced tilt from the asset's own geometry.
 `PbrSettings::shadows` now supports `Off`, `Hard` and `Pcf` for directional and
 spot lights. Directional lights use a stable scene-fitted orthographic map;
 spots use a cone-matched perspective map. This bounded-scene implementation does
-not yet provide cascades or point-light cubemaps. Enabling shadows with
-point lights fails explicitly rather than leaving them silently unshadowed.
+not yet provide cascades. M5 below adds point-light cubemaps.
 
 Settings expose resolution, a 3x3 bilinear-comparison PCF radius in texels,
 normalized depth bias, world-metre normal bias, and a memory budget. Defaults
@@ -124,7 +123,7 @@ source-size penumbra estimation and variable-radius comparison filtering.
 Each directional light supplies `angular_radius` in radians; each local light
 supplies `source_radius` in metres. Zero gives exact Hard visibility. These
 parameters affect shadow softness, not the punctual BRDF or emitted power.
-Point shadows remain explicitly unsupported until the cubemap increment.
+M5 below extends this path to point shadows.
 
 `ShadowSettings::pcss` defaults to 32 blocker + 32 filter samples, independent
 64-texel search/filter caps and a 1024-sample-per-fragment budget across lights.
@@ -138,8 +137,32 @@ The example also writes `shadow-pcss.png` with the same M3 rig and
 `shadow-pcss-wide.png` with source radii multiplied by four, unchanged irradiance
 and intensity. Baseline sources are a 0.00465-radian sun and 0.5-metre spots.
 No sky/IBL or LTC is included. PCSS is high-priority work; area/LTC is deferred
-at low priority. Per-light mode selection, cubemap/cascade handling and broader
+at low priority. Per-light mode selection, cascades and broader
 performance acceptance remain follow-ups.
+
+## M5: point-light cubemap shadows
+
+Point lights now support Hard/PCF/PCSS using six faces in the shared depth array.
+Each face stores `distance_to_light / far_radius`, not perspective depth.
+The far sphere encloses visible scene bounds; the 0.01-metre near sphere excludes
+casters and shadow lookups inside it without changing light attenuation.
+
+Point PCF/PCSS kernels use a direction/tangent-space footprint. Every sample,
+including the four neighbours of each bilinear comparison, is remapped across
+cube faces. Receiver-plane comparisons use the radial distance at the fetched
+texel, including grazing/far-boundary cases. PCSS averages radial blocker
+distances and conservatively bounds its search using the nearest scene-bound
+radius. Source-size approximation, deterministic quality caps, alpha masks,
+sidedness and cache invalidation follow the existing shadow contract.
+Point filter radii use face-centre texel angular units (`2 / resolution`);
+they do not clamp a kernel to its originating face.
+
+Memory accounting includes all six faces per point light and never silently
+reduces quality. The new `point-off.png`, `point-hard.png`, `point-pcf.png` and
+`point-pcss.png` captures use sun + four points at an explicit 1024 resolution:
+25 depth layers, 100 MiB. Reusing maps across Hard/PCF/PCSS still avoids depth
+redraws. The earlier sun + spot captures retain their 2048 setting.
+Neither preview adds sky/IBL, LTC or live controls.
 
 ## Render server
 

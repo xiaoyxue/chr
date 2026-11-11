@@ -152,11 +152,18 @@ fn pcss_contact_source_size_and_sampled_visibility() {
         depth_bias: 0.00005,
         ..Default::default()
     };
-    for spot in [false, true] {
+    for kind in 0..3 {
+        let spot = kind != 0;
         let mut widths = Vec::new();
         for (height, size) in [(0.3, 1.0), (1.5, 1.0), (1.5, 2.0)] {
             let radius = size * if spot { 0.4 } else { 0.12 };
-            let light = if spot {
+            let light = if kind == 2 {
+                Light::Point {
+                    position: [-3.0, 0.0, -5.0],
+                    intensity: [100.0; 3],
+                    source_radius: radius as f32,
+                }
+            } else if spot {
                 Light::Spot {
                     position: [-3.0, 0.0, -5.0],
                     direction: [0.6, 0.0, 1.0],
@@ -231,7 +238,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                 compared += 1;
             }
             eprintln!(
-                "PCSS spot={spot} height={height} size={size}: partial={partial}, reference MAE={}",
+                "PCSS kind={kind} height={height} size={size}: partial={partial}, reference MAE={}",
                 error / f64::from(compared)
             );
             assert!(
@@ -606,6 +613,259 @@ fn directional_spot_pcf_and_caster_changes() {
             .unwrap(),
         )
         .unwrap();
+    render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Hard);
+    assert_eq!(renderer.shadow_passes_last_frame(), 6);
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn point_radial_shadows_cover_all_face_edges_and_corners() {
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let mut scene = Scene::new().unwrap();
+    let mesh = scene
+        .add_mesh(
+            MeshData::new(
+                vec![
+                    [-0.5, -0.5, 0.0],
+                    [0.5, -0.5, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [-0.5, 0.5, 0.0],
+                ],
+                vec![0, 2, 1, 0, 3, 2],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let material = scene
+        .add_material(PbrMaterial {
+            roughness: 1.0,
+            double_sided: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let caster_material = scene
+        .add_material(PbrMaterial {
+            roughness: 1.0,
+            double_sided: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let ground = scene
+        .add_instance(mesh, vec![material], ModelMatrix::IDENTITY)
+        .unwrap();
+    let caster = scene
+        .add_instance(mesh, vec![caster_material], ModelMatrix::IDENTITY)
+        .unwrap();
+    scene
+        .set_lighting(
+            Lighting::new(
+                vec![Light::Point {
+                    position: [0.0; 3],
+                    intensity: [30.0; 3],
+                    source_radius: 0.2,
+                }],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let extent = ImageExtent::new(160, 160).unwrap();
+    let normalize = |v: [f64; 3]| {
+        let len = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        v.map(|x| x / len)
+    };
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    for x in -1..=1 {
+        for y in -1..=1 {
+            for z in -1..=1 {
+                if [x, y, z] == [0, 0, 0] {
+                    continue;
+                }
+                let d = normalize([f64::from(x), f64::from(y), f64::from(z)]);
+                let up = if z == 0 || x != 0 || y != 0 {
+                    [0.0, 0.0, 1.0]
+                } else {
+                    [0.0, 1.0, 0.0]
+                };
+                let t = normalize(cross(d, up));
+                let b = cross(d, t);
+                let model = |distance: f64, scale: f64| {
+                    ModelMatrix::new([
+                        [t[0] * scale, b[0] * scale, d[0], d[0] * distance],
+                        [t[1] * scale, b[1] * scale, d[1], d[1] * distance],
+                        [t[2] * scale, b[2] * scale, d[2], d[2] * distance],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ])
+                    .unwrap()
+                };
+                scene.set_model(ground, model(4.0, 6.0)).unwrap();
+                scene.set_model(caster, model(2.0, 1.0)).unwrap();
+                let center = d.map(|v| v * 4.0);
+                let outside = std::array::from_fn(|i| center[i] - t[i] * 1.6);
+                let camera = Camera::look_at(
+                    extent,
+                    std::array::from_fn(|i| d[i] * 3.0 + t[i] * 2.0),
+                    center,
+                    b,
+                    1.4,
+                    0.01,
+                    50.0,
+                )
+                .unwrap();
+                for mode in [ShadowMode::Hard, ShadowMode::Pcf, ShadowMode::Pcss] {
+                    let image = render(&gpu, &mut renderer, &scene, &camera, mode);
+                    assert!(
+                        pixel(&camera, &image, center) < 8,
+                        "{x}/{y}/{z} {mode:?}: missing shadow at face boundary"
+                    );
+                    assert!(
+                        pixel(&camera, &image, outside) > 70,
+                        "{x}/{y}/{z} {mode:?}: false shadow outside caster"
+                    );
+                    assert_eq!(
+                        renderer.shadow_passes_last_frame(),
+                        if mode == ShadowMode::Hard { 6 } else { 0 }
+                    );
+                }
+                scene.set_visible(caster, false).unwrap();
+                let clear = render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Pcss);
+                assert!(
+                    pixel(&camera, &clear, center) > 70,
+                    "receiver must not self-shadow on cube boundaries"
+                );
+                assert_eq!(
+                    clear,
+                    render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Off),
+                    "empty radial samples stay lit even when the receiver plane extends beyond the fitted far sphere"
+                );
+                scene.set_visible(caster, true).unwrap();
+                let mut shifted = model(2.0, 1.0).rows();
+                for i in 0..3 {
+                    shifted[i][3] += t[i] * 0.5;
+                }
+                scene
+                    .set_model(caster, ModelMatrix::new(shifted).unwrap())
+                    .unwrap();
+                for mode in [ShadowMode::Pcf, ShadowMode::Pcss] {
+                    let edge = render(&gpu, &mut renderer, &scene, &camera, mode);
+                    let visibility = radiance(pixel(&camera, &edge, center))
+                        / radiance(pixel(&camera, &clear, center));
+                    assert!(
+                        (0.15..0.85).contains(&visibility),
+                        "{x}/{y}/{z} {mode:?}: edge on cube seam must be partially covered, got {visibility}"
+                    );
+                }
+                scene.set_model(caster, model(2.0, 1.0)).unwrap();
+                if [x, y, z] == [0, 0, 1] {
+                    scene.set_model(caster, model(0.009, 0.001)).unwrap();
+                    let near = render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Hard);
+                    assert!(
+                        pixel(&camera, &near, center) > 70,
+                        "the spherical near exclusion must remove sub-centimetre casters"
+                    );
+                    scene.set_model(caster, model(2.0, 1.0)).unwrap();
+                }
+                if [x, y, z] == [1, 1, 1] {
+                    scene
+                        .set_material(
+                            caster_material,
+                            PbrMaterial {
+                                base_color: [1.0, 1.0, 1.0, 0.0],
+                                alpha_cutoff: Some(0.5),
+                                double_sided: true,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    let masked = render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Pcss);
+                    assert!(
+                        pixel(&camera, &masked, center) > 70,
+                        "radial depth must honor alpha masks"
+                    );
+                    scene
+                        .set_material(
+                            caster_material,
+                            PbrMaterial {
+                                double_sided: true,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    let mut mirrored = model(2.0, 1.0).rows();
+                    for row in mirrored.iter_mut().take(3) {
+                        row[0] *= -1.0;
+                    }
+                    scene
+                        .set_model(caster, ModelMatrix::new(mirrored).unwrap())
+                        .unwrap();
+                    let point = Light::Point {
+                        position: [0.0; 3],
+                        intensity: [30.0; 3],
+                        source_radius: 0.0,
+                    };
+                    scene
+                        .set_lighting(Lighting::new(vec![point], None).unwrap())
+                        .unwrap();
+                    let hard = render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Hard);
+                    assert!(pixel(&camera, &hard, center) < 8);
+                    assert_eq!(
+                        hard,
+                        render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Pcss),
+                        "zero point radius is exact Hard"
+                    );
+                    scene
+                        .set_lighting(
+                            Lighting::new(
+                                vec![
+                                    Light::Directional {
+                                        direction: d,
+                                        irradiance: [0.0; 3],
+                                        angular_radius: 0.0,
+                                    },
+                                    Light::Spot {
+                                        position: [0.0; 3],
+                                        direction: d,
+                                        intensity: [0.0; 3],
+                                        inner_angle: 0.5,
+                                        outer_angle: 1.0,
+                                        source_radius: 0.0,
+                                    },
+                                    point,
+                                ],
+                                None,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        hard,
+                        render(&gpu, &mut renderer, &scene, &camera, ShadowMode::Hard),
+                        "mixed planar/cube lights must use disjoint atlas layers"
+                    );
+                    assert_eq!(renderer.shadow_passes_last_frame(), 8);
+                }
+            }
+        }
+    }
+    let camera = Camera::look_at(
+        extent,
+        [0.0, 0.0, -5.0],
+        [0.0; 3],
+        [0.0, -1.0, 0.0],
+        1.0,
+        0.1,
+        20.0,
+    )
+    .unwrap();
     assert!(
         renderer
             .prepare_pbr(
@@ -615,11 +875,14 @@ fn directional_spot_pcf_and_caster_changes() {
                 PbrSettings {
                     shadows: ShadowSettings {
                         mode: ShadowMode::Hard,
+                        resolution: 256,
+                        max_bytes: 256 * 256 * 4 * 5,
                         ..Default::default()
                     },
                     ..Default::default()
                 }
             )
-            .is_err()
+            .is_err(),
+        "the memory budget must include all six point faces"
     );
 }

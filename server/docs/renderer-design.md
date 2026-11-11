@@ -15,7 +15,7 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: EXR/IBL, point shadows, area/atmosphere lighting
+not a live scene-control protocol: EXR/IBL, area/atmosphere lighting
 and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
@@ -88,7 +88,7 @@ or temporal accumulation; receiver-plane correction applies to both stages.
 Quality-only changes and camera motion reuse the maps. Large kernels are capped
 and thin blockers may be missed; this remains a single-average-blocker approximation.
 The `shadow-pcss.png` capture retains M3 lighting; `shadow-pcss-wide.png` increases
-source radii fourfold without changing energy. Point cubemaps, cascades, per-light
+source radii fourfold without changing energy. Cascades, per-light
 mode selection, sky visibility and finite-area BRDF integration remain unimplemented.
 PCSS is high priority; area/LTC is now low priority.
 
@@ -101,6 +101,31 @@ as visibility. GPU regressions compare controlled contact/separation/source-size
 cases against independent disk-emitter ray/plane visibility integration, plus
 zero-size, no-blocker, near-plane, cache and budget cases. These fixtures are not
 a general-scene quality benchmark or a realtime performance guarantee.
+
+M5 extends Hard/PCF/PCSS to points with six depth-array faces per light, ordered
+`+X,-X,+Y,-Y,+Z,-Z`. Depth is radial distance divided by a common far radius fitted
+to visible scene bounds. A 0.01-metre spherical near exclusion applies to casters
+and visibility queries; the face near planes include that sphere at cube corners.
+This does not alter the light's inverse-square attenuation.
+
+Point kernels are sampled in direction/tangent space, with `2/resolution` as
+the face-centre texel angular scale. Bilinear neighbours are individually
+remapped across faces rather than clamped. Receiver-plane comparisons reconstruct
+the radial distance for the actual fetched texel; empty far samples remain lit.
+PCSS averages radial blocker distances, uses the nearest scene-bound radius to
+conservatively tighten blocker search, and retains the shared sample/radius limits.
+The scalar penumbra remains a finite-source approximation, not shape-aware BRDF
+integration. The local reference's grounding blob is not used.
+
+Synthetic GPU fixtures move casters across all six face centres, twelve edges
+and eight corners, including partially covered filtered edges, no-blocker/far
+boundaries, spherical near clipping, masks, mirroring and mixed planar/cube layers.
+Point contact-hardening is also compared with independent emitter visibility.
+Memory budgets count six layers per point. M5 `point-*` captures explicitly use
+1024 resolution for sun + four points (25 layers, 100 MiB); M3/M4 `shadow-*`
+retain sun + four spots at 2048. Hard/PCF/PCSS and camera changes reuse unchanged
+maps. Per-light mode selection, cascades, broad performance acceptance, sky/IBL
+and area/LTC remain follow-ups.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,
