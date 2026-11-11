@@ -71,6 +71,77 @@
 
 验证业务范围、状态与元数据关联，不未经约定要求不同编码器或 GPU 产物逐字节一致。
 
+## Proposed time and effect profile
+
+Issues #57-#60 use this concrete **candidate**, pending alignment with #12/#22.
+It refines the vocabulary above without approving a scheduler or changing the
+implemented triangle clock.
+
+```typescript
+type TimeBase = {
+  numerator: number;
+  denominator: number;
+};
+
+type Timeline = {
+  timeline_id: BusinessId;
+  time_base: TimeBase;
+};
+
+type MediaPosition = {
+  timeline_id: BusinessId;
+  ticks: UInt64Text;
+};
+
+type MediaDuration = {
+  ticks: UInt64Text;
+  time_base: TimeBase;
+};
+
+type AppliedEffect = {
+  runtime_id: BusinessId;
+  sequence: UInt64Text;
+};
+```
+
+Each tick lasts `numerator / denominator` seconds; both are positive integers
+no larger than `2147483647`, stored as a reduced fraction. A timeline fixes its
+time base for its entire lifetime. Positions are nonnegative relative values;
+source-clock evidence with another origin belongs to metadata, not to this
+unsigned content position.
+
+The runtime serializes applied control mutations using `AppliedEffect.sequence`.
+The effect token establishes an order **within that runtime incarnation**,
+not a frame identity or media time. A frame submission carries the latest
+applied effect sequence and the selected scene/calibration bindings. A mutation
+does not alter submissions already bound before it. The submission receipt
+connects that order to each actual frame and media position; #22 owns its exact
+wire representation. Effects from different runtime IDs cannot be compared.
+
+Control changes may apply while the input is paused; their effect order still
+exists, but no imaginary input frame or media position is invented. Recording
+start/stop boundaries instead report actual accepted source frames. Future
+precisely timed controls must additionally name their target timeline/position;
+this draft does not treat an effect sequence as elapsed time.
+
+Create a new timeline for a seek, backward jump or discontinuous reset. Store
+source-to-file and input-to-output associations explicitly. Never subtract ticks
+from different timelines, infer source identity from PTS, or compare an input
+position directly with a delayed output position. A recording in this candidate
+does not span a source-timeline reset.
+
+For replay, record resolved frame boundaries, applied effect ordering and the
+binding selected for each submission. Re-submit those resolved bindings rather
+than running asynchronous resource preparation again and expecting identical
+timing. Different batch sizes cannot reorder effects or change recorded binding
+boundaries. This specifies replayable business results, not identical encoded
+bytes or cross-GPU pixel equality.
+
+Protection time is independently injected monotonic time. A media pause does
+not pause I/O/worker protection deadlines; changing wall clock changes neither.
+Deadline values and production input/output clock mapping remain configuration
+decisions. No universal 25-frame, 50-FPS or wall-clock-derived default is added.
+
 ## Open decisions
 
 - 时间点、时长、时间线身份及不连续的具体编码。

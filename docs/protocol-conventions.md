@@ -169,6 +169,9 @@ Success response:
   "id": "req-001",
   "result": {
     "recording_id": "rec-001",
+    "session_id": "session-01",
+    "runtime_id": "runtime-01",
+    "stream_id": "stream-01",
     "state": "preparing"
   }
 }
@@ -195,6 +198,90 @@ JSON-RPC batch 不保证执行顺序、原子性或统一生效时刻；response
 JSON-RPC 本身不提供事件持久化、订阅或重放。重连后的状态恢复、认证与传输细节
 需要各自明确，不能从使用标准 envelope 推导出不存在的保证。
 控制 effect、逻辑时间与模拟约束见 [Execution model](execution-model.md)。
+
+## Proposed business-contract primitives
+
+The following candidate is shared by issues #57-#60. It is **not implemented or
+product-approved**, does not change existing method payloads, and must be
+reconciled with the scene/frame contract in #12 before wire implementation.
+
+```typescript
+type BusinessId = string;
+type UInt64Text = string;
+
+type VersionRef = {
+  id: BusinessId;
+  revision: UInt64Text;
+};
+
+type FrameKey = {
+  stream_id: BusinessId;
+  sequence: UInt64Text;
+};
+
+type LocalFileRef = {
+  path: string;
+  sha256: string;
+};
+```
+
+- IDs are nonempty opaque strings. A creator must not reuse an ID for a
+  different object. Display names and filesystem paths are not object identities.
+- `UInt64Text` is canonical decimal `0` or `[1-9][0-9]*`, limited to
+  `18446744073709551615`. Revisions increase without wrapping; source sequences
+  may contain gaps. They are not JSON numbers or durations.
+- A new capture/decode instance receives a new `stream_id`, including after a
+  source restart. A slot, timestamp, camera ID or RPC ID cannot replace `FrameKey`.
+- `VersionRef` names immutable content. Replacing content creates a new revision;
+  resolving the same pair must not return different bytes or coordinate meaning.
+- `LocalFileRef` is an absolute path on the executing host plus a lowercase
+  64-hex SHA-256 digest. Resolve and verify the exact bytes before use; retain
+  that verified content or an immutable copy. Hashing and then reopening a mutable
+  path does not establish content identity. The reference does not authorize
+  arbitrary file access: existing local-access boundaries still apply.
+- New method schemas reject undeclared fields. Stored artifacts carry their own
+  `schema_version`; an unknown version is rejected rather than partially loaded.
+  No version handshake for existing RPC methods is introduced by this draft.
+
+### Retry and rejection profile
+
+Queries are repeatable. Candidate recording/calibration creation uses a
+caller-selected object ID: an identical create returns the existing reference,
+including after completion or failure, without restarting work. Reusing the ID
+with different normalized parameters is a conflict. The accepting service
+persists the identity and parameters before acknowledging acceptance; records
+are not automatically expired while their session is retained.
+
+This is narrow create deduplication, not a general exactly-once command service.
+State replacements carry an expected revision and, for runtime effects, the
+observed `runtime_id`. After an uncertain reply, read current state and reconcile;
+do not automatically repeat an effect with a new revision. A runtime restart
+changes `runtime_id`, invalidates live bindings and does not replay old effects.
+After explicit session deletion, retry/recovery guarantees end; deletion and
+retention policy remain an approval gate, not an implicit background cleanup.
+
+Candidate shared business rejections use integer code `1000` and required data:
+
+```typescript
+type BusinessRejection = {
+  code: 1000;
+  message: string;
+  data: {
+    kind:
+      | "identity_conflict"
+      | "revision_conflict"
+      | "runtime_changed"
+      | "invalid_state"
+      | "unsupported_profile";
+  };
+};
+```
+
+Messages are English; clients branch on `data.kind`. Standard JSON-RPC errors
+remain unchanged. Codes `1001`-`1004` belong to the recording proposal,
+`1101`-`1104` to calibration, and `1201`-`1204` to tracking. This allocation is
+proposed, does not overlap implemented `-32000`/`-32001`, and requires #12/#36
+coordination before adding any code to `common/`.
 
 ## Open decisions
 

@@ -8,6 +8,14 @@
 **Depends on:** [Protocol conventions](protocol-conventions.md)、[Execution model](execution-model.md)、
 [Coordinate contract](../server/docs/coordinates.md)。
 
+The candidate business contracts in #57-#60 reuse this ownership boundary.
+[Calibration](calibration-control.md) assigns an immutable calibration/tracking
+binding at tracker admission; [Tracking](tracking-control.md) retains it for the
+associated frame. Render submission must resolve compatible C/world/scene state,
+not substitute whichever calibration is active when a result arrives. The exact
+submission schema and shared candidate time/identity alignment remain with
+#12/#21/#22/#36.
+
 ## Confirmed decisions
 
 - 首期只支持 pinhole，不包含畸变参数，也不预留含糊的占位字段。
