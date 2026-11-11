@@ -1,13 +1,23 @@
 # Simplified renderer scope and design
 
-Status: **proposal, not implemented**. This document compares the local `trd`
+Status: **roadmap; CPU scene foundations implemented**. This document compares the local `trd`
 reference at `9c7bccc` with the `chr` baseline at `dcebb33`. It proposes a smaller
 renderer, not a port of the reference application suite. The paired translation
 is [renderer-design.zh-CN.md](renderer-design.zh-CN.md).
 
-This change is documentation only. [coordinates.md](coordinates.md) remains
-the current implementation contract; no existing API or rendering behavior is
-changed. All capabilities below are targets unless identified as existing.
+[coordinates.md](coordinates.md) remains the coordinate contract.
+All capabilities below are targets unless identified as existing.
+
+`chr_renderer::scene` now provides shared indexed CPU meshes, per-part material
+bindings, model matrices/visibility, validated PBR factors and direct/environment
+light configuration. `Scene::snapshot` owns an immutable `SceneView`; later
+updates retain old resources and reject stale or cross-scene handles.
+Deleting an asset referenced by a live instance fails; singular model matrices
+are rejected, with visibility used for hiding. Geometry and material values are
+shared rather than copied on every instance update. This is a library foundation,
+not a live scene-control protocol: GLB/EXR decoding, texture bindings, GPU mesh/PBR
+rendering, area/atmosphere lighting and runtime adaptation remain follow-up work.
+The existing triangle path is unchanged.
 
 The current workspace is rooted at the repository root: `server/renderer`
 (`chr-renderer`), `server/runtime` (`chr-server`), `server/viewer` (`chr-app`),
