@@ -457,6 +457,305 @@ fn pixel(camera: &Camera, image: &[u8], world: [f64; 3]) -> u8 {
 
 #[test]
 #[ignore = "requires a hardware GPU"]
+fn cascades_preserve_visibility_and_pcss_across_splits() {
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let extent = ImageExtent::new(640, 640).unwrap();
+    let camera = Camera::look_at(
+        extent,
+        [0.0, 12.0, -3.0],
+        [0.0, 0.0, -3.0],
+        [0.0, 0.0, -1.0],
+        1.2,
+        0.1,
+        50.0,
+    )
+    .unwrap();
+    let mut scene = Scene::new().unwrap();
+    let quad = scene
+        .add_mesh(
+            MeshData::new(
+                vec![
+                    [-0.5, -0.5, 0.0],
+                    [0.5, -0.5, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [-0.5, 0.5, 0.0],
+                ],
+                vec![0, 2, 1, 0, 3, 2],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let material = scene
+        .add_material(PbrMaterial {
+            roughness: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut ground = ModelMatrix::IDENTITY.rows();
+    ground[0][0] = 8.0;
+    ground[1][1] = 48.0;
+    ground[1][3] = -8.0;
+    scene
+        .add_instance(quad, vec![material], ModelMatrix::new(ground).unwrap())
+        .unwrap();
+    let caster = scene
+        .add_instance(quad, vec![material], ModelMatrix::IDENTITY)
+        .unwrap();
+    scene
+        .set_lighting(
+            Lighting::new(
+                vec![Light::Directional {
+                    direction: [0.7, 0.0, 1.0],
+                    irradiance: [3.0; 3],
+                    angular_radius: 0.12,
+                    shadow_mode: None,
+                }],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let settings = ShadowSettings {
+        mode: ShadowMode::Pcss,
+        resolution: 1024,
+        depth_bias: 0.00005,
+        normal_bias: 0.0,
+        cascades: chr_renderer::CascadeSettings {
+            count: 4,
+            max_distance: 24.0,
+            split_lambda: 0.0,
+            blend_fraction: 0.15,
+        },
+        ..Default::default()
+    };
+    for split in [6.075, 12.05, 18.025] {
+        let mut edge_values = Vec::new();
+        for offset in [-0.05, 0.0, 0.05] {
+            let y = 12.0 - split - offset;
+            let mut model = ModelMatrix::IDENTITY.rows();
+            model[1][3] = y;
+            model[2][3] = -1.0;
+            scene
+                .set_model(caster, ModelMatrix::new(model).unwrap())
+                .unwrap();
+            let off = render_settings(
+                &gpu,
+                &mut renderer,
+                &scene,
+                &camera,
+                ShadowSettings {
+                    mode: ShadowMode::Off,
+                    ..settings
+                },
+            );
+            for mode in [ShadowMode::Hard, ShadowMode::Pcf, ShadowMode::Pcss] {
+                let image = render_settings(
+                    &gpu,
+                    &mut renderer,
+                    &scene,
+                    &camera,
+                    ShadowSettings { mode, ..settings },
+                );
+                assert_eq!(
+                    renderer.shadow_passes_last_frame(),
+                    if mode == ShadowMode::Hard { 4 } else { 0 }
+                );
+                assert!(
+                    pixel(&camera, &image, [0.9, y, 0.0]) < 8,
+                    "missing shadow at split {split}, offset {offset}, mode {mode:?}"
+                );
+                if mode == ShadowMode::Pcss {
+                    let edge = radiance(pixel(&camera, &image, [1.2, y, 0.0]))
+                        / radiance(pixel(&camera, &off, [1.2, y, 0.0]));
+                    assert!(
+                        (edge - sampled_visibility(1.2, 1.0, 0.12, false)).abs() < 0.25,
+                        "PCSS reference mismatch at split {split}: {edge}"
+                    );
+                    edge_values.push(edge);
+                }
+            }
+        }
+        let min = edge_values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = edge_values
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max - min < 0.3,
+            "cascade transition must not jump: {edge_values:?}"
+        );
+    }
+    let moved = Camera::look_at(
+        extent,
+        [0.000001, 12.0, -3.0],
+        [0.000001, 0.0, -3.0],
+        [0.0, 0.0, -1.0],
+        1.2,
+        0.1,
+        50.0,
+    )
+    .unwrap();
+    render_settings(&gpu, &mut renderer, &scene, &moved, settings);
+    assert_eq!(
+        renderer.shadow_passes_last_frame(),
+        0,
+        "subtexel camera motion reuses unchanged cascade matrices"
+    );
+    assert!(
+        renderer
+            .prepare_pbr(
+                &gpu,
+                &scene.snapshot(),
+                &camera,
+                PbrSettings {
+                    shadows: ShadowSettings {
+                        max_bytes: 3 * 1024 * 1024 * 4,
+                        ..settings
+                    },
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+        "all cascade maps count against the memory budget"
+    );
+    assert!(
+        renderer
+            .prepare_pbr(
+                &gpu,
+                &scene.snapshot(),
+                &camera,
+                PbrSettings {
+                    shadows: ShadowSettings {
+                        max_samples_per_fragment: 64,
+                        ..settings
+                    },
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+        "cascade blending budgets both PCSS evaluations"
+    );
+    let directional = scene.snapshot().lighting().lights()[0];
+    let hard = render_settings(
+        &gpu,
+        &mut renderer,
+        &scene,
+        &camera,
+        ShadowSettings {
+            mode: ShadowMode::Hard,
+            ..settings
+        },
+    );
+    scene
+        .set_lighting(
+            Lighting::new(
+                vec![
+                    Light::Point {
+                        position: [0.0, 0.0, -20.0],
+                        intensity: [0.0; 3],
+                        source_radius: 0.0,
+                        shadow_mode: None,
+                    },
+                    directional,
+                ],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        hard,
+        render_settings(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &camera,
+            ShadowSettings {
+                mode: ShadowMode::Hard,
+                ..settings
+            }
+        ),
+        "cascade layers after a point cubemap must not alias its faces"
+    );
+    assert_eq!(renderer.shadow_passes_last_frame(), 10);
+    scene
+        .set_lighting(
+            Lighting::new(
+                vec![Light::Directional {
+                    direction: [0.0, -1.0, 1.0],
+                    irradiance: [3.0; 3],
+                    angular_radius: 0.0,
+                    shadow_mode: None,
+                }],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut offscreen = ModelMatrix::IDENTITY.rows();
+    offscreen[1][3] = 20.0;
+    offscreen[2][3] = -20.0;
+    scene
+        .set_model(caster, ModelMatrix::new(offscreen).unwrap())
+        .unwrap();
+    let cast = render_settings(&gpu, &mut renderer, &scene, &camera, settings);
+    assert!(
+        pixel(&camera, &cast, [0.0, 0.0, 0.0]) < 8,
+        "offscreen casters retain the full scene light-depth interval"
+    );
+    for depth in [23.55, 25.0] {
+        let y = 12.0 - depth;
+        offscreen[1][3] = y + 20.0;
+        scene
+            .set_model(caster, ModelMatrix::new(offscreen).unwrap())
+            .unwrap();
+        let shadowed = render_settings(&gpu, &mut renderer, &scene, &camera, settings);
+        let unshadowed = render_settings(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &camera,
+            ShadowSettings {
+                mode: ShadowMode::Off,
+                ..settings
+            },
+        );
+        let visibility = radiance(pixel(&camera, &shadowed, [0.0, y, 0.0]))
+            / radiance(pixel(&camera, &unshadowed, [0.0, y, 0.0]));
+        if depth < 24.0 {
+            assert!(
+                (0.2..0.8).contains(&visibility),
+                "last cascade must fade toward the declared distance limit: {visibility}"
+            );
+        } else {
+            assert!(
+                (visibility - 1.0).abs() < 0.01,
+                "beyond the declared shadow distance is explicitly unshadowed"
+            );
+        }
+    }
+    scene.set_visible(caster, false).unwrap();
+    let clear = render_settings(&gpu, &mut renderer, &scene, &camera, settings);
+    assert_eq!(
+        clear,
+        render_settings(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &camera,
+            ShadowSettings {
+                mode: ShadowMode::Off,
+                ..settings
+            }
+        )
+    );
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
 fn per_light_modes_control_visibility_allocation_and_budgets() {
     let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
     assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);

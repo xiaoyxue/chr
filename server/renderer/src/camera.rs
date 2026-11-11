@@ -212,6 +212,9 @@ impl Camera {
     pub fn center(&self) -> [f64; 3] {
         self.center
     }
+    pub(crate) fn depth_range(&self) -> [f64; 2] {
+        [self.near, self.far]
+    }
     pub fn source_ti(&self) -> Option<Ti> {
         self.source_ti
     }

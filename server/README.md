@@ -98,7 +98,7 @@ Use them to distinguish projection-induced tilt from the asset's own geometry.
 `PbrSettings::shadows` now supports `Off`, `Hard` and `Pcf` for directional and
 spot lights. Directional lights use a stable scene-fitted orthographic map;
 spots use a cone-matched perspective map. This bounded-scene implementation does
-not yet provide cascades. M5 below adds point-light cubemaps.
+uses a single directional map. M5 adds point-light cubemaps and M8 adds cascades.
 
 Settings expose resolution, a square bilinear-comparison PCF radius in texels,
 normalized depth bias, world-metre normal bias, and a memory budget. Defaults
@@ -138,8 +138,7 @@ The example also writes `shadow-pcss.png` with the same M3 rig and
 `shadow-pcss-wide.png` with source radii multiplied by four, unchanged irradiance
 and intensity. Baseline sources are a 0.00465-radian sun and 0.5-metre spots.
 No sky/IBL or LTC is included. PCSS is high-priority work; area/LTC is deferred
-at low priority. Cascades and broader
-performance acceptance remain follow-ups.
+at low priority. Broader performance acceptance remains separate.
 
 ## M5: point-light cubemap shadows
 
@@ -204,7 +203,29 @@ budget: one filtered comparison can access four depth texels.
 The example adds `point-pcf-64.png` and `point-mixed-all.png`. The latter keeps
 all five lights shadow-enabled, unlike the explicitly labelled one-shadow-Off
 `point-mixed.png` fixture. Both retain unchanged illumination. Directional
-cascades and broader performance acceptance remain the next shadow work.
+performance acceptance remains separate from these functional diagnostics.
+
+## M8: directional cascades
+
+`ShadowSettings::cascades` accepts one scene-fitted map (the unchanged default)
+or 2..=4 view-frustum cascades. `max_distance` defaults to 200 metres, clamped
+to the camera far plane. `split_lambda` blends linear/logarithmic splits;
+`blend_fraction` defaults to 0.1 of each interval, including a final fade to
+unshadowed beyond the explicitly configured distance.
+
+Overlapping frustum-slice spheres keep map extents stable under rotation, with
+world-texel-snapped centres. The light-depth interval retains all visible scene
+bounds so offscreen casters still contribute. Every cascade converts the same
+PCSS world-space penumbra to its own texel footprint. Blended intervals budget
+two visibility evaluations; memory budgets count every map.
+
+Camera-dependent cascades recompute their fit on view changes, but reuse maps
+when snapped projections and scene state are unchanged. Single-map and point/
+spot behavior is unchanged. `sun-single.png` and `sun-cascades.png` compare one
+and four maps at 1024 with identical sun-only lighting and ordinary pinhole view.
+Automated tests cover overlap, camera stability, all shadow modes at splits,
+PCSS reference visibility, offscreen casters, mixed cube/cascade offsets, range
+fading and budget failures. These are not a realtime frame-rate guarantee.
 
 ## Render server
 
