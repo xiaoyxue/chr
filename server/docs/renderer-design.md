@@ -541,6 +541,31 @@ Perspective rays share an origin; orthographic rays have varying origins and
 a constant direction. Orthographic specular shading must use that direction,
 not `normalize(camera_position - surface_position)`.
 
+**Implemented internal API:** `camera::Camera` retains its pinhole/FOV/K/Ti
+constructors and accessors. `OrthographicCamera::from_pose(extent,
+[horizontal_span, vertical_span], pose, near, far)` is a separate type;
+both implement the sealed `CameraView` interface accepted by `MeshRenderer`.
+Spans are full world-metre width/height, independent of raster aspect ratio.
+The proper rigid, row-major camera-to-world pose places the image centre at
+optical `(0,0)`; native pixel centres have no added half-pixel offset.
+Orthographic ray origins lie on the pose's depth-zero plane, vary across the
+image, and share its forward axis. Clip W is exactly one and depth is
+`(optical_z - near)/(far - near)`, with `0 < near < far`.
+Invalid spans, poses, clip ranges, nonfinite operations and GPU matrix overflow
+fail explicitly. This type cannot import K/Ti or accept lens distortion;
+the live pinhole schema and its rejection of unsupported inputs are unchanged.
+
+Both cameras use the same mesh/depth/HDR renderer. Orthographic direct specular
+and IBL use `V = -forward`; sky rays are parallel, translation-independent and
+follow the same world/environment rotation. Cascades fit the actual per-pixel
+ray origins and select by optical forward depth, never orthographic clip W.
+The shared CPU/WGSL camera uniform is 112 bytes, including its optical-depth row;
+shadow-camera bindings use the same layout. Synthetic CPU/GPU regressions cover
+rotated poses, spans, clipping/occlusion, specular/sky orientation and every
+cascade. The implementation uses the standard affine orthographic equations
+directly, reusing chr's rigid-frame validation and matrix boundary; no trd
+camera code, private assets or calibration records are copied.
+
 ### 3.3 Distorted lenses
 
 The initial live frame profile has no distortion. For a later, separately

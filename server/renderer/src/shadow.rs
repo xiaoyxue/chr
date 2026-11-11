@@ -1,5 +1,5 @@
 use crate::{
-    camera::Camera,
+    camera::{Camera, CameraView},
     coordinates::ImageExtent,
     offscreen::BoxError,
     scene::{Aabb, Light, SceneView},
@@ -366,7 +366,7 @@ fn directional_cascades(
     light: Light,
     bounds: Aabb,
     settings: ShadowSettings,
-    camera: &Camera,
+    camera: &dyn CameraView,
 ) -> Result<Vec<Option<ShadowProjection>>, BoxError> {
     let [near, camera_far] = camera.depth_range();
     let far = camera_far.min(settings.cascades.max_distance);
@@ -374,8 +374,7 @@ fn directional_cascades(
         return Err("cascade distance must exceed the camera near plane".into());
     }
     let extent = camera.extent();
-    let k = camera.intrinsics();
-    let forward = camera.ray([k.cx, k.cy])?.direction;
+    let forward = camera.forward();
     let rays = [
         [0.0, 0.0],
         [f64::from(extent.width()), 0.0],
@@ -462,7 +461,7 @@ pub(crate) fn projections(
     light: Light,
     bounds: Aabb,
     settings: ShadowSettings,
-    camera: &Camera,
+    camera: &dyn CameraView,
 ) -> Result<Vec<Option<ShadowProjection>>, BoxError> {
     if matches!(light, Light::Directional { .. }) && settings.cascades.count > 1 {
         return directional_cascades(light, bounds, settings, camera);
@@ -549,6 +548,67 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orthographic_cascades_cover_parallel_ray_origins_and_overlap() {
+        use crate::camera::OrthographicCamera;
+        let camera = OrthographicCamera::from_pose(
+            ImageExtent::new(640, 480).unwrap(),
+            [40.0, 20.0],
+            [
+                [1.0, 0.0, 0.0, 5.0],
+                [0.0, 1.0, 0.0, 2.0],
+                [0.0, 0.0, 1.0, -10.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            2.0,
+            42.0,
+        )
+        .unwrap();
+        let settings = ShadowSettings {
+            cascades: CascadeSettings {
+                count: 4,
+                max_distance: 42.0,
+                split_lambda: 0.0,
+                blend_fraction: 0.1,
+            },
+            ..Default::default()
+        };
+        let maps = projections(
+            Light::Directional {
+                direction: [0.0, 0.0, 1.0],
+                irradiance: [1.0; 3],
+                angular_radius: 0.0,
+                shadow_mode: None,
+            },
+            Aabb::new([-30.0, -30.0, -10.0], [30.0, 30.0, 40.0]).unwrap(),
+            settings,
+            &camera,
+        )
+        .unwrap();
+        let mut previous_begin = 2.0;
+        for (index, map) in maps.into_iter().enumerate() {
+            let map = map.unwrap();
+            assert_eq!(map.split[1], 12.0 + index as f32 * 10.0);
+            let begin = f64::from(map.split[0]) - 0.1 * (f64::from(map.split[0]) - previous_begin);
+            for depth in [begin, f64::from(map.split[1])] {
+                for pixel in [[0.0, 0.0], [640.0, 0.0], [0.0, 480.0], [640.0, 480.0]] {
+                    let ray = camera.ray(pixel).unwrap();
+                    let point = [ray.origin[0], ray.origin[1], ray.origin[2] + depth, 1.0];
+                    for row in 0..2 {
+                        let clip: f64 = (0..4)
+                            .map(|c| f64::from(map.matrix[c][row]) * point[c])
+                            .sum();
+                        assert!(
+                            clip.abs() < 1.0,
+                            "all parallel corner origins must be covered"
+                        );
+                    }
+                }
+            }
+            previous_begin = f64::from(map.split[0]);
+        }
+    }
 
     #[test]
     fn cascades_cover_overlapping_slices_and_keep_world_texels_stable() {

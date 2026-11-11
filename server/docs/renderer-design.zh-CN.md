@@ -445,6 +445,25 @@ K 使用像素单位，矩阵为 `[[fx, skew, cx], [0, fy, cy], [0, 0, 1]]`。
 正交光线起点不同、方向恒定。正交镜面着色必须使用该方向，
 不能套用 `normalize(camera_position - surface_position)`。
 
+**已实现的内部 API：** `camera::Camera` 保留针孔/FOV/K/Ti 构造器和访问器。
+`OrthographicCamera::from_pose(extent, [horizontal_span, vertical_span],
+pose, near, far)` 是独立类型；两者实现 `MeshRenderer` 接受的 sealed
+`CameraView` 接口。跨度是世界米单位的完整宽/高，与栅格宽高比独立。
+行优先、正规刚体 camera-to-world 姿态将图像中心放在光学 `(0,0)`；
+原生像素中心不额外增加半像素偏移。正交射线起点位于姿态的深度零平面，
+随像素变化，方向均为姿态的前向轴。Clip W 恒为一，深度为
+`(optical_z - near)/(far - near)`，要求 `0 < near < far`。
+无效跨度、姿态、裁剪范围、非有限运算与 GPU 矩阵溢出均明确失败。
+该类型不能导入 K/Ti 或接受镜头畸变；直播针孔 schema 及其不支持输入的拒绝行为不变。
+
+两种相机使用相同的 mesh/depth/HDR 渲染器。正交直接镜面光照及 IBL 使用
+`V = -forward`；天空射线平行、与平移无关，并遵循相同的世界/环境旋转。
+级联拟合每个像素实际的射线起点，按光学前向深度选择，绝不使用正交 clip W。
+CPU/WGSL 共享相机 uniform 为 112 字节，包含光学深度行；
+阴影相机绑定使用同一布局。合成 CPU/GPU 回归覆盖旋转姿态、跨度、
+裁剪/遮挡、镜面/天空方向及每个级联。实现直接采用标准仿射正交公式，
+复用 chr 的刚体坐标系验证和矩阵边界；未复制 trd 相机代码、私有资产或标定记录。
+
 ### 3.3 带畸变的镜头
 
 首期直播帧范围不包含畸变。对后续单独确认的扩展，

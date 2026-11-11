@@ -1,5 +1,5 @@
 use chr_renderer::{
-    camera::{Camera, CameraError, Intrinsics},
+    camera::{Camera, CameraError, CameraView, Intrinsics, OrthographicCamera},
     coordinates::{ImageExtent, Ti},
 };
 
@@ -136,4 +136,103 @@ fn look_at_fov_and_invalid_inputs() {
         Err(CameraError::InvalidPose)
     ));
     assert!(camera.ray([f64::NAN, 0.0]).is_err());
+}
+
+#[test]
+fn orthographic_pose_spans_rays_and_linear_clip_agree_at_every_depth() {
+    // A translated, rotated optical frame; optical +Z is world +Y.
+    let pose = [
+        [-1.0, 0.0, 0.0, 2.0],
+        [0.0, 0.0, 1.0, 3.0],
+        [0.0, 1.0, 0.0, -10.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    for (w, h) in [(800, 400), (400, 800)] {
+        let extent = ImageExtent::new(w, h).unwrap();
+        let camera = OrthographicCamera::from_pose(extent, [8.0, 4.0], pose, 1.0, 21.0).unwrap();
+        let ray = camera
+            .ray([0.75 * f64::from(w), 0.75 * f64::from(h)])
+            .unwrap();
+        assert_eq!(ray.origin, [0.0, 3.0, -9.0]);
+        assert_eq!(ray.direction, [0.0, 1.0, 0.0]);
+        let corner = camera.ray([0.0, 0.0]).unwrap();
+        assert_eq!(corner.origin, [6.0, 3.0, -12.0]);
+        assert_eq!(corner.direction, ray.direction);
+        let matrix = camera.clip_from_world().unwrap();
+        for depth in [1.0, 4.0, 11.0, 21.0] {
+            let world = [0.0, 3.0 + depth, -9.0];
+            let (pixel, z) = camera.project(world).unwrap();
+            close(pixel[0], 0.75 * f64::from(w));
+            close(pixel[1], 0.75 * f64::from(h));
+            close(z, (depth - 1.0) / 20.0);
+            let (other, _) = camera.project([1.0, 3.0 + depth, -9.0]).unwrap();
+            close(pixel[0] - other[0], f64::from(w) / 8.0);
+            let p = [world[0], world[1], world[2], 1.0];
+            let clip: [f64; 4] =
+                std::array::from_fn(|r| (0..4).map(|c| f64::from(matrix[c][r]) * p[c]).sum());
+            close(clip[0], 0.5);
+            close(clip[1], -0.5);
+            close(clip[2], z);
+            close(clip[3], 1.0);
+        }
+        for depth in [-1.0, 0.99, 21.01] {
+            assert_eq!(
+                camera.project([2.0, 3.0 + depth, -10.0]),
+                Err(CameraError::OutsideDepth)
+            );
+        }
+    }
+}
+
+#[test]
+fn orthographic_rejects_invalid_spans_pose_clips_and_nonfinite_operations() {
+    let extent = ImageExtent::new(64, 64).unwrap();
+    let pose = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        for span in [[value, 4.0], [4.0, value]] {
+            assert!(matches!(
+                OrthographicCamera::from_pose(extent, span, pose, 1.0, 10.0),
+                Err(CameraError::InvalidSpan)
+            ));
+        }
+    }
+    for (near, far) in [
+        (0.0, 10.0),
+        (-1.0, 10.0),
+        (1.0, 1.0),
+        (2.0, 1.0),
+        (f64::NAN, 10.0),
+        (1.0, f64::INFINITY),
+    ] {
+        assert!(matches!(
+            OrthographicCamera::from_pose(extent, [4.0; 2], pose, near, far),
+            Err(CameraError::InvalidClip)
+        ));
+    }
+    for (row, col, value) in [(0, 0, 2.0), (0, 0, -1.0), (3, 0, 1.0), (0, 3, f64::NAN)] {
+        let mut invalid = pose;
+        invalid[row][col] = value;
+        assert!(matches!(
+            OrthographicCamera::from_pose(extent, [4.0; 2], invalid, 1.0, 10.0),
+            Err(CameraError::InvalidPose)
+        ));
+    }
+    let camera = OrthographicCamera::from_pose(extent, [4.0; 2], pose, 1.0, 10.0).unwrap();
+    assert!(camera.ray([f64::NAN, 0.0]).is_err());
+    assert!(camera.ray([0.0, f64::INFINITY]).is_err());
+    assert_eq!(
+        camera.project([f64::NAN, 0.0, 2.0]),
+        Err(CameraError::InvalidGeometry)
+    );
+    let tiny =
+        OrthographicCamera::from_pose(extent, [f64::MIN_POSITIVE; 2], pose, 1.0, 10.0).unwrap();
+    assert!(
+        tiny.clip_from_world().is_err(),
+        "GPU-unrepresentable matrices fail explicitly"
+    );
 }
