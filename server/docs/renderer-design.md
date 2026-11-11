@@ -758,6 +758,241 @@ Changing sun/atmosphere parameters invalidates dependent LUTs and environment
 lighting; changing output exposure does not. Aerial perspective, clouds, and
 general participating media are deferred.
 
+#### Review candidate: portable LUT profile (#35 / #28)
+
+**Proposed, not approved or implemented.** This independent method-gate slice
+does not freeze #28/#35, approve #12/#63, or deliver runtime/SDI integration.
+The numbers below are starting limits to test, not measured GPU performance or
+proof that the whole parameter domain meets the quality targets.
+
+**Source verification (2026-11-11).** Primary references:
+
+- [Hillaire, EGSR 2020, author's paper](https://sebh.github.io/publications/egsr2020.pdf),
+  §§3–5.5, equations 5–11, §6 limitations and Table 2. It supports RGB
+  exponential Rayleigh/Mie, ozone absorption, spherical geometry, a
+  transmittance LUT, horizon-focused sky-view LUT and isotropic higher-order
+  scattering approximation. The direct disk is explicitly outside sky-view.
+  Table 2 uses 256×64/40 steps, 200×100/30 steps and 32×32/20 steps
+  for desktop transmittance, sky-view and multiple scattering; §5.5 uses
+  64 sphere directions. Those are the author's settings, not chr measurements.
+- [Author implementation, revision `183ead5`](https://github.com/sebh/UnrealEngineSkyAtmosphere/tree/183ead5bdacc701b3b626347a680a2f3cd3d4fbd):
+  `Application/SkyAtmosphereCommon.cpp::SetupEarthAtmosphere`,
+  `Resources/RenderSkyCommon.hlsl` (LUT mappings, density/phase functions),
+  `Resources/RenderSkyRayMarching.hlsl::IntegrateScatteredLuminance` and
+  `NewMultiScattCS`. `hgPhase` actually selects Cornette–Shanks in this revision;
+  a port must not infer Henyey–Greenstein from its name.
+  `GetSunLuminance` uses arbitrary brightness and a separate hard-coded disk
+  angle: it is **not** a unified physical-sun contract to copy.
+- [Karis, Real Shading in Unreal Engine 4, SIGGRAPH 2013 notes](https://blog.selfshadow.com/publications/s2013-shading-course/karis/s2013_pbs_epic_notes_v2.pdf),
+  “Representative Point” / “Sphere Lights”: a candidate finite-angular GGX
+  approximation with distribution-widening normalization, not an exact BRDF
+  integral. It still needs the specific small-sun/horizon comparison below.
+- [wgpu 30 texture formats](https://docs.rs/wgpu/30.0.0/wgpu/enum.TextureFormat.html)
+  and [storage access](https://docs.rs/wgpu/30.0.0/wgpu/enum.StorageTextureAccess.html).
+  The author's demo is DX11/Windows, not evidence of wgpu/Linux portability.
+  Its [MIT license](https://github.com/sebh/UnrealEngineSkyAtmosphere/blob/183ead5bdacc701b3b626347a680a2f3cd3d4fbd/LICENSE)
+  is Copyright 2020 Epic Games, Inc.; reused substantial code requires that
+  notice. Third-party Bruneton code/submodules have separate provenance.
+  Papers/figures are not licensed by that source-code MIT grant. This slice
+  copies no code, tables, figures or assets; the oracle is independently written.
+
+The current chr IBL path was inspected directly (`environment.rs`,
+`environment_sampling.wgsl`): CPU nine-coefficient SH, six equal-resolution
+Float32 roughness layers, manual bilinear loads and a 64×64 split-sum LUT.
+The prior trd adaptation is recorded above; this slice does not claim a new trd
+checkout audit or an atmosphere implementation there. It does not complete
+the broader #35 area-light/visibility comparisons.
+
+**Medium and domain.** Proposed renderer-local, validated SI inputs; evaluate
+the shader in kilometres only after explicit `m / 1000` and `m⁻¹ × 1000`
+conversion. Coefficients below are channelwise scene-linear RGB extinction/
+scattering proxies, not wavelength samples or calibrated spectral data.
+
+| Quantity | Proposed profile / review range |
+|---|---|
+| Bottom radius `Rb`, top radius `Rt` | Earth reference 6,360,000 / 6,460,000 m; `Rb` 6,000,000–7,000,000 m, shell thickness 80,000–120,000 m |
+| Rayleigh relative density | `exp(-h / HR)`, `HR=8000 m`, allowed 6000–10,000 m |
+| Mie relative density | `exp(-h / HM)`, `HM=1200 m`, allowed 800–2000 m |
+| Ozone relative density | `max(0, 1 - abs(h-25,000)/15,000)`; fixed triangle, zero outside 10–40 km |
+| Rayleigh scattering = extinction | Reference `(5.802,13.558,33.100) × 10⁻⁶ m⁻¹` |
+| Mie scattering / extinction | Reference `(3.996,3.996,3.996)` / `(4.440,4.440,4.440) × 10⁻⁶ m⁻¹`; absorption is their difference |
+| Ozone absorption (no scattering) | Reference `(0.650,1.881,0.085) × 10⁻⁶ m⁻¹` |
+| Density amplitudes | Separate dimensionless Rayleigh/Mie/ozone multipliers in `[0,2]`; no free per-channel coefficient editing in this first profile |
+| Phase functions | Normalized Rayleigh `3(1+cos²θ)/(16π)` and Cornette–Shanks Mie; `g=0.8`, range `[0,0.85]`; test forward/backward sign convention |
+| Planet ground | Uniform Lambertian RGB albedo `[0,0.5]`, reference 0; not scene-material ground, terrain GI or a captured reflection |
+| Observer / source | `h=ground_altitude-Z` in `[0,20,000] m`, ground altitude `[0,10,000] m`; sun elevations `[-12°,90°]`, angular radius `[0.001,0.01] rad` |
+
+All inputs must be finite, extinctions nonnegative and scattering no greater
+than extinction; reject outside-profile input rather than silently clamping.
+The bottom radius defines the sea-level sphere. The local scene is a tangent
+patch with up `(0,0,-1)`: use a virtual radial observer `(0,0,Rb+h)` and rotate
+directions into that basis, not `length(world_position)-Rb`. XY translations
+do not change altitude or bend the pitch. Limit the proposed patch to 1 km
+from its origin; no geodesy, curved terrain, below-sea-level or space views.
+For an orthographic camera, use the camera-centre altitude for the distant
+sky, not a different atmosphere per parallel ray origin. Surface solar
+transmittance uses the surface's own altitude; a shared IBL probe remains an
+approximation and does not provide spatially varying indirect illumination.
+
+Use `σt(h)=ρR βR + ρM βMt + ρO βO`, `T=exp(-∫σt ds)`.
+Integrate a constant segment analytically as
+`S * (1-exp(-σt Δs))/σt`, taking the limit `S Δs` at zero extinction.
+Use a cancellation-safe small-optical-depth branch, not an epsilon that
+turns vacuum into absorption. Clip rays against the top and opaque bottom
+spheres; planet-blocked solar rays have zero direct transmission, not a
+clamped lookup across the ground/sky boundary.
+
+**LUTs and bounded resource proposal.**
+
+| Resource | Layout / calculation | Rebuild dependency |
+|---|---|---|
+| Transmittance | 256×64 RGBA32Float, RGB `T`, 64 path segments; Bruneton/Hillaire radius/distance mapping and texel-centre remap | Radii, densities, scale heights, extinction, resolution/steps |
+| Multiple scattering | 32×32 RGBA32Float, altitude × sun-zenith cosine; 64 deterministic sphere directions × 32 segments | Transmittance generation, scattering, ground albedo, quality |
+| Sky-view | 192×108 RGBA32Float; separate above/below-horizon nonlinear latitude mapping, sun-relative azimuth; up to 64 segments | Medium/MS generation, observer altitude, sun elevation, quality |
+| IBL source | 256×128 disk-free RGBA32Float panorama in current negative-Z-up convention | Sky-view generation and sun azimuth |
+| IBL specular / BRDF | Existing six 256×128 RGBA32Float layers, 64 GGX samples; existing 64×64 split-sum LUT | Panorama generation / BRDF quality respectively |
+| Diffuse reduction | 128 groups × nine padded RGB Float32 coefficients (18,432 B), final 144 B SH | Panorama generation |
+
+Multiple scattering uses the paper's `L2 / (1-fms)` geometric-series
+approximation, isotropic from order two and spatially uniform nearby; it is
+not an iterative physical solution. Ground reflection participates in that
+LUT and the lower-hemisphere sky-view boundary, without adding scene GI.
+Numerical `fms` must stay below one; report unsupported/nonconvergent cases
+instead of hiding divergence by a large clamp. The zero-medium limit is zero.
+Use unit RGB top-of-atmosphere irradiance for all scattering-transfer LUTs;
+apply the authored RGB emission once when consuming them.
+
+Analytic allocation, **not measured GPU memory/timing**: these three atmosphere
+LUTs total 610,304 B; panorama + six layers + split-sum total 3,735,552 B.
+Together with the listed SH buffers: 4,364,432 B (about 4.16 MiB) per complete
+set, excluding uniform/alignment/driver overhead. A 16 MiB provisional ceiling
+covers two such generations plus scratch; account allocations before building.
+Worst-case cold integration counts are 1,048,576 transmittance segments,
+2,097,152 MS segments and 1,327,104 sky-view segments, plus panorama resampling
+and at most 12,582,912 GGX samples. Each manual bilinear fetch is four loads.
+These are workload estimates, not milliseconds; do not borrow the paper's
+NVIDIA 1080 timings as RTX 3090 acceptance.
+
+Use baseline compute, f32, separate sampled/read and write-only RGBA32Float
+storage resources, workgroup shared memory and ordered passes. No Float32
+filtering, float atomics, subgroups, f16, read/write storage textures, ray
+tracing or backend switch is required. Check adapter format usages/limits at
+creation; do not bind one texture for sampling and writing in the same pass.
+GPU timestamps are optional measurement features, not production prerequisites.
+
+**Smallest GPU-sky bridge.** Add a renderer-internal generated texture source
+only after interface review, alongside (not encoded as) the CPU EXR asset.
+Resample the disk-free sky-view to the existing panorama, then reuse the
+current GGX bake and split-sum consumer. Compute nine SH coefficients from that
+same panorama using exact lat-long cell basis integrals, a two-pass fixed
+reduction and the current normalized cosine kernel `(1, 2/3, 1/4)` by band.
+These SH coefficients represent irradiance **divided by π**; applying another
+π would change existing diffuse energy.
+
+Write SH to a storage/COPY_SRC buffer, then GPU-copy its 144-byte prefix to
+the existing environment uniform's COPY_DST prefix before shading. CPU writes
+only the non-SH suffix for generated skies; the present whole-uniform
+`queue.write_buffer` must not overwrite the result on a warm frame. This avoids
+render-hot-path readback, CPU atmosphere rendering, new mesh SH bindings and
+float atomics. Keep EXR CPU SH unchanged. Generated transfer data can use
+scale=1; apply RGB solar emission consistently to background, SH and specular
+consumers through a reviewed internal uniform extension (current gain is scalar).
+Do not reuse the EXR maximum-pixel CPU scan for generated textures.
+
+**One sun and no duplicated disk.** Proposed emission is RGB
+top-of-atmosphere *normal irradiance* `Etoa`, in W/m²-equivalent linear RGB
+(range `[0,2000]` per channel for this test profile), not lux or a ground
+measurement. Existing directional-light semantics must not be silently changed:
+review a tagged atmosphere/sun linkage or explicit conversion boundary.
+The authored light's propagation direction is opposite the sky's unit
+direction-to-sun. One source identity supplies both, angular radius `α`,
+emission and shadow settings; no duplicate sky rotation or sun gain.
+
+For a uniform disk, `Ldisk=Etoa/(π sin²α)`, not `Etoa/solid_angle`;
+`Ωdisk=2π(1-cos α)`. The attenuated direct-normal ground value is
+approximately `Etoa*T(h,sun)` when transmission is constant across the disk.
+Surface diffuse irradiance integrates `Ldisk*T(ω)*max(n·ω,0)` over the visible
+disk; fully visible, constant-transmission disks above the surface horizon
+reduce to `Etoa*T*max(n·sun,0)`. Partial planetary/surface horizon clipping
+needs disk coverage integration or a validated analytic approximation.
+Never multiply transmittance twice or treat this ground value as source power.
+
+Background = scattered sky + visible, planet-clipped, attenuated disk.
+SH/specular panorama = scattered sky including the Mie aureole and modeled
+ground, **without the unscattered disk**; do not cut a black hole around the
+sun or remove its atmospheric scattering. Direct diffuse **and finite-angular
+specular** come from the linked sun. Candidate: Karis's normalized spherical
+representative-point GGX, taking the distant fixed-angular-size limit, with
+projected-disk diffuse. Compare against independent high-sample disk/BRDF
+quadrature before adoption; a punctual GGX light with only wider PCSS shadows
+does not satisfy #28. Horizon clipping, low-roughness normalization and
+transmission variation across the disk remain unresolved method questions.
+Multiplying unoccluded finite-sun shading by existing PCSS visibility is an
+explicit decorrelation approximation, not exact joint BRDF/visibility
+integration. Share `α` with PCSS; PCF alone is not finite-sun penumbra acceptance.
+No production disk quadrature default is selected in this profile.
+
+**Cache proposal.** Cache by validated parameter values/generation plus
+algorithm/quality version, not camera/exposure revision wholesale. MS covers
+all sun elevations and uses unit emission, so sun movement/emission changes
+do not rebuild T/MS. A new elevation or observer altitude rebuilds sky-view
+and its IBL descendants; azimuth alone only resamples/rebakes the world-oriented
+panorama. Emission changes update consumption uniforms, not transfer textures;
+angular radius changes affect disk/direct/shadow state, not the point-sun
+scattering approximation. No altitude quantization is proposed initially.
+XY motion, view rotation/FOV/resolution, backdrop visibility and exposure
+leave these caches intact. Publish complete generations atomically, never a
+new sky with old lighting. Budget failure retains the last complete generation
+and reports failure; asynchronous/stale-frame policy needs API approval.
+
+**Proposed quality gates and actual evidence.**
+
+- Reject NaN/negative output; `T∈[0,1]`. Homogeneous and vacuum GPU results:
+  absolute T error ≤`2e-5`; variable-density LUT vs converged f64 ray reference:
+  ≤`2e-3` absolute and ≤2% relative where reference T≥0.05.
+- Test observer altitudes 0, 2, 1000, 10,000, 20,000 m; sun elevations
+  -12, -6, -1, 0, 1, 5, 30, 90 degrees; zenith, horizon ±0.1°, nadir,
+  seam/poles and near-sun rays. Include all-zero medium, zero sun emission,
+  ozone-only and g extremes. Zero emission gives black sky/direct lighting;
+  vacuum with black ground keeps the visible/direct sun, but no scattered IBL.
+- For disk-excluded sky/IBL, propose ≤5% normalized RMS RGB error against a
+  converged independent multiple-scattering reference; ≤10% local error around
+  twilight/horizon using an absolute dark-value floor `1e-4 * max(Etoa)`.
+  These are acceptance candidates, not results from the scalar oracle.
+- Verify constant-map diffuse `E/π`, emitted-power linearity, disk radius
+  energy invariance at fixed `Etoa`, and disk exclusion without lost direct
+  highlights. Sweep metal/dielectric roughness 0.04, 0.1, 0.5, 1 and grazing
+  normals; propose ≤5% integrated finite-sun error against disk quadrature.
+  Test partial disk horizons separately rather than hiding them in mean error.
+- Instrument cold/warm generation counts and allocation, sun-only/altitude/
+  exposure/visibility edits and failed rebuilds. Measure isolated target-GPU
+  timestamps at 1920×1080: provisional incremental atmosphere+IBL target ≤4 ms
+  cold and ≤0.5 ms warm, not an existing pass or product frame-time guarantee.
+  Compare Float32/Float16 and higher LUT quality only if measured error/cost
+  warrants the extra variant.
+- `tests/atmosphere_reference.rs` is a small synthetic f64 **validation oracle**:
+  Beer–Lambert homogeneous/partition checks, finite zero-extinction segment
+  integration, exponential/triangular-ozone columns, 25 spherical rays
+  (4096/8192-step convergence) and finite-disk irradiance normalization.
+  It uses no renderer path, asset, calibration data or new dependency.
+  Run `nix develop --command cargo test --locked -p chr-renderer --test atmosphere_reference -- --nocapture`.
+  It does not test a GPU LUT, multiple scattering, BRDF/PCSS, disk exclusion or
+  cache implementation; those gates remain unverified.
+  Linux Nix execution on 2026-11-11 passed all five CPU tests; the 25-ray
+  maximum `|T4096-T8192|` was `1.448483792e-7`. This is numerical convergence
+  evidence only, not a 64-step LUT accuracy result or a GPU benchmark.
+
+This candidate prefers low-dimensional transfer LUTs over iterative 4D
+precomputation for editable local skies; the latter remains a possible
+quality reference, not a rejected measured loser. Full-screen high-sample
+marching/path tracing is an oracle only. RGB/non-spectral transport,
+isotropic higher orders, shared distant IBL and point-sun atmospheric
+scattering are declared approximations. Clouds, aerial perspective,
+refraction, scene volumetric shadows, spatial sky visibility (#29) and general
+GI are unsupported here. Before production work, approve the numerical domain,
+radiometric linkage/API, observer/probe ownership, finite-sun method and
+resource/quality targets, then collect the missing GPU/reference evidence.
+
 ### 4.3 Shadow techniques and honest approximations
 
 | Light / effect | Proposed baseline | Limit |
