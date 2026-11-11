@@ -2,6 +2,7 @@
 
 pub mod camera;
 pub mod coordinates;
+pub mod exr;
 pub mod glb;
 mod gpu;
 mod material_maps;
