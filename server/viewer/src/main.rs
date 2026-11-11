@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chr_core::{Gpu, TriangleRenderer, coordinates::ImageExtent};
+use chr_renderer::{Gpu, TriangleRenderer, coordinates::ImageExtent};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
@@ -223,7 +223,7 @@ fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!(
                     "Usage: chr-app [--headless | --smoke-test]\n\
-                     Writes output/render/triangle.png under the checkout root\n\
+                     Writes output/renderer/triangle.png under the checkout root\n\
                      (or the working directory outside a checkout). Escape closes the window."
                 );
                 return Ok(());

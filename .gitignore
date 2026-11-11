@@ -1,4 +1,5 @@
 .worktree/
+target/
 /reference/*
 !/reference/.gitkeep
 /output/

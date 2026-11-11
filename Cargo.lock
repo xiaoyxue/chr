@@ -306,7 +306,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 name = "chr-app"
 version = "0.1.0"
 dependencies = [
- "chr-core",
+ "chr-renderer",
  "env_logger",
  "log",
  "png",
@@ -316,7 +316,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chr-core"
+name = "chr-renderer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

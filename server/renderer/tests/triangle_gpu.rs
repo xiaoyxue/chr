@@ -1,4 +1,4 @@
-use chr_core::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
+use chr_renderer::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
 
 #[test]
 #[ignore = "requires a hardware GPU; run explicitly on Windows and Linux"]

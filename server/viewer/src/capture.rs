@@ -4,16 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chr_core::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
+use chr_renderer::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
 
 use crate::Result;
 
 fn output_directory(working_directory: &Path) -> PathBuf {
     let root = working_directory
         .ancestors()
-        .find(|path| path.join("flake.nix").is_file() && path.join("render/Cargo.toml").is_file())
+        .find(|path| path.join("flake.nix").is_file() && path.join("Cargo.toml").is_file())
         .unwrap_or(working_directory);
-    root.join("output/render")
+    root.join("output/renderer")
 }
 
 pub fn write_triangle_png(gpu: &Gpu) -> Result<()> {
@@ -49,14 +49,14 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir(&root).expect("temporary directory");
-        assert_eq!(output_directory(&root), root.join("output/render"));
-        let package = root.join("render/native/chr-app");
+        assert_eq!(output_directory(&root), root.join("output/renderer"));
+        let package = root.join("server/viewer");
         fs::create_dir_all(&package).expect("package directory");
         fs::write(root.join("flake.nix"), "").expect("flake marker");
-        fs::write(root.join("render/Cargo.toml"), "").expect("workspace marker");
-        let expected = root.join("output/render");
+        fs::write(root.join("Cargo.toml"), "").expect("workspace marker");
+        let expected = root.join("output/renderer");
         assert_eq!(output_directory(&root), expected);
-        assert_eq!(output_directory(&root.join("render")), expected);
+        assert_eq!(output_directory(&root.join("server")), expected);
         assert_eq!(output_directory(&package), expected);
         fs::remove_dir_all(&root).expect("remove temporary directory");
     }

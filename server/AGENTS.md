@@ -1,4 +1,7 @@
-# Contributor and agent guidance
+# Server contributor and agent guidance
+
+`server/` is the live render server: the renderer and everything that runs in its
+process. Repository-wide rules are in the root `AGENTS.md`.
 
 ## Feature worktrees
 
@@ -10,14 +13,21 @@
 
 ## Architecture and scope
 
-- Keep all rendering in `crates/chr-core`. Delivery shells in `native/` own
-  windows, events, surfaces, and presentation, not separate rendering algorithms.
+- Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `viewer/`
+  (`chr-app`) is the native window and headless shell. Further server crates sit
+  beside them as `server/<name>/`, as members of the root Cargo workspace.
+- Keep all rendering in `renderer/`. It has no networking, video-device, or
+  output-card dependencies. Shells such as `viewer/` own windows, events,
+  surfaces, and presentation, not separate rendering algorithms.
+- Start new server functionality as modules of an existing crate; split out a
+  crate when it brings heavy dependencies or needs its own lint exception, such
+  as hardware FFI.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
-- Keep generated PNGs in repository-root `output/render/`, ignored by Git but retained locally.
-  PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in core.
+- Keep generated PNGs in repository-root `output/renderer/`, ignored by Git but retained locally.
+  PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in `renderer/`.
 - This first slice is a native RGB triangle. Browser delivery, scene formats,
   video, meshes, and camera calibration are not implemented.
-- The repository root's `reference/` (`../reference/` from this workspace) holds
+- The repository root's `reference/` (`../reference/` from `server/`) holds
   all private, local-only reference material. Never stage, upload, redistribute,
   or embed its assets or experimental data in public fixtures. Use synthetic data.
 
@@ -34,12 +44,12 @@
   Comments explain non-obvious reasons, not the code's mechanics.
 - Use English for code, comments, and documentation. Keep any existing paired
   translations synchronized if either version changes.
-- Keep `render/Cargo.lock` and root `flake.lock` under version control. Prefer narrow changes;
+- Keep root `Cargo.lock` and `flake.lock` under version control. Prefer narrow changes;
   add regression tests for new behavior rather than introducing abstractions early.
 
 ## Coordinate contract
 
-`docs/coordinates.md` is the public implementation contract. Local reference
+`server/docs/coordinates.md` is the public implementation contract. Local reference
 documents informed it; their private measurements are not part of this project.
 
 - World coordinates are pitch-centred metres: X length, Y width, ground Z=0,
@@ -58,13 +68,13 @@ documents informed it; their private measurements are not part of this project.
 ## Platforms
 
 - Windows: PowerShell 7, Rust MSVC x64, Visual Studio C++ tools and Windows SDK.
-  Dot-source `scripts\dev-env.ps1`; do not change global toolchains or install
+  Dot-source `server\scripts\dev-env.ps1`; do not change global toolchains or install
   packages silently. Use the vendor GPU driver and DX12 or Vulkan.
-- Linux: run `nix develop` / `nix build` / `nix flake check` from the repository
-  root (or `nix develop ..` from `render/`). Run Cargo commands from `render/`;
-  the shell uses an absolute `render/target/linux` cache regardless of working
-  directory. Direct Cargo is also supported with system window libraries and
-  graphics drivers. See README.md.
+- Linux: run `nix develop` / `nix build` / `nix flake check` and Cargo commands
+  from the repository root, where the Cargo workspace lives. The shell uses an
+  absolute `target/linux` cache regardless of working directory. Direct Cargo is
+  also supported with system window libraries and graphics drivers. See
+  `server/README.md`.
 - Validate Linux on the designated native Linux GPU host over SSH, not WSL.
   Keep machine-specific connection details out of public project files.
 - Nix flakes in Git see tracked files only. Stage explicit project paths before
@@ -78,13 +88,13 @@ documents informed it; their private measurements are not part of this project.
 Run on both Windows and Linux; report missing environments as unverified, not
 passed. Do not duplicate unrelated trd browser/video gates in this smaller project.
 
-From `render/` inside the root development shell:
+From the repository root inside the development shell:
 
 ```text
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-cargo test --locked -p chr-core --test triangle_gpu -- --ignored --nocapture
+cargo test --locked -p chr-renderer --test triangle_gpu -- --ignored --nocapture
 cargo run --locked -p chr-app -- --smoke-test
 ```
 
