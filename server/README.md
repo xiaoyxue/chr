@@ -7,13 +7,50 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
+| `runtime/` | `chr-server` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, SDI-to-WebRTC monitor |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers |
 
-The first vertical slice draws an RGB hello-world triangle using the same
-pipeline in a native window and an offscreen hardware test. No browser, video,
-scene serialization, or calibration pipeline is included yet.
+The current slice draws an RGB triangle using the same pipeline in a native
+window, an offscreen hardware test, and the render server. No scene
+serialization, video input, or calibration pipeline is included yet.
+
+## Render server
+
+`chr-server` renders the triangle offscreen (1280x720p50 by default) and takes
+JSON-RPC 2.0 commands (`triangle.start_rotation`, `triangle.stop_rotation`,
+`triangle.get_state`, `sdi.get_status`, `webrtc.offer`) over a NativeSocket at
+`$XDG_RUNTIME_DIR/chr/render.sock` and a loopback WebSocket at
+`ws://127.0.0.1:8787`. The renderer's only product is the SDI program output;
+clients receive that output back as WebRTC:
+
+```text
+args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY 4:2:2, BT.709 limited)
+                                 -> sdi: program output port (own clock, bounded queue,
+                                         repeat on underrun)
+                                      -> monitor: SDI -> H.264 -> WebRTC -> clients
+```
+
+| Module (`runtime/src/`) | Role |
+| --- | --- |
+| `control.rs` | Control plane: JSON-RPC methods (the args) onto the pipeline and status |
+| `pipeline.rs`, `scene.rs` | Render loop in logical frame time; produces SDI frames |
+| `sdi.rs` | SDI output port, simulated until hardware is chosen |
+| `monitor/` | Encodes what the port transmitted and streams it over WebRTC |
+
+The monitor encodes in software (openh264) after a CPU readback; this is a
+development shortcut, not the intended GPU-to-hardware-encoder path. From the
+repository root:
+
+```sh
+cargo run --locked --release -p chr-server -- --help
+cargo run --locked --release -p chr-server -- --webrtc-tcp 127.0.0.1:8788
+```
+
+`--webrtc-tcp` adds ICE-TCP candidates on four consecutive loopback ports so a
+browser on another machine can connect through an SSH port forward. The browser
+viewer and verification scripts are in `client/example/render-harness/`.
 
 Every run also saves a 960x640 sRGB image to repository-root
 `output/renderer/triangle.png`, from any directory in the checkout. Outside a
@@ -119,13 +156,14 @@ Run Cargo checks from the repository root inside the development shell:
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-cargo test --locked -p chr-renderer --test triangle_gpu -- --ignored --nocapture
+cargo test --locked -p chr-renderer -- --ignored --nocapture
 cargo run --locked -p chr-app -- --smoke-test
 ```
 
-The GPU test checks real offscreen pixels, RGB orientation, coverage, and aspect
-in landscape and portrait targets, including padded-row readback; it is ignored
-by ordinary CPU-only tests. PNG export uses this same readback path and pipeline.
+The GPU tests check real offscreen pixels, RGB orientation, coverage, aspect,
+and rotation in landscape and portrait targets, including padded-row readback,
+plus the UYVY conversion against BT.709 reference values; they are ignored by
+ordinary CPU-only tests. PNG export uses this same readback path and pipeline.
 The smoke test exits after three presented frames and requests a resize.
 Interactively verify resize, minimize/restore, display scaling, and Escape/close.
 Escape or the window close button exits the normal demo.

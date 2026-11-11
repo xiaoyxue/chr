@@ -39,11 +39,12 @@ impl TriangleRenderer {
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let viewport = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("SNC to NDC scale"),
-            size: 16,
+        // Layout: SNC-to-NDC scale (x, y), then the display rotation (cos, sin). The scale
+        // stays zero until `resize`; the rotation starts at identity.
+        let viewport = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("viewport transform"),
+            contents: bytemuck::cast_slice(&[0.0f32, 0.0, 1.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("viewport layout"),
@@ -111,7 +112,20 @@ impl TriangleRenderer {
         queue.write_buffer(
             &self.viewport,
             0,
-            bytemuck::cast_slice(&[x as f32, y as f32, 0.0, 0.0]),
+            bytemuck::cast_slice(&[x as f32, y as f32]),
+        );
+    }
+
+    /// Rotates the triangle about the SNC origin (the image centre) by `radians`.
+    ///
+    /// SNC Y points down, so positive angles turn clockwise on screen. This is a display
+    /// animation for previews, not a camera model. Same update rules as [`Self::resize`].
+    pub fn set_rotation(&self, queue: &wgpu::Queue, radians: f64) {
+        let (sin, cos) = radians.sin_cos();
+        queue.write_buffer(
+            &self.viewport,
+            8,
+            bytemuck::cast_slice(&[cos as f32, sin as f32]),
         );
     }
 

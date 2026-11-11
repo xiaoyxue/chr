@@ -5,9 +5,10 @@
 | Directory | Purpose | Language |
 | --- | --- | --- |
 | `client/src/` | Client-side code | Primarily TypeScript |
-| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
-| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/` | Rust |
-| `common/src/` | Shared communication protocols, such as socket protocols | To be decided |
+| `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
+| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), headless render server in `runtime/` (`chr-server`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
+| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/` and `common/` | Rust |
+| `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |
 | `algorithm/src/` | Scene reconstruction algorithms | To be decided |
 | `flake.nix`, `flake.lock` | Shared, pinned Linux development environment and renderer build/check entry points | Nix |
 | `docs/` | Repository-wide documentation, including `docs/development.md`; server contracts live in `server/docs/` | |
@@ -57,8 +58,8 @@ nix run . -- --headless
 
 The default package and `packages.<system>.chr-app` build the renderer;
 the default app runs it. Checks include Node.js/npm/TypeScript tool availability,
-Rust formatting, Clippy, and CPU tests. `client/src/` is currently a placeholder:
-there is no client build/test script or TypeScript project configuration yet.
+Rust formatting, Clippy, and CPU tests. `client/src/` is currently a placeholder;
+the example harness in `client/example/render-harness/` has its own npm scripts.
 `nix fmt` formats Nix files. GPU runs need a working hardware driver; see
 `server/README.md` for non-NixOS host-driver wrappers.
 

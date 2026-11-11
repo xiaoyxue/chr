@@ -1,0 +1,262 @@
+// Program monitor: controls the triangle over WebSocket and shows the SDI program output,
+// which the server encodes and streams back over WebRTC.
+// `?auto=1` connects, opens the stream, rotates, and writes a JSON report to #result
+// for the headless browser check (src/harness/browser.ts).
+
+import type { SdiStatus, TriangleState } from "../protocol.ts";
+import { RpcClient, connectWebSocket } from "../rpc.ts";
+
+const params = new URLSearchParams(location.search);
+const $ = <T extends HTMLElement>(selector: string) => {
+  const element = document.querySelector<T>(selector);
+  if (element === null) throw new Error(`missing ${selector}`);
+  return element;
+};
+
+const wsInput = $<HTMLInputElement>("#ws-url");
+wsInput.value = params.get("ws") ?? `ws://${location.hostname || "127.0.0.1"}:8787`;
+const connectButton = $<HTMLButtonElement>("#connect");
+const streamButton = $<HTMLButtonElement>("#stream");
+const startButton = $<HTMLButtonElement>("#start");
+const stopButton = $<HTMLButtonElement>("#stop");
+const connectionLabel = $("#connection");
+const video = $<HTMLVideoElement>("video");
+const overlay = $("#overlay");
+
+let rpc: RpcClient | null = null;
+let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+function log(message: string): void {
+  const line = `${new Date().toLocaleTimeString()}  ${message}\n`;
+  const element = $("#log");
+  element.textContent = line + (element.textContent ?? "");
+}
+
+function renderList(element: HTMLElement, entries: [string, string][]): void {
+  element.replaceChildren(
+    ...entries.flatMap(([key, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = key;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      return [dt, dd];
+    }),
+  );
+}
+
+function setConnected(connected: boolean, label: string): void {
+  connectionLabel.textContent = label;
+  connectionLabel.className = `status ${connected ? "ok" : "bad"}`;
+  connectButton.textContent = connected ? "Disconnect" : "Connect";
+  startButton.disabled = !connected;
+  stopButton.disabled = !connected;
+  streamButton.disabled = !connected;
+}
+
+function showState(state: TriangleState): void {
+  renderList($("#scene"), [
+    ["rotating", String(state.rotating)],
+    ["angle", `${((state.angle_rad * 180) / Math.PI).toFixed(1)}°`],
+    ["speed", `${((state.angular_velocity_rad_per_s * 180) / Math.PI).toFixed(1)}°/s`],
+    ["frame", String(state.frame)],
+  ]);
+}
+
+function showSdi(status: SdiStatus): void {
+  renderList($("#sdi"), [
+    ["mode", status.video_mode],
+    ["format", status.pixel_format],
+    ["slots out", String(status.frames_output)],
+    ["repeated", String(status.repeated_frames)],
+    ["dropped", String(status.dropped_frames)],
+    ["monitor dropped", String(status.monitor_dropped_frames)],
+    ["source frame", String(status.last_source_frame ?? "-")],
+  ]);
+}
+
+// ---------------------------------------------------------------------------------------
+// WebRTC stream of the program output
+
+interface StreamStats {
+  source: "program";
+  state: string;
+  framesDecoded: number;
+  fps: number;
+  width: number;
+  height: number;
+  decoder: string;
+  jitterBufferMs: number;
+}
+
+const emptyStats = (state: string): StreamStats => ({
+  source: "program",
+  state,
+  framesDecoded: 0,
+  fps: 0,
+  width: 0,
+  height: 0,
+  decoder: "-",
+  jitterBufferMs: 0,
+});
+
+let pc: RTCPeerConnection | null = null;
+let stats = emptyStats("closed");
+
+function showStats(): void {
+  renderList($("#stats"), [
+    ["state", stats.state],
+    ["resolution", stats.width ? `${stats.width}×${stats.height}` : "-"],
+    ["fps", stats.fps.toFixed(1)],
+    ["decoded", String(stats.framesDecoded)],
+    ["decoder", stats.decoder],
+    ["jitter buffer", `${stats.jitterBufferMs.toFixed(0)} ms`],
+  ]);
+}
+
+async function openStream(): Promise<void> {
+  if (rpc === null || pc !== null) return;
+  const peer = new RTCPeerConnection();
+  pc = peer;
+  streamButton.textContent = "Close stream";
+  overlay.textContent = "Connecting…";
+  overlay.hidden = false;
+  peer.addTransceiver("video", { direction: "recvonly" });
+  peer.ontrack = (event) => {
+    video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+  };
+  video.onplaying = () => {
+    overlay.hidden = true;
+  };
+  peer.onconnectionstatechange = () => {
+    log(`stream: ${peer.connectionState}`);
+    if (peer.connectionState === "failed") closeStream();
+  };
+  try {
+    await peer.setLocalDescription(await peer.createOffer());
+    await iceGatheringComplete(peer);
+    const offer = peer.localDescription;
+    if (offer === null) throw new Error("no local description");
+    await peer.setRemoteDescription(await rpc.offer({ type: "offer", sdp: offer.sdp }));
+  } catch (error) {
+    log(`stream failed: ${(error as Error).message}`);
+    closeStream();
+  }
+}
+
+function closeStream(): void {
+  pc?.close();
+  pc = null;
+  video.srcObject = null;
+  streamButton.textContent = "Open stream";
+  overlay.textContent = "Stream closed";
+  overlay.hidden = false;
+  stats = emptyStats("closed");
+  showStats();
+}
+
+async function pollStream(): Promise<void> {
+  const peer = pc;
+  if (peer === null) return;
+  let inbound: Record<string, unknown> | undefined;
+  (await peer.getStats()).forEach((report: Record<string, unknown>) => {
+    if (report.type === "inbound-rtp" && report.kind === "video") inbound = report;
+  });
+  const number = (key: string) => Number(inbound?.[key] ?? 0);
+  const emitted = number("jitterBufferEmittedCount");
+  stats = {
+    source: "program",
+    state: peer.connectionState,
+    framesDecoded: number("framesDecoded"),
+    fps: number("framesPerSecond"),
+    width: number("frameWidth"),
+    height: number("frameHeight"),
+    decoder: String(inbound?.decoderImplementation ?? "-"),
+    jitterBufferMs: emitted > 0 ? (number("jitterBufferDelay") / emitted) * 1000 : 0,
+  };
+  showStats();
+}
+
+function iceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
+  if (peer.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      if (peer.iceGatheringState === "complete") {
+        peer.removeEventListener("icegatheringstatechange", done);
+        resolve();
+      }
+    };
+    peer.addEventListener("icegatheringstatechange", done);
+    // Host candidates gather quickly; do not wait on unreachable interfaces forever.
+    setTimeout(resolve, 3000);
+  });
+}
+
+// ---------------------------------------------------------------------------------------
+// Control
+
+async function connect(): Promise<void> {
+  try {
+    rpc = new RpcClient(await connectWebSocket(wsInput.value), { idPrefix: "ui" });
+    setConnected(true, "connected");
+    log(`connected to ${wsInput.value}`);
+    pollTimer = setInterval(() => void poll(), 500);
+    await poll();
+  } catch (error) {
+    setConnected(false, (error as Error).message);
+  }
+}
+
+function disconnect(reason: string): void {
+  clearInterval(pollTimer);
+  closeStream();
+  rpc?.close();
+  rpc = null;
+  setConnected(false, reason);
+}
+
+async function poll(): Promise<void> {
+  if (rpc === null) return;
+  try {
+    showState(await rpc.getState());
+    showSdi(await rpc.getSdiStatus());
+    await pollStream();
+  } catch (error) {
+    log(`poll failed: ${(error as Error).message}`);
+    disconnect("connection lost");
+  }
+}
+
+async function command(run: (client: RpcClient) => Promise<TriangleState>, label: string): Promise<void> {
+  if (rpc === null) return;
+  try {
+    const state = await run(rpc);
+    showState(state);
+    log(`${label}: applied at frame ${state.frame}`);
+  } catch (error) {
+    log(`${label} failed: ${(error as Error).message}`);
+  }
+}
+
+const speed = () => (Number($<HTMLInputElement>("#speed").value) * Math.PI) / 180;
+
+connectButton.onclick = () => (rpc ? disconnect("disconnected") : void connect());
+streamButton.onclick = () => (pc ? closeStream() : void openStream());
+startButton.onclick = () =>
+  void command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
+stopButton.onclick = () => void command((client) => client.stopRotation(), "stop rotation");
+setConnected(false, "disconnected");
+showStats();
+
+if (params.get("auto") === "1") {
+  void (async () => {
+    await connect();
+    await openStream();
+    await command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
+    const seconds = Number(params.get("seconds") ?? 4);
+    await new Promise((done) => setTimeout(done, seconds * 1000));
+    await poll();
+    const result = $("#result");
+    result.textContent = JSON.stringify([stats]);
+    result.hidden = false;
+  })();
+}

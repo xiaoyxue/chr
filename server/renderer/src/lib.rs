@@ -3,8 +3,10 @@
 pub mod coordinates;
 mod gpu;
 mod offscreen;
+mod sdi;
 mod triangle;
 
 pub use gpu::Gpu;
-pub use offscreen::render_triangle_rgba;
+pub use offscreen::{OffscreenTarget, render_rotated_triangle_rgba, render_triangle_rgba};
+pub use sdi::UyvyConverter;
 pub use triangle::TriangleRenderer;
