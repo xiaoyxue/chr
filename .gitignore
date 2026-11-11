@@ -4,3 +4,5 @@
 /output/
 /result
 /result-*
+node_modules/
+*.tsbuildinfo
