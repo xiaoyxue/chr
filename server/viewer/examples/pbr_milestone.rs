@@ -4,7 +4,7 @@ use chr_renderer::{
     camera::Camera,
     coordinates::{ImageExtent, Ti},
     glb::import_glb,
-    scene::{Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene},
+    scene::{Aabb, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene},
 };
 use serde::Deserialize;
 use std::{error::Error, fs, io::BufWriter, path::Path};
@@ -37,6 +37,48 @@ fn write_png(path: &Path, extent: ImageExtent, pixels: &[u8]) -> Result<()> {
     writer.write_image_data(pixels)?;
     writer.finish()?;
     Ok(())
+}
+
+/// Level front view: world verticals stay vertical in the image, with zero skew.
+fn standard_camera(extent: ImageExtent, bounds: Aabb) -> Result<Camera> {
+    let lo = bounds.min();
+    let hi = bounds.max();
+    let center = std::array::from_fn::<_, 3, _>(|i| (lo[i] + hi[i]) * 0.5);
+    let radius = (0..3)
+        .map(|i| ((hi[i] - lo[i]) * 0.5).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let half_fov = std::f64::consts::FRAC_PI_8;
+    let horizontal =
+        (half_fov.tan() * f64::from(extent.width()) / f64::from(extent.height())).atan();
+    let distance = 1.15 * radius / half_fov.min(horizontal).sin();
+    Ok(Camera::look_at(
+        extent,
+        [center[0], center[1] + distance, center[2]],
+        center,
+        [0.0, 0.0, -1.0],
+        2.0 * half_fov,
+        radius * 0.01,
+        distance + radius * 2.0,
+    )?)
+}
+
+fn capture(
+    gpu: &Gpu,
+    renderer: &mut MeshRenderer,
+    scene: &Scene,
+    camera: &Camera,
+    target: &OffscreenTarget,
+    path: &Path,
+) -> Result<()> {
+    renderer.prepare_pbr(gpu, &scene.snapshot(), camera, PbrSettings::default())?;
+    let mut pixels = Vec::new();
+    target.render_rgba(
+        gpu,
+        |encoder, view| renderer.encode(encoder, view),
+        &mut pixels,
+    )?;
+    write_png(path, camera.extent(), &pixels)
 }
 
 fn main() -> Result<()> {
@@ -115,6 +157,7 @@ fn main() -> Result<()> {
         )?;
     }
     let models = &args[2..];
+    let mut model_views = Vec::new();
     for (i, path) in models.iter().enumerate() {
         let asset = import_glb(&fs::read(path)?)?;
         for warning in &asset.warnings {
@@ -170,6 +213,7 @@ fn main() -> Result<()> {
         if scene.snapshot().instance(instance)?.bounds().max()[2].abs() > 1e-8 {
             return Err("model grounding failed".into());
         }
+        model_views.push((instance, scene.snapshot().instance(instance)?.bounds()));
     }
     let directory = Path::new(&args[1]);
     fs::create_dir_all(directory)?;
@@ -180,7 +224,7 @@ fn main() -> Result<()> {
     }
     let target = OffscreenTarget::new(&gpu, extent)?;
     let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
-    for mode in ["sun", "points", "spots"] {
+    for mode in ["sun", "spots", "points"] {
         let mut lights = vec![Light::Directional {
             direction: [0.2, -0.4, 1.0],
             irradiance: [2.5, 2.35, 2.1],
@@ -208,15 +252,83 @@ fn main() -> Result<()> {
             }
         }
         scene.set_lighting(Lighting::new(lights, None)?)?;
-        renderer.prepare_pbr(&gpu, &scene.snapshot(), &camera, PbrSettings::default())?;
-        let mut pixels = Vec::new();
-        target.render_rgba(
+        capture(
             &gpu,
-            |encoder, view| renderer.encode(encoder, view),
-            &mut pixels,
+            &mut renderer,
+            &scene,
+            &camera,
+            &target,
+            &directory.join(format!("{mode}.png")),
         )?;
-        write_png(&directory.join(format!("{mode}.png")), extent, &pixels)?;
         eprintln!("Rendered {mode} diagnostic (no shadows or IBL).");
     }
+    let mut lo = model_views[0].1.min();
+    let mut hi = model_views[0].1.max();
+    for (_, bounds) in &model_views {
+        lo = std::array::from_fn(|i| lo[i].min(bounds.min()[i]));
+        hi = std::array::from_fn(|i| hi[i].max(bounds.max()[i]));
+    }
+    let standard = standard_camera(extent, Aabb::new(lo, hi)?)?;
+    capture(
+        &gpu,
+        &mut renderer,
+        &scene,
+        &standard,
+        &target,
+        &directory.join("standard.png"),
+    )?;
+    for (index, &(selected, bounds)) in model_views.iter().enumerate() {
+        for &(id, _) in &model_views {
+            scene.set_visible(id, id == selected)?;
+        }
+        let inspection = standard_camera(extent, bounds)?;
+        capture(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &inspection,
+            &target,
+            &directory.join(format!("model-{}.png", index + 1)),
+        )?;
+        let lo = bounds.min();
+        let hi = bounds.max();
+        let bottom = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, hi[2]];
+        let top = [bottom[0], bottom[1], lo[2]];
+        let a = camera.project(bottom)?.0;
+        let b = camera.project(top)?.0;
+        let tracked_angle = (b[0] - a[0]).atan2(a[1] - b[1]).to_degrees();
+        eprintln!(
+            "Model {}: tracked projection of a world-vertical line tilts {:.1} degrees; standard view is level.",
+            index + 1,
+            tracked_angle
+        );
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_view_fits_bounds_and_preserves_verticals() {
+        let bounds = Aabb::new([-3.0, -2.0, -8.0], [3.0, 2.0, 0.0]).unwrap();
+        for (w, h) in [(1280, 720), (720, 1280)] {
+            let extent = ImageExtent::new(w, h).unwrap();
+            let camera = standard_camera(extent, bounds).unwrap();
+            assert_eq!(camera.intrinsics().skew, 0.0);
+            for x in [-3.0, 3.0] {
+                for y in [-2.0, 2.0] {
+                    let bottom = camera.project([x, y, 0.0]).unwrap().0;
+                    let top = camera.project([x, y, -8.0]).unwrap().0;
+                    assert!((bottom[0] - top[0]).abs() < 1e-9);
+                    assert!(top[1] < bottom[1]);
+                    for pixel in [bottom, top] {
+                        assert!((0.0..f64::from(w)).contains(&pixel[0]));
+                        assert!((0.0..f64::from(h)).contains(&pixel[1]));
+                    }
+                }
+            }
+        }
+    }
 }

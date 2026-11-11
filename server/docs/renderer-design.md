@@ -65,6 +65,12 @@ Ti+C projective estimate, not accepted physical calibration. Private input and
 output remain local-only. This example is not a new public wire schema or a
 replacement for the required NativeSocket/WebSocket interactive path.
 
+For inspection, the example additionally emits `standard.png` and per-model
+`model-N.png` views. They reuse the ordinary FOV/look-at pinhole camera with a
+level optical axis, zero skew and bounds-based framing. Models and illumination
+are unchanged, and imported Ti/C are preserved for the comparison views.
+This separates camera-induced apparent tilt from actual model orientation.
+
 The current workspace is rooted at the repository root: `server/renderer`
 (`chr-renderer`), `server/runtime` (`chr-server`), `server/viewer` (`chr-app`),
 and `common` (`chr-common`). The current server renders a rotating triangle to
