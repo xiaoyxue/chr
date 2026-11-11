@@ -3,12 +3,14 @@
 pub mod camera;
 pub mod coordinates;
 mod gpu;
+mod mesh_renderer;
 mod offscreen;
 pub mod scene;
 mod sdi;
 mod triangle;
 
 pub use gpu::Gpu;
+pub use mesh_renderer::MeshRenderer;
 pub use offscreen::{OffscreenTarget, render_rotated_triangle_rgba, render_triangle_rgba};
 pub use sdi::UyvyConverter;
 pub use triangle::TriangleRenderer;

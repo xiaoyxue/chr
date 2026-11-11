@@ -1,6 +1,6 @@
 # Simplified renderer scope and design
 
-Status: **roadmap; CPU scene foundations implemented**. This document compares the local `trd`
+Status: **roadmap; scene, pinhole camera and unlit mesh foundations implemented**. This document compares the local `trd`
 reference at `9c7bccc` with the `chr` baseline at `dcebb33`. It proposes a smaller
 renderer, not a port of the reference application suite. The paired translation
 is [renderer-design.zh-CN.md](renderer-design.zh-CN.md).
@@ -15,7 +15,7 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: GLB/EXR decoding, texture bindings, GPU mesh/PBR
+not a live scene-control protocol: GLB/EXR decoding, texture bindings, GPU PBR
 rendering, area/atmosphere lighting and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
@@ -24,6 +24,15 @@ FOV/look-at, or Ti+C. It provides native-pixel projection, pixel-to-world rays
 and a column-major WGSL clip matrix with metric near/far depth. Ti+C uses a
 derived proper optical frame while retaining the original Ti coefficients.
 This does not add lens distortion or change the live input protocol.
+
+`MeshRenderer` supplies the shared indexed, opaque unlit/depth baseline.
+Meshes stay GPU-resident while referenced by the prepared view; instance/part
+uniforms and depth targets are reused. The M1 example renders a synthetic pitch
+and grounded, face-coloured boxes to `output/renderer/milestone-m1.png`.
+Run `cargo run --locked -p chr-app --example mesh_milestone` from the repository
+root in its development environment. This image demonstrates camera projection,
+mesh placement and occlusion, not PBR or shadows; it is not the #40 interactive
+Socket/WebSocket acceptance.
 
 The current workspace is rooted at the repository root: `server/renderer`
 (`chr-renderer`), `server/runtime` (`chr-server`), `server/viewer` (`chr-app`),
