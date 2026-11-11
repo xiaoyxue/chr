@@ -15,6 +15,8 @@
 | Shared protocol | [Protocol conventions](protocol-conventions.md) | 所有方法共用的消息封装、标识、错误、schema 记法及完整消息示例。 |
 | Execution | [Execution model](execution-model.md) | Effect、生效位置、逻辑时间、批处理和模拟重放。 |
 | Business methods | [Cam1 input recording](recording-control.md) | 录制 params、result、state、errors、产物及业务验证场景。 |
+| Business methods | [Calibration records](calibration-control.md) | atlas/Ti/C 记录及 create/get/load 的核心职责。 |
+| Frame pipeline | [Frame ingestion and rendering](render-frame-input.md) | 首期 pinhole 范围、scene 上下文、帧发布/渲染提交与资源生命周期。 |
 | Discussion | [Open decisions](open-decisions.md) | 尚未解决的问题索引，不复制各文档已确认的决定。 |
 | Renderer contract | [Coordinate contract](../render/docs/coordinates.md) | 已实现的坐标与投影契约。 |
 
@@ -52,6 +54,8 @@ Shared protocol 和 Execution 的共同基础，再在 Business methods 中逐�
 业务数据/时间约束、`Simulation acceptance`、`Open decisions`、`References`。
 没有对应内容的章节可以省略，不添加占位框架。
 每个方法必须列出 params、result 和成功 effect；错误与异步失败分开说明。
+补全核心指令集合时，可以先声明逻辑输入、结果和 effect，但必须显式标注字段级 schema
+尚未完成；不能将该阶段的清单当作可实现的完整接口。之后再逐个专题细化。
 
 ## Design references
 

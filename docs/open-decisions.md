@@ -29,6 +29,8 @@
 | Shared messages | ID 约束、错误码分配、schema 演进与传输适配。 | [Protocol conventions](protocol-conventions.md) |
 | Execution | 时间编码、时间线映射、生效记录、冲突顺序、保护时钟与批处理调度。 | [Execution model](execution-model.md) |
 | Recording | 产物组织、录制规格、时间范围、错误策略及候选 payload 的确认。 | [Cam1 input recording](recording-control.md) |
+| Calibration | 任务/记录 schema、机位与坐标绑定、load 生效边界及存储方式。 | [Calibration records](calibration-control.md) |
+| Frame rendering | 帧引用、scene 快照、帧池/数据入口、提交结果和失败策略。 | [Frame ingestion and rendering](render-frame-input.md) |
 
 后续按实际讨论补充业务文档，尚不创建占位接口：
 
@@ -50,8 +52,13 @@
 | Latency | 视频、几何和动画时刻如何关联，deadline 和超时如何处理。 |
 | Recording | 输入/输出录制需求、诊断关联与资源隔离。 |
 | Deployment | 模块部署、素材与校准交付、控制和媒体通道。 |
-| Geometry ingestion | 对接已有坐标契约，定义图像域、相机模型与几何不可用状态。 |
+| Geometry ingestion | 对接已有 pinhole 坐标契约，细化图像域、Ti/C 关联与几何不可用状态。 |
 | Failure recovery | 输入、渲染、进程或硬件失败的分别处理，是否需要外部旁路。 |
 
 渲染服务的具体部署及双输出提案由 [PR #4](https://github.com/xiaoyxue/chr/pull/4)
 单独推进；其方案仍需与这里的产品需求和执行约束对齐。
+
+## Deferred extensions
+
+畸变模型、逐帧真实场景遮挡/深度输入不纳入当前首期合同，后续再定义，
+不在当前 payload 中添加缺乏语义的可选占位字段。

@@ -16,6 +16,9 @@
 每个方法说明成功确认的是任务建立、修改已生效还是产物已完成，不能混用。
 方法需要记录其实际生效位置；任务准备、资源处理与运行保护不隐式修改内容时间。
 多个来源同时操作时的仲裁、相同逻辑时刻的排序和精确帧触发规则仍待确定。
+具体业务可以将加载与启用合并为一次操作；effect 的明确性不要求统一增加 activate 指令。
+例如 [Calibration records](calibration-control.md) 采用 load 即启用的方向。
+持久 scene 与提交时的候选快照绑定见 [Frame ingestion and rendering](render-frame-input.md)。
 
 ## Logical and runtime clocks
 
