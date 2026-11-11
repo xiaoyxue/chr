@@ -16,6 +16,11 @@
 这是库级基础，不是直播控制协议：GLB/EXR 解码、纹理绑定、GPU 网格/PBR 渲染、
 面光/大气以及 runtime 适配仍属后续工作。现有三角形路径不变。
 
+`chr_renderer::camera` 已实现经过校验的 K/pose、FOV/look-at 和 Ti+C 针孔相机，
+提供原生像素投影、像素到世界射线，以及包含度量 near/far 深度的列主序 WGSL clip 矩阵。
+Ti+C 派生正确的光学坐标基，同时保留原始 Ti 系数。
+这不包含镜头畸变，也不改变直播输入协议。
+
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
 `server/runtime`（`chr-server`）、`server/viewer`（`chr-app`）和
 `common`（`chr-common`）。当前服务已将旋转三角形送入模拟 SDI 端口，

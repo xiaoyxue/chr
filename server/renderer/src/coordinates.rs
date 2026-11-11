@@ -76,6 +76,11 @@ pub struct Ti {
 }
 
 impl Ti {
+    /// Original forward row-major coefficients, including the supplied scale.
+    pub fn rows(self) -> [[f64; 3]; 3] {
+        self.rows
+    }
+
     pub fn new(rows: [[f64; 3]; 3]) -> Result<Self, CoordinateError> {
         if !rows.iter().flatten().all(|value| value.is_finite()) {
             return Err(CoordinateError::NonFinite);
