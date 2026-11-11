@@ -1,6 +1,6 @@
 # 精简渲染器功能范围与设计
 
-状态：**路线图；CPU 场景基础已实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
+状态：**路线图；场景、针孔相机和 unlit 网格基础已实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
 的 `dcebb33`，提出更小的渲染器，而不是移植参考项目的整套应用。
 英文配对文档为 [renderer-design.md](renderer-design.md)。
 
@@ -13,13 +13,21 @@
 并拒绝过期或跨 scene 的句柄。仍被当前实例引用的资源不能删除；
 拒绝奇异 model matrix，隐藏使用显隐状态。
 几何与材质值共享保存，不随每个实例更新而复制。
-这是库级基础，不是直播控制协议：GLB/EXR 解码、纹理绑定、GPU 网格/PBR 渲染、
+这是库级基础，不是直播控制协议：GLB/EXR 解码、纹理绑定、GPU PBR 渲染、
 面光/大气以及 runtime 适配仍属后续工作。现有三角形路径不变。
 
 `chr_renderer::camera` 已实现经过校验的 K/pose、FOV/look-at 和 Ti+C 针孔相机，
 提供原生像素投影、像素到世界射线，以及包含度量 near/far 深度的列主序 WGSL clip 矩阵。
 Ti+C 派生正确的光学坐标基，同时保留原始 Ti 系数。
 这不包含镜头畸变，也不改变直播输入协议。
+
+`MeshRenderer` 已提供共享的索引、不透明 unlit/深度基础路径。
+网格在当前准备视图引用期间驻留 GPU，复用实例/材质分组 uniform 和深度目标。
+M1 样例将合成球场和贴地、按面着色的方盒渲染到
+`output/renderer/milestone-m1.png`。
+在仓库根开发环境执行 `cargo run --locked -p chr-app --example mesh_milestone`。
+该图用于展示相机投影、网格放置和遮挡，不是 PBR 或阴影效果，
+也不等于 #40 的 Socket/WebSocket 交互验收。
 
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
 `server/runtime`（`chr-server`）、`server/viewer`（`chr-app`）和

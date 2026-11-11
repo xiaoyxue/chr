@@ -22,6 +22,31 @@ The Linux renderer roadmap is described in
 pinhole/persistent-scene contract from later camera and lighting extensions;
 these are design targets, not implemented features.
 
+## M1: camera, indexed meshes and depth
+
+The shared `MeshRenderer` now draws static scene instances and material-part
+colours with camera depth. This is an opaque **unlit diagnostic baseline**, not
+PBR lighting, GLB loading, shadows or the interactive socket-controlled demo.
+The normal viewer/server triangle paths remain unchanged.
+
+From the repository root, render the synthetic pitch and grounded test models:
+
+```sh
+nix develop
+cargo run --locked -p chr-app --example mesh_milestone
+```
+
+The example saves `output/renderer/milestone-m1.png` and requires hardware GPU
+rendering. On a non-NixOS NVIDIA host, use the nixGL wrapper documented below:
+
+```sh
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo run --locked -p chr-app --example mesh_milestone
+```
+
+This is an offline core validation artifact, not a new client media stream or
+an alternative control channel.
+
 ## Render server
 
 `chr-server` renders the triangle offscreen (1280x720p50 by default) and takes
