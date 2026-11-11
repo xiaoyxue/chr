@@ -18,7 +18,7 @@
 | Business methods | [Calibration records](calibration-control.md) | atlas/Ti/C 记录及 create/get/load 的核心职责。 |
 | Frame pipeline | [Frame ingestion and rendering](render-frame-input.md) | 首期 pinhole 范围、scene 上下文、帧发布/渲染提交与资源生命周期。 |
 | Discussion | [Open decisions](open-decisions.md) | 尚未解决的问题索引，不复制各文档已确认的决定。 |
-| Renderer contract | [Coordinate contract](../render/docs/coordinates.md) | 已实现的坐标与投影契约。 |
+| Renderer contract | [Coordinate contract](../server/docs/coordinates.md) | 已实现的坐标与投影契约。 |
 
 业务讨论按 Product → Architecture → Responsibilities 展开；方法设计使用
 Shared protocol 和 Execution 的共同基础，再在 Business methods 中逐项细化。
@@ -65,7 +65,8 @@ Fusion 的现阶段定位见产品架构，不再复制历史远端部署假设�
 [Hong-Xiang/vchao#150](https://github.com/Hong-Xiang/vchao/pull/150)
 是历史讨论参考，不是 chr 的最终协议，也不覆盖本仓库的现有实现契约。
 [PR #4](https://github.com/xiaoyxue/chr/pull/4) 单独讨论渲染服务部署与输出设计；
-其未合并的目录调整、传输和硬件方案不在这里自动升级为已确认决定。
+其未合并提案不在这里自动升级为已确认决定。已经落地的目录、IPC 和服务端能力
+以当前实现及其契约为准，不因该设计 PR 尚未合并而视为待定。
 
 本组设计由 [tracking issue #1](https://github.com/xiaoyxue/chr/issues/1) 跟踪，
 [draft PR #2](https://github.com/xiaoyxue/chr/pull/2) 持续记录讨论结果。

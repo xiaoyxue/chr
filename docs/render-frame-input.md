@@ -6,7 +6,7 @@
 **Scope:** 逐帧画面和几何如何进入渲染，如何引用 scene 状态，以及输入资源的生命周期。
 
 **Depends on:** [Protocol conventions](protocol-conventions.md)、[Execution model](execution-model.md)、
-[Coordinate contract](../render/docs/coordinates.md)。
+[Coordinate contract](../server/docs/coordinates.md)。
 
 ## Confirmed decisions
 

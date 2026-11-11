@@ -53,9 +53,10 @@ chr → 实时视频 → 实时追踪服务 → 逐帧 Ti → chr
 
 以上是组件责任，不要求把采集、编码、追踪通信、渲染与输出放在同一线程或同一子进程中。
 
-控制侧与实时侧可考虑 WebSocket/WebRTC 或其他适当协议。
-为 CLI 跨进程控制，也可考虑直接使用本地文件 socket；具体机制与必要性待定。
-不能在这里默认所有控制、素材和视频都走同一种通道。
+现有运行时通过 NativeSocket 和 WebSocket 接收控制，两者使用同一处理路径。
+客户端通过 WebRTC 接收 SDI 输出的监看画面；它不是另一个控制通道。
+已实现的 IPC profile 由通用协议文档指向权威实现。未来素材、视频输入等数据通道仍需各自定义，
+不能默认它们全部复用控制通道。
 
 业务命令及其 effect 应独立于发起来源：WebUI、CLI 或固定 trigger 均可发起操作。
 上图是主要用户交互路径，不排除其他控制来源。先明确业务语义，再细化模块适配和传输方式。
@@ -104,17 +105,23 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 ## Current implementation
 
 目录以 [Development environment](development.md) 和根 `AGENTS.md` 为准。
-当前渲染工作区已经导入，不能再视为只有占位目录：
+当前 Cargo 工作区位于仓库根，服务端与共享协议已经有可运行实现：
 
 | Path | Implemented responsibility |
 | --- | --- |
-| `render/crates/chr-core/` | 共享坐标数学、GPU 初始化与 wgpu 渲染。 |
-| `render/native/chr-app/` | 原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
+| `server/renderer/` | `chr-renderer`：共享坐标数学、GPU 初始化与 wgpu 渲染。 |
+| `server/runtime/` | `chr-server`：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及其 WebRTC 监看。 |
+| `server/viewer/` | `chr-app`：原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
+| `common/` | `chr-common`：共享控制消息、方法和 NativeSocket/WebSocket IPC 实现。 |
+| `client/example/render-harness/` | 浏览器示例客户端和验证 harness，不等同于完整业务 WebUI。 |
 
-遵守 [render/AGENTS.md](../render/AGENTS.md)：渲染算法留在 core，交付壳不维护另一套渲染实现。
-现有 [renderer](../render/README.md) 是原生/离屏三角形切片，不是已实现的 SDI、录制、
-实时追踪或浏览器服务。已有坐标契约见 [Coordinate contract](../render/docs/coordinates.md)。
+遵守 [server/AGENTS.md](../server/AGENTS.md)：渲染算法留在 renderer，交付壳不维护另一套渲染实现。
+现有 [server](../server/README.md) 输出三角形的模拟 SDI 画面，监看链路编码该输出并发送给浏览器。
+当前编码使用 CPU readback 后的软件编码，是开发实现，不是已验证的硬件零拷贝链路。
+实际 SDI 采集/输出硬件、视频输入、录制、实时追踪和 calibration 管线仍未实现。
+已有坐标契约见 [Coordinate contract](../server/docs/coordinates.md)。
 
-`client/src/` 目前仍是占位目录；`common/src/` 和 `algorithm/src/` 的实现栈未定。
-后续 WebUI/Local Server 集成应结合实际实现细化，而不是在此重复搭建。
+`client/src/` 目前仍是占位目录；`common/` 已是 Rust 协议的权威实现，TypeScript 客户端镜像其类型。
+只有 `algorithm/src/` 的实现栈仍未定。后续业务 WebUI/Local Server 集成应结合现有协议与示例，
+而不是在此重复搭建或把示例客户端当作完整产品。
 渲染服务部署提案 #4 不改变这里记录的现有路径或自动确认产品级待决问题。

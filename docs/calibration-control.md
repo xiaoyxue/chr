@@ -5,7 +5,7 @@
 **Scope:** 扫描录像到机位标定记录的生成、查询和加载，不定义建模或 tracking 算法。
 
 **Depends on:** [Protocol conventions](protocol-conventions.md)、[Execution model](execution-model.md)、
-[Cam1 input recording](recording-control.md)、[Coordinate contract](../render/docs/coordinates.md)。
+[Cam1 input recording](recording-control.md)、[Coordinate contract](../server/docs/coordinates.md)。
 
 ## Confirmed decisions
 

@@ -16,8 +16,31 @@
 - 中文可以用于解释语义，但不是 wire value。例如录制中编码为 `recording`，
   不编码为中文描述，也不允许客户端依赖显示文案分支。
 
-这个决定不要求视频、逐帧几何或批量媒体数据使用 JSON，也不选择 HTTP、WebSocket、
-WebRTC、本地 socket 或实现库。传输上的消息分帧、连接与订阅机制后续确定。
+这不要求视频、逐帧几何或批量媒体数据使用 JSON。已实现的控制传输见下一节；
+新增数据通道和未来传输适配不因共用消息封装而自动确定。
+
+## Implemented profile
+
+`common/` 的 Rust crate `chr-common` 是现有协议和 IPC 的权威实现；
+TypeScript 客户端镜像其类型，不另造不相容的消息或 socket framing。
+
+| Area | Source of truth |
+| --- | --- |
+| Message types and validation | [common/src/jsonrpc.rs](../common/src/jsonrpc.rs) |
+| Implemented method payloads | [common/src/methods.rs](../common/src/methods.rs) |
+| NativeSocket framing | [common/src/framing.rs](../common/src/framing.rs) |
+| Transport handlers | [common/src/server.rs](../common/src/server.rs) |
+
+现有 [IPC contract](../common/src/lib.rs) 提供两个共享处理路径的入口：
+
+| Transport | Implemented framing |
+| --- | --- |
+| `NativeSocket` | Unix Domain Socket；每条消息以 4 字节 big-endian 长度开头，随后是 UTF-8 JSON payload。 |
+| `WebSocket` | 每个 text message 承载一条消息；监听地址限制为 loopback。 |
+
+两者进入同一 handler，控制语义不因入口而变化。WebRTC 的 signaling 属于控制消息，
+媒体传输不属于 `chr-common`；运行时的监看行为以 [server contract](../server/README.md) 为准。
+这与本组尚待细化的录制、标定和帧输入方法是不同成熟度，不能把候选 payload 当作已支持方法。
 
 ## Schema notation
 
@@ -177,5 +200,5 @@ JSON-RPC 本身不提供事件持久化、订阅或重放。重连后的状态�
 
 - 是否将请求 ID 限定为字符串，以及业务 schema 的版本和演进方式。
 - 跨 namespace 的业务错误码分配。
-- 各传输适配的连接、消息分帧、订阅、认证和重连机制。
+- 未来传输适配及尚未定义的订阅、认证、重连恢复行为，不重新选择已有 IPC framing。
 - 业务操作身份、去重范围和重启持久性；不从标准 ID 推导。
