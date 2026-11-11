@@ -215,6 +215,40 @@ The example accepts an optional final `--environment <local.exr>`; without it,
 M9 captures explicitly use a synthetic studio panorama. No physical atmosphere,
 scene sky occlusion or live-control integration is implied.
 
+The native `composition::FrameCompositor` now accepts descriptor-validated
+caller-owned GPU images, a retained scene, `CameraView` and a fixed output
+configuration. It does not own frame identity, acquisition, scheduling or
+producer synchronization. GPU image contents must satisfy the declared transfer/
+alpha contract and use the same device; external leases remain live until GPU
+completion.
+All colour uses sRGB/Rec.709 D65 primaries; transfer tags are not gamut conversion.
+
+Composition uses linear-premultiplied intermediates: scene backgrounds, CG and
+scene foregrounds are combined before one configured exposure/tone-map; display
+backgrounds and foregrounds surround that transformed scene without receiving
+its exposure again. Straight images are premultiplied before filtering. Resolved
+MSAA CG is unpremultiplied before tone mapping and premultiplied again afterward.
+Input/output transfers are explicit Linear, sRGB or BT.709 with validated format
+pairings. The existing RGBA16F scene/intermediate range remains the bound.
+
+CG and native image rectangles share the native camera extent and one configured
+Contain/Cover/Stretch output fit, with no Ti rewrite or extra half-pixel offset.
+Display foregrounds use output-pixel rectangles. Output is a validated whole
+single-mip, single-sample caller texture; fixed output alpha may be straight or
+linear-premultiplied before encoding. Linear output means display-linear after
+the scene tone-map, not bypassed HDR radiance. Sky remains CG, so its background
+visibility is explicit rather than silently suppressed for a plate.
+
+The shared scene renderer supplies depth, shadows, IBL and 1x/4x shaded CG. Image
+layers never become virtual geometry or shadow casters. Source bindings are
+replaced per prepared frame and native canvases resize without changing output
+configuration. Invalid metadata, targets and additional-canvas budgets fail
+explicitly. `composition_milestone` provides a synthetic colour/lifetime example;
+CPU/GPU tests cover exact native fitting, premultiplied alpha, colour-domain
+separation, BT.709, virtual depth, orthographic/MSAA joins and source replacement.
+This closes the renderer-only boundary, not the pending scene/frame wire contract,
+runtime resource/scheduling integration or SDI-derived monitor acceptance.
+
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,
 and writes sun/point/spot comparison PNGs. Camera input remains a conditional

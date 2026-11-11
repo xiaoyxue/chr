@@ -263,6 +263,51 @@ Automated CPU/GPU checks cover HDR energy, roughness, reflection/background
 rotation, visibility independence, AO/direct-shadow separation, cache replacement
 and budget errors. No manual image approval is required.
 
+## Native image composition
+
+`composition::FrameCompositor` records renderer-only image/CG composition into a
+caller-supplied whole texture. `ImageView::new` validates a single-sample 2D
+sampleable colour texture and its explicit Linear/sRGB/BT.709 transfer pairing.
+GPU contents and same-device/producer synchronization remain caller contracts.
+Primaries are sRGB/Rec.709 D65 throughout; transfer tags do not perform gamut conversion.
+It does not acquire frame resources, parse `FrameKey`, schedule frames or stream media.
+
+Layers have explicit stages: scene-linear background/foreground around CG, then
+display-referred background/foreground around the scene output transform. All
+intermediates use linear-light premultiplied alpha. Straight inputs are decoded
+and premultiplied before filtering, preventing transparent-colour fringes.
+MSAA CG is resolved in HDR, unpremultiplied for tone mapping and premultiplied
+again for composition. Display plates/overlays bypass scene exposure and tone mapping.
+
+Scene and display-background rectangles use native camera pixels; display
+foreground rectangles use output pixels. The configured Contain/Cover/Stretch
+fit applies equally to native CG and native image layers, without altering Ti,
+intrinsics or pixel-centre conventions. Sky remains part of CG; hide its
+background when a plate should be visible behind geometry.
+
+`CompositionOutput` fixes extent, fit, PBR/output transform, transfer, output
+alpha representation, clear colour and additional-canvas budget. Default output
+is straight sRGB over opaque black. Linear output is display-linear after the
+configured scene tone map, not an HDR export bypass. Encoded premultiplied output
+means premultiplication in linear light before encoding. Unsupported target
+format/transfer/extent/sample/mip combinations fail explicitly.
+
+Call `prepare`, `encode`, then submit before preparing another frame. Bind groups
+retain GPU handles, but the runtime must retain external leases and prevent
+producer overwrites until completion. `set_sample_count` enables shaded 1x/4x CG;
+diagnostic display views remain on `MeshRenderer`, rather than being tone-mapped
+as scene radiance.
+
+```sh
+cargo run --locked -p chr-app --example composition_milestone
+```
+
+This synthetic offscreen example verifies that changing CG exposure leaves its
+display plate and overlay unchanged. GPU regressions cover colour domains,
+premultiplied filtering, BT.709, native Ti alignment, virtual depth, orthographic/
+pinhole MSAA, source replacement, resize and budget/target failures. These checks
+need no server and do not claim live protocol or physical SDI acceptance.
+
 ## Render server
 
 `chr-server` renders the triangle offscreen (1280x720p50 by default) and takes
