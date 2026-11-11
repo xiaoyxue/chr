@@ -88,8 +88,8 @@ or temporal accumulation; receiver-plane correction applies to both stages.
 Quality-only changes and camera motion reuse the maps. Large kernels are capped
 and thin blockers may be missed; this remains a single-average-blocker approximation.
 The `shadow-pcss.png` capture retains M3 lighting; `shadow-pcss-wide.png` increases
-source radii fourfold without changing energy. Cascades, per-light
-mode selection, sky visibility and finite-area BRDF integration remain unimplemented.
+source radii fourfold without changing energy. Cascades,
+sky visibility and finite-area BRDF integration remain unimplemented.
 PCSS is high priority; area/LTC is now low priority.
 
 Algorithm reference: NVIDIA's
@@ -124,8 +124,26 @@ Point contact-hardening is also compared with independent emitter visibility.
 Memory budgets count six layers per point. M5 `point-*` captures explicitly use
 1024 resolution for sun + four points (25 layers, 100 MiB); M3/M4 `shadow-*`
 retain sun + four spots at 2048. Hard/PCF/PCSS and camera changes reuse unchanged
-maps. Per-light mode selection, cascades, broad performance acceptance, sky/IBL
+maps. Cascades, broad performance acceptance, sky/IBL
 and area/LTC remain follow-ups.
+
+M6 adds `Light::shadow_mode: Option<ShadowMode>` for all three light kinds.
+`None` inherits the frame's default mode; an explicit Off suppresses only
+visibility, not direct illumination. Explicit enabled modes work with an Off
+frame default. The enum lives in GPU-independent scene state and keeps its
+crate-root re-export.
+
+Map allocation and cache identity include the effective active light set, and
+only effective PCSS lights contribute to PCSS quality validation/sample budgets.
+Default filter changes reuse maps if the active set stays unchanged; authored
+override edits change the scene snapshot and conservatively rebuild maps.
+The unlit path ignores overrides. GPU tests isolate coloured light contributions
+and verify inherited/explicit modes, disabled-map savings, active-set changes,
+budgets and unlit behavior without relying on manual image review.
+The `point-mixed.png` diagnostic keeps the same sun/four-point energy and 1024
+resolution, assigning sun PCSS and corner points Hard/PCF/PCSS/Off in X/Y order.
+It needs 19 layers (76 MiB); the shadow-disabled point still illuminates.
+This does not add live scene-control protocol support.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,

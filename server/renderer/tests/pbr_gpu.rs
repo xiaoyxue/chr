@@ -108,6 +108,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                     direction: [0.0, 0.0, 1.0],
                     irradiance: [std::f32::consts::PI; 3],
                     angular_radius: 0.0,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -142,6 +143,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 position: [0.0, 0.0, -2.0],
                 intensity: [4.0 * std::f32::consts::PI; 3],
                 source_radius: 0.0,
+                shadow_mode: None,
             },
             1.0,
         ),
@@ -150,6 +152,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 position: [0.0, 0.0, -4.0],
                 intensity: [4.0 * std::f32::consts::PI; 3],
                 source_radius: 0.0,
+                shadow_mode: None,
             },
             0.25,
         ),
@@ -161,6 +164,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 inner_angle: 0.2,
                 outer_angle: 0.5,
                 source_radius: 0.0,
+                shadow_mode: None,
             },
             1.0,
         ),
@@ -172,6 +176,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 inner_angle: 0.2,
                 outer_angle: 0.5,
                 source_radius: 0.0,
+                shadow_mode: None,
             },
             0.0,
         ),
@@ -181,6 +186,37 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
             .unwrap();
         let pixel = capture(&gpu, &mut renderer, &scene, &camera, 1.0)[center];
         assert!(pixel.abs_diff(encoded(gain * (0.96 * linear + 0.01))) <= 3);
+    }
+
+    let ray = camera.ray([32.5, 32.5]).unwrap();
+    let distance = -ray.origin[2] / ray.direction[2];
+    let receiver: [f64; 3] = std::array::from_fn(|i| ray.origin[i] + ray.direction[i] * distance);
+    for angle in [0.19_f64, 0.2, 0.21, 0.35, 0.49, 0.5, 0.51] {
+        scene
+            .set_lighting(
+                Lighting::new(
+                    vec![Light::Spot {
+                        position: [receiver[0], receiver[1], -2.0],
+                        direction: [angle.sin(), 0.0, angle.cos()],
+                        intensity: [4.0 * std::f32::consts::PI; 3],
+                        inner_angle: 0.2,
+                        outer_angle: 0.5,
+                        source_radius: 0.0,
+                        shadow_mode: None,
+                    }],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let t = ((angle.cos() - 0.5_f64.cos()) / (0.2_f64.cos() - 0.5_f64.cos())).clamp(0.0, 1.0)
+            as f32;
+        let gain = t * t * (3.0 - 2.0 * t);
+        let actual = capture(&gpu, &mut renderer, &scene, &camera, 1.0)[center];
+        assert!(
+            actual.abs_diff(encoded(gain * (0.96 * linear + 0.01))) <= 3,
+            "spot cone transition at {angle} radians"
+        );
     }
 
     scene.set_lighting(original.lighting().clone()).unwrap();

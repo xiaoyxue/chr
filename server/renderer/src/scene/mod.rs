@@ -14,7 +14,7 @@ use std::sync::{
 
 use thiserror::Error;
 
-pub use appearance::{EnvironmentMap, Light, Lighting, PbrMaterial, SkyLight};
+pub use appearance::{EnvironmentMap, Light, Lighting, PbrMaterial, ShadowMode, SkyLight};
 pub use geometry::{Aabb, MeshAttributes, MeshData, ModelMatrix};
 use storage::{Key, Store};
 pub use texture::{Filter, MaterialMaps, TextureData, TextureSampler, Wrap};

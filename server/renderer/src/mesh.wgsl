@@ -147,11 +147,12 @@ fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f
 }
 
 fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+    let mode=u32(light.pcss.w);
     let radius=length(receiver);
     if radius<light.shadow_depth.x || radius>=light.shadow_depth.y {return 1.0;}
     let direction=receiver/radius;
     let plane=cross(px,py);
-    if camera.options.z==1u || (camera.options.z==3u && light.pcss.x==0.0) {
+    if mode==1u || (mode==3u && light.pcss.x==0.0) {
         let depths=point_depths(light,direction,receiver,plane);
         return select(0.0,1.0,depths.y<=depths.x);
     }
@@ -159,7 +160,7 @@ fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f
     let tangent=normalize(cross(direction,up));
     let bitangent=cross(direction,tangent);
     let texel=2.0/f32(textureDimensions(shadow_maps).x);
-    if camera.options.z==2u {
+    if mode==2u {
         var visibility=0.0;
         let step=texel*light.shadow_params.w;
         for(var y=-1;y<=1;y++) {
@@ -262,7 +263,8 @@ fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>)->f32 {
 }
 
 fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
-    if camera.options.z==0u || light.shadow_params.x<0.0 {return 1.0;}
+    let mode=u32(light.pcss.w);
+    if mode==0u || light.shadow_params.x<0.0 {return 1.0;}
     if light.position_kind.w==1.0 {
         return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
     }
@@ -285,12 +287,12 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     if abs(determinant)>1e-12 {
         gradient=vec2(dx.z*uy.y-dy.z*ux.y,ux.x*dy.z-uy.x*dx.z)/determinant;
     }
-    if camera.options.z==1u || (camera.options.z==3u && light.pcss.x==0.0) {
+    if mode==1u || (mode==3u && light.pcss.x==0.0) {
         let pixel=clamp(vec2<i32>(uv*vec2<f32>(size)),vec2(0),vec2<i32>(size)-vec2(1));
         let offset=(vec2<f32>(pixel)+vec2(0.5))/vec2<f32>(size)-uv;
         return select(0.0,1.0,depth+dot(gradient,offset)<=textureLoad(shadow_maps,pixel,layer,0));
     }
-    if camera.options.z==3u {return pcss_visibility(light,uv,depth,gradient);}
+    if mode==3u {return pcss_visibility(light,uv,depth,gradient);}
     var visibility=0.0;
     let step=light.shadow_params.w/vec2<f32>(size);
     // Correct the receiver plane per tap; cover the bilinear footprint's depth slope.
