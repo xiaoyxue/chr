@@ -1,52 +1,67 @@
-# 产品与系统设计
+# Documentation guide
 
-状态：讨论草案。先明确业务流程和模块职责，再逐步细化数据模型、控制行为与技术接口。
-本目录不是已实现功能清单，也不是冻结的协议规范。
+**Status:** `draft` — 产品与协议讨论持续完善；不代表所有设计已经实现。
 
-## 阅读顺序
+**Scope:** 文档导航、内容归属和编辑格式。开发环境及渲染实现契约保留各自的权威入口。
 
-| 文档 | 解决的问题 |
+## Document map
+
+| Layer | Document | Owns |
+| --- | --- | --- |
+| Development | [Development environment](development.md) | 已有目录职责、工具链和开发命令。 |
+| Product | [Business workflow](business-workflow.md) | 四阶段业务流程、参与方、交接和阶段出口。 |
+| Architecture | [System architecture](system-architecture.md) | 产品边界、逻辑模块、数据流及现有实现与目标的区别。 |
+| Responsibilities | [Component responsibilities](component-responsibilities.md) | 各功能的操作、配置、执行和反馈归属。 |
+| Shared protocol | [Protocol conventions](protocol-conventions.md) | 所有方法共用的消息封装、标识、错误、schema 记法及完整消息示例。 |
+| Execution | [Execution model](execution-model.md) | Effect、生效位置、逻辑时间、批处理和模拟重放。 |
+| Business methods | [Cam1 input recording](recording-control.md) | 录制 params、result、state、errors、产物及业务验证场景。 |
+| Discussion | [Open decisions](open-decisions.md) | 尚未解决的问题索引，不复制各文档已确认的决定。 |
+| Renderer contract | [Coordinate contract](../render/docs/coordinates.md) | 已实现的坐标与投影契约。 |
+
+业务讨论按 Product → Architecture → Responsibilities 展开；方法设计使用
+Shared protocol 和 Execution 的共同基础，再在 Business methods 中逐项细化。
+开发和渲染文档独立维护，不为统一讨论文档外观而重复或改写其约束。
+
+## Ownership rules
+
+每项约定有一个主要维护位置，其他文档通过链接使用：
+
+- 通用封装只在 `protocol-conventions.md` 定义。具体方法默认遵守，不重复讲解版本、
+  request ID、notification 或标准错误；方法示例只展示业务 payload。
+- 跨方法的时间和 effect 规则放在 `execution-model.md`。业务页只补充自己的边界与场景。
+- 产品目标不等于代码现状。目录和已实现能力引用开发及模块文档，不把提案写成已有功能。
+- 已确认决定保留在负责该主题的文档，`open-decisions.md` 只跟踪仍待解决的问题。
+- 私有 `reference/` 不是可发布文档素材，不引入其资产或实验数据。
+
+## Document format
+
+本组设计文档使用英文标题与章节名，解释性正文可用中文；
+协议标识的语言和命名规则以通用协议文档为准。
+文档开头依次给出 `Status`、`Scope`，有前置文档时列出 `Depends on`。
+
+| Label | Meaning |
 | --- | --- |
-| [业务流程](business-workflow.md) | 谁在什么阶段做什么，使用和产出什么，怎样算完成。 |
-| [系统模块](system-architecture.md) | 各模块承担什么职责，数据怎样流动，哪些边界仍待讨论。 |
-| [功能归属](component-responsibilities.md) | 每项功能由谁操作、谁执行，跨模块需要传递什么。 |
-| [Protocol conventions](protocol-conventions.md) | 仓库级 JSON-RPC 2.0、英文协议标识及通用 request/response/error schema。 |
-| [Control effects and simulation](control-protocol.md) | 控制 effect、逻辑时间和模拟重放约束，不重复定义通用消息规范。 |
-| [Cam1 输入录制](recording-control.md) | 录制方法、effect、英文状态及各方法的 response payload schema 草案。 |
-| [待决问题](open-decisions.md) | 哪些产品与技术问题尚未确定，以及讨论它们的先后关系。 |
+| `draft` | 文档仍在演进，不代表业务 schema 已冻结。 |
+| `confirmed` | 已明确确认的决定，写在对应主题的 `Confirmed decisions` 或明确标注的段落中。 |
+| `proposed` | 供评审的具体候选，不能作为已获批准或已实现的依据。 |
+| `open` | 尚未决定；不能以默认值或实现便利隐式替代。 |
+| `implemented` | 必须有当前代码或实现契约依据，与产品目标分别表达。 |
 
-随着业务框架逐步明确，再按需要增加内容与投放、校准、渲染控制、素材与动画、
-视频输入输出、具体接口等文档。不提前冻结尚未讨论确认的命令或字段。
-具体业务可以先给出候选命令结构，但必须与已确认语义区分，不能当作冻结接口。
+业务方法文档依次组织为 `Scope`（在文首）、`Confirmed decisions`、`Methods`、
+`Effects and state`、`Payload schemas`、`Errors`、`Payload examples`、
+业务数据/时间约束、`Simulation acceptance`、`Open decisions`、`References`。
+没有对应内容的章节可以省略，不添加占位框架。
+每个方法必须列出 params、result 和成功 effect；错误与异步失败分开说明。
 
-## 文档状态约定
+## Design references
 
-- **业务输入**：用户提供的历史流程和参考需求，保留其意图，不等于已经验收的最终需求。
-- **候选方案**：为讨论提出的职责划分或实现方式，未经确认不能作为固定接口依据。
-- **已确认**：经过明确讨论确认的决定；涉及的文档应同步更新。
-- **待决**：尚未解决，不能用默认值或技术选型隐式替代。
-
-## 参考与适用范围
-
-业务输入来自本次讨论提供的四阶段参考流程：赛前内容准备、场地扫描与校准、
-叠加测试、赛中直播。
-
-已确认：历史 `Fusion` 是 Public Web Server，首期不依赖它；先由本地 WebUI
-配套的 Local Server 读取本地数据。chr 初期有控制侧和实时渲染侧两大组件，
-面向用户的主要界面是 WebUI，CLI 可作为辅助入口。离线场景建模和实时追踪是
-另外两个逻辑模块，其算法实现可能不在本仓库，但与 chr 的接口需要在这里明确。
-
-已确认：实时渲染服务是现场视频运行时，负责组织 SDI 采集、实时追踪接入、
-渲染合成、视频输出及录制任务；控制侧负责业务配置和操作。这不规定内部线程或子进程划分。
-
-已确认：控制消息采用 JSON-RPC 2.0，传输、实现库和具体业务方法另行确定。
-业务设计需要考虑模拟与重放，使用明确的逻辑时间语义，不依赖当前系统墙钟。
-仓库级协议约定统一放在 `protocol-conventions.md`；协议字段、状态值和错误等具体标识使用英文，
-各业务方法明确自己的 response payload，不仅列出请求参数。
+历史业务输入是赛前内容准备、场地扫描与校准、叠加测试、赛中直播四阶段流程。
+Fusion 的现阶段定位见产品架构，不再复制历史远端部署假设。
 
 [Hong-Xiang/vchao#150](https://github.com/Hong-Xiang/vchao/pull/150)
-是几何、素材、控制、预览与 SDI 讨论的参考草案，不是本仓库的最终协议。
-其中的 wgpu、glTF/GLB、HTTP/WebSocket/WebRTC、延迟和失败策略均不因此自动定案。
+是历史讨论参考，不是 chr 的最终协议，也不覆盖本仓库的现有实现契约。
+[PR #4](https://github.com/xiaoyxue/chr/pull/4) 单独讨论渲染服务部署与输出设计；
+其未合并的目录调整、传输和硬件方案不在这里自动升级为已确认决定。
 
-几何约定可参考该 PR 引用的 vchao README。正式接口落地时仍需明确所采用的
-坐标、矩阵方向、图像域和版本，不能只依赖另一仓库不断变化的文字。
+本组设计由 [tracking issue #1](https://github.com/xiaoyxue/chr/issues/1) 跟踪，
+[draft PR #2](https://github.com/xiaoyxue/chr/pull/2) 持续记录讨论结果。

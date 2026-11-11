@@ -1,14 +1,17 @@
-# 系统模块与职责
+# System architecture
 
-状态：四模块逻辑划分与初期产品边界已确认；模块内部职责、接口与部署细节继续讨论。
-逻辑模块不等于独立进程或网络服务。
+**Status:** `draft` — 产品边界和四模块划分为 `confirmed`，部署与接口细节仍有候选方案。
 
-## 已确认的产品边界
+**Scope:** 产品目标、逻辑模块、数据流以及它们与当前代码的关系。
+
+**Depends on:** [Development environment](development.md)。
+
+## Confirmed decisions
 
 chr 初期有两大交付组件：
 
 - **控制侧：WebUI + Local Server**。主要用户界面是 WebUI，Local Server
-  为其提供本地能力，首期可以读取本地数据。该组件即将集成到仓库，本文不规定其内部实现。
+  为其提供本地能力，首期可以读取本地数据。该组件待集成，本文不规定其内部实现。
 - **实时渲染侧：本地 CLI/服务**。可独立运行，作为现场视频运行时组织 SDI 采集、
   追踪服务接入、渲染合成、输出及录制任务。与控制侧跨进程通信，CLI 也可作为辅助控制入口。
 
@@ -16,9 +19,9 @@ chr 初期有两大交付组件：
 除服务端静态场景建模外，内容管理、现场准备、录制、调整、预览与直播控制均在 chr
 产品范围内；实时追踪算法也可能在外部，但输入与结果接入是 chr 的职责。
 
-## 四个逻辑模块
+## Logical modules
 
-| 模块 | 核心职责 | 代码范围 |
+| Module | Responsibility | Repository scope |
 | --- | --- | --- |
 | 控制 WebUI（含 Local Server） | 广告位信息管理、业务操作、现场工作流、状态呈现和交互预览。 | chr；WebUI 与 Local Server 的内部拆分后续细化。 |
 | 实时渲染服务（现场视频运行时） | 组织 SDI 采集、实时追踪接入、逐帧渲染合成、视频输出及录制任务，执行运行时控制。 | chr，以本地 CLI/服务形式运行。 |
@@ -28,7 +31,7 @@ chr 初期有两大交付组件：
 Local Server 属于控制侧，不另计为第五个大模块。离线与实时分析也不因名称中有
 “服务”就要求远端部署；可否本地运行、使用什么传输方式均未冻结。
 
-## 控制与数据连接
+## Control and data flow
 
 ```text
 用户
@@ -54,9 +57,9 @@ chr → 实时视频 → 实时追踪服务 → 逐帧 Ti/可选畸变参数 →
 业务命令及其 effect 应独立于发起来源：WebUI、CLI 或固定 trigger 均可发起操作。
 上图是主要用户交互路径，不排除其他控制来源。先明确业务语义，再细化模块适配和传输方式。
 通用消息规范见 [Protocol conventions](protocol-conventions.md)；
-逻辑时间与模拟要求见 [Control effects and simulation](control-protocol.md)。
+逻辑时间与模拟要求见 [Execution model](execution-model.md)。
 
-## 准备与直播路径
+## Preparation and live paths
 
 准备路径：
 
@@ -78,15 +81,12 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 采集、合成与输出归现场视频运行时组织，但其内部进程、缓存和调度方式尚未冻结，
 也不要求当前帧分析结果必须同步返回。视频、几何和渲染如何关联及处理时限属于后续接口设计。
 
-实时处理允许有界延迟窗口、时序分析和批处理，输出仍按连续的视频节奏给出。
-固定延迟 25 帧、输出 50 FPS 是讨论示例（约 500 ms），不是冻结的输出规格，
-也不等于固定每批处理 25 帧。窗口信息可用于算法估计与批量处理；
-实际可用预算需同时考虑采集、分析、渲染和输出调度。
-内部按批处理不改变每帧的身份及结果关联要求。
+实时执行的延迟窗口与批处理语义由 execution model 统一描述，不以图中的箭头顺序
+要求每帧同步执行完所有阶段。
 
-## 保持独立的业务概念
+## Domain boundaries
 
-| 概念 | 需要区分的原因 |
+| Concept | Boundary |
 | --- | --- |
 | 球场与 session | 球场基础信息长期存在，session 的覆盖范围与生命周期仍需定义。 |
 | 布置方案与当前呈现状态 | 希望呈现的内容和实际输出状态不一定相同。 |
@@ -96,10 +96,20 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 | 原始追踪结果与人工修正 | 应能分辨算法输入和人工操作的效果；具体保存和组合方式待决。 |
 | 虚拟视角预览与实际输出 | 浏览器查看虚拟场地不等于改变直播相机或证明直播合成正确。 |
 
-## 与仓库结构的关系
+## Current implementation
 
-现有约定：`client/src/` 主要使用 TypeScript，`render/src/` 主要使用 Rust，
-`common/src/` 放共享通信协议；`algorithm/src/` 的语言与技术栈未定。
+目录以 [Development environment](development.md) 和根 `AGENTS.md` 为准。
+当前渲染工作区已经导入，不能再视为只有占位目录：
 
-这些是代码组织约定，不决定渲染 API、素材格式或各分析模块的技术栈。
-即将集成的 WebUI/Local Server 应在集成后结合实际实现细化，而不是在此重复搭建。
+| Path | Implemented responsibility |
+| --- | --- |
+| `render/crates/chr-core/` | 共享坐标数学、GPU 初始化与 wgpu 渲染。 |
+| `render/native/chr-app/` | 原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
+
+遵守 [render/AGENTS.md](../render/AGENTS.md)：渲染算法留在 core，交付壳不维护另一套渲染实现。
+现有 [renderer](../render/README.md) 是原生/离屏三角形切片，不是已实现的 SDI、录制、
+实时追踪或浏览器服务。已有坐标契约见 [Coordinate contract](../render/docs/coordinates.md)。
+
+`client/src/` 目前仍是占位目录；`common/src/` 和 `algorithm/src/` 的实现栈未定。
+后续 WebUI/Local Server 集成应结合实际实现细化，而不是在此重复搭建。
+渲染服务部署提案 #4 不改变这里记录的现有路径或自动确认产品级待决问题。

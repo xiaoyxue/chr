@@ -1,19 +1,27 @@
-# Control effects, logical time and simulation
+# Execution model
 
-状态：业务设计需要支持模拟与重放，不能依赖当前系统墙钟。
-具体 effect、业务方法和时间编码继续讨论。
+**Status:** `draft` — 模拟和重放要求为 `confirmed`，具体时间编码及调度策略为 `proposed`。
 
-## Scope
+**Scope:** 跨业务方法的 effect、生效位置、逻辑时间、批处理与模拟，不定义消息封装。
 
-JSON-RPC、英文协议标识、ID、response 和 error 的仓库级约定统一位于
-[Protocol conventions](protocol-conventions.md)，所有业务方法共用，不在本文重复定义。
-本文只讨论控制业务的 effect、生效位置、逻辑时间与模拟。
+**Depends on:** [Protocol conventions](protocol-conventions.md)。
 
-## 逻辑时间与运行时间
+## Confirmed decisions
+
+业务效果不能依赖当前系统墙钟或执行速度；真实输入与模拟输入使用相同业务语义。
+操作可由 WebUI、CLI 或固定 trigger 发起，不根据来源改变业务接口。
+
+## Effects and activation
+
+每个方法说明成功确认的是任务建立、修改已生效还是产物已完成，不能混用。
+方法需要记录其实际生效位置；任务准备、资源处理与运行保护不隐式修改内容时间。
+多个来源同时操作时的仲裁、相同逻辑时刻的排序和精确帧触发规则仍待确定。
+
+## Logical and runtime clocks
 
 业务时间与机器执行速度分离是设计约束。以下分层为后续接口提供讨论基础：
 
-| Time category | 用途 |
+| Time category | Purpose |
 | --- | --- |
 | `logical_time` / `media_time` | 录制范围、触发位置、动画进度和控制实际生效位置；模拟中可以暂停、步进或加速。 |
 | `monotonic_time` | 通信、设备和写入等运行保护及性能测量，不冒充内容时长。 |
@@ -35,7 +43,14 @@ JSON-RPC、英文协议标识、ID、response 和 error 的仓库级约定统一
 输入停顿时逻辑时间如何推进需单独规定，不能意外禁用设备超时等保护。
 测试中也应能控制保护时钟，而不是靠真实等待才能触发超时。
 
-## 模拟与重放的设计要求
+## Bounded latency and batching
+
+实时处理允许有界延迟窗口、时序分析和批处理，输出仍按连续的视频节奏给出。
+固定延迟 25 帧、输出 50 FPS 是讨论示例（约 500 ms），不是冻结的输出规格，
+也不等于固定每批处理 25 帧。可用预算需共同覆盖采集、分析、渲染和输出调度。
+内部按批处理不改变每帧的身份及结果关联要求。
+
+## Simulation acceptance
 
 真实 SDI、文件回放与模拟输入使用相同业务命令和状态语义，替换输入、时钟等边界，
 不引入一套测试专用业务协议。业务应可通过推进逻辑时间、注入帧及异常来验证。
@@ -53,7 +68,9 @@ JSON-RPC、英文协议标识、ID、response 和 error 的仓库级约定统一
 
 验证业务范围、状态与元数据关联，不未经约定要求不同编码器或 GPU 产物逐字节一致。
 
-## 对业务文档的要求
+## Open decisions
 
-每项控制功能逐步明确输入、effect、结果、错误、逻辑时间依据与可模拟的验证场景。
-具体参数不因本文中的示例自动定案；从 [Cam1 输入录制](recording-control.md) 开始细化。
+- 时间点、时长、时间线身份及不连续的具体编码。
+- 输入与输出时间线的映射、触发位置、冲突排序与生效记录。
+- 输入停顿时的时间推进和独立运行保护规则。
+- 延迟窗口、批次调度及 deadline 故障的策略。
