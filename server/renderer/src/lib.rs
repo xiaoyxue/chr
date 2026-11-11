@@ -1,6 +1,7 @@
 //! Shared rendering independent of window ownership and operating system.
 
 pub mod camera;
+pub mod composition;
 pub mod coordinates;
 mod diagnostics;
 pub use diagnostics::{DiagnosticOverlays, DiagnosticView, RenderSettings};

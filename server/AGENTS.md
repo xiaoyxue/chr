@@ -31,10 +31,12 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   WebRTC); do not add a second, render-direct client stream. The server's roles
   are the control plane (args over JSON-RPC), the render pipeline and its clock,
   the SDI output, and the monitor that encodes the output for clients.
-- The current slice is an RGB triangle with a display rotation and a simulated
-  SDI port. Encoding is software after a CPU readback, a development shortcut
-  rather than the intended GPU-to-hardware-encoder path. Scene formats, video
-  input, meshes, and camera calibration are not implemented.
+- The runtime product still renders an RGB triangle with display rotation and a
+  simulated SDI port; monitor encoding uses software after CPU readback.
+  The renderer library separately supports retained meshes, cameras, PBR,
+  shadows, IBL, diagnostics and native image composition. Its offscreen examples
+  do not establish live scene/frame control, capture, SDI hardware or encoder
+  interoperability. Keep that integration/acceptance boundary explicit.
 - Outputs must not block each other or the render loop: hand frames to their
   own threads through bounded queues and drop instead of waiting.
 - The repository root's `reference/` (`../reference/` from `server/`) holds

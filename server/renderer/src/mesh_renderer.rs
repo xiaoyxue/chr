@@ -918,6 +918,28 @@ impl MeshRenderer {
 
     /// Record only after successful prepare; GPU buffers stay owned by the renderer.
     pub fn encode(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        self.encode_passes(encoder, view, true);
+    }
+
+    pub(crate) fn linear_view(&self) -> Option<&wgpu::TextureView> {
+        self.hdr
+            .as_ref()
+            .filter(|_| self.pbr_active && self.settings.view == DiagnosticView::Shaded)
+            .map(|(_, view, _)| view)
+    }
+
+    pub(crate) fn encode_linear(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(view) = self.linear_view().cloned() {
+            self.encode_passes(encoder, &view, false);
+        }
+    }
+
+    fn encode_passes(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        output_transform: bool,
+    ) {
         self.shadow_passes_last_frame = 0;
         let Some((_, depth)) = &self.depth else {
             return;
@@ -965,11 +987,15 @@ impl MeshRenderer {
                 depth_slice: None,
                 resolve_target: self.msaa.as_ref().map(|_| destination),
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.018,
-                        g: 0.025,
-                        b: 0.04,
-                        a: 1.0,
+                    load: wgpu::LoadOp::Clear(if output_transform {
+                        wgpu::Color {
+                            r: 0.018,
+                            g: 0.025,
+                            b: 0.04,
+                            a: 1.0,
+                        }
+                    } else {
+                        wgpu::Color::TRANSPARENT
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -1013,7 +1039,7 @@ impl MeshRenderer {
             }
         }
         drop(pass);
-        if let Some((_, _, group)) = hdr {
+        if let Some((_, _, group)) = hdr.filter(|_| output_transform) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("single output transform"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1031,7 +1057,9 @@ impl MeshRenderer {
             pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.overlays.encode(encoder, view, &self.camera_group);
+        if output_transform {
+            self.overlays.encode(encoder, view, &self.camera_group);
+        }
     }
 
     fn pack_light(light: Light) -> Result<LightUniform, BoxError> {
