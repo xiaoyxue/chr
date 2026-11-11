@@ -1,5 +1,5 @@
 {
-  description = "chr shared Rust/wgpu renderer";
+  description = "chr TypeScript and Rust development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -32,6 +32,10 @@
           };
           toolchain = pkgs.rust-bin.fromRustupToolchainFile ./render/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
+          clientTools = with pkgs; [
+            nodejs
+            typescript
+          ];
           runtime = with pkgs; [
             vulkan-loader
             libGL
@@ -80,6 +84,17 @@
         {
           inherit app;
           checks = {
+            client-toolchain =
+              pkgs.runCommand "chr-client-toolchain"
+                {
+                  nativeBuildInputs = clientTools;
+                }
+                ''
+                  export HOME="$TMPDIR"
+                  node --version > "$out"
+                  npm --version >> "$out"
+                  tsc --version >> "$out"
+                '';
             fmt = craneLib.cargoFmt { inherit src; };
             clippy = craneLib.cargoClippy (
               common
@@ -103,6 +118,7 @@
               pkgs.pkg-config
               pkgs.nixfmt
             ]
+            ++ clientTools
             ++ runtime;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
             shellHook = ''
