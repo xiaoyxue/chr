@@ -1,5 +1,5 @@
 [package]
-name = "chr-core"
+name = "chr-renderer"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

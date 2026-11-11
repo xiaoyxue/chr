@@ -30,7 +30,7 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./render/rust-toolchain.toml;
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
           clientTools = with pkgs; [
             nodejs
@@ -46,11 +46,26 @@
             libxi
             libxrandr
           ];
+          # The Cargo workspace is at the root; its crates live under these directories.
+          rustRoots = [
+            "server"
+            "common"
+          ];
+          workspaceFiles = [
+            "Cargo.toml"
+            "Cargo.lock"
+            "rust-toolchain.toml"
+          ];
           src = pkgs.lib.cleanSourceWith {
-            src = ./render;
+            src = ./.;
             filter =
               path: type:
-              !builtins.elem (builtins.baseNameOf path) [
+              let
+                relative = pkgs.lib.removePrefix "${toString ./.}/" (toString path);
+                topLevel = builtins.head (pkgs.lib.splitString "/" relative);
+              in
+              (builtins.elem relative workspaceFiles || builtins.elem topLevel rustRoots)
+              && !builtins.elem (builtins.baseNameOf path) [
                 "reference"
                 "output"
                 "target"
@@ -58,6 +73,7 @@
                 ".worktree"
                 ".worktrees"
                 "result"
+                "node_modules"
               ]
               && !(pkgs.lib.hasPrefix "result-" (builtins.baseNameOf path))
               && (craneLib.filterCargoSources path type || pkgs.lib.hasSuffix ".wgsl" path);
@@ -122,7 +138,7 @@
             ++ runtime;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
             shellHook = ''
-              export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/render/target/linux"
+              export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"
             '';
           };
           formatter = pkgs.nixfmt;

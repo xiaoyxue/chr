@@ -3,13 +3,13 @@ name = "chr-app"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "Native Windows/Linux hello-triangle shell"
+description = "Native Windows/Linux window and headless shell for the renderer"
 
 [lints]
 workspace = true
 
 [dependencies]
-chr-core.workspace = true
+chr-renderer.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 log.workspace = true
