@@ -3,8 +3,9 @@
 `chr_server::frame_resources` implements the bounded native ownership slice of
 [#21](https://github.com/xiaoyxue/chr/issues/21), under the
 [limited synthetic contract](../../docs/scene-frame-contract.md).
-It is not connected to JSON-RPC, scene binding, the render scheduler, SDI, or
-the monitor. Existing runtime behavior is unchanged.
+The opt-in [synthetic submission owner](frame-submissions.md) connects it to
+publication RPCs and resource-backed admission through the retained adapter.
+The default daemon, SDI and monitor behavior remain unchanged.
 
 ## Registration and identity
 
@@ -85,9 +86,9 @@ it as an absent resource.
 against submission frame/position, and keeps that lease through its own bounded
 admission/scheduling lifetime. #38 can resolve synthetic image assets through
 `acquire_asset_id`. These callers do not need a string-to-resource registry:
-this module owns that lookup and all resource lifetimes. Transport handlers,
-scene binding, batch admission/result retention and error-to-wire mapping
-remain adapter work; adding them must not duplicate the resource owner.
+this module owns that lookup and all resource lifetimes. Transport handlers, scene binding, batch admission/result retention and
+error-to-wire mapping belong to the retained/submission adapters, which reuse
+this resource owner without another image registry.
 
 ## Caller lifetime and synchronization duties
 
@@ -118,7 +119,7 @@ remain adapter work; adding them must not duplicate the resource owner.
 Previously acquired leases remain usable. `cancel_write` similarly revokes an
 unpublished ticket without claiming producer completion. Neither operation
 completes physical work. Submission/cancellation/result handling is not part of
-this module; a future scheduler must retain its own leases and completion guards
+this module; the submission scheduler retains its own leases and completion guards
 even after a logical timeout, cancellation or public result release.
 
 ## Capacity and separation
