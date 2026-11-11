@@ -39,6 +39,15 @@
 - Keep `AGENTS.md`, `README.md`, and `docs/development.md` consistent when changing
   directory responsibilities, tool availability, or development commands.
 
+## Implementation Style
+
+- Keep implementations simple, clear, and readable. Avoid excessive defensive
+  programming, repeated checks of established invariants, and speculative fallbacks.
+- Validate external inputs at clear boundaries; preserve necessary error handling
+  and resource-lifetime guarantees without duplicating them throughout internal code.
+- Use focused unit tests to verify invariants and realistic edge cases rather than
+  adding production branches for hypothetical failures.
+
 ## Feature Development
 
 - Before implementing a new feature, create a dedicated branch and Git worktree under the repository root's `.worktree/` directory.

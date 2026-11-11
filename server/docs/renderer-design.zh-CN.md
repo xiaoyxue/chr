@@ -1,11 +1,20 @@
 # 精简渲染器功能范围与设计
 
-状态：**设计提案，尚未实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
+状态：**路线图；CPU 场景基础已实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
 的 `dcebb33`，提出更小的渲染器，而不是移植参考项目的整套应用。
 英文配对文档为 [renderer-design.md](renderer-design.md)。
 
-本次只修改文档。[coordinates.md](coordinates.md) 仍然是当前实现的坐标契约；
-不改变现有 API 或渲染行为。除明确标注为现有能力的内容外，下文均为目标。
+[coordinates.md](coordinates.md) 仍然是坐标契约。
+除明确标注为现有能力的内容外，下文均为目标。
+
+`chr_renderer::scene` 已提供共享索引 CPU 网格、按材质分组绑定、model matrix/显隐，
+以及经过校验的 PBR 系数和直接光/环境光配置。
+`Scene::snapshot` 返回拥有所有权的不可变 `SceneView`；后续修改保留旧资源，
+并拒绝过期或跨 scene 的句柄。仍被当前实例引用的资源不能删除；
+拒绝奇异 model matrix，隐藏使用显隐状态。
+几何与材质值共享保存，不随每个实例更新而复制。
+这是库级基础，不是直播控制协议：GLB/EXR 解码、纹理绑定、GPU 网格/PBR 渲染、
+面光/大气以及 runtime 适配仍属后续工作。现有三角形路径不变。
 
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
 `server/runtime`（`chr-server`）、`server/viewer`（`chr-app`）和

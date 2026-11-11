@@ -3,6 +3,7 @@
 pub mod coordinates;
 mod gpu;
 mod offscreen;
+pub mod scene;
 mod sdi;
 mod triangle;
 
