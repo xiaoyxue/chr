@@ -1,6 +1,8 @@
 # Render Server and Client Design
 
-Status: proposed design, not yet implemented.
+Status: proposed design, not yet implemented. No SDI signal source or output
+card is available yet, so Phase 1 uses simulated input, tracking, and SDI
+output (section 6).
 
 All software components run on the same Linux machine.
 An installed SDI output card can send video to external SDI equipment. This
@@ -38,11 +40,15 @@ flowchart LR
         end
         subgraph process["One Rust server process: app + core"]
             control["WebSocket / Socket command handler"]
-            core["wgpu Render Core"]
+            input["Video input source"]
+            track["Tracking result source"]
+            core["wgpu Render Core + compositing"]
             encode["GPU conversion + hardware encoder"]
             sdi["GPU conversion + SDI output adapter"]
 
             control -->|"Scene and camera instructions"| core
+            input -->|"Frames with frame identity"| core
+            track -->|"Per-frame Ti"| core
             core -->|"GPU frames"| encode
             core -->|"GPU frames"| sdi
         end
@@ -53,6 +59,10 @@ flowchart LR
     end
     sdi -->|"Local SDI card and cable"| equipment["SDI equipment"]
 ```
+
+The input source, tracking result source, and SDI output adapter are
+replaceable boundaries. Phase 1 uses simulated implementations; Phase 2
+replaces them with hardware and the tracking service (section 6).
 
 WebSocket and Socket are alternative entrances to the **same command handler**.
 The Agent connects over Socket and shares the same validation, authorization,
@@ -69,8 +79,8 @@ rendered scene, without routing SDI through the browser or WebRTC.
 | Component | Responsibility |
 | --- | --- |
 | `client/src/` | Send instructions and display WebRTC video; provide a local Socket adapter for Node.js clients. |
-| `render/crates/app/` | Host the renderer and server in one process. Handle UI/Agent commands and the independent WebRTC/SDI output modules. |
-| `render/crates/core/` | A library managing scene/camera state and rendering GPU frames with wgpu. No networking or output-card dependencies. |
+| `render/crates/app/` | Host the renderer and server in one process. Handle UI/Agent commands, the input and tracking sources, and the independent WebRTC/SDI output modules. |
+| `render/crates/core/` | A library managing scene/camera state and rendering GPU frames with wgpu. No networking, capture-card, or output-card dependencies. |
 | `common/src/` | Define the shared command, response, and event protocol for Rust and TypeScript. |
 
 The Agent is a separate control process using the shared protocol. Its runtime
@@ -95,6 +105,10 @@ are required.
    validates it, applies it through the core, and returns a result.
 4. The core renders a GPU frame once. The server independently feeds it to
    hardware encoding/WebRTC for browser playback and to the SDI output adapter.
+
+In the live runtime, frames are driven by the video input: the core renders
+the overlay with the matching tracking result and composites it onto the
+input frame before both outputs (section 6).
 
 A control-only client does not need WebRTC. A command response confirms
 the operation's result, not that the resulting frame has already been displayed.
@@ -136,7 +150,53 @@ Use a bounded GPU frame pool and GPU completion signals. Do not reuse a texture
 until its consumers have finished; prevent a slow output from retaining frames
 indefinitely. Each output may require different pixel formats and resolutions.
 
-## 6. Latency and Validation
+## 6. Phased Delivery and Replaceable Boundaries
+
+No SDI signal source or output card is available yet. Phase 1 therefore runs
+the complete pipeline with simulated boundaries. Phase 2 replaces them with
+hardware after it is selected and validated. Both phases use the same command
+semantics, frame pipeline, and output scheduling, so hardware integration
+replaces implementations instead of restructuring the pipeline. This follows
+the simulation and replay requirement in #1.
+
+The live runtime confirmed in #1 is input-driven: capture -> tracking ->
+render/composite -> outputs. Model each boundary as a replaceable interface
+from the start, rather than building an output-only path first.
+
+| Boundary | Phase 1 (simulated) | Phase 2 (hardware) |
+| --- | --- | --- |
+| Video input | Decoded local video file or generated test pattern; each frame carries a frame identity and timecode. | SDI capture card (Cam1). |
+| Tracking result | Recorded or synthetic per-frame Ti, matched by frame identity. | Real-time tracking service. |
+| Render and composite | Real implementation: render the overlay and composite it onto the input frame. | Unchanged. |
+| Browser preview | Real implementation: GPU hardware encoding -> WebRTC. | Unchanged. |
+| SDI output | Simulated sink: fixed-cadence output in the SDI pixel format, written to a file or frame dump. | SDI output card. |
+| Clock | Controllable clock that can pause, step, and accelerate. | Hardware reference clock or input-locked timing. |
+
+Frame identity comes from the input source and travels with each frame through
+tracking, composition, and both outputs. Do not substitute buffer slots or
+output frame counters for it. The behavior when a frame has no matching
+tracking result is still open in #1; make it explicit rather than silently
+reusing a stale result.
+
+The simulated SDI sink simulates the output constraints, not only image delivery:
+
+- Emit frames at the selected video mode's cadence, driven by the controllable
+  clock.
+- Use a bounded queue, count underruns, and apply the documented underrun
+  policy, such as repeating the last frame.
+- Convert to the intended SDI pixel format on the GPU, such as 10-bit YUV
+  4:2:2, so the conversion can be reused with real hardware.
+- It may read pixels back to the CPU to write files. Label this path as
+  simulation-only; it does not relax the no-raw-readback rule for WebRTC or
+  for the hardware SDI path.
+
+Phase 1 does not cover selecting the SDI card or SDK, validating a direct
+GPU-to-SDI-card path, hardware genlock, or any SDI latency claims. These belong
+to Phase 2. Once a card that supports both input and output is available,
+looping its output back to its own input allows self-testing without an
+external signal source.
+
+## 7. Latency and Validation
 
 For same-machine hardware-encoded WebRTC, use approximately **50-150 ms from a
 completed GPU frame to browser display** as an initial planning budget, not a
@@ -149,13 +209,14 @@ Every additional buffered frame adds about 16.7 ms at 60 FPS or 33.3 ms at
 Browser playback and SDI are not automatically synchronized.
 
 Start with one rendering session, a TS client, and an Agent Socket connection.
+In Phase 1, use the simulated input, tracking, and SDI sink from section 6.
 Verify that UI and Agent commands affect the same scene and that responses go
 to the correct caller. Prove camera control and browser playback at 720p/30 FPS,
 then evaluate low-latency 1080p60 where supported.
-Select the SDI format according to the actual output card and downstream
-equipment. These are validation targets, not performance guarantees.
+In Phase 2, select the SDI format according to the actual output card and
+downstream equipment. These are validation targets, not performance guarantees.
 
-## 7. First-Version Rules
+## 8. First-Version Rules
 
 - Use the same JSON command/response definitions and request IDs for both
   WebSocket and Socket, including the Agent connection. Share command handling,
