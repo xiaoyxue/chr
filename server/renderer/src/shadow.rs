@@ -8,6 +8,29 @@ use crate::{
 pub use crate::scene::ShadowMode;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CascadeSettings {
+    /// One keeps the scene-fitted map; 2..=4 enable view-frustum cascades.
+    pub count: u32,
+    /// Maximum optical depth in world metres; ignored for the single-map path.
+    pub max_distance: f64,
+    /// Linear/logarithmic split interpolation in [0, 1].
+    pub split_lambda: f64,
+    /// Fraction of each interval used to blend into the next (or fade to lit).
+    pub blend_fraction: f64,
+}
+
+impl Default for CascadeSettings {
+    fn default() -> Self {
+        Self {
+            count: 1,
+            max_distance: 200.0,
+            split_lambda: 0.5,
+            blend_fraction: 0.1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PcssSettings {
     /// Each stage supports 1..=64 deterministic disk samples.
     pub blocker_samples: u32,
@@ -59,6 +82,7 @@ pub struct ShadowSettings {
     /// Worst-case logical shadow samples across effective Hard, PCF and PCSS lights.
     pub max_samples_per_fragment: u64,
     pub pcss: PcssSettings,
+    pub cascades: CascadeSettings,
 }
 
 impl Default for ShadowSettings {
@@ -73,12 +97,21 @@ impl Default for ShadowSettings {
             max_bytes: 256 * 1024 * 1024,
             max_samples_per_fragment: 1024,
             pcss: PcssSettings::default(),
+            cascades: CascadeSettings::default(),
         }
     }
 }
 
 impl ShadowSettings {
     pub(crate) fn validate(self) -> Result<(), BoxError> {
+        if !(1..=4).contains(&self.cascades.count)
+            || !self.cascades.max_distance.is_finite()
+            || self.cascades.max_distance <= 0.0
+            || !(0.0..=1.0).contains(&self.cascades.split_lambda)
+            || !(0.0..=0.5).contains(&self.cascades.blend_fraction)
+        {
+            return Err("invalid directional cascade settings".into());
+        }
         if self.resolution == 0
             || !self.filter_radius.is_finite()
             || self.filter_radius < 0.0
@@ -93,12 +126,13 @@ impl ShadowSettings {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct ShadowProjection {
     pub matrix: [[f32; 4]; 4],
     /// Near/far and planar UV scales; point maps use z for the nearest scene-bound radius.
     pub depth_scale: [f32; 4],
     pub point_position: Option<[f32; 3]>,
+    pub split: [f32; 2],
 }
 
 pub(crate) struct ShadowAtlas {
@@ -257,6 +291,7 @@ pub(crate) fn projection(
             matrix,
             depth_scale: [near as f32, far as f32, scale, scale],
             point_position: None,
+            split: [0.0; 2],
         }));
     }
     let right = unit(cross(direction, up));
@@ -308,22 +343,130 @@ pub(crate) fn projection(
             (1.0 / span[1]) as f32,
         ],
         point_position: None,
+        split: [0.0; 2],
     }))
 }
 
-pub(crate) fn face_count(light: Light) -> usize {
-    if matches!(light, Light::Point { .. }) {
-        6
-    } else {
-        1
+pub(crate) fn face_count(light: Light, cascades: CascadeSettings) -> usize {
+    match light {
+        Light::Point { .. } => 6,
+        Light::Directional { .. } => cascades.count as usize,
+        Light::Spot { .. } => 1,
     }
+}
+
+pub(crate) fn cascade_padding(settings: ShadowSettings) -> f32 {
+    settings
+        .filter_radius
+        .max(settings.pcss.max_search_radius)
+        .max(settings.pcss.max_filter_radius)
+}
+
+fn directional_cascades(
+    light: Light,
+    bounds: Aabb,
+    settings: ShadowSettings,
+    camera: &Camera,
+) -> Result<Vec<Option<ShadowProjection>>, BoxError> {
+    let [near, camera_far] = camera.depth_range();
+    let far = camera_far.min(settings.cascades.max_distance);
+    if far <= near {
+        return Err("cascade distance must exceed the camera near plane".into());
+    }
+    let extent = camera.extent();
+    let k = camera.intrinsics();
+    let forward = camera.ray([k.cx, k.cy])?.direction;
+    let rays = [
+        [0.0, 0.0],
+        [f64::from(extent.width()), 0.0],
+        [0.0, f64::from(extent.height())],
+        [f64::from(extent.width()), f64::from(extent.height())],
+    ]
+    .map(|pixel| camera.ray(pixel))
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    let Light::Directional { direction, .. } = light else {
+        return Err("cascades require a directional light".into());
+    };
+    let direction = unit(direction);
+    let up = if direction[2].abs() > 0.99 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, -1.0]
+    };
+    let right = unit(cross(direction, up));
+    let axes = [right, cross(direction, right)];
+    let mut result = Vec::new();
+    let mut previous = near;
+    let mut previous_begin = near;
+    for index in 0..settings.cascades.count {
+        let fraction = f64::from(index + 1) / f64::from(settings.cascades.count);
+        let split = settings.cascades.split_lambda * near * (far / near).powf(fraction)
+            + (1.0 - settings.cascades.split_lambda) * (near + (far - near) * fraction);
+        let begin = previous - settings.cascades.blend_fraction * (previous - previous_begin);
+        let corners: [[f64; 3]; 8] = std::array::from_fn(|i| {
+            let ray = rays[i % 4];
+            let depth = if i < 4 { begin } else { split };
+            let distance = depth / dot(ray.direction, forward);
+            std::array::from_fn(|axis| ray.origin[axis] + ray.direction[axis] * distance)
+        });
+        let center = std::array::from_fn(|axis| corners.iter().map(|p| p[axis]).sum::<f64>() / 8.0);
+        let radius = corners
+            .iter()
+            .map(|p| {
+                let d = sub(*p, center);
+                dot(d, d).sqrt()
+            })
+            .fold(0.0, f64::max)
+            * (1.0
+                + 2.0 * (f64::from(cascade_padding(settings)) + 1.0)
+                    / f64::from(settings.resolution));
+        // A frustum-slice sphere keeps its extent under rotation; snap its world-space centre.
+        let texel = 2.0 * radius / f64::from(settings.resolution);
+        let Some(mut map) = projection(light, bounds, settings)? else {
+            unreachable!()
+        };
+        for (row, axis) in axes.iter().enumerate() {
+            let scale = if row == 0 {
+                1.0 / radius
+            } else {
+                -1.0 / radius
+            };
+            let snapped = (dot(*axis, center) / texel).round() * texel;
+            for (column, value) in axis.iter().enumerate() {
+                map.matrix[column][row] = (value * scale) as f32;
+            }
+            map.matrix[3][row] = (-snapped * scale) as f32;
+        }
+        // Retain the full scene's light-depth interval so offscreen casters are not clipped.
+        map.depth_scale[2] = (0.5 / radius) as f32;
+        map.depth_scale[3] = (0.5 / radius) as f32;
+        map.split = [previous as f32, split as f32];
+        if !map
+            .matrix
+            .iter()
+            .flatten()
+            .chain(map.depth_scale.iter())
+            .all(|v| v.is_finite())
+        {
+            return Err("cascade projection exceeds GPU range".into());
+        }
+        result.push(Some(map));
+        previous_begin = previous;
+        previous = split;
+    }
+    Ok(result)
 }
 
 pub(crate) fn projections(
     light: Light,
     bounds: Aabb,
     settings: ShadowSettings,
+    camera: &Camera,
 ) -> Result<Vec<Option<ShadowProjection>>, BoxError> {
+    if matches!(light, Light::Directional { .. }) && settings.cascades.count > 1 {
+        return directional_cascades(light, bounds, settings, camera);
+    }
     let Light::Point { position, .. } = light else {
         return Ok(vec![projection(light, bounds, settings)?]);
     };
@@ -377,6 +520,7 @@ pub(crate) fn projections(
             matrix,
             depth_scale: [near as f32, far as f32, search_near as f32, 0.0],
             point_position: Some(position.map(|v| v as f32)),
+            split: [0.0; 2],
         }))
     })
     .collect()
@@ -405,6 +549,102 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cascades_cover_overlapping_slices_and_keep_world_texels_stable() {
+        let extent = ImageExtent::new(640, 480).unwrap();
+        let camera = Camera::look_at(
+            extent,
+            [0.0, 20.0, -4.0],
+            [0.0, 0.0, -4.0],
+            [0.0, 0.0, -1.0],
+            1.0,
+            0.1,
+            100.0,
+        )
+        .unwrap();
+        let moved = Camera::look_at(
+            extent,
+            [0.000001, 20.0, -4.0],
+            [0.000001, 0.0, -4.0],
+            [0.0, 0.0, -1.0],
+            1.0,
+            0.1,
+            100.0,
+        )
+        .unwrap();
+        let light = Light::Directional {
+            direction: [0.2, -0.4, 1.0],
+            irradiance: [1.0; 3],
+            angular_radius: 0.01,
+            shadow_mode: None,
+        };
+        let bounds = Aabb::new([-30.0, -30.0, -10.0], [30.0, 30.0, 0.0]).unwrap();
+        let settings = ShadowSettings {
+            cascades: CascadeSettings {
+                count: 4,
+                max_distance: 80.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let maps = projections(light, bounds, settings, &camera).unwrap();
+        let shifted = projections(light, bounds, settings, &moved).unwrap();
+        let forward = camera
+            .ray([camera.intrinsics().cx, camera.intrinsics().cy])
+            .unwrap()
+            .direction;
+        let mut previous_begin = 0.1;
+        for (map, shifted) in maps.iter().zip(shifted) {
+            let map = map.unwrap();
+            let shifted = shifted.unwrap();
+            for (a, b) in map
+                .matrix
+                .iter()
+                .flatten()
+                .zip(shifted.matrix.iter().flatten())
+            {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "subtexel motion should preserve the snapped grid"
+                );
+            }
+            let begin = f64::from(map.split[0])
+                - settings.cascades.blend_fraction * (f64::from(map.split[0]) - previous_begin);
+            for depth in [begin, f64::from(map.split[1])] {
+                for pixel in [[0.0, 0.0], [640.0, 0.0], [0.0, 480.0], [640.0, 480.0]] {
+                    let ray = camera.ray(pixel).unwrap();
+                    let distance = depth / dot(ray.direction, forward);
+                    let point = std::array::from_fn::<_, 4, _>(|i| {
+                        if i == 3 {
+                            1.0
+                        } else {
+                            ray.origin[i] + ray.direction[i] * distance
+                        }
+                    });
+                    for row in 0..2 {
+                        let clip: f64 = (0..4)
+                            .map(|c| f64::from(map.matrix[c][row]) * point[c])
+                            .sum();
+                        assert!(
+                            clip.abs() < 1.0,
+                            "cascade must include its overlap and frustum corners"
+                        );
+                    }
+                }
+            }
+            previous_begin = f64::from(map.split[0]);
+        }
+        let invalid = ShadowSettings {
+            cascades: CascadeSettings {
+                count: 4,
+                max_distance: 0.05,
+                ..Default::default()
+            },
+            ..settings
+        };
+        assert!(projections(light, bounds, invalid, &camera).is_err());
+    }
 
     #[test]
     fn spot_depth_metadata_reconstructs_linear_distances_at_both_clip_planes() {
