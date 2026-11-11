@@ -1,8 +1,14 @@
 # Initial scene and frame control contract
 
-**Status:** `proposed` - a concrete, independently reviewable profile for #12.
-Neither merging this document nor passing its examples approves product policy
-or implements the methods in `chr-common`.
+**Status:** `approved-for-synthetic-implementation` - limited owner approval for
+the initial #12 profile, recorded on 2026-11-12 in #12. This is not blanket
+production-policy approval, approval of #63, or a claim that methods are implemented.
+
+Approved scope: the method/type/error surface below, revision and bounded retry/
+release semantics, whole-batch admission with independent post-admission results,
+and #20/#21 implementation using explicit configuration, registered synthetic
+assets/producers and a trusted local controller. Production authorization,
+hardware acquisition, tracking-loss and hot-reconfiguration policy remain gated.
 
 **Scope:** Linux, retained static models, pinhole cameras, direct/IBL lighting,
 frame publication, render submission and program-output association.
@@ -172,6 +178,11 @@ finite pixel data, authorized access and retained leases. A configured local
 file adapter may verify/copy a content-addressed file; this profile does not
 add an arbitrary-path RPC or assume clients share the server filesystem.
 Unknown asset references or write tickets are rejected, not lazily guessed.
+
+The approved first implementation uses an in-process synthetic registration
+adapter and a trusted local controller. This is an explicit test/integration
+scope, not a production registration or authorization protocol. All limits and
+output settings must be supplied and validated; example values are not defaults.
 
 ## Scene, camera and lighting schemas
 
@@ -584,7 +595,7 @@ handle happens to match a new process's object.
 ## Rejection schema
 
 Use existing standard JSON-RPC errors for malformed envelopes/method params.
-The following positive codes are a **candidate** namespace allocation distinct
+The following positive codes are the approved initial-profile allocation, distinct
 from #63's `1000`/recording/calibration/tracking proposal. Existing
 `-32000`/`-32001` server errors remain compatible.
 
@@ -796,22 +807,30 @@ method table. These actions do not carry hidden positional arguments.
 
 ## Approval gates and handoff
 
-The mechanical profile is ready for technical review, not production coding by
-implication. #12 remains open until the owning decisions are explicitly approved:
+The owner approved the following for the limited initial synthetic scope:
 
-- Method/profile names, revision/retry/release semantics and the initial static
-  capability surface; allocation of candidate error codes.
-- Native producer/asset registration and authorized controller ownership.
-- Resource/quality limits, abandoned-result reclamation, join timeout and
-  production output/reconfiguration policy.
-- Exact shared type/time/effect integration with #63 without duplicate DTOs.
+- `scene_frame_v1`, the method/type/static-capability surface, decimal U64,
+  FrameKey/logical time and error codes 2001-2007.
+- Scene-revision binding, whole-request admission/rejection, independent
+  post-admission results, retained-request retry and explicit terminal release.
+- Cancellation/timeout does not release physical leases early; capacity
+  exhaustion rejects rather than overwrites or creates unbounded storage.
+- #20 shared DTOs/conformance and #21 bounded resources may now be implemented
+  with registered synthetic resources, explicit settings and a trusted local controller.
+
+Still unapproved: production producer/asset registration and authorization,
+production capacity/latency values, administrative abandoned-result reclamation,
+the #22 join/late-input policy, tracking-loss/failover and hot output
+reconfiguration. Broader #63 business semantics are not approved by this decision.
 
 #63 is not a build/merge prerequisite for this document. Its shared wire shapes
-are compatible review inputs; neither proposal approves the other. The paired
+are compatible inputs; approval of this renderer profile does not approve #63.
+Shared identity/time/effect DTOs must have one common definition. The paired
 renderer roadmaps are unchanged because this slice does not expand native
 renderer features or their Linux delivery scope.
 
-After approval, #20 can add DTOs/conformance fixtures and #21 can implement the
-resource owner independently. #38/#22/#31 then join existing renderer APIs
-rather than implementing another compositor or changing the initial pinhole
-contract.
+Under the approval above, #20 can add DTOs/conformance fixtures and #21 can
+implement the synthetic/native resource owner independently. #12 remains open
+for the remaining production decisions. Later #38/#22/#31 integration must join
+existing renderer APIs without inventing another compositor or treating
+synthetic acceptance as approval of production registration/output policy.
