@@ -263,6 +263,66 @@ native/headless shell; do not reproduce the reference's editor and protocol stac
 | Platforms | trd has native, browser, CLI, GUI, and editor delivery | Linux native and headless only; Windows is out of scope; browser delivery is deferred, not architecturally blocked |
 | Editing/media | trd includes picking, transform editing, video decode adapters, sparse tracks, export, and replay | Not part of this renderer increment; no timeline, media decoder, or legacy trd document migration |
 
+### Configured raster and inspection (implemented)
+
+`MeshRenderer::set_render_settings(&Gpu, RenderSettings)` configures the shared
+renderer independently of `PbrSettings` and scene ownership. Call `prepare` or
+`prepare_pbr` again before encoding after a settings change. Defaults are
+single-sample `DiagnosticView::Shaded` with both overlays off; the production PBR
+and legacy unlit defaults are unchanged.
+
+`sample_count` accepts **1 or 4 only**. The adapter must support render attachment
+usage and the requested sample count for output colour, RGBA16F and Depth32Float;
+multisampled colour also requires resolve support. Invalid or unsupported
+requests fail without changing the current configuration, never silently
+downgrading. Colour, main depth, mesh and sky pipelines share the configured
+sample count. Multisampled HDR resolves to single-sample HDR before the one
+exposure/tone-map pass; inspection/unlit colour resolves directly to the
+single-sample output. Resize or sample-count changes recreate matching
+attachments; output-format changes still require a new renderer. Shadow maps
+remain independently single-sample.
+
+`DiagnosticView::{Wireframe, Normals, Depth}` inspects the same visible instances,
+transforms and GPU vertex buffers, but bypasses lighting, sky and tone mapping.
+These views inspect raw geometry, including backfaces and alpha-masked regions,
+not material opacity. Wireframe derives line-list indices from each indexed
+triangle, retaining material-part ranges; it shows all triangle edges (not a
+hidden-line or silhouette-only mode). It needs no polygon-line device feature
+and does not mistake shared vertex IDs for per-triangle barycentrics.
+Normals encode the normalized world inverse-transpose geometric normal as
+`(n + 1) / 2`, with winding-aware derivative normals when attributes are absent;
+normal maps and face-forward lighting flips are intentionally excluded.
+Depth encodes normalized GPU depth `[0,1]`, near black/far white, **not metric
+distance or a calibration export**. These diagnostic values pass through the
+output format's normal sRGB encoding, not the physical exposure curve.
+
+`DiagnosticOverlays` independently enables `axes` and `bounds` for any view.
+One-metre world axes are +X red, +Y green and -Z/up blue. Yellow boxes show each
+visible instance's conservative world-axis-aligned bounds. Overlays are
+single-pixel, single-sample, always-on-top lines drawn after the output transform;
+they are not antialiased scene surfaces and never enter HDR radiance, lighting,
+scene resources or shadow-caster geometry. They may be clipped by the camera.
+Switching inspection modes, overlays or main sample counts preserves the
+production shadow/IBL caches when the scene and relevant settings are unchanged.
+
+This increment uses the reference attachment/options/gizmo separation recorded
+in this design (the local reference checkout was unavailable), simplifying it
+into renderer-owned configuration, matching colour/depth attachments and a small
+post-output line pass; no reference code/assets were copied, and it does not
+port an editor or create another scene model.
+Portable derived indexed edges replace optional polygon-line/barycentric
+assumptions. Synthetic `diagnostics_gpu` checks cover edge coverage, resize,
+sample-count and view switching, nonuniform/mirrored normals, axes/bounds,
+unchanged physical output and retained environment/shadow caches.
+The orthographic integration fixture repeats MSAA/resize/view/overlay checks
+with a mirrored nonuniform instance, verifies normalized optical depth and
+switches back through pinhole without losing physical output or IBL/shadow caches.
+The shared 112-byte camera uniform keeps the orthographic flag in `options.z`
+and the diagnostic selector in `options.w`; overlays use only its clip-matrix prefix.
+Run `cargo test --locked -p chr-renderer --test diagnostics_gpu -- --ignored --nocapture`
+on a hardware GPU. Native window resize/minimize/HiDPI interaction is not
+accepted by offscreen tests and remains unverified over SSH.
+
 Deferred material features include anisotropy, subsurface, transmission,
 clearcoat, sheen, and general alpha blending. Do not silently flatten an
 unsupported GLB feature into an apparently equivalent material: report it at

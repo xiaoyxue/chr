@@ -410,7 +410,23 @@ fn brdf(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)-
 }
 
 @fragment
+fn fs_wire() -> @location(0) vec4<f32> {
+    return vec4(1.0);
+}
+
+@fragment
 fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @location(0) vec4<f32> {
+    if camera.options.w==2u {
+        // Inspect geometric normals, independent of normal maps, lights and sidedness.
+        var n=surface.normal;
+        if dot(n,n)<1e-12 {
+            n=cross(dpdx(surface.position),dpdy(surface.position));
+            n=select(n,-n,front_facing);
+            n=select(n,-n,object.flags.w!=0u);
+        }
+        return vec4(normalize(n)*0.5+vec3(0.5),1.0);
+    }
+    if camera.options.w==3u { return vec4(vec3(surface.clip.z),1.0); }
     if camera.options.x==0u { return vec4(object.color.rgb,1.0); }
     let base = textureSample(base_map,base_sampler,surface.uv)*object.color*surface.color;
     let mr = textureSample(mr_map,mr_sampler,surface.uv);
