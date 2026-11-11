@@ -13,7 +13,7 @@
 - Keep all rendering in `crates/chr-core`. Delivery shells in `native/` own
   windows, events, surfaces, and presentation, not separate rendering algorithms.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
-- Keep generated PNGs in root `output/`, ignored by Git but retained locally.
+- Keep generated PNGs in repository-root `output/render/`, ignored by Git but retained locally.
   PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in core.
 - This first slice is a native RGB triangle. Browser delivery, scene formats,
   video, meshes, and camera calibration are not implemented.
@@ -34,7 +34,7 @@
   Comments explain non-obvious reasons, not the code's mechanics.
 - Use English for code, comments, and documentation. Keep any existing paired
   translations synchronized if either version changes.
-- Keep Cargo.lock and flake.lock under version control. Prefer narrow changes;
+- Keep `render/Cargo.lock` and root `flake.lock` under version control. Prefer narrow changes;
   add regression tests for new behavior rather than introducing abstractions early.
 
 ## Coordinate contract
@@ -60,9 +60,11 @@ documents informed it; their private measurements are not part of this project.
 - Windows: PowerShell 7, Rust MSVC x64, Visual Studio C++ tools and Windows SDK.
   Dot-source `scripts\dev-env.ps1`; do not change global toolchains or install
   packages silently. Use the vendor GPU driver and DX12 or Vulkan.
-- Linux: `nix develop` / `nix build` / `nix flake check` are the reproducible
-  development/build gates. Direct Cargo is also supported with system window
-  libraries and graphics drivers. See README.md.
+- Linux: run `nix develop` / `nix build` / `nix flake check` from the repository
+  root (or `nix develop ..` from `render/`). Run Cargo commands from `render/`;
+  the shell uses an absolute `render/target/linux` cache regardless of working
+  directory. Direct Cargo is also supported with system window libraries and
+  graphics drivers. See README.md.
 - Validate Linux on the designated native Linux GPU host over SSH, not WSL.
   Keep machine-specific connection details out of public project files.
 - Nix flakes in Git see tracked files only. Stage explicit project paths before
@@ -76,6 +78,8 @@ documents informed it; their private measurements are not part of this project.
 Run on both Windows and Linux; report missing environments as unverified, not
 passed. Do not duplicate unrelated trd browser/video gates in this smaller project.
 
+From `render/` inside the root development shell:
+
 ```text
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -84,7 +88,7 @@ cargo test --locked -p chr-core --test triangle_gpu -- --ignored --nocapture
 cargo run --locked -p chr-app -- --smoke-test
 ```
 
-Non-GPU checks also run through `nix flake check`. Rendering changes need the
+Non-GPU checks also run through root `nix flake check`. Rendering changes need the
 hardware pixel test, plus an interactive check of resize, minimize/restore,
 HiDPI behavior, and Escape/close. `--smoke-test` only checks bounded window
 startup/presentation, not full UI acceptance. Over Linux SSH, run automated
