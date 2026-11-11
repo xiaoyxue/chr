@@ -251,6 +251,10 @@ line-list 索引并保留材质分段范围，显示全部三角形边，不是�
 可移植的派生索引边替代可选 polygon-line/重心坐标假设。
 合成 `diagnostics_gpu` 测试覆盖边缘覆盖率、尺寸、采样数和视图切换、
 非均匀/镜像法线、坐标轴/包围盒、正式输出不变及环境/阴影缓存保留。
+正交集成夹具对镜像非均匀缩放实例重复 MSAA/尺寸/视图/叠加层检查，
+验证归一化光学深度，并经过针孔视图切换后确认正式输出与 IBL/阴影缓存不丢失。
+共享 112 字节相机 uniform 在 `options.z` 保留正交标记，
+`options.w` 保存诊断选择器；叠加层只读取其 clip 矩阵前缀。
 在硬件 GPU 上运行
 `cargo test --locked -p chr-renderer --test diagnostics_gpu -- --ignored --nocapture`。
 离屏测试不能验收原生窗口 resize/minimize/HiDPI 交互；SSH 环境中仍未验证。
@@ -486,6 +490,25 @@ K 使用像素单位，矩阵为 `[[fx, skew, cx], [0, fy, cy], [0, 0, 1]]`。
 相机的点投影和像素反投影光线必须一致。透视光线共享起点；
 正交光线起点不同、方向恒定。正交镜面着色必须使用该方向，
 不能套用 `normalize(camera_position - surface_position)`。
+
+**已实现的内部 API：** `camera::Camera` 保留针孔/FOV/K/Ti 构造器和访问器。
+`OrthographicCamera::from_pose(extent, [horizontal_span, vertical_span],
+pose, near, far)` 是独立类型；两者实现 `MeshRenderer` 接受的 sealed
+`CameraView` 接口。跨度是世界米单位的完整宽/高，与栅格宽高比独立。
+行优先、正规刚体 camera-to-world 姿态将图像中心放在光学 `(0,0)`；
+原生像素中心不额外增加半像素偏移。正交射线起点位于姿态的深度零平面，
+随像素变化，方向均为姿态的前向轴。Clip W 恒为一，深度为
+`(optical_z - near)/(far - near)`，要求 `0 < near < far`。
+无效跨度、姿态、裁剪范围、非有限运算与 GPU 矩阵溢出均明确失败。
+该类型不能导入 K/Ti 或接受镜头畸变；直播针孔 schema 及其不支持输入的拒绝行为不变。
+
+两种相机使用相同的 mesh/depth/HDR 渲染器。正交直接镜面光照及 IBL 使用
+`V = -forward`；天空射线平行、与平移无关，并遵循相同的世界/环境旋转。
+级联拟合每个像素实际的射线起点，按光学前向深度选择，绝不使用正交 clip W。
+CPU/WGSL 共享相机 uniform 为 112 字节，包含光学深度行；
+阴影相机绑定使用同一布局。合成 CPU/GPU 回归覆盖旋转姿态、跨度、
+裁剪/遮挡、镜面/天空方向及每个级联。实现直接采用标准仿射正交公式，
+复用 chr 的刚体坐标系验证和矩阵边界；未复制 trd 相机代码、私有资产或标定记录。
 
 ### 3.3 带畸变的镜头
 

@@ -314,6 +314,11 @@ Portable derived indexed edges replace optional polygon-line/barycentric
 assumptions. Synthetic `diagnostics_gpu` checks cover edge coverage, resize,
 sample-count and view switching, nonuniform/mirrored normals, axes/bounds,
 unchanged physical output and retained environment/shadow caches.
+The orthographic integration fixture repeats MSAA/resize/view/overlay checks
+with a mirrored nonuniform instance, verifies normalized optical depth and
+switches back through pinhole without losing physical output or IBL/shadow caches.
+The shared 112-byte camera uniform keeps the orthographic flag in `options.z`
+and the diagnostic selector in `options.w`; overlays use only its clip-matrix prefix.
 Run `cargo test --locked -p chr-renderer --test diagnostics_gpu -- --ignored --nocapture`
 on a hardware GPU. Native window resize/minimize/HiDPI interaction is not
 accepted by offscreen tests and remains unverified over SSH.
@@ -595,6 +600,31 @@ Camera operations must expose projection and pixel-to-ray consistently.
 Perspective rays share an origin; orthographic rays have varying origins and
 a constant direction. Orthographic specular shading must use that direction,
 not `normalize(camera_position - surface_position)`.
+
+**Implemented internal API:** `camera::Camera` retains its pinhole/FOV/K/Ti
+constructors and accessors. `OrthographicCamera::from_pose(extent,
+[horizontal_span, vertical_span], pose, near, far)` is a separate type;
+both implement the sealed `CameraView` interface accepted by `MeshRenderer`.
+Spans are full world-metre width/height, independent of raster aspect ratio.
+The proper rigid, row-major camera-to-world pose places the image centre at
+optical `(0,0)`; native pixel centres have no added half-pixel offset.
+Orthographic ray origins lie on the pose's depth-zero plane, vary across the
+image, and share its forward axis. Clip W is exactly one and depth is
+`(optical_z - near)/(far - near)`, with `0 < near < far`.
+Invalid spans, poses, clip ranges, nonfinite operations and GPU matrix overflow
+fail explicitly. This type cannot import K/Ti or accept lens distortion;
+the live pinhole schema and its rejection of unsupported inputs are unchanged.
+
+Both cameras use the same mesh/depth/HDR renderer. Orthographic direct specular
+and IBL use `V = -forward`; sky rays are parallel, translation-independent and
+follow the same world/environment rotation. Cascades fit the actual per-pixel
+ray origins and select by optical forward depth, never orthographic clip W.
+The shared CPU/WGSL camera uniform is 112 bytes, including its optical-depth row;
+shadow-camera bindings use the same layout. Synthetic CPU/GPU regressions cover
+rotated poses, spans, clipping/occlusion, specular/sky orientation and every
+cascade. The implementation uses the standard affine orthographic equations
+directly, reusing chr's rigid-frame validation and matrix boundary; no trd
+camera code, private assets or calibration records are copied.
 
 ### 3.3 Distorted lenses
 

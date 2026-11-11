@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chr_renderer::{
     DiagnosticOverlays, DiagnosticView, EnvironmentSettings, Gpu, MeshRenderer, OffscreenTarget,
     PbrSettings, RenderSettings, ShadowMode, ShadowSettings,
-    camera::Camera,
+    camera::{Camera, CameraView, OrthographicCamera},
     coordinates::ImageExtent,
     scene::{
         EnvironmentMap, Light, Lighting, MeshAttributes, MeshData, ModelMatrix, PbrMaterial, Scene,
@@ -39,7 +39,7 @@ fn capture(
     gpu: &Gpu,
     renderer: &mut MeshRenderer,
     scene: &SceneView,
-    camera: &Camera,
+    camera: &dyn CameraView,
     pbr: Option<PbrSettings>,
 ) -> Vec<u8> {
     match pbr {
@@ -412,4 +412,159 @@ fn overlays_and_view_switches_preserve_lighting_resources_environment_and_shadow
         &snapshot.lighting().sky().unwrap().environment,
         &environment
     ));
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn orthographic_msaa_diagnostics_keep_optical_depth_ibl_and_shadows_compatible() {
+    let gpu = gpu();
+    let camera = |width, height| {
+        OrthographicCamera::from_pose(
+            ImageExtent::new(width, height).unwrap(),
+            [7.0, 6.0],
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.8, -0.6, 3.0],
+                [0.0, 0.6, 0.8, -4.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            1.0,
+            20.0,
+        )
+        .unwrap()
+    };
+    let model = ModelMatrix::new([
+        [-1.25, 0.0, 0.0, 0.0],
+        [0.0, 0.75, 0.0, 0.0],
+        [0.0, 0.0, 0.5, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    .unwrap();
+    let mut scene = triangle(Some([1.0, 1.0, -1.0]), model);
+    scene
+        .set_lighting(
+            Lighting::new(
+                vec![Light::Directional {
+                    direction: [0.0, 0.0, 1.0],
+                    irradiance: [3.0; 3],
+                    angular_radius: 0.0,
+                    shadow_mode: None,
+                }],
+                Some(SkyLight {
+                    environment: Arc::new(
+                        EnvironmentMap::new(ImageExtent::new(1, 1).unwrap(), vec![[0.3, 0.2, 0.1]])
+                            .unwrap(),
+                    ),
+                    rotation: 0.0,
+                    gain: 1.0,
+                    visible: true,
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let snapshot = scene.snapshot();
+    let pbr = PbrSettings {
+        shadows: ShadowSettings {
+            mode: ShadowMode::Hard,
+            resolution: 64,
+            ..Default::default()
+        },
+        environment: EnvironmentSettings {
+            resolution: 64,
+            samples: 64,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let baseline = capture(&gpu, &mut renderer, &snapshot, &camera(96, 96), Some(pbr));
+    assert_eq!(renderer.shadow_passes_last_frame(), 1);
+    let normal = model.transform_normal([1.0, 1.0, -1.0]).unwrap();
+    let expected = normal.map(|n| encoded((n as f32 + 1.0) * 0.5));
+    for (width, height) in [(96, 96), (65, 97), (96, 96)] {
+        let camera = camera(width, height);
+        let center = ((height / 2 * width + width / 2) * 4) as usize;
+        for sample_count in [1, 4, 1] {
+            for view in [
+                DiagnosticView::Normals,
+                DiagnosticView::Depth,
+                DiagnosticView::Wireframe,
+                DiagnosticView::Shaded,
+            ] {
+                renderer
+                    .set_render_settings(
+                        &gpu,
+                        RenderSettings {
+                            sample_count,
+                            view,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                let image = capture(&gpu, &mut renderer, &snapshot, &camera, Some(pbr));
+                match view {
+                    DiagnosticView::Normals => {
+                        for channel in 0..3 {
+                            assert!(image[center + channel].abs_diff(expected[channel]) <= 1);
+                        }
+                        let partial = image
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .filter(|p| p[0] > image[0] + 3 && p[0] < expected[0] - 3)
+                            .count();
+                        if sample_count == 1 {
+                            assert_eq!(partial, 0);
+                        } else {
+                            assert!(partial > 20, "orthographic edges must resolve coverage");
+                        }
+                    }
+                    DiagnosticView::Depth => {
+                        let (_, depth) = camera.project([0.0; 3]).unwrap();
+                        assert!(image[center].abs_diff(encoded(depth as f32)) <= 2);
+                    }
+                    DiagnosticView::Wireframe => {
+                        assert!(image.as_chunks::<4>().0.iter().any(|p| p[0] > 200));
+                        assert!(image[center] < 100);
+                    }
+                    DiagnosticView::Shaded => {}
+                }
+                assert_eq!(renderer.shadow_passes_last_frame(), 0);
+                assert!(!renderer.environment_preprocessed_last_prepare());
+                renderer
+                    .set_render_settings(
+                        &gpu,
+                        RenderSettings {
+                            sample_count,
+                            view,
+                            overlays: DiagnosticOverlays {
+                                axes: true,
+                                bounds: true,
+                            },
+                        },
+                    )
+                    .unwrap();
+                let overlay = capture(&gpu, &mut renderer, &snapshot, &camera, Some(pbr));
+                for color in [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]] {
+                    assert!(overlay.as_chunks::<4>().0.iter().any(|p| p[..3] == color));
+                }
+                assert_eq!(renderer.shadow_passes_last_frame(), 0);
+            }
+        }
+    }
+    renderer
+        .set_render_settings(&gpu, RenderSettings::default())
+        .unwrap();
+    capture(
+        &gpu,
+        &mut renderer,
+        &snapshot,
+        &test_camera(96, 96),
+        Some(pbr),
+    );
+    assert_eq!(
+        baseline,
+        capture(&gpu, &mut renderer, &snapshot, &camera(96, 96), Some(pbr))
+    );
 }
