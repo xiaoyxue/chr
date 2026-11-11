@@ -12,6 +12,31 @@ pub enum ShadowMode {
     Off = 0,
     Hard = 1,
     Pcf = 2,
+    Pcss = 3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PcssSettings {
+    /// Each stage supports 1..=64 deterministic disk samples.
+    pub blocker_samples: u32,
+    pub filter_samples: u32,
+    /// Independent search/filter caps in shadow texels, not physical source sizes.
+    pub max_search_radius: f32,
+    pub max_filter_radius: f32,
+    /// Worst-case blocker plus filter samples across all lights per fragment.
+    pub max_samples_per_fragment: u64,
+}
+
+impl Default for PcssSettings {
+    fn default() -> Self {
+        Self {
+            blocker_samples: 32,
+            filter_samples: 32,
+            max_search_radius: 64.0,
+            max_filter_radius: 64.0,
+            max_samples_per_fragment: 1024,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,6 +50,7 @@ pub struct ShadowSettings {
     /// Receiver offset along its unperturbed surface normal, in world metres.
     pub normal_bias: f32,
     pub max_bytes: u64,
+    pub pcss: PcssSettings,
 }
 
 impl Default for ShadowSettings {
@@ -36,6 +62,7 @@ impl Default for ShadowSettings {
             depth_bias: 0.0005,
             normal_bias: 0.02,
             max_bytes: 256 * 1024 * 1024,
+            pcss: PcssSettings::default(),
         }
     }
 }
@@ -52,8 +79,24 @@ impl ShadowSettings {
         {
             return Err("invalid shadow resolution, filter radius or bias".into());
         }
+        if self.mode == ShadowMode::Pcss
+            && (!(1..=64).contains(&self.pcss.blocker_samples)
+                || !(1..=64).contains(&self.pcss.filter_samples)
+                || [self.pcss.max_search_radius, self.pcss.max_filter_radius]
+                    .into_iter()
+                    .any(|radius| !radius.is_finite() || radius <= 0.0))
+        {
+            return Err("invalid PCSS sample counts or radius limits".into());
+        }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ShadowProjection {
+    pub matrix: [[f32; 4]; 4],
+    /// Near/far linear light depths and projected UV units per metre (per metre/z for spots).
+    pub depth_scale: [f32; 4],
 }
 
 pub(crate) struct ShadowAtlas {
@@ -151,7 +194,7 @@ pub(crate) fn projection(
     light: Light,
     bounds: Aabb,
     settings: ShadowSettings,
-) -> Result<Option<[[f32; 4]; 4]>, BoxError> {
+) -> Result<Option<ShadowProjection>, BoxError> {
     let lo = bounds.min();
     let hi = bounds.max();
     let center = std::array::from_fn::<_, 3, _>(|i| (lo[i] + hi[i]) * 0.5);
@@ -197,18 +240,21 @@ pub(crate) fn projection(
         let near = (min - padding).max(0.01);
         let far = (max + padding).max(near + 0.01);
         let target = std::array::from_fn(|i| position[i] + direction[i]);
-        return Ok(Some(
-            Camera::look_at(
-                ImageExtent::new(settings.resolution, settings.resolution)?,
-                position,
-                target,
-                up,
-                2.0 * outer_angle,
-                near,
-                far,
-            )?
-            .clip_from_world()?,
-        ));
+        let matrix = Camera::look_at(
+            ImageExtent::new(settings.resolution, settings.resolution)?,
+            position,
+            target,
+            up,
+            2.0 * outer_angle,
+            near,
+            far,
+        )?
+        .clip_from_world()?;
+        let scale = (0.5 / outer_angle.tan()) as f32;
+        return Ok(Some(ShadowProjection {
+            matrix,
+            depth_scale: [near as f32, far as f32, scale, scale],
+        }));
     }
     let right = unit(cross(direction, up));
     let down = cross(direction, right);
@@ -250,7 +296,15 @@ pub(crate) fn projection(
     if !columns.iter().flatten().all(|v| v.is_finite()) {
         return Err("shadow projection exceeds GPU range".into());
     }
-    Ok(Some(columns))
+    Ok(Some(ShadowProjection {
+        matrix: columns,
+        depth_scale: [
+            0.0,
+            span[2] as f32,
+            (1.0 / span[0]) as f32,
+            (1.0 / span[1]) as f32,
+        ],
+    }))
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -278,6 +332,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spot_depth_metadata_reconstructs_linear_distances_at_both_clip_planes() {
+        let p = projection(
+            Light::Spot {
+                position: [0.0; 3],
+                direction: [0.0, 0.0, 1.0],
+                intensity: [1.0; 3],
+                inner_angle: 0.3,
+                outer_angle: 0.8,
+                source_radius: 0.2,
+            },
+            Aabb::new([-1.0, -1.0, -1.0], [1.0, 1.0, 10.0]).unwrap(),
+            ShadowSettings::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let [near, far, ..] = p.depth_scale;
+        for distance in [near, near * 2.0, 1.0, far] {
+            let depth = (p.matrix[2][2] * distance + p.matrix[3][2]) / distance;
+            let reconstructed = near * far / (far - depth * (far - near));
+            assert!((reconstructed - distance).abs() / distance < 0.0002);
+        }
+    }
+
+    #[test]
     fn directional_texel_grid_survives_subtexel_bounds_motion() {
         let settings = ShadowSettings {
             resolution: 128,
@@ -286,6 +364,7 @@ mod tests {
         let light = Light::Directional {
             direction: [0.0, 0.0, 1.0],
             irradiance: [1.0; 3],
+            angular_radius: 0.0,
         };
         let matrix = |offset: f64| {
             projection(
@@ -295,6 +374,7 @@ mod tests {
             )
             .unwrap()
             .unwrap()
+            .matrix
         };
         let initial = matrix(0.0);
         let shifted = matrix(0.001);
@@ -316,12 +396,14 @@ mod tests {
                 Light::Directional {
                     direction: [0.2, -0.4, 1.0],
                     irradiance: [1.0; 3],
+                    angular_radius: 0.0,
                 },
                 bounds,
                 ShadowSettings::default(),
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .matrix;
             for corner in 0..8 {
                 let point: [f64; 4] = std::array::from_fn(|i| {
                     if i == 3 {

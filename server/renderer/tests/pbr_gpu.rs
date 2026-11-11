@@ -107,6 +107,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 vec![Light::Directional {
                     direction: [0.0, 0.0, 1.0],
                     irradiance: [std::f32::consts::PI; 3],
+                    angular_radius: 0.0,
                 }],
                 None,
             )
@@ -140,6 +141,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
             Light::Point {
                 position: [0.0, 0.0, -2.0],
                 intensity: [4.0 * std::f32::consts::PI; 3],
+                source_radius: 0.0,
             },
             1.0,
         ),
@@ -147,6 +149,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
             Light::Point {
                 position: [0.0, 0.0, -4.0],
                 intensity: [4.0 * std::f32::consts::PI; 3],
+                source_radius: 0.0,
             },
             0.25,
         ),
@@ -157,6 +160,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 intensity: [4.0 * std::f32::consts::PI; 3],
                 inner_angle: 0.2,
                 outer_angle: 0.5,
+                source_radius: 0.0,
             },
             1.0,
         ),
@@ -167,6 +171,7 @@ fn pbr_maps_colour_space_exposure_mask_and_light_isolation() {
                 intensity: [4.0 * std::f32::consts::PI; 3],
                 inner_angle: 0.2,
                 outer_angle: 0.5,
+                source_radius: 0.0,
             },
             0.0,
         ),

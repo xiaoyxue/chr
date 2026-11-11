@@ -98,7 +98,7 @@ Use them to distinguish projection-induced tilt from the asset's own geometry.
 `PbrSettings::shadows` now supports `Off`, `Hard` and `Pcf` for directional and
 spot lights. Directional lights use a stable scene-fitted orthographic map;
 spots use a cone-matched perspective map. This bounded-scene implementation does
-not yet provide cascades, point-light cubemaps or PCSS. Enabling shadows with
+not yet provide cascades or point-light cubemaps. Enabling shadows with
 point lights fails explicitly rather than leaving them silently unshadowed.
 
 Settings expose resolution, a 3x3 bilinear-comparison PCF radius in texels,
@@ -116,6 +116,30 @@ The same example additionally writes `shadow-off.png`, `shadow-hard.png` and
 the same sun-plus-four-spot rig, isolating the shadow setting. The legacy M2 and
 front-inspection captures remain unshadowed. PCF filters edges; it is not PCSS
 contact-hardening or finite-area-light integration.
+
+## M4: directional and spot PCSS
+
+`ShadowMode::Pcss` reuses those depth maps for linear-depth blocker search,
+source-size penumbra estimation and variable-radius comparison filtering.
+Each directional light supplies `angular_radius` in radians; each local light
+supplies `source_radius` in metres. Zero gives exact Hard visibility. These
+parameters affect shadow softness, not the punctual BRDF or emitted power.
+Point shadows remain explicitly unsupported until the cubemap increment.
+
+`ShadowSettings::pcss` defaults to 32 blocker + 32 filter samples, independent
+64-texel search/filter caps and a 1024-sample-per-fragment budget across lights.
+Each stage accepts 1..=64 samples; invalid settings and budget overflow fail,
+never silently downgrade to PCF. Counts represent logical texture operations;
+comparison samples use hardware bilinear filtering. Deterministic disk sampling
+needs no temporal history. Caps deliberately limit wide-penumbra accuracy, and
+very thin blockers can be missed by the bounded search.
+
+The example also writes `shadow-pcss.png` with the same M3 rig and
+`shadow-pcss-wide.png` with source radii multiplied by four, unchanged irradiance
+and intensity. Baseline sources are a 0.00465-radian sun and 0.5-metre spots.
+No sky/IBL or LTC is included. PCSS is high-priority work; area/LTC is deferred
+at low priority. Per-light mode selection, cubemap/cascade handling and broader
+performance acceptance remain follow-ups.
 
 ## Render server
 
