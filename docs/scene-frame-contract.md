@@ -20,6 +20,28 @@ frame publication, render submission and program-output association.
 
 ## Boundary and implementation mapping
 
+`common::scene_frame` now supplies the initial DTOs, `Validate`, `parse_payload`,
+`parse_params`, method constants and typed rejection conversion to the existing
+JSON-RPC error object. The TypeScript mirror is
+`client/example/render-harness/src/scene-frame.ts`, reexported as `SceneFrame`
+by `protocol.ts`. This implements the wire boundary only, not runtime methods.
+Call the shared parser before native math validation and resource resolution;
+plain serde decoding alone does not check cross-field metadata or installed
+capacity. IDs/time/finite numbers are validated scalar types. Required nullable
+fields must be present even when null; unknown fields are errors.
+DTO objects reject positional arrays. Numeric integer fields accept equivalent
+JSON spellings (`1`, `1.0`, `1e0`), matching JavaScript's number domain; U64 text
+never uses that normalization and remains canonical decimal only.
+
+Shared synthetic fixtures live in `common/tests/fixtures/scene_frame.json`.
+`cargo test --locked -p chr-common` checks round trips, negative payloads and
+the same mock handler over both IPC transports. Run the harness's
+`npm run typecheck` and `npm test` against those same fixtures. These CPU/control
+checks establish neither GPU behavior nor production authorization or policy.
+The current DTO representation uses unsigned 32-bit dimensions/counts and signed
+31-bit rational terms; actual supported dimensions and capacities still require
+explicit native/configuration validation.
+
 JSON-RPC 2.0, NativeSocket framing and WebSocket text messages remain unchanged.
 Every public method below uses the same handler and semantics over both control
 transports. Image/model bytes and GPU dependencies are not embedded in JSON.

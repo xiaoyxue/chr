@@ -1,5 +1,7 @@
 // TypeScript mirror of the shared protocol in `common/src/` (Rust, the source of truth):
 // `jsonrpc.rs` for the envelope and `methods.rs` for business methods. Keep both in sync.
+// Approved synthetic scene/frame payloads are separate from the existing runtime methods.
+export * as SceneFrame from "./scene-frame.ts";
 
 export const JSONRPC_VERSION = "2.0";
 

@@ -18,4 +18,5 @@ pub mod client;
 pub mod framing;
 pub mod jsonrpc;
 pub mod methods;
+pub mod scene_frame;
 pub mod server;
