@@ -16,6 +16,10 @@ The current slice draws an RGB triangle using the same pipeline in a native
 window, an offscreen hardware test, and the render server. No scene
 serialization, video input, or calibration pipeline is included yet.
 
+The runtime library also exposes an isolated, bounded
+[native synthetic frame-resource owner](docs/frame-resources.md). It is not yet
+wired into control, scene scheduling, or physical capture/output.
+
 The Linux renderer roadmap is described in
 [Simplified renderer scope and design](docs/renderer-design.md)
 ([Chinese](docs/renderer-design.zh-CN.md)). It distinguishes the initial
