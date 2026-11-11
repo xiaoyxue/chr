@@ -95,8 +95,9 @@ impl ShadowSettings {
 #[derive(Clone, Copy)]
 pub(crate) struct ShadowProjection {
     pub matrix: [[f32; 4]; 4],
-    /// Near/far linear light depths and projected UV units per metre (per metre/z for spots).
+    /// Near/far and planar UV scales; point maps use z for the nearest scene-bound radius.
     pub depth_scale: [f32; 4],
+    pub point_position: Option<[f32; 3]>,
 }
 
 pub(crate) struct ShadowAtlas {
@@ -109,7 +110,7 @@ pub(crate) struct ShadowAtlas {
 impl ShadowAtlas {
     pub fn new(device: &wgpu::Device, resolution: u32, layers: u32) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("planar shadow maps"),
+            label: Some("shadow maps"),
             size: wgpu::Extent3d {
                 width: resolution,
                 height: resolution,
@@ -217,7 +218,7 @@ pub(crate) fn projection(
     let direction = match light {
         Light::Directional { direction, .. } | Light::Spot { direction, .. } => unit(direction),
         Light::Point { .. } => {
-            return Err("point-light shadows require the cubemap increment".into());
+            return Err("point lights require six face projections, not one planar map".into());
         }
     };
     let up = if direction[2].abs() > 0.99 {
@@ -254,6 +255,7 @@ pub(crate) fn projection(
         return Ok(Some(ShadowProjection {
             matrix,
             depth_scale: [near as f32, far as f32, scale, scale],
+            point_position: None,
         }));
     }
     let right = unit(cross(direction, up));
@@ -304,7 +306,79 @@ pub(crate) fn projection(
             (1.0 / span[0]) as f32,
             (1.0 / span[1]) as f32,
         ],
+        point_position: None,
     }))
+}
+
+pub(crate) fn face_count(light: Light) -> usize {
+    if matches!(light, Light::Point { .. }) {
+        6
+    } else {
+        1
+    }
+}
+
+pub(crate) fn projections(
+    light: Light,
+    bounds: Aabb,
+    settings: ShadowSettings,
+) -> Result<Vec<Option<ShadowProjection>>, BoxError> {
+    let Light::Point { position, .. } = light else {
+        return Ok(vec![projection(light, bounds, settings)?]);
+    };
+    // Spherical exclusion in metres; the face near plane includes its corners.
+    let near: f64 = 0.01;
+    let closest =
+        std::array::from_fn(|axis| position[axis].clamp(bounds.min()[axis], bounds.max()[axis]));
+    let delta = sub(closest, position);
+    let search_near = dot(delta, delta).sqrt().max(near);
+    let far = (0..8)
+        .map(|corner| {
+            let point = std::array::from_fn(|axis| {
+                if corner & (1 << axis) == 0 {
+                    bounds.min()[axis]
+                } else {
+                    bounds.max()[axis]
+                }
+            });
+            let delta = sub(point, position);
+            dot(delta, delta).sqrt()
+        })
+        .fold(near * 2.0, f64::max)
+        * 1.01;
+    // +X, -X, +Y, -Y, +Z, -Z; shared with cube_coordinates/cube_direction in WGSL.
+    [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ]
+    .into_iter()
+    .map(|direction: [f64; 3]| {
+        let up = if direction[2] == 0.0 {
+            [0.0, 0.0, -1.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let matrix = Camera::look_at(
+            ImageExtent::new(settings.resolution, settings.resolution)?,
+            position,
+            std::array::from_fn(|i| position[i] + direction[i]),
+            up,
+            std::f64::consts::FRAC_PI_2,
+            near / 3.0_f64.sqrt(),
+            far,
+        )?
+        .clip_from_world()?;
+        Ok(Some(ShadowProjection {
+            matrix,
+            depth_scale: [near as f32, far as f32, search_near as f32, 0.0],
+            point_position: Some(position.map(|v| v as f32)),
+        }))
+    })
+    .collect()
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {

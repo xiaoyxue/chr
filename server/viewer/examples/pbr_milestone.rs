@@ -380,6 +380,31 @@ fn main() -> Result<()> {
             ..Default::default()
         },
     )?;
+    scene.set_lighting(illumination(length, width, "points")?)?;
+    for (name, mode) in [
+        ("point-off", ShadowMode::Off),
+        ("point-hard", ShadowMode::Hard),
+        ("point-pcf", ShadowMode::Pcf),
+        ("point-pcss", ShadowMode::Pcss),
+    ] {
+        capture(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &overview,
+            &target,
+            &directory.join(format!("{name}.png")),
+            ShadowSettings {
+                mode,
+                resolution: 1024,
+                ..Default::default()
+            },
+        )?;
+        eprintln!(
+            "Rendered {name}: {} shadow depth passes.",
+            renderer.shadow_passes_last_frame()
+        );
+    }
     Ok(())
 }
 

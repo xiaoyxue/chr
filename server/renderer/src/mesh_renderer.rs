@@ -120,8 +120,9 @@ pub struct MeshRenderer {
     pbr_active: bool,
     camera_layout: wgpu::BindGroupLayout,
     shadow_pipeline: wgpu::RenderPipeline,
+    point_shadow_pipeline: wgpu::RenderPipeline,
     shadow_atlas: ShadowAtlas,
-    shadow_cameras: Vec<(usize, wgpu::BindGroup)>,
+    shadow_cameras: Vec<(usize, bool, wgpu::BindGroup)>,
     shadow_projections: Vec<Option<ShadowProjection>>,
     shadow_cache: Option<(SceneView, u32, f32, u64)>,
     shadow_dirty: bool,
@@ -225,33 +226,37 @@ impl MeshRenderer {
             ],
             immediate_size: 0,
         });
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("alpha-masked shadow depth"),
-            layout: Some(&shadow_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
-                buffers: &[Some(vertex_layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_shadow"),
-                compilation_options: Default::default(),
-                targets: &[],
-            }),
-            primitive: Default::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let create_shadow_pipeline = |entry_point| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("alpha-masked shadow depth"),
+                layout: Some(&shadow_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_shadow"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(vertex_layout())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                primitive: Default::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let shadow_pipeline = create_shadow_pipeline("fs_shadow");
+        let point_shadow_pipeline = create_shadow_pipeline("fs_shadow_point");
         let create_pipeline = |format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("unlit indexed meshes"),
@@ -309,6 +314,7 @@ impl MeshRenderer {
             pbr_active: false,
             camera_layout,
             shadow_pipeline,
+            point_shadow_pipeline,
             shadow_atlas,
             shadow_cameras: Vec::new(),
             shadow_projections: Vec::new(),
@@ -347,15 +353,6 @@ impl MeshRenderer {
                 > quality.max_samples_per_fragment
         {
             return Err("PCSS exceeds the configured per-fragment sample budget".into());
-        }
-        if settings.shadows.mode != ShadowMode::Off
-            && scene
-                .lighting()
-                .lights()
-                .iter()
-                .any(|light| matches!(light, Light::Point { .. }))
-        {
-            return Err("point-light shadows require the cubemap increment".into());
         }
         if scene.lighting().sky().is_some() {
             return Err(
@@ -563,8 +560,9 @@ impl MeshRenderer {
         let shadows = settings.map_or(ShadowSettings::default(), |s| s.shadows);
         let atlas_changed = self.prepare_shadows(gpu, scene, shadows)?;
         if shadows.mode != ShadowMode::Off {
+            let mut layer = 0;
             for (index, light) in lights.iter_mut().enumerate() {
-                if let Some(projection) = self.shadow_projections.get(index).copied().flatten() {
+                if let Some(projection) = self.shadow_projections.get(layer).copied().flatten() {
                     light.shadow_matrix = projection.matrix;
                     light.shadow_depth = projection.depth_scale;
                     light.pcss[1] = shadows.pcss.max_search_radius;
@@ -576,12 +574,13 @@ impl MeshRenderer {
                         0.0,
                     ];
                     light.shadow_params = [
-                        index as f32,
+                        layer as f32,
                         shadows.depth_bias,
                         shadows.normal_bias,
                         shadows.filter_radius,
                     ];
                 }
+                layer += shadow::face_count(scene.lighting().lights()[index]);
             }
         }
         let bytes = std::mem::size_of::<LightUniform>() as u64 * lights.len().max(1) as u64;
@@ -663,7 +662,7 @@ impl MeshRenderer {
             return;
         };
         if self.shadow_dirty {
-            for (layer, camera_group) in &self.shadow_cameras {
+            for (layer, point, camera_group) in &self.shadow_cameras {
                 self.shadow_passes_last_frame += 1;
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("light shadow map"),
@@ -678,7 +677,11 @@ impl MeshRenderer {
                     }),
                     ..Default::default()
                 });
-                pass.set_pipeline(&self.shadow_pipeline);
+                pass.set_pipeline(if *point {
+                    &self.point_shadow_pipeline
+                } else {
+                    &self.shadow_pipeline
+                });
                 pass.set_bind_group(0, camera_group, &[]);
                 for draw in &self.draws {
                     let mesh = &self.meshes[&draw.mesh];
@@ -858,7 +861,14 @@ impl MeshRenderer {
         }
         let bounds = shadow::scene_bounds(scene);
         let lights = scene.lighting().lights();
-        let layers = u32::try_from(lights.len().max(1))?;
+        let layers = u32::try_from(
+            lights
+                .iter()
+                .copied()
+                .map(shadow::face_count)
+                .sum::<usize>()
+                .max(1),
+        )?;
         let resolution = if bounds.is_some() && !lights.is_empty() {
             settings.resolution
         } else {
@@ -871,17 +881,23 @@ impl MeshRenderer {
             .iter()
             .copied()
             .map(|light| match bounds {
-                Some(bounds) => shadow::projection(light, bounds, settings),
-                None => Ok(None),
+                Some(bounds) => shadow::projections(light, bounds, settings),
+                None => Ok(vec![None; shadow::face_count(light)]),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let mut cameras = Vec::new();
         for (index, matrix) in projections.iter().enumerate() {
             if let Some(matrix) = matrix {
                 let data = CameraUniform {
                     clip: matrix.matrix,
-                    eye: [0.0; 4],
-                    options: [0; 4],
+                    eye: matrix
+                        .point_position
+                        .map_or([0.0; 4], |p| [p[0], p[1], p[2], matrix.depth_scale[1]]),
+                    // Radial near distance is bit-packed in the shared camera options.
+                    options: [0, matrix.depth_scale[0].to_bits(), 0, 0],
                 };
                 let buffer = gpu
                     .device
@@ -892,6 +908,7 @@ impl MeshRenderer {
                     });
                 cameras.push((
                     index,
+                    matrix.point_position.is_some(),
                     uniform_group(&gpu.device, &self.camera_layout, &buffer, 96),
                 ));
             }

@@ -51,7 +51,8 @@ fn vs_main(vertex: Vertex) -> Surface {
 fn pow5(x: f32) -> f32 { let x2=x*x; return x2*x2*x; }
 
 struct ShadowSurface {
-    @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) alpha: f32
+    @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) alpha: f32,
+    @location(2) position: vec3<f32>
 };
 
 @vertex
@@ -61,15 +62,136 @@ fn vs_shadow(vertex:Vertex)->ShadowSurface {
     out.clip=camera.clip_from_world*world;
     out.uv=vertex.uv;
     out.alpha=vertex.color.a;
+    out.position=world.xyz;
     return out;
 }
 
-@fragment
-fn fs_shadow(surface:ShadowSurface,@builtin(front_facing) front_facing:bool) {
+fn shadow_alpha_test(surface:ShadowSurface,front_facing:bool) {
     let alpha=textureSample(base_map,base_sampler,surface.uv).a*object.color.a*surface.alpha;
     let front=select(front_facing,!front_facing,object.flags.w!=0u);
     if !front && object.flags.z==0u {discard;}
     if object.emissive_cutoff.w>=0.0 && alpha<object.emissive_cutoff.w {discard;}
+}
+
+@fragment
+fn fs_shadow(surface:ShadowSurface,@builtin(front_facing) front_facing:bool) {
+    shadow_alpha_test(surface,front_facing);
+}
+
+@fragment
+fn fs_shadow_point(surface:ShadowSurface,@builtin(front_facing) front_facing:bool)->@builtin(frag_depth) f32 {
+    shadow_alpha_test(surface,front_facing);
+    let radial=distance(surface.position,camera.eye.xyz);
+    if radial<bitcast<f32>(camera.options.y) {discard;}
+    return radial/camera.eye.w;
+}
+
+struct CubeAddress { uv:vec2<f32>, face:u32 };
+
+fn cube_coordinates(d:vec3<f32>)->CubeAddress {
+    let a=abs(d);
+    var uv=vec2(0.0);
+    var face=0u;
+    if a.x>=a.y && a.x>=a.z {
+        if d.x>=0.0 {uv=d.yz/a.x;} else {uv=vec2(-d.y,d.z)/a.x;face=1u;}
+    } else if a.y>=a.z {
+        if d.y>=0.0 {uv=vec2(-d.x,d.z)/a.y;face=2u;} else {uv=d.xz/a.y;face=3u;}
+    } else {
+        if d.z>=0.0 {uv=-d.xy/a.z;face=4u;} else {uv=vec2(d.x,-d.y)/a.z;face=5u;}
+    }
+    return CubeAddress(uv*0.5+vec2(0.5),face);
+}
+
+fn cube_direction(face:u32,uv:vec2<f32>)->vec3<f32> {
+    let p=uv*2.0-vec2(1.0);
+    switch face {
+        case 0u: {return vec3(1.0,p.x,p.y);}
+        case 1u: {return vec3(-1.0,-p.x,p.y);}
+        case 2u: {return vec3(-p.x,1.0,p.y);}
+        case 3u: {return vec3(p.x,-1.0,p.y);}
+        case 4u: {return vec3(-p.x,-p.y,1.0);}
+        default: {return vec3(p.x,-p.y,-1.0);}
+    }
+}
+
+// Raw radial depth and receiver-plane comparison depth at the actual fetched texel.
+fn point_depths(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->vec2<f32> {
+    let address=cube_coordinates(direction);
+    let size=vec2<f32>(textureDimensions(shadow_maps));
+    let pixel=clamp(vec2<i32>(address.uv*size),vec2(0),vec2<i32>(size)-vec2(1));
+    let ray=normalize(cube_direction(address.face,(vec2<f32>(pixel)+vec2(0.5))/size));
+    let numerator=dot(receiver,plane);
+    let denominator=dot(ray,plane);
+    if numerator*denominator<=0.0 {return vec2(1.0,0.0);}
+    let depth=textureLoad(shadow_maps,pixel,i32(light.shadow_params.x)+i32(address.face),0);
+    return vec2(depth,min(1.0,numerator/denominator/light.shadow_depth.y-light.shadow_params.y));
+}
+
+fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->f32 {
+    let address=cube_coordinates(direction);
+    let size=vec2<f32>(textureDimensions(shadow_maps));
+    let pixel=address.uv*size-vec2(0.5);
+    let base=floor(pixel);
+    let fraction=fract(pixel);
+    var result=0.0;
+    for(var y=0;y<2;y++) {
+        for(var x=0;x<2;x++) {
+            // Remap even bilinear neighbours across faces, instead of clamping UVs.
+            let ray=cube_direction(address.face,(base+vec2(f32(x),f32(y))+vec2(0.5))/size);
+            let depths=point_depths(light,ray,receiver,plane);
+            let weight=select(1.0-fraction.x,fraction.x,x==1)*select(1.0-fraction.y,fraction.y,y==1);
+            result+=weight*select(0.0,1.0,depths.y<=depths.x);
+        }
+    }
+    return result;
+}
+
+fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+    let radius=length(receiver);
+    if radius<light.shadow_depth.x || radius>=light.shadow_depth.y {return 1.0;}
+    let direction=receiver/radius;
+    let plane=cross(px,py);
+    if camera.options.z==1u || (camera.options.z==3u && light.pcss.x==0.0) {
+        let depths=point_depths(light,direction,receiver,plane);
+        return select(0.0,1.0,depths.y<=depths.x);
+    }
+    let up=select(vec3(0.0,0.0,1.0),vec3(0.0,1.0,0.0),abs(direction.z)>0.99);
+    let tangent=normalize(cross(direction,up));
+    let bitangent=cross(direction,tangent);
+    let texel=2.0/f32(textureDimensions(shadow_maps).x);
+    if camera.options.z==2u {
+        var visibility=0.0;
+        let step=texel*light.shadow_params.w;
+        for(var y=-1;y<=1;y++) {
+            for(var x=-1;x<=1;x++) {
+                visibility+=point_compare(light,direction+step*(f32(x)*tangent+f32(y)*bitangent),receiver,plane);
+            }
+        }
+        return visibility/9.0;
+    }
+    let near=light.shadow_depth.z;
+    let search=min(light.pcss.x*max(radius-near,0.0)/(near*radius),texel*light.pcss.y);
+    let blocker_samples=u32(light.pcss_samples.x);
+    var sum=0.0;
+    var count=0u;
+    for(var i=0u;i<blocker_samples;i++) {
+        let p=shadow_disk(i,blocker_samples)*search;
+        let depths=point_depths(light,direction+p.x*tangent+p.y*bitangent,receiver,plane);
+        if depths.x<1.0 && depths.x<depths.y {
+            sum+=depths.x*light.shadow_depth.y;
+            count++;
+        }
+    }
+    if count==0u {return 1.0;}
+    let blocker=sum/f32(count);
+    let penumbra=min(light.pcss.x*max(radius-blocker,0.0)/(blocker*radius),texel*light.pcss.z);
+    let filter_samples=u32(light.pcss_samples.y);
+    var visibility=0.0;
+    for(var i=0u;i<filter_samples;i++) {
+        let p=shadow_disk(i,filter_samples)*penumbra;
+        visibility+=point_compare(light,direction+p.x*tangent+p.y*bitangent,receiver,plane);
+    }
+    return visibility/f32(filter_samples);
 }
 
 fn linear_shadow_depth(light:Light,depth:f32)->f32 {
@@ -141,6 +263,9 @@ fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>)->f32 {
 
 fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
     if camera.options.z==0u || light.shadow_params.x<0.0 {return 1.0;}
+    if light.position_kind.w==1.0 {
+        return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
+    }
     let clip=light.shadow_matrix*vec4(position+normal*light.shadow_params.z,1.0);
     if clip.w<=0.0 {return 1.0;}
     let ndc=clip.xyz/clip.w;
