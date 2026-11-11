@@ -206,6 +206,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
         vec![Light::Point {
             position: [1.0, 2.0, -35.0],
             intensity: [10.0; 3],
+            source_radius: 0.0,
         }],
         Some(SkyLight {
             environment,
@@ -231,10 +232,12 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
         Light::Directional {
             direction: [0.0; 3],
             irradiance: [1.0; 3],
+            angular_radius: 0.0,
         },
         Light::Point {
             position: [0.0; 3],
             intensity: [-1.0; 3],
+            source_radius: 0.0,
         },
         Light::Spot {
             position: [0.0; 3],
@@ -242,6 +245,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
             intensity: [1.0; 3],
             inner_angle: 0.5,
             outer_angle: 0.4,
+            source_radius: 0.0,
         },
     ] {
         assert!(matches!(
@@ -253,4 +257,26 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
         EnvironmentMap::new(ImageExtent::new(1, 1).unwrap(), vec![[f32::INFINITY; 3]]),
         Err(SceneError::InvalidEnvironment)
     ));
+    for radius in [-0.1, f32::INFINITY, f32::NAN] {
+        for light in [
+            Light::Directional {
+                direction: [0.0, 0.0, 1.0],
+                irradiance: [1.0; 3],
+                angular_radius: radius,
+            },
+            Light::Spot {
+                position: [0.0, 0.0, -1.0],
+                direction: [0.0, 0.0, 1.0],
+                intensity: [1.0; 3],
+                inner_angle: 0.2,
+                outer_angle: 0.5,
+                source_radius: radius,
+            },
+        ] {
+            assert!(matches!(
+                Lighting::new(vec![light], None),
+                Err(SceneError::InvalidLighting)
+            ));
+        }
+    }
 }

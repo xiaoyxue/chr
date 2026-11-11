@@ -59,11 +59,15 @@ pub enum Light {
         direction: [f64; 3],
         /// Linear RGB W/m^2 on a plane perpendicular to the light.
         irradiance: [f32; 3],
+        /// Angular source radius in radians for PCSS; zero is an ideal directional source.
+        angular_radius: f32,
     },
     Point {
         position: [f64; 3],
         /// Linear RGB W/sr.
         intensity: [f32; 3],
+        /// Shadow-source radius in metres; does not change punctual BRDF evaluation.
+        source_radius: f32,
     },
     Spot {
         position: [f64; 3],
@@ -73,6 +77,8 @@ pub enum Light {
         /// Half angles in radians: 0 <= inner < outer < pi/2.
         inner_angle: f64,
         outer_angle: f64,
+        /// Shadow-source radius in metres; does not change punctual BRDF evaluation.
+        source_radius: f32,
     },
 }
 
@@ -82,17 +88,29 @@ impl Light {
             Self::Directional {
                 direction,
                 irradiance,
-            } => valid_direction(direction) && nonnegative(irradiance),
+                angular_radius,
+            } => {
+                valid_direction(direction)
+                    && nonnegative(irradiance)
+                    && (0.0..std::f32::consts::FRAC_PI_2).contains(&angular_radius)
+            }
             Self::Point {
                 position,
                 intensity,
-            } => position.into_iter().all(f64::is_finite) && nonnegative(intensity),
+                source_radius,
+            } => {
+                position.into_iter().all(f64::is_finite)
+                    && nonnegative(intensity)
+                    && source_radius.is_finite()
+                    && source_radius >= 0.0
+            }
             Self::Spot {
                 position,
                 direction,
                 intensity,
                 inner_angle,
                 outer_angle,
+                source_radius,
             } => {
                 position.into_iter().all(f64::is_finite)
                     && valid_direction(direction)
@@ -100,6 +118,8 @@ impl Light {
                     && 0.0 <= inner_angle
                     && inner_angle < outer_angle
                     && outer_angle < std::f64::consts::FRAC_PI_2
+                    && source_radius.is_finite()
+                    && source_radius >= 0.0
             }
         };
         if valid {

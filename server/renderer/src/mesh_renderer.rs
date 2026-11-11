@@ -12,7 +12,7 @@ use crate::{
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
     scene::{Light, MaterialId, MaterialMaps, MeshId, SceneView},
-    shadow::{self, ShadowAtlas, ShadowMode, ShadowSettings},
+    shadow::{self, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,6 +65,9 @@ struct LightUniform {
     emission_outer: [f32; 4],
     shadow_matrix: [[f32; 4]; 4],
     shadow_params: [f32; 4],
+    shadow_depth: [f32; 4],
+    pcss: [f32; 4],
+    pcss_samples: [f32; 4],
 }
 
 #[repr(C)]
@@ -119,7 +122,7 @@ pub struct MeshRenderer {
     shadow_pipeline: wgpu::RenderPipeline,
     shadow_atlas: ShadowAtlas,
     shadow_cameras: Vec<(usize, wgpu::BindGroup)>,
-    shadow_projections: Vec<Option<[[f32; 4]; 4]>>,
+    shadow_projections: Vec<Option<ShadowProjection>>,
     shadow_cache: Option<(SceneView, u32, f32, u64)>,
     shadow_dirty: bool,
     shadow_passes_last_frame: u32,
@@ -127,6 +130,7 @@ pub struct MeshRenderer {
 
 impl MeshRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let light_size = std::mem::size_of::<LightUniform>() as u64;
         let camera_layout = uniform_layout(device, false, 96);
         let object_layout = uniform_layout(device, true, 176);
         let camera = uniform_buffer(device, 96);
@@ -141,7 +145,7 @@ impl MeshRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(128),
+                        min_binding_size: NonZeroU64::new(light_size),
                     },
                     count: None,
                 },
@@ -165,12 +169,12 @@ impl MeshRenderer {
         });
         let lights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene lights"),
-            size: 128,
+            size: light_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let shadow_atlas = ShadowAtlas::new(device, 1, 1);
-        let light_group = light_group(device, &light_layout, &lights, 128, &shadow_atlas);
+        let light_group = light_group(device, &light_layout, &lights, light_size, &shadow_atlas);
         let tone_settings = uniform_buffer(device, 16);
         let tone_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tone map"),
@@ -297,7 +301,7 @@ impl MeshRenderer {
             lights,
             light_group,
             light_layout,
-            light_capacity: 128,
+            light_capacity: light_size,
             tone_pipeline,
             tone_layout,
             tone_settings,
@@ -336,6 +340,14 @@ impl MeshRenderer {
             return Err("exposure must be finite and nonnegative".into());
         }
         settings.shadows.validate()?;
+        let quality = settings.shadows.pcss;
+        if settings.shadows.mode == ShadowMode::Pcss
+            && scene.lighting().lights().len() as u64
+                * u64::from(quality.blocker_samples + quality.filter_samples)
+                > quality.max_samples_per_fragment
+        {
+            return Err("PCSS exceeds the configured per-fragment sample budget".into());
+        }
         if settings.shadows.mode != ShadowMode::Off
             && scene
                 .lighting()
@@ -552,8 +564,17 @@ impl MeshRenderer {
         let atlas_changed = self.prepare_shadows(gpu, scene, shadows)?;
         if shadows.mode != ShadowMode::Off {
             for (index, light) in lights.iter_mut().enumerate() {
-                if let Some(matrix) = self.shadow_projections.get(index).copied().flatten() {
-                    light.shadow_matrix = matrix;
+                if let Some(projection) = self.shadow_projections.get(index).copied().flatten() {
+                    light.shadow_matrix = projection.matrix;
+                    light.shadow_depth = projection.depth_scale;
+                    light.pcss[1] = shadows.pcss.max_search_radius;
+                    light.pcss[2] = shadows.pcss.max_filter_radius;
+                    light.pcss_samples = [
+                        shadows.pcss.blocker_samples as f32,
+                        shadows.pcss.filter_samples as f32,
+                        0.0,
+                        0.0,
+                    ];
                     light.shadow_params = [
                         index as f32,
                         shadows.depth_bias,
@@ -745,10 +766,12 @@ impl MeshRenderer {
             Light::Directional {
                 direction,
                 irradiance,
+                ..
             } => ([0.0; 3], 0.0, normalize(direction), irradiance, 0.0, 0.0),
             Light::Point {
                 position,
                 intensity,
+                ..
             } => (
                 position.map(|v| v as f32),
                 1.0,
@@ -763,6 +786,7 @@ impl MeshRenderer {
                 intensity,
                 inner_angle,
                 outer_angle,
+                ..
             } => (
                 position.map(|v| v as f32),
                 2.0,
@@ -778,6 +802,19 @@ impl MeshRenderer {
             emission_outer: [emission[0], emission[1], emission[2], outer],
             shadow_matrix: [[0.0; 4]; 4],
             shadow_params: [-1.0, 0.0, 0.0, 0.0],
+            shadow_depth: [0.0; 4],
+            pcss: [
+                match light {
+                    Light::Directional { angular_radius, .. } => angular_radius.tan(),
+                    Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
+                        source_radius
+                    }
+                },
+                0.0,
+                0.0,
+                0.0,
+            ],
+            pcss_samples: [0.0; 4],
         };
         if !bytemuck::cast_slice::<_, f32>(&[uniform])
             .iter()
@@ -842,7 +879,7 @@ impl MeshRenderer {
         for (index, matrix) in projections.iter().enumerate() {
             if let Some(matrix) = matrix {
                 let data = CameraUniform {
-                    clip: *matrix,
+                    clip: matrix.matrix,
                     eye: [0.0; 4],
                     options: [0; 4],
                 };

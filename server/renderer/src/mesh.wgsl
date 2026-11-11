@@ -5,7 +5,8 @@ struct Object {
 };
 struct Light {
     position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>,
-    shadow_matrix: mat4x4<f32>, shadow_params: vec4<f32>
+    shadow_matrix: mat4x4<f32>, shadow_params: vec4<f32>,
+    shadow_depth: vec4<f32>, pcss: vec4<f32>, pcss_samples: vec4<f32>
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
@@ -71,6 +72,73 @@ fn fs_shadow(surface:ShadowSurface,@builtin(front_facing) front_facing:bool) {
     if object.emissive_cutoff.w>=0.0 && alpha<object.emissive_cutoff.w {discard;}
 }
 
+fn linear_shadow_depth(light:Light,depth:f32)->f32 {
+    let near=light.shadow_depth.x;
+    let far=light.shadow_depth.y;
+    if light.position_kind.w>0.5 {
+        return near/(1.0-depth+depth*(near/far));
+    }
+    return depth*far;
+}
+
+fn shadow_disk(index:u32,count:u32)->vec2<f32> {
+    let angle=f32(index)*2.39996323;
+    return sqrt(f32(index)/f32(count))*vec2(cos(angle),sin(angle));
+}
+
+fn bounded_shadow_radius(radius:vec2<f32>,limit:f32,size:vec2<f32>)->vec2<f32> {
+    let largest=max(radius.x*size.x,radius.y*size.y);
+    return radius*min(1.0,limit/max(largest,1e-20));
+}
+
+fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>)->f32 {
+    let size=vec2<f32>(textureDimensions(shadow_maps));
+    let layer=i32(light.shadow_params.x);
+    let receiver=linear_shadow_depth(light,clamp(depth,0.0,1.0));
+    let near=light.shadow_depth.x;
+    var projection=light.shadow_depth.zw;
+    var search_world=light.pcss.x*receiver;
+    if light.position_kind.w>0.5 {
+        projection/=receiver;
+        search_world=light.pcss.x*max(receiver-near,0.0)/near;
+    }
+    let search=bounded_shadow_radius(search_world*projection,light.pcss.y,size);
+    let blocker_samples=u32(light.pcss_samples.x);
+    var blocker_sum=0.0;
+    var blockers=0u;
+    for(var i=0u;i<blocker_samples;i++) {
+        let sample_uv=uv+shadow_disk(i,blocker_samples)*search;
+        if any(sample_uv<vec2(0.0)) || any(sample_uv>=vec2(1.0)) {continue;}
+        let pixel=vec2<i32>(sample_uv*size);
+        let offset=(vec2<f32>(pixel)+vec2(0.5))/size-uv;
+        let stored=textureLoad(shadow_maps,pixel,layer,0);
+        if stored<1.0 && stored<depth+dot(gradient,offset) {
+            // Average reconstructed distances, never nonlinear perspective depths.
+            blocker_sum+=linear_shadow_depth(light,stored);
+            blockers++;
+        }
+    }
+    if blockers==0u {return 1.0;}
+    let blocker=blocker_sum/f32(blockers);
+    var penumbra=light.pcss.x*max(receiver-blocker,0.0);
+    if light.position_kind.w>0.5 {penumbra/=blocker;}
+    let radius=bounded_shadow_radius(penumbra*projection,light.pcss.z,size);
+    let filter_samples=u32(light.pcss_samples.y);
+    let receiver_bias=dot(abs(gradient),1.0/size);
+    var visibility=0.0;
+    for(var i=0u;i<filter_samples;i++) {
+        let offset=shadow_disk(i,filter_samples)*radius;
+        let sample_uv=uv+offset;
+        if any(sample_uv<vec2(0.0)) || any(sample_uv>=vec2(1.0)) {
+            visibility+=1.0;
+        } else {
+            visibility+=textureSampleCompareLevel(shadow_maps,shadow_sampler,sample_uv,layer,
+                depth+dot(gradient,offset)-receiver_bias);
+        }
+    }
+    return visibility/f32(filter_samples);
+}
+
 fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
     if camera.options.z==0u || light.shadow_params.x<0.0 {return 1.0;}
     let clip=light.shadow_matrix*vec4(position+normal*light.shadow_params.z,1.0);
@@ -92,11 +160,12 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     if abs(determinant)>1e-12 {
         gradient=vec2(dx.z*uy.y-dy.z*ux.y,ux.x*dy.z-uy.x*dx.z)/determinant;
     }
-    if camera.options.z==1u {
+    if camera.options.z==1u || (camera.options.z==3u && light.pcss.x==0.0) {
         let pixel=clamp(vec2<i32>(uv*vec2<f32>(size)),vec2(0),vec2<i32>(size)-vec2(1));
         let offset=(vec2<f32>(pixel)+vec2(0.5))/vec2<f32>(size)-uv;
         return select(0.0,1.0,depth+dot(gradient,offset)<=textureLoad(shadow_maps,pixel,layer,0));
     }
+    if camera.options.z==3u {return pcss_visibility(light,uv,depth,gradient);}
     var visibility=0.0;
     let step=light.shadow_params.w/vec2<f32>(size);
     // Correct the receiver plane per tap; cover the bilinear footprint's depth slope.

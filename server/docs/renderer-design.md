@@ -15,7 +15,7 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: EXR/IBL, point shadows/PCSS, area/atmosphere lighting
+not a live scene-control protocol: EXR/IBL, point shadows, area/atmosphere lighting
 and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
@@ -71,6 +71,36 @@ mode changes. The M3 overview captures compare Off/Hard/PCF with identical
 sun-plus-four-spot illumination and ordinary pinhole framing. They remain
 owner-local diagnostics, not full interactive acceptance. Cascades, point-light
 cubemaps, PCSS and sky occlusion are not implemented by this increment.
+
+M4 adds directional/spot `Pcss` on the same depth maps. Each directional light
+has an angular source radius in radians; each local light has a shadow-source
+radius in metres. The shader reconstructs each blocker into linear light depth
+before averaging, uses angular separation for sun penumbrae and similar triangles
+for spots, then filters comparisons with the resulting projected radius.
+Zero size is exactly Hard; no blockers is fully lit. Punctual BRDF evaluation and
+emission units do not change.
+
+Shared `PcssSettings` expose 1..=64 samples per stage (32+32 by default), separate
+search/filter caps (64 shadow texels each), and a worst-case per-fragment budget
+(1024 logical samples across lights). Invalid quality or budget overflow is an
+error. Fixed disk sampling is deterministic without screen-space random noise
+or temporal accumulation; receiver-plane correction applies to both stages.
+Quality-only changes and camera motion reuse the maps. Large kernels are capped
+and thin blockers may be missed; this remains a single-average-blocker approximation.
+The `shadow-pcss.png` capture retains M3 lighting; `shadow-pcss-wide.png` increases
+source radii fourfold without changing energy. Point cubemaps, cascades, per-light
+mode selection, sky visibility and finite-area BRDF integration remain unimplemented.
+PCSS is high priority; area/LTC is now low priority.
+
+Algorithm reference: NVIDIA's
+[Soft Shadows sample](https://docs.nvidia.com/gameworks/content/gameworkslibrary/graphicssamples/opengl_samples/softshadowssample.htm)
+and its PCSS integration references. The bounded two-stage strategy is retained,
+with deterministic disk sampling and explicit world/angular units rather than
+an invented sun distance. The local `trd` grounding/blob shader is not reused
+as visibility. GPU regressions compare controlled contact/separation/source-size
+cases against independent disk-emitter ray/plane visibility integration, plus
+zero-size, no-blocker, near-plane, cache and budget cases. These fixtures are not
+a general-scene quality benchmark or a realtime performance guarantee.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,
