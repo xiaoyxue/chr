@@ -61,8 +61,31 @@ Inspect a locally supplied model without adding it to the repository:
 cargo run --locked -p chr-app --example glb_info -- /path/to/model.glb
 ```
 
-The importer is independent of rendering; the M1 shader still uses unlit factor
-colours until the PBR increment is connected.
+The importer is independent of rendering. M1 remains an unlit diagnostic;
+the same mesh renderer now also offers `prepare_pbr`.
+
+## M2: local GLB and direct-light PBR
+
+The PBR path supports material maps, correct colour-space mipmaps, normal mapping,
+alpha masking, direct directional/point/spot lights, and one HDR exposure/tone-map
+pass. It does not yet implement shadows, IBL/EXR environments, area lights or
+the interactive control integration.
+
+The offline example uses a private native diagnostic JSON fixture containing
+`width`, `height`, forward row-major `ti`, world `center`, and `pitch` dimensions.
+Prepare those values from the local package metadata and explicit frame map;
+do not infer frame identity from row order or rewrite source coefficients.
+This fixture is not a public scene/control protocol.
+
+```sh
+cargo run --locked -p chr-app --example pbr_milestone -- \
+  /path/to/private-camera.json output/renderer/m2 /path/to/model.glb
+```
+
+Use the documented nixGL wrapper when needed. The example saves owner-local
+`sun.png`, `points.png` and `spots.png`, comparing sunlight with four authored
+35 m corner towers. These are static PBR diagnostics, not shadow or physical
+camera-calibration acceptance. Do not upload private inputs or resulting images.
 
 ## Render server
 
