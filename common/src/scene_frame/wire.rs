@@ -21,14 +21,14 @@ macro_rules! methods {
         /// A parsed method invocation, not another wire envelope.
         #[derive(Debug, Clone, PartialEq, Serialize)]
         #[serde(untagged)]
-        pub enum Params { $($variant($params)),* }
+        pub enum Params { $($variant(Box<$params>)),* }
 
         /// Both IPC transports should call this from the same handler.
         /// Unknown methods remain available to the handler's other namespaces.
         pub fn parse_params(method: &str, params: Option<Value>) -> Result<Params, ErrorObject> {
             match method {
                 $($method => parse_payload(params.ok_or_else(|| ErrorObject::invalid_params("params are required"))?)
-                    .map(Params::$variant),)*
+                    .map(Box::new).map(Params::$variant),)*
                 _ => Err(ErrorObject::method_not_found(method)),
             }
         }
@@ -94,21 +94,23 @@ pub struct Rejection {
     pub frame: Option<FrameKey>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RejectionFields {
+object!(@private RejectionFields {
+    #[serde(deserialize_with = "rejection_code")]
     code: i32,
     message: String,
     data: RejectionData,
+});
+
+fn rejection_code<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+    let number = super::core::integer(deserializer)?;
+    i32::try_from(number).map_err(serde::de::Error::custom)
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RejectionData {
+object!(@private RejectionData {
     kind: RejectionKind,
     #[serde(deserialize_with = "required_nullable")]
     frame: Option<FrameKey>,
-}
+});
 
 impl TryFrom<RejectionFields> for Rejection {
     type Error = ValidationError;

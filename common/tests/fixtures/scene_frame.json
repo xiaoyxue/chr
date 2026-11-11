@@ -117,7 +117,29 @@
       "name":"release_submission","method":"render.release","params":{"runtime_id":"runtime-01","submission_id":"submission-17"},"result":{"released":true}
     }
   ],
+  "valid_changes":[
+    {"name":"nonnull cutoff","base":"create","side":"params","path":"/state/instances/0/material_overrides/0/factors/alpha_cutoff","value":0.5},
+    {"name":"nonnull context","base":"tracked_submit","side":"params","path":"/frames/0/geometry/context_id","value":"synthetic-context"},
+    {"name":"float linear image","base":"publish","side":"params","path":"/image","value":{"extent":{"width":1280.0,"height":720e0},"format":"rgba16_float","transfer":"linear","alpha":"premultiplied"}},
+    {"name":"bgra encoded image","base":"publish","side":"params","path":"/image","value":{"extent":{"width":1280,"height":720},"format":"bgra8_unorm","transfer":"srgb","alpha":"premultiplied"}},
+    {"name":"manual camera tracked metadata","base":"create","side":"params","path":"/state/camera","value":{"mode":"tracked","near_m":0.1,"far_m":1000}},
+    {"name":"instance put","base":"mutate","side":"params","path":"/operations","value":[{"kind":"instance_put","instance":{"instance_id":"synthetic","asset_ref":"synthetic-cube","model":[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],"visible":false,"material_overrides":[]}}]},
+    {"name":"output failed","base":"get_submission","side":"result","path":"/frames/4/delivery/reason","value":"output_failed"},
+    {"name":"deadline exceeded","base":"get_submission","side":"result","path":"/frames/2/reason","value":"deadline_exceeded"},
+    {"name":"cancelled frame","base":"get_submission","side":"result","path":"/frames/2/reason","value":"cancelled"},
+    {"name":"render failed","base":"get_submission","side":"result","path":"/frames/2/reason","value":"render_failed"},
+    {"name":"runtime failed","base":"get_submission","side":"result","path":"/frames/2/reason","value":"runtime_failed"}
+  ],
   "invalid_params":[
+    {"name":"positional scene target","base":"get_scene","path":"","value":["runtime-01","scene-tracked"]},
+    {"name":"positional extent","base":"publish","path":"/image/extent","value":[1280,720]},
+    {"name":"positional frame key","base":"publish","path":"/frame","value":["stream-01","17"]},
+    {"name":"positional timeline","base":"publish","path":"/timeline","value":["capture-01",{"numerator":1,"denominator":50}]},
+    {"name":"positional nullable lighting","base":"create","path":"/state/lighting","value":[[],null]},
+    {"name":"duplicate instances","base":"create","path":"/state/instances","duplicate":true},
+    {"name":"duplicate lights","base":"create","path":"/state/lighting/lights","duplicate":true},
+    {"name":"duplicate material parts","base":"create","path":"/state/instances/0/material_overrides","duplicate":true},
+    {"name":"duplicate frame keys","base":"submit","path":"/frames","duplicate":true},
     {"name":"empty identity","base":"create","path":"/runtime_id","value":""},
     {"name":"null identity","base":"create","path":"/scene_id","value":null},
     {"name":"stale wrapper","base":"create","path":"/scene","value":{}},
@@ -154,6 +176,10 @@
     {"name":"no client readiness","base":"publish","path":"/ready","value":true}
   ],
   "invalid_results":[
+    {"name":"positional release result","base":"release_frame","path":"","value":[true]},
+    {"name":"duplicate accepted frames","base":"submit","path":"/frames","duplicate":true},
+    {"name":"duplicate result frames","base":"get_submission","path":"/frames","duplicate":true},
+    {"name":"duplicate cancellation frames","base":"cancel","path":"/cancelled","duplicate":true},
     {"name":"unsupported profile","base":"configuration","path":"/profile","value":"scene_frame_v2"},
     {"name":"configuration missing budget","base":"configuration","path":"/max_intermediate_bytes","remove":true},
     {"name":"zero budget","base":"configuration","path":"/shadows/max_bytes","value":"0"},
@@ -173,9 +199,9 @@
   "scalars": {
     "u64_valid":["0","1","9007199254740993","18446744073709551615"],
     "u64_invalid":["","00","01","-1","+1"," 1","1 ","1.0","1e3","18446744073709551616","１２",0,1,null,true],
-    "time_valid":[{"numerator":1,"denominator":50},{"numerator":1001,"denominator":30000},{"numerator":2147483647,"denominator":1}],
+    "time_valid":[{"numerator":1,"denominator":50},{"numerator":1001,"denominator":30000},{"numerator":2147483647,"denominator":1},{"numerator":1.0,"denominator":50e0}],
     "time_invalid":[{"numerator":0,"denominator":1},{"numerator":1,"denominator":0},{"numerator":2,"denominator":100},
       {"numerator":1.5,"denominator":50},{"numerator":2147483648,"denominator":1},{"numerator":1,"denominator":-1},
-      {"numerator":1},{"numerator":1,"denominator":50,"fps":50},null]
+      {"numerator":1},{"numerator":1,"denominator":50,"fps":50},[1,50],null]
   }
 }

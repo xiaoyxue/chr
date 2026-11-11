@@ -29,6 +29,9 @@ Call the shared parser before native math validation and resource resolution;
 plain serde decoding alone does not check cross-field metadata or installed
 capacity. IDs/time/finite numbers are validated scalar types. Required nullable
 fields must be present even when null; unknown fields are errors.
+DTO objects reject positional arrays. Numeric integer fields accept equivalent
+JSON spellings (`1`, `1.0`, `1e0`), matching JavaScript's number domain; U64 text
+never uses that normalization and remains canonical decimal only.
 
 Shared synthetic fixtures live in `common/tests/fixtures/scene_frame.json`.
 `cargo test --locked -p chr-common` checks round trips, negative payloads and

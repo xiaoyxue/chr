@@ -1,14 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::{core::required_nullable, *};
-
-macro_rules! object {
-    ($name:ident { $($(#[$meta:meta])* $field:ident : $ty:ty),* $(,)? }) => {
-        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-        #[serde(deny_unknown_fields)]
-        pub struct $name { $($(#[$meta])* pub $field: $ty),* }
-    };
-}
+use super::{
+    core::{integer, required_nullable},
+    *,
+};
 
 macro_rules! strings {
     ($name:ident { $($variant:ident => $wire:literal),* $(,)? }) => {
@@ -46,20 +41,25 @@ object!(SubmissionTarget {
     submission_id: Id
 });
 object!(Pcss {
+    #[serde(deserialize_with = "integer")]
     blocker_samples: u32,
+    #[serde(deserialize_with = "integer")]
     filter_samples: u32,
     max_search_radius: Finite,
     max_filter_radius: Finite,
 });
 object!(Cascades {
+    #[serde(deserialize_with = "integer")]
     count: u32,
     max_distance: Finite,
     split_lambda: Finite,
     blend_fraction: Finite
 });
 object!(Shadows {
+    #[serde(deserialize_with = "integer")]
     resolution: u32,
     filter_radius: Finite,
+    #[serde(deserialize_with = "integer")]
     pcf_samples: u32,
     depth_bias: Finite,
     normal_bias: Finite,
@@ -69,19 +69,30 @@ object!(Shadows {
     cascades: Cascades,
 });
 object!(EnvironmentSettings {
+    #[serde(deserialize_with = "integer")]
     resolution: u32,
+    #[serde(deserialize_with = "integer")]
     samples: u32,
     max_bytes: U64
 });
 object!(Limits {
+    #[serde(deserialize_with = "integer")]
     scenes: u32,
+    #[serde(deserialize_with = "integer")]
     instances_per_scene: u32,
+    #[serde(deserialize_with = "integer")]
     lights_per_scene: u32,
+    #[serde(deserialize_with = "integer")]
     operations_per_mutation: u32,
+    #[serde(deserialize_with = "integer")]
     published_frames: u32,
+    #[serde(deserialize_with = "integer")]
     frames_per_submission: u32,
+    #[serde(deserialize_with = "integer")]
     inflight_frames: u32,
+    #[serde(deserialize_with = "integer")]
     retained_submissions: u32,
+    #[serde(deserialize_with = "integer")]
     render_timeout_ms: u32,
 });
 object!(Configuration {
@@ -96,6 +107,7 @@ object!(Configuration {
     output_transfer: OutputTransfer,
     exposure: Finite,
     tone_map: ToneMap,
+    #[serde(deserialize_with = "integer")]
     sample_count: u32,
     shadows: Shadows,
     environment: EnvironmentSettings,
@@ -110,6 +122,7 @@ object!(PbrFactors {
     double_sided: bool, normal_scale: Finite, occlusion_strength: Finite, unlit: bool,
 });
 object!(MaterialOverride {
+    #[serde(deserialize_with = "integer")]
     part: u32,
     factors: PbrFactors
 });

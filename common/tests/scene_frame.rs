@@ -6,7 +6,16 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 fn fixtures() -> Value {
-    serde_json::from_str(include_str!("fixtures/scene_frame.json")).unwrap()
+    let mut fixtures: Value =
+        serde_json::from_str(include_str!("fixtures/scene_frame.json")).unwrap();
+    for positive in fixtures["valid_changes"].as_array().unwrap().clone() {
+        let mut call = case(&fixtures, positive["base"].as_str().unwrap()).clone();
+        let side = positive["side"].as_str().unwrap();
+        call[side] = changed(&fixtures, &positive, side);
+        call["name"] = positive["name"].clone();
+        fixtures["calls"].as_array_mut().unwrap().push(call);
+    }
+    fixtures
 }
 
 fn case<'a>(fixtures: &'a Value, name: &str) -> &'a Value {
@@ -19,10 +28,16 @@ fn case<'a>(fixtures: &'a Value, name: &str) -> &'a Value {
 }
 
 fn changed(fixtures: &Value, negative: &Value, side: &str) -> Value {
+    if negative["path"] == "" {
+        return negative["value"].clone();
+    }
     let mut value = case(fixtures, negative["base"].as_str().unwrap())[side].clone();
     let (parent, field) = negative["path"].as_str().unwrap().rsplit_once('/').unwrap();
     let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
-    if negative["remove"] == true {
+    if negative["duplicate"] == true {
+        let list = object[field].as_array_mut().unwrap();
+        list.push(list[0].clone());
+    } else if negative["remove"] == true {
         assert!(object.remove(field).is_some());
     } else {
         object.insert(field.into(), negative["value"].clone());
@@ -309,7 +324,11 @@ mod ipc {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
 
         let mut requests = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for call in fixtures["calls"].as_array().unwrap() {
+            if !seen.insert((call["method"].to_string(), call["params"].to_string())) {
+                continue;
+            }
             requests.push((
                 json!({"jsonrpc":"2.0","id":call["name"],"method":call["method"],"params":call["params"]}),
                 json!({"jsonrpc":"2.0","id":call["name"],"result":call["result"]}),
@@ -361,10 +380,11 @@ mod ipc {
         }
         ws.close(None).await.unwrap();
         drop(native);
-        let transports = handler.transports.lock().unwrap();
-        assert!(transports.contains(&Transport::NativeSocket));
-        assert!(transports.contains(&Transport::WebSocket));
-        drop(transports);
+        {
+            let transports = handler.transports.lock().unwrap();
+            assert!(transports.contains(&Transport::NativeSocket));
+            assert!(transports.contains(&Transport::WebSocket));
+        }
         native_task.abort();
         ws_task.abort();
         let _ = native_task.await;

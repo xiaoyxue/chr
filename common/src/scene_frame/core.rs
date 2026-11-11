@@ -123,12 +123,40 @@ where
     Option::deserialize(deserializer)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FrameKey {
-    pub stream_id: Id,
-    pub sequence: U64,
+// JSON/JavaScript has one numeric domain: 1, 1.0 and 1e0 are the same integer.
+pub(super) fn integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let number = f64::deserialize(deserializer)?;
+    if number.fract() != 0.0 || !(0.0..=f64::from(u32::MAX)).contains(&number) {
+        return Err(D::Error::custom("expected an unsigned 32-bit integer"));
+    }
+    Ok(number as u32)
 }
+
+pub(super) fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+        type Value = T;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+}
+
+object!(
+    #[derive(Eq, Hash)]
+    FrameKey {
+        stream_id: Id,
+        sequence: U64
+    }
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "TimeBaseFields", into = "TimeBaseFields")]
@@ -137,12 +165,12 @@ pub struct TimeBase {
     denominator: u32,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TimeBaseFields {
+object!(@private TimeBaseFields {
+    #[serde(deserialize_with = "integer")]
     numerator: u32,
+    #[serde(deserialize_with = "integer")]
     denominator: u32,
-}
+});
 
 impl TimeBase {
     /// Seconds per tick, already reduced; does not normalize caller input.
@@ -194,40 +222,43 @@ impl From<TimeBase> for TimeBaseFields {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Timeline {
-    pub timeline_id: Id,
-    pub time_base: TimeBase,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Position {
-    pub timeline_id: Id,
-    pub ticks: U64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Effect {
-    pub runtime_id: Id,
-    pub sequence: U64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Version {
-    pub id: Id,
-    pub revision: U64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Extent {
-    pub width: u32,
-    pub height: u32,
-}
+object!(
+    #[derive(Eq)]
+    Timeline {
+        timeline_id: Id,
+        time_base: TimeBase
+    }
+);
+object!(
+    #[derive(Eq)]
+    Position {
+        timeline_id: Id,
+        ticks: U64
+    }
+);
+object!(
+    #[derive(Eq)]
+    Effect {
+        runtime_id: Id,
+        sequence: U64
+    }
+);
+object!(
+    #[derive(Eq)]
+    Version {
+        id: Id,
+        revision: U64
+    }
+);
+object!(
+    #[derive(Copy, Eq)]
+    Extent {
+        #[serde(deserialize_with = "integer")]
+        width: u32,
+        #[serde(deserialize_with = "integer")]
+        height: u32,
+    }
+);
 
 impl Validate for Extent {
     fn validate(&self) -> Result<(), ValidationError> {

@@ -7,23 +7,33 @@ import {
 } from "../scene-frame.ts";
 
 interface Call { name: string; method: SceneFrameMethod; params: unknown; result: unknown }
-interface Change { name: string; base: string; path: string; remove?: boolean; value?: unknown }
+interface Change { name: string; base: string; path: string; remove?: boolean; duplicate?: boolean; value?: unknown }
 const fixtures = JSON.parse(readFileSync(
   new URL("../../../../../common/tests/fixtures/scene_frame.json", import.meta.url), "utf8",
 )) as {
-  calls: Call[]; invalid_params: Change[]; invalid_results: Change[];
+  calls: Call[]; valid_changes: (Change & { side: "params" | "result" })[]; invalid_params: Change[]; invalid_results: Change[];
   scalars: { u64_valid: unknown[]; u64_invalid: unknown[]; time_valid: unknown[]; time_invalid: unknown[] };
 };
 function changed(change: Change, side: "params" | "result"): { method: SceneFrameMethod; value: unknown } {
   const call = fixtures.calls.find(call => call.name === change.base)!;
+  if (change.path === "") return { method: call.method, value: change.value };
   const value: unknown = structuredClone(call[side]);
   const keys = change.path.slice(1).split("/");
   const field = keys.pop()!;
   let parent = value as Record<string, unknown>;
   for (const key of keys) parent = parent[key] as Record<string, unknown>;
-  if (change.remove) delete parent[field];
+  if (change.duplicate) {
+    const list = parent[field] as unknown[];
+    list.push(structuredClone(list[0]));
+  } else if (change.remove) delete parent[field];
   else parent[field] = change.value;
   return { method: call.method, value };
+}
+for (const positive of fixtures.valid_changes) {
+  const base = structuredClone(fixtures.calls.find(call => call.name === positive.base)!);
+  base[positive.side] = changed(positive, positive.side).value;
+  base.name = positive.name;
+  fixtures.calls.push(base);
 }
 
 test("Rust shared fixtures round trip exact params and results", () => {
