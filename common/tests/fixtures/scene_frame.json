@@ -1,0 +1,181 @@
+{
+  "calls": [
+    {
+      "name": "configuration",
+      "method": "render.get_configuration",
+      "params": {"runtime_id":"runtime-01"},
+      "result": {
+        "runtime_id":"runtime-01","configuration_id":"configuration-01","profile":"scene_frame_v1",
+        "native_extent":{"width":1280,"height":720},"output_extent":{"width":1280,"height":720},
+        "output_rate":{"numerator":1,"denominator":50},"fit":"contain","input_stage":"scene_background",
+        "output_transfer":"bt709","exposure":0,"tone_map":"aces","sample_count":4,
+        "shadows":{
+          "resolution":512,"filter_radius":2,"pcf_samples":9,"depth_bias":0.001,"normal_bias":0.01,
+          "max_bytes":"18446744073709551615","max_samples_per_fragment":"1024",
+          "pcss":{"blocker_samples":16,"filter_samples":16,"max_search_radius":8,"max_filter_radius":8},
+          "cascades":{"count":4,"max_distance":1000,"split_lambda":0.5,"blend_fraction":0.1}
+        },
+        "environment":{"resolution":64,"samples":16,"max_bytes":"1048576"},
+        "max_intermediate_bytes":"16777216",
+        "limits":{"scenes":4,"instances_per_scene":8,"lights_per_scene":4,"operations_per_mutation":8,
+          "published_frames":8,"frames_per_submission":4,"inflight_frames":4,"retained_submissions":8,"render_timeout_ms":1000}
+      }
+    },
+    {
+      "name":"create","method":"scene.create",
+      "params":{
+        "runtime_id":"runtime-01","scene_id":"scene-demo",
+        "state":{
+          "world":{"id":"synthetic-world","revision":"1"},"configuration_id":"configuration-01",
+          "camera":{"mode":"manual","camera":{"kind":"intrinsics_pose","extent":{"width":1280,"height":720},
+            "near_m":0.1,"far_m":1000,"intrinsics":{"fx":1000,"fy":1000,"skew":0,"cx":640,"cy":360},
+            "camera_to_world":[[1,0,0,0],[0,1,0,0],[0,0,1,-10],[0,0,0,1]]}},
+          "instances":[{"instance_id":"cube","asset_ref":"synthetic-cube","model":[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "visible":true,"material_overrides":[{"part":0,"factors":{"base_color":[1,1,1,1],"metallic":0,"roughness":0.5,
+              "emissive":[0,0,0],"alpha_cutoff":null,"double_sided":false,"normal_scale":1,"occlusion_strength":1,"unlit":false}}]}],
+          "lighting":{"lights":[
+            {"light_id":"sun","kind":"directional","direction":[0,0,1],"irradiance":[1,1,1],"angular_radius":0.00465,"shadow_mode":null},
+            {"light_id":"point","kind":"point","position":[0,0,-2],"intensity":[1,1,1],"source_radius":0,"shadow_mode":"off"},
+            {"light_id":"spot","kind":"spot","position":[0,0,-2],"direction":[0,0,1],"intensity":[1,1,1],"source_radius":0.1,
+              "inner_angle":0.2,"outer_angle":0.4,"shadow_mode":"hard"}
+          ],"environment":null},"shadow_mode":"pcf"
+        }
+      },
+      "result":{"runtime_id":"runtime-01","scene_id":"scene-demo","scene_revision":"0","effect":{"runtime_id":"runtime-01","sequence":"7"}}
+    },
+    {
+      "name":"get_scene","method":"scene.get","params":{"runtime_id":"runtime-01","scene_id":"scene-tracked"},
+      "result":{"runtime_id":"runtime-01","scene_id":"scene-tracked","scene_revision":"0","effect":{"runtime_id":"runtime-01","sequence":"8"},
+        "state":{"world":{"id":"synthetic-world","revision":"1"},"configuration_id":"configuration-01",
+          "camera":{"mode":"tracked","near_m":0.1,"far_m":1000},"instances":[],
+          "lighting":{"lights":[],"environment":{"asset_ref":"synthetic-exr","gain":1,"rotation":0,"visible":false}},"shadow_mode":"off"}}
+    },
+    {
+      "name":"mutate","method":"scene.mutate",
+      "params":{"runtime_id":"runtime-01","scene_id":"scene-demo","expected_revision":"0","operations":[
+        {"kind":"instance_remove","instance_id":"cube"},{"kind":"lighting_set","lighting":{"lights":[],"environment":null}},
+        {"kind":"shadow_mode_set","shadow_mode":"pcss"},
+        {"kind":"camera_set","camera":{"kind":"ti_c","extent":{"width":1280,"height":720},"near_m":0.1,"far_m":1000,
+          "ti":[1,0,0,0,1,0,0,0,1],"camera_center":[0,0,-10]}}
+      ]},
+      "result":{"runtime_id":"runtime-01","scene_id":"scene-demo","scene_revision":"1","effect":{"runtime_id":"runtime-01","sequence":"9"}}
+    },
+    {
+      "name":"release_scene","method":"scene.release","params":{"runtime_id":"runtime-01","scene_id":"scene-demo"},"result":{"released":true}
+    },
+    {
+      "name":"publish","method":"frame.publish",
+      "params":{"runtime_id":"runtime-01","producer_ticket":"ticket-17","frame":{"stream_id":"stream-01","sequence":"18446744073709551615"},
+        "timeline":{"timeline_id":"capture-01","time_base":{"numerator":1,"denominator":50}},
+        "position":{"timeline_id":"capture-01","ticks":"9007199254740993"},
+        "image":{"extent":{"width":1280,"height":720},"format":"rgba8_unorm","transfer":"bt709","alpha":"straight"}},
+      "result":{"runtime_id":"runtime-01","frame":{"stream_id":"stream-01","sequence":"18446744073709551615"},
+        "image_ref":"image-17","position":{"timeline_id":"capture-01","ticks":"9007199254740993"}}
+    },
+    {
+      "name":"release_frame","method":"frame.release","params":{"runtime_id":"runtime-01","image_ref":"image-17"},"result":{"released":false}
+    },
+    {
+      "name":"submit","method":"render.submit",
+      "params":{"runtime_id":"runtime-01","scene_id":"scene-demo","submission_id":"submission-17","expected_scene_revision":null,
+        "frames":[{"frame":{"stream_id":"stream-01","sequence":"17"},"image_ref":"image-17",
+          "position":{"timeline_id":"capture-01","ticks":"17"},"geometry":{"kind":"scene_camera"}}]},
+      "result":{"runtime_id":"runtime-01","submission_id":"submission-17","scene_id":"scene-demo","scene_revision":"4",
+        "effect":{"runtime_id":"runtime-01","sequence":"23"},
+        "frames":[{"frame":{"stream_id":"stream-01","sequence":"17"},"position":{"timeline_id":"capture-01","ticks":"17"}}]}
+    },
+    {
+      "name":"tracked_submit","method":"render.submit",
+      "params":{"runtime_id":"runtime-01","scene_id":"scene-tracked","submission_id":"submission-18","expected_scene_revision":"0",
+        "frames":[{"frame":{"stream_id":"stream-01","sequence":"18"},"image_ref":"image-18","position":{"timeline_id":"capture-01","ticks":"18"},
+          "geometry":{"kind":"ti_c","world":{"id":"synthetic-world","revision":"1"},"context_id":null,
+            "extent":{"width":1280,"height":720},"ti":[1,0,0,0,1,0,0,0,1],"camera_center":[0,0,-10]}}]},
+      "result":{"runtime_id":"runtime-01","submission_id":"submission-18","scene_id":"scene-tracked","scene_revision":"0",
+        "effect":{"runtime_id":"runtime-01","sequence":"24"},
+        "frames":[{"frame":{"stream_id":"stream-01","sequence":"18"},"position":{"timeline_id":"capture-01","ticks":"18"}}]}
+    },
+    {
+      "name":"get_submission","method":"render.get","params":{"runtime_id":"runtime-01","submission_id":"submission-17"},
+      "result":{"runtime_id":"runtime-01","submission_id":"submission-17","scene_id":"scene-demo","scene_revision":"4",
+        "effect":{"runtime_id":"runtime-01","sequence":"23"},"frames":[
+          {"frame":{"stream_id":"stream-01","sequence":"17"},"position":{"timeline_id":"capture-01","ticks":"17"},
+            "state":"rendered","output_frame_id":"output-17","delivery":{"state":"transmitted","output_stream_id":"program-01","first_slot":"18446744073709551615"}},
+          {"frame":{"stream_id":"stream-01","sequence":"18"},"position":{"timeline_id":"capture-01","ticks":"18"},"state":"pending"},
+          {"frame":{"stream_id":"stream-01","sequence":"19"},"position":{"timeline_id":"capture-01","ticks":"19"},"state":"failed","reason":"write_failed"},
+          {"frame":{"stream_id":"stream-01","sequence":"20"},"position":{"timeline_id":"capture-01","ticks":"20"},
+            "state":"rendered","output_frame_id":"output-20","delivery":{"state":"queued"}},
+          {"frame":{"stream_id":"stream-01","sequence":"21"},"position":{"timeline_id":"capture-01","ticks":"21"},
+            "state":"rendered","output_frame_id":"output-21","delivery":{"state":"dropped","reason":"queue_full"}}
+        ]}
+    },
+    {
+      "name":"cancel","method":"render.cancel","params":{"runtime_id":"runtime-01","submission_id":"submission-17"},
+      "result":{"runtime_id":"runtime-01","submission_id":"submission-17",
+        "cancelled":[{"stream_id":"stream-01","sequence":"18"}],"too_late":[{"stream_id":"stream-01","sequence":"17"}]}
+    },
+    {
+      "name":"release_submission","method":"render.release","params":{"runtime_id":"runtime-01","submission_id":"submission-17"},"result":{"released":true}
+    }
+  ],
+  "invalid_params":[
+    {"name":"empty identity","base":"create","path":"/runtime_id","value":""},
+    {"name":"null identity","base":"create","path":"/scene_id","value":null},
+    {"name":"stale wrapper","base":"create","path":"/scene","value":{}},
+    {"name":"missing environment","base":"create","path":"/state/lighting/environment","remove":true},
+    {"name":"missing light inheritance","base":"create","path":"/state/lighting/lights/0/shadow_mode","remove":true},
+    {"name":"missing cutoff","base":"create","path":"/state/instances/0/material_overrides/0/factors/alpha_cutoff","remove":true},
+    {"name":"missing revision selector","base":"submit","path":"/expected_scene_revision","remove":true},
+    {"name":"missing context selector","base":"tracked_submit","path":"/frames/0/geometry/context_id","remove":true},
+    {"name":"unsupported distortion","base":"create","path":"/state/camera/camera/distortion","value":[0,0,0,0]},
+    {"name":"unsupported orthographic","base":"create","path":"/state/camera/camera/kind","value":"orthographic"},
+    {"name":"unsupported area light","base":"create","path":"/state/lighting/lights/0/kind","value":"area"},
+    {"name":"unsupported atmosphere","base":"create","path":"/state/lighting/atmosphere","value":{}},
+    {"name":"unsupported animation","base":"create","path":"/state/animation","value":[]},
+    {"name":"wrong enum field","base":"create","path":"/state/lighting/lights/0/position","value":[0,0,0]},
+    {"name":"unknown geometry field","base":"submit","path":"/frames/0/geometry/ti","value":[1,0,0,0,1,0,0,0,1]},
+    {"name":"missing geometry","base":"submit","path":"/frames/0/geometry","remove":true},
+    {"name":"null geometry","base":"submit","path":"/frames/0/geometry","value":null},
+    {"name":"empty submission","base":"submit","path":"/frames","value":[]},
+    {"name":"empty mutation","base":"mutate","path":"/operations","value":[]},
+    {"name":"wrong matrix layout","base":"create","path":"/state/instances/0/model","value":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]},
+    {"name":"null finite number","base":"create","path":"/state/camera/camera/near_m","value":null},
+    {"name":"bad clip interval","base":"create","path":"/state/camera/camera/near_m","value":1000},
+    {"name":"zero extent","base":"publish","path":"/image/extent/width","value":0},
+    {"name":"fractional extent","base":"publish","path":"/image/extent/width","value":1.5},
+    {"name":"too large extent","base":"publish","path":"/image/extent/width","value":4294967296},
+    {"name":"float requires linear","base":"publish","path":"/image/format","value":"rgba16_float"},
+    {"name":"timeline mismatch","base":"publish","path":"/position/timeline_id","value":"other"},
+    {"name":"unreduced time","base":"publish","path":"/timeline/time_base","value":{"numerator":2,"denominator":100}},
+    {"name":"numeric sequence","base":"publish","path":"/frame/sequence","value":17},
+    {"name":"sequence overflow","base":"publish","path":"/frame/sequence","value":"18446744073709551616"},
+    {"name":"noncanonical sequence","base":"publish","path":"/frame/sequence","value":"017"},
+    {"name":"no arbitrary path","base":"publish","path":"/path","value":"synthetic.png"},
+    {"name":"no image bytes","base":"publish","path":"/image/bytes","value":[1,2,3,4]},
+    {"name":"no client readiness","base":"publish","path":"/ready","value":true}
+  ],
+  "invalid_results":[
+    {"name":"unsupported profile","base":"configuration","path":"/profile","value":"scene_frame_v2"},
+    {"name":"configuration missing budget","base":"configuration","path":"/max_intermediate_bytes","remove":true},
+    {"name":"zero budget","base":"configuration","path":"/shadows/max_bytes","value":"0"},
+    {"name":"unsupported msaa","base":"configuration","path":"/sample_count","value":2},
+    {"name":"unsupported pcf","base":"configuration","path":"/shadows/pcf_samples","value":8},
+    {"name":"unsupported pcss","base":"configuration","path":"/shadows/pcss/blocker_samples","value":65},
+    {"name":"unsupported environment","base":"configuration","path":"/environment/resolution","value":96},
+    {"name":"invalid capacity","base":"configuration","path":"/limits/scenes","value":0},
+    {"name":"effect runtime mismatch","base":"submit","path":"/effect/runtime_id","value":"old-runtime"},
+    {"name":"accepted is not rendered","base":"submit","path":"/frames/0/state","value":"rendered"},
+    {"name":"completed is not transmitted","base":"get_submission","path":"/frames/3/delivery/output_stream_id","value":"program-01"},
+    {"name":"stale success wrapper","base":"release_frame","path":"/success","value":true},
+    {"name":"missing terminal slot","base":"get_submission","path":"/frames/0/delivery/first_slot","remove":true},
+    {"name":"unknown failure reason","base":"get_submission","path":"/frames/2/reason","value":"unknown"},
+    {"name":"tracked clip missing","base":"get_scene","path":"/state/camera/near_m","remove":true}
+  ],
+  "scalars": {
+    "u64_valid":["0","1","9007199254740993","18446744073709551615"],
+    "u64_invalid":["","00","01","-1","+1"," 1","1 ","1.0","1e3","18446744073709551616","１２",0,1,null,true],
+    "time_valid":[{"numerator":1,"denominator":50},{"numerator":1001,"denominator":30000},{"numerator":2147483647,"denominator":1}],
+    "time_invalid":[{"numerator":0,"denominator":1},{"numerator":1,"denominator":0},{"numerator":2,"denominator":100},
+      {"numerator":1.5,"denominator":50},{"numerator":2147483648,"denominator":1},{"numerator":1,"denominator":-1},
+      {"numerator":1},{"numerator":1,"denominator":50,"fps":50},null]
+  }
+}

@@ -17,6 +17,10 @@ what the port transmits, repeats included. Encoding is software after a CPU read
 that is a development shortcut, not the intended GPU-to-hardware-encoder path.
 
 The protocol mirror is `src/protocol.ts`; the Rust source of truth is `common/src/`.
+`src/scene-frame.ts` mirrors the limited synthetic `scene_frame_v1` DTOs and exact
+payload validation, reexported as `SceneFrame`. It does not enable those methods
+in the triangle runtime. Keep its required-nullable fields, method/result maps
+and error codes synchronized with `common/src/scene_frame/`.
 
 ## Run
 
@@ -39,7 +43,7 @@ npm run dev          # viewer at http://127.0.0.1:5173/
 
 ```sh
 npm run typecheck
-npm test                          # depacketizer and framing unit tests
+npm test                          # depacketizer, framing and shared scene/frame fixtures
 npm run verify                    # IPC, SDI status, and the WebRTC stream via werift + ffmpeg
 npm run verify:browser            # the stream decoded by a headless Chrome
 npm run verify:browser -- --tcp-only   # same, with UDP forbidden (SSH forward case)
