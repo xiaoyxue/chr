@@ -1,6 +1,6 @@
 //! Private local diagnostic fixture, not a public control protocol or live preview.
 use chr_renderer::{
-    Gpu, MeshRenderer, OffscreenTarget, PbrSettings,
+    Gpu, MeshRenderer, OffscreenTarget, PbrSettings, ShadowMode, ShadowSettings,
     camera::Camera,
     coordinates::{ImageExtent, Ti},
     glb::import_glb,
@@ -41,6 +41,10 @@ fn write_png(path: &Path, extent: ImageExtent, pixels: &[u8]) -> Result<()> {
 
 /// Level front view: world verticals stay vertical in the image, with zero skew.
 fn standard_camera(extent: ImageExtent, bounds: Aabb) -> Result<Camera> {
+    framed_camera(extent, bounds, 0.0)
+}
+
+fn framed_camera(extent: ImageExtent, bounds: Aabb, elevation: f64) -> Result<Camera> {
     let lo = bounds.min();
     let hi = bounds.max();
     let center = std::array::from_fn::<_, 3, _>(|i| (lo[i] + hi[i]) * 0.5);
@@ -54,7 +58,11 @@ fn standard_camera(extent: ImageExtent, bounds: Aabb) -> Result<Camera> {
     let distance = 1.15 * radius / half_fov.min(horizontal).sin();
     Ok(Camera::look_at(
         extent,
-        [center[0], center[1] + distance, center[2]],
+        [
+            center[0],
+            center[1] + distance * elevation.cos(),
+            center[2] - distance * elevation.sin(),
+        ],
         center,
         [0.0, 0.0, -1.0],
         2.0 * half_fov,
@@ -70,8 +78,17 @@ fn capture(
     camera: &Camera,
     target: &OffscreenTarget,
     path: &Path,
+    shadows: ShadowSettings,
 ) -> Result<()> {
-    renderer.prepare_pbr(gpu, &scene.snapshot(), camera, PbrSettings::default())?;
+    renderer.prepare_pbr(
+        gpu,
+        &scene.snapshot(),
+        camera,
+        PbrSettings {
+            shadows,
+            ..Default::default()
+        },
+    )?;
     let mut pixels = Vec::new();
     target.render_rgba(
         gpu,
@@ -79,6 +96,36 @@ fn capture(
         &mut pixels,
     )?;
     write_png(path, camera.extent(), &pixels)
+}
+
+fn illumination(length: f64, width: f64, mode: &str) -> Result<Lighting> {
+    let mut lights = vec![Light::Directional {
+        direction: [0.2, -0.4, 1.0],
+        irradiance: [2.5, 2.35, 2.1],
+    }];
+    if mode != "sun" {
+        for x in [-length / 2.0, length / 2.0] {
+            for y in [-width / 2.0, width / 2.0] {
+                let position = [x, y, -35.0];
+                let intensity = [4000.0, 4200.0, 5000.0];
+                lights.push(if mode == "points" {
+                    Light::Point {
+                        position,
+                        intensity,
+                    }
+                } else {
+                    Light::Spot {
+                        position,
+                        direction: [-x, -y, 35.0],
+                        intensity,
+                        inner_angle: 0.4,
+                        outer_angle: 0.9,
+                    }
+                });
+            }
+        }
+    }
+    Ok(Lighting::new(lights, None)?)
 }
 
 fn main() -> Result<()> {
@@ -225,33 +272,7 @@ fn main() -> Result<()> {
     let target = OffscreenTarget::new(&gpu, extent)?;
     let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
     for mode in ["sun", "spots", "points"] {
-        let mut lights = vec![Light::Directional {
-            direction: [0.2, -0.4, 1.0],
-            irradiance: [2.5, 2.35, 2.1],
-        }];
-        if mode != "sun" {
-            for x in [-length / 2.0, length / 2.0] {
-                for y in [-width / 2.0, width / 2.0] {
-                    let position = [x, y, -35.0];
-                    let intensity = [4000.0, 4200.0, 5000.0];
-                    lights.push(if mode == "points" {
-                        Light::Point {
-                            position,
-                            intensity,
-                        }
-                    } else {
-                        Light::Spot {
-                            position,
-                            direction: [-x, -y, 35.0],
-                            intensity,
-                            inner_angle: 0.4,
-                            outer_angle: 0.9,
-                        }
-                    });
-                }
-            }
-        }
-        scene.set_lighting(Lighting::new(lights, None)?)?;
+        scene.set_lighting(illumination(length, width, mode)?)?;
         capture(
             &gpu,
             &mut renderer,
@@ -259,6 +280,7 @@ fn main() -> Result<()> {
             &camera,
             &target,
             &directory.join(format!("{mode}.png")),
+            ShadowSettings::default(),
         )?;
         eprintln!("Rendered {mode} diagnostic (no shadows or IBL).");
     }
@@ -276,6 +298,7 @@ fn main() -> Result<()> {
         &standard,
         &target,
         &directory.join("standard.png"),
+        ShadowSettings::default(),
     )?;
     for (index, &(selected, bounds)) in model_views.iter().enumerate() {
         for &(id, _) in &model_views {
@@ -289,6 +312,7 @@ fn main() -> Result<()> {
             &inspection,
             &target,
             &directory.join(format!("model-{}.png", index + 1)),
+            ShadowSettings::default(),
         )?;
         let lo = bounds.min();
         let hi = bounds.max();
@@ -301,6 +325,33 @@ fn main() -> Result<()> {
             "Model {}: tracked projection of a world-vertical line tilts {:.1} degrees; standard view is level.",
             index + 1,
             tracked_angle
+        );
+    }
+    for &(id, _) in &model_views {
+        scene.set_visible(id, true)?;
+    }
+    scene.set_lighting(illumination(length, width, "spots")?)?;
+    let overview = framed_camera(extent, Aabb::new(lo, hi)?, 0.65)?;
+    for (name, mode) in [
+        ("shadow-off", ShadowMode::Off),
+        ("shadow-hard", ShadowMode::Hard),
+        ("shadow-pcf", ShadowMode::Pcf),
+    ] {
+        capture(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &overview,
+            &target,
+            &directory.join(format!("{name}.png")),
+            ShadowSettings {
+                mode,
+                ..Default::default()
+            },
+        )?;
+        eprintln!(
+            "Rendered {name}: {} shadow depth passes.",
+            renderer.shadow_passes_last_frame()
         );
     }
     Ok(())

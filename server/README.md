@@ -68,8 +68,8 @@ the same mesh renderer now also offers `prepare_pbr`.
 
 The PBR path supports material maps, correct colour-space mipmaps, normal mapping,
 alpha masking, direct directional/point/spot lights, and one HDR exposure/tone-map
-pass. It does not yet implement shadows, IBL/EXR environments, area lights or
-the interactive control integration.
+pass. M2 captures leave shadows disabled; IBL/EXR environments, area lights and
+the interactive control integration remain follow-up work.
 
 The offline example uses a private native diagnostic JSON fixture containing
 `width`, `height`, forward row-major `ti`, world `center`, and `pitch` dimensions.
@@ -92,6 +92,30 @@ level 45-degree FOV/look-at pinhole camera framed around the model bounds.
 These views have zero skew and keep world-vertical lines vertical on screen,
 without changing model orientation, placement, lighting or imported calibration.
 Use them to distinguish projection-induced tilt from the asset's own geometry.
+
+## M3: directional and spot shadows
+
+`PbrSettings::shadows` now supports `Off`, `Hard` and `Pcf` for directional and
+spot lights. Directional lights use a stable scene-fitted orthographic map;
+spots use a cone-matched perspective map. This bounded-scene implementation does
+not yet provide cascades, point-light cubemaps or PCSS. Enabling shadows with
+point lights fails explicitly rather than leaving them silently unshadowed.
+
+Settings expose resolution, a 3x3 bilinear-comparison PCF radius in texels,
+normalized depth bias, world-metre normal bias, and a memory budget. Defaults
+are shadow-off, 2048 texels and a 256 MiB budget. Receiver-plane depth correction
+prevents sloping surfaces from shadowing themselves. Caster alpha masks and
+sidedness match the main material path.
+
+Depth maps are reused when scene state and map settings are unchanged, including
+camera-only motion and Hard/PCF switching. `shadow_passes_last_frame()` reports
+actual depth passes encoded, not the number of enabled lights.
+
+The same example additionally writes `shadow-off.png`, `shadow-hard.png` and
+`shadow-pcf.png`. These use one ordinary pinhole overview, unchanged models and
+the same sun-plus-four-spot rig, isolating the shadow setting. The legacy M2 and
+front-inspection captures remain unshadowed. PCF filters edges; it is not PCSS
+contact-hardening or finite-area-light integration.
 
 ## Render server
 

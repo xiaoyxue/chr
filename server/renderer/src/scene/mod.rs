@@ -124,6 +124,10 @@ pub struct SceneView {
 }
 
 impl SceneView {
+    pub(crate) fn same_snapshot(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     /// Monotonic within this scene only; not a source frame identity or timestamp.
     pub fn revision(&self) -> u64 {
         self.state.revision
