@@ -249,6 +249,39 @@ reject unsupported deep/multipart/channel layouts explicitly rather than
 silently converting them to LDR. Existing sRGB PNG captures remain unchanged;
 any future HDR image export also uses `.exr`.
 
+The CPU import boundary is `chr_renderer::exr::import_exr(&[u8])`, returning
+the existing validated `scene::EnvironmentMap`. The caller loads bytes and
+schedules decoding outside rendering; the core performs no filesystem I/O.
+Its currently supported profile is:
+
+- One flat part, exactly `R`, `G`, `B`, optionally `A`; every channel is
+  full-resolution HALF or FLOAT (mixed precision is allowed). HALF widens exactly
+  to `f32`; FLOAT and values above one are retained. RGB must be finite and
+  nonnegative. Alpha must be exactly one; transparent associated RGB is rejected
+  rather than silently unpremultiplied or treated as complete radiance.
+- Scan lines or single-level tiles with lossless NONE, RLE, ZIPS, ZIP or PIZ
+  compression. Deep, multipart, mip/rip levels, integer or extra/layered/subsampled
+  channels and other compression methods are unsupported.
+- Complete zero-origin, matching data/display windows and square pixels.
+  `envmap` may be absent (explicit latitude-longitude assumption) or
+  latitude-longitude; cube maps and multiview layouts are rejected. Raster order
+  is preserved, top row first; no rotation, resampling, exposure or gain is applied.
+- Scene-linear sRGB/Rec.709 primaries and D65 white are the working-space contract.
+  Untagged input explicitly assumes that space. `chromaticities`, when present,
+  must match R `(0.64, 0.33)`, G `(0.30, 0.60)`, B `(0.15, 0.06)` and white
+  `(0.3127, 0.3290)` within `1e-5` per coordinate. No transfer function or
+  colour-space conversion is performed. `whiteLuminance`, `adoptedNeutral`,
+  rendering/look transforms and all custom attributes (including ACES/colour-space
+  tags) are rejected, not silently ignored. Standard descriptive/camera metadata
+  is not applied or retained in `EnvironmentMap`; callers retain source bytes
+  when needed.
+
+Synthetic in-memory EXR tests cover this profile, invalid radiance, malformed
+headers/payloads, unsupported formats and retained-scene replacement. This decoder
+is independent of trd's GPU environment algorithms; none are ported here. It does
+not implement IBL convolution/prefiltering, BRDF integration, visible background,
+GPU cache invalidation or the remaining issue #19 acceptance.
+
 The full target includes **all five light families, physical atmosphere, multiple
 area shapes, and shadows including PCF and PCSS**. Staging them is an
 implementation order, not a reduction to a shadow-free MVP. Fisheye, panoramic cameras, depth of field,
