@@ -1,4 +1,11 @@
-@group(0) @binding(0) var<uniform> viewport: vec4<f32>;
+struct Viewport {
+    // SNC to NDC scale; NDC Y is up while SNC Y is down.
+    scale: vec2<f32>,
+    // (cos, sin) of the display rotation about the SNC origin.
+    rotation: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> viewport: Viewport;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -11,7 +18,9 @@ fn vs_main(
     @location(1) color: vec3<f32>,
 ) -> VertexOutput {
     var output: VertexOutput;
-    output.position = vec4<f32>(snc * viewport.xy, 0.5, 1.0);
+    let r = viewport.rotation;
+    let rotated = vec2<f32>(r.x * snc.x - r.y * snc.y, r.y * snc.x + r.x * snc.y);
+    output.position = vec4<f32>(rotated * viewport.scale, 0.5, 1.0);
     output.color = color;
     return output;
 }

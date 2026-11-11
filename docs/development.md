@@ -13,15 +13,17 @@ flake.lock                Pinned Nix inputs for the whole repository
 AGENTS.md                 Repository-wide contributor rules
 README.md                 Project overview and quick start
 client/src/               TypeScript client sources (currently a placeholder)
-Cargo.toml                Rust workspace definition (members under server/)
+client/example/           Example clients and harnesses, each its own npm package
+Cargo.toml                Rust workspace definition (members under server/, common/)
 Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
+server/runtime/           chr-server: headless render server with IPC and video outputs
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
-common/src/               Shared communication protocols (stack undecided)
+common/                   chr-common: JSON-RPC 2.0 messages and local IPC (Rust)
 algorithm/src/            Scene reconstruction algorithms (stack undecided)
 docs/                     Repository-wide documentation
 reference/                Private, local-only reference materials
@@ -33,7 +35,8 @@ Keep module sources inside their owning module, not at the repository root.
 Use `docs/` for cross-module development and architecture documents, and
 `server/docs/` for server-specific contracts. Do not move private reference
 materials into documentation, source files, fixtures, or Nix build inputs.
-No client framework, shared-protocol implementation language, or algorithm
+The shared protocol is implemented in Rust (`common/`), with TypeScript
+mirrors in clients. No client framework or algorithm
 technology stack is chosen by this environment setup.
 
 ## Start a feature
@@ -77,11 +80,12 @@ rustc --version
 cargo --version
 ```
 
-`client/src/` is currently a placeholder. The environment supplies its language
-tools, not a client application: there is no `package.json`, `tsconfig.json`,
-client build command, or client test suite yet. Do not run bare `tsc` or invent
-`npm run` scripts as repository validation. Add project configuration with the
-actual client implementation, and keep it within `client/`.
+`client/src/` is currently a placeholder with no package or build scripts; do not
+run bare `tsc` there or invent `npm run` scripts as repository validation. Example
+packages under `client/example/` are self-contained: run `npm install` and their
+documented scripts inside each package (see
+`client/example/render-harness/README.md`). Keep client configuration within
+`client/`.
 
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.
@@ -98,8 +102,9 @@ nix build --no-update-lock-file
 nix fmt -- --check flake.nix
 ```
 
-The default package and named `chr-app` package still build the renderer.
-The default application runs it; no placeholder client package is advertised.
+The default package and named `chr-app` package build the renderer viewer, and
+`chr-server` builds the headless render server. The default application runs the
+viewer; no client package is advertised.
 `nix flake check` includes:
 
 | Check | Coverage |
@@ -137,7 +142,8 @@ belong under root `output/<module>/`. Renderer PNGs go to
 `output/renderer/triangle.png` when launched from anywhere in the checkout;
 outside a checkout the packaged app uses that path relative to its working
 directory.
-Keep future client runtime artifacts in `output/client/`. These outputs,
+Keep client runtime artifacts in `output/client/` or `output/<harness>/`, such as
+`output/render-harness/`. These outputs,
 `node_modules/`, and TypeScript `.tsbuildinfo` caches are ignored by Git.
 
 The Rust Nix build source includes only the root Cargo manifests and the

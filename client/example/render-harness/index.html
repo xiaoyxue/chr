@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chr program monitor</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101215;
+        --panel: #181b20;
+        --border: #2a2f37;
+        --text: #e6e8eb;
+        --muted: #8b939e;
+        --accent: #4c8dff;
+        --ok: #3ccf91;
+        --bad: #ff6b6b;
+        font: 14px/1.45 system-ui, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        align-items: baseline;
+        margin-bottom: 12px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+      }
+      .pipeline {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 340px;
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .stage {
+        position: relative;
+        background: black;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      video {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background: black;
+      }
+      .overlay {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        pointer-events: none;
+      }
+      .overlay[hidden] {
+        display: none;
+      }
+      aside {
+        display: grid;
+        gap: 12px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .panel h2 {
+        font-size: 13px;
+        margin: 0 0 8px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      .row + .row {
+        margin-top: 8px;
+      }
+      input {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 8px;
+        min-width: 0;
+      }
+      #ws-url {
+        flex: 1;
+      }
+      #speed {
+        width: 72px;
+      }
+      button {
+        background: var(--accent);
+        color: white;
+        border: 0;
+        border-radius: 6px;
+        padding: 7px 12px;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      button.secondary {
+        background: var(--border);
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 2px 12px;
+        margin: 0;
+        font-variant-numeric: tabular-nums;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .status {
+        font-weight: 600;
+      }
+      .status.ok {
+        color: var(--ok);
+      }
+      .status.bad {
+        color: var(--bad);
+      }
+      #log {
+        margin-top: 12px;
+        max-height: 140px;
+        overflow: auto;
+        font: 12px/1.4 ui-monospace, monospace;
+        color: var(--muted);
+        white-space: pre-wrap;
+      }
+      #result {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: 12px/1.4 ui-monospace, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>chr program monitor</h1>
+      <span class="pipeline">render → SDI (UYVY 4:2:2) → encoder (H.264) → WebRTC</span>
+    </header>
+
+    <div class="layout">
+      <div class="stage">
+        <video muted autoplay playsinline></video>
+        <div class="overlay" id="overlay">Connect, then open the stream</div>
+      </div>
+
+      <aside>
+        <section class="panel">
+          <h2>Server</h2>
+          <div class="row">
+            <input id="ws-url" aria-label="WebSocket URL" />
+            <button id="connect">Connect</button>
+          </div>
+          <div class="row">
+            <span id="connection" class="status">disconnected</span>
+          </div>
+          <div class="row">
+            <button id="stream" disabled>Open stream</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Triangle</h2>
+          <div class="row">
+            <label>Speed <input id="speed" type="number" value="90" step="15" /> °/s</label>
+          </div>
+          <div class="row">
+            <button id="start" disabled>Start rotation</button>
+            <button id="stop" class="secondary" disabled>Stop rotation</button>
+          </div>
+          <div class="row"><dl id="scene"></dl></div>
+        </section>
+
+        <section class="panel">
+          <h2>SDI output</h2>
+          <dl id="sdi"></dl>
+        </section>
+
+        <section class="panel">
+          <h2>WebRTC stream</h2>
+          <dl id="stats"></dl>
+        </section>
+      </aside>
+    </div>
+
+    <div id="log"></div>
+    <pre id="result" hidden></pre>
+    <script type="module" src="/src/browser/main.ts"></script>
+  </body>
+</html>

@@ -1,4 +1,7 @@
-use chr_renderer::{Gpu, coordinates::ImageExtent, render_triangle_rgba};
+use chr_renderer::{
+    Gpu, OffscreenTarget, TriangleRenderer, coordinates::ImageExtent, render_rotated_triangle_rgba,
+    render_triangle_rgba,
+};
 
 #[test]
 #[ignore = "requires a hardware GPU; run explicitly on Windows and Linux"]
@@ -64,4 +67,53 @@ fn triangle_pixels_preserve_snc_orientation_and_aspect() {
     }
     let too_large = ImageExtent::new(gpu.device.limits().max_texture_dimension_2d + 1, 1).unwrap();
     assert!(render_triangle_rgba(&gpu, too_large).is_err());
+}
+
+#[test]
+#[ignore = "requires a hardware GPU; run explicitly on Windows and Linux"]
+fn rotation_turns_clockwise_about_the_image_centre() {
+    let instance = Gpu::instance();
+    let gpu = pollster::block_on(Gpu::request(&instance, None)).expect("GPU initialization");
+    let (width, height) = (128, 96);
+    let extent = ImageExtent::new(width, height).unwrap();
+    let scale = (f64::from(width) * f64::from(height)).sqrt();
+    let rgb_at = |data: &[u8], snc: [f64; 2]| -> [u8; 3] {
+        let x = ((snc[0] * scale + f64::from(width)) / 2.0) as u32;
+        let y = ((snc[1] * scale + f64::from(height)) / 2.0) as u32;
+        let offset = ((y * width + x) * 4) as usize;
+        [data[offset], data[offset + 1], data[offset + 2]]
+    };
+
+    // A half turn moves the red apex from above the centre to below it.
+    let half = render_rotated_triangle_rgba(&gpu, extent, std::f64::consts::PI).unwrap();
+    assert!(rgb_at(&half, [0.0, 0.35])[0] > 170, "apex not rotated");
+    // Inside the unrotated triangle's base, outside every rotated one checked here.
+    let base_corner = [0.45, 0.45];
+    assert!(rgb_at(&render_triangle_rgba(&gpu, extent).unwrap(), base_corner)[2] > 100);
+    assert_eq!(rgb_at(&half, base_corner), [0, 0, 0]);
+
+    // A quarter turn is clockwise on screen: the apex (up) moves to the right.
+    let quarter = render_rotated_triangle_rgba(&gpu, extent, std::f64::consts::FRAC_PI_2).unwrap();
+    assert!(
+        rgb_at(&quarter, [0.35, 0.0])[0] > 170,
+        "rotation is not clockwise"
+    );
+    assert_eq!(rgb_at(&quarter, base_corner), [0, 0, 0]);
+
+    // A reused target and renderer produce the same pixels as the one-shot helper.
+    let target = OffscreenTarget::new(&gpu, extent).unwrap();
+    let renderer = TriangleRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    renderer.resize(&gpu.queue, extent);
+    let mut pixels = Vec::new();
+    for radians in [0.0, std::f64::consts::PI] {
+        renderer.set_rotation(&gpu.queue, radians);
+        target
+            .render_rgba(
+                &gpu,
+                |encoder, view| renderer.encode(encoder, view),
+                &mut pixels,
+            )
+            .unwrap();
+    }
+    assert_eq!(pixels, half);
 }

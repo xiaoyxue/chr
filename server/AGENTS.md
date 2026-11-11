@@ -13,8 +13,9 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 
 ## Architecture and scope
 
-- Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `viewer/`
-  (`chr-app`) is the native window and headless shell. Further server crates sit
+- Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `runtime/`
+  (`chr-server`) is the headless render server; `viewer/` (`chr-app`) is the
+  native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
 - Keep all rendering in `renderer/`. It has no networking, video-device, or
   output-card dependencies. Shells such as `viewer/` own windows, events,
@@ -25,8 +26,17 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
 - Keep generated PNGs in repository-root `output/renderer/`, ignored by Git but retained locally.
   PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in `renderer/`.
-- This first slice is a native RGB triangle. Browser delivery, scene formats,
-  video, meshes, and camera calibration are not implemented.
+- The renderer's only product is the SDI program output. `runtime/` streams to
+  clients exactly what the SDI port transmits (render -> SDI -> encoder ->
+  WebRTC); do not add a second, render-direct client stream. The server's roles
+  are the control plane (args over JSON-RPC), the render pipeline and its clock,
+  the SDI output, and the monitor that encodes the output for clients.
+- The current slice is an RGB triangle with a display rotation and a simulated
+  SDI port. Encoding is software after a CPU readback, a development shortcut
+  rather than the intended GPU-to-hardware-encoder path. Scene formats, video
+  input, meshes, and camera calibration are not implemented.
+- Outputs must not block each other or the render loop: hand frames to their
+  own threads through bounded queues and drop instead of waiting.
 - The repository root's `reference/` (`../reference/` from `server/`) holds
   all private, local-only reference material. Never stage, upload, redistribute,
   or embed its assets or experimental data in public fixtures. Use synthetic data.
@@ -94,7 +104,7 @@ From the repository root inside the development shell:
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-cargo test --locked -p chr-renderer --test triangle_gpu -- --ignored --nocapture
+cargo test --locked -p chr-renderer -- --ignored --nocapture
 cargo run --locked -p chr-app -- --smoke-test
 ```
 

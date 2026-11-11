@@ -96,9 +96,20 @@
               postInstall = "wrapProgram $out/bin/chr-app --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
             }
           );
+          server = craneLib.buildPackage (
+            common
+            // {
+              inherit cargoArtifacts;
+              pname = "chr-server";
+              cargoExtraArgs = "-p chr-server";
+              doCheck = false;
+              nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
+              postInstall = "wrapProgram $out/bin/chr-server --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
+            }
+          );
         in
         {
-          inherit app;
+          inherit app server;
           checks = {
             client-toolchain =
               pkgs.runCommand "chr-client-toolchain"
@@ -148,6 +159,7 @@
       packages = perSystem (system: {
         default = (environment system).app;
         chr-app = (environment system).app;
+        chr-server = (environment system).server;
       });
       apps = perSystem (system: {
         default = {
