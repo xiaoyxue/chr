@@ -30,7 +30,7 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./render/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
           runtime = with pkgs; [
             vulkan-loader
@@ -43,10 +43,19 @@
             libxrandr
           ];
           src = pkgs.lib.cleanSourceWith {
-            src = ./.;
+            src = ./render;
             filter =
               path: type:
-              builtins.baseNameOf path != "reference"
+              !builtins.elem (builtins.baseNameOf path) [
+                "reference"
+                "output"
+                "target"
+                ".git"
+                ".worktree"
+                ".worktrees"
+                "result"
+              ]
+              && !(pkgs.lib.hasPrefix "result-" (builtins.baseNameOf path))
               && (craneLib.filterCargoSources path type || pkgs.lib.hasSuffix ".wgsl" path);
           };
           common = {
@@ -90,12 +99,15 @@
           shell = pkgs.mkShell {
             packages = [
               toolchain
+              pkgs.git
               pkgs.pkg-config
               pkgs.nixfmt
             ]
             ++ runtime;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
-            CARGO_TARGET_DIR = "target/linux";
+            shellHook = ''
+              export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/render/target/linux"
+            '';
           };
           formatter = pkgs.nixfmt;
         };

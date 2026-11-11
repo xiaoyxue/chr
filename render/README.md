@@ -4,10 +4,12 @@ A Rust + wgpu renderer core for **Windows and Linux**. The first vertical slice
 draws an RGB hello-world triangle using the same pipeline in a native window
 and an offscreen hardware test.
 
-Every run also saves a 960x640 sRGB image to `output/triangle.png`, relative to
-the working directory. Run from `render/` to keep it in `render/output/`.
-The image is retained locally and replaced on the next run; all of `output/`
-is ignored by Git. To export without opening a window (including Linux SSH):
+Every run also saves a 960x640 sRGB image to repository-root
+`output/render/triangle.png`, whether started from the root or `render/`.
+Outside a checkout, the packaged app uses `output/render/triangle.png` under
+the working directory. The image is retained locally and replaced on the next
+run; root `output/` is ignored by Git. To export without opening a window
+(including Linux SSH), run from `render/` in the development environment:
 
 ```sh
 cargo run --locked -p chr-app -- --headless
@@ -40,22 +42,38 @@ Remove-Item Env:WGPU_BACKEND
 
 ## Linux
 
-Like the reference project's setup, Nix is both a development shell and a build
-system. Commit/review the generated flake.lock when updating Nix inputs.
-Run these commands from `render/`.
+Nix is both a development shell and a build system. The single `flake.nix` and
+`flake.lock` live at the repository root; the Cargo workspace, Cargo lockfile,
+Rust toolchain file, and shaders remain under `render/`. Preserve the Nix lockfile
+unless intentionally updating inputs. From the repository root:
 
 ```sh
 nix develop
+cd render
 cargo run --locked -p chr-app
-# Or build and run the packaged application:
-nix build
-nix run
-nix flake check
 ```
 
+Or build, check, and run the packaged application from the repository root:
+
+```sh
+nix build
+nix flake check
+nix run . -- --headless
+```
+
+Use `nix run` without `--headless` for the native window. The default package,
+named `chr-app` package, default app, Nix formatter, and formatting/Clippy/test
+checks remain available. When starting in `render/`, use `nix develop ..`;
+keep Cargo commands in `render/`, not the repository root.
+
 Nix flakes in Git only include tracked files. Add new project files explicitly
-before a build; never add the private `reference` directory. The shell places
-Cargo build artifacts in `target/linux`.
+before a build; never add the private root `reference/` directory. The build
+source is restricted to the renderer workspace with Cargo sources and `.wgsl`
+shaders; private references, generated outputs, caches, and worktrees are excluded.
+The shell sets an absolute `CARGO_TARGET_DIR` pointing to `render/target/linux`,
+so changing directories does not create another cache. Cargo outside this shell
+uses `render/target` by default. Root Nix `result` / `result-*` links and
+root `output/` are ignored, as is `render/target/`.
 
 Plain Cargo also works without Nix. Install Rust stable, a C/C++ linker,
 pkg-config, X11/Wayland development libraries, and a working Vulkan/OpenGL driver.
@@ -81,7 +99,16 @@ NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -
 Use the corresponding nixGL wrapper for your GPU. DX12 is Windows-only;
 Vulkan is the normal native Linux backend.
 
+For the built package, run the wrapper from the repository root:
+
+```sh
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  ./result/bin/chr-app --headless
+```
+
 ## Checks and controls
+
+Run Cargo checks from `render/` inside the root development shell:
 
 ```sh
 cargo fmt --all -- --check

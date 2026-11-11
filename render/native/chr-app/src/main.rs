@@ -223,7 +223,8 @@ fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!(
                     "Usage: chr-app [--headless | --smoke-test]\n\
-                     Writes output/triangle.png. Escape closes the window."
+                     Writes output/render/triangle.png under the checkout root\n\
+                     (or the working directory outside a checkout). Escape closes the window."
                 );
                 return Ok(());
             }
