@@ -137,7 +137,7 @@ The example also writes `shadow-pcss.png` with the same M3 rig and
 `shadow-pcss-wide.png` with source radii multiplied by four, unchanged irradiance
 and intensity. Baseline sources are a 0.00465-radian sun and 0.5-metre spots.
 No sky/IBL or LTC is included. PCSS is high-priority work; area/LTC is deferred
-at low priority. Per-light mode selection, cascades and broader
+at low priority. Cascades and broader
 performance acceptance remain follow-ups.
 
 ## M5: point-light cubemap shadows
@@ -163,6 +163,28 @@ reduces quality. The new `point-off.png`, `point-hard.png`, `point-pcf.png` and
 25 depth layers, 100 MiB. Reusing maps across Hard/PCF/PCSS still avoids depth
 redraws. The earlier sun + spot captures retain their 2048 setting.
 Neither preview adds sky/IBL, LTC or live controls.
+
+## M6: per-light shadow modes
+
+Every `Light` has `shadow_mode: Option<ShadowMode>`. `None` inherits
+`PbrSettings::shadows.mode`; `Some(Off)` disables only that light's shadows,
+not its illumination. Explicit Hard/PCF/PCSS overrides also work when the
+frame default is Off. `ShadowMode` remains available at the crate root and is
+also exported from the GPU-independent `scene` module.
+
+Only enabled shadow lights consume map layers. Only effective PCSS lights
+consume the PCSS sample budget, and their quality is validated even if the
+frame default is Off. The cache includes the active light set; changing the
+default between filtering modes reuses maps when that set is unchanged.
+Editing authored overrides changes the scene snapshot and conservatively
+rebuilds its maps. Unlit diagnostics ignore all shadow overrides.
+
+`point-mixed.png` retains the sun/four-point illumination and 1024 resolution:
+sun PCSS, then corner points Hard/PCF/PCSS/Off in the example's X/Y iteration
+order. This uses 19 depth layers (76 MiB); the last point still illuminates.
+Automatic GPU checks isolate coloured light contributions, allocation/cache
+changes and invalid quality/budget cases. This remains offline diagnostics,
+not NativeSocket/WebSocket scene-control acceptance.
 
 ## Render server
 

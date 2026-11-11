@@ -51,7 +51,17 @@ impl PbrMaterial {
     }
 }
 
-/// CPU light inputs, not a promise that the current triangle shader evaluates them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ShadowMode {
+    #[default]
+    Off = 0,
+    Hard = 1,
+    Pcf = 2,
+    Pcss = 3,
+}
+
+/// CPU light inputs for the shared PBR path.
 /// Positions are world metres; directions describe light travel and need not be unit length.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Light {
@@ -61,6 +71,8 @@ pub enum Light {
         irradiance: [f32; 3],
         /// Angular source radius in radians for PCSS; zero is an ideal directional source.
         angular_radius: f32,
+        /// None inherits the frame default; Some(Off) disables only this light's shadows.
+        shadow_mode: Option<ShadowMode>,
     },
     Point {
         position: [f64; 3],
@@ -68,6 +80,8 @@ pub enum Light {
         intensity: [f32; 3],
         /// Shadow-source radius in metres; does not change punctual BRDF evaluation.
         source_radius: f32,
+        /// None inherits the frame default; Some(Off) disables only this light's shadows.
+        shadow_mode: Option<ShadowMode>,
     },
     Spot {
         position: [f64; 3],
@@ -79,16 +93,26 @@ pub enum Light {
         outer_angle: f64,
         /// Shadow-source radius in metres; does not change punctual BRDF evaluation.
         source_radius: f32,
+        /// None inherits the frame default; Some(Off) disables only this light's shadows.
+        shadow_mode: Option<ShadowMode>,
     },
 }
 
 impl Light {
+    pub(crate) fn effective_shadow_mode(self, default: ShadowMode) -> ShadowMode {
+        let (Self::Directional { shadow_mode, .. }
+        | Self::Point { shadow_mode, .. }
+        | Self::Spot { shadow_mode, .. }) = self;
+        shadow_mode.unwrap_or(default)
+    }
+
     fn validate(self) -> Result<(), SceneError> {
         let valid = match self {
             Self::Directional {
                 direction,
                 irradiance,
                 angular_radius,
+                ..
             } => {
                 valid_direction(direction)
                     && nonnegative(irradiance)
@@ -98,6 +122,7 @@ impl Light {
                 position,
                 intensity,
                 source_radius,
+                ..
             } => {
                 position.into_iter().all(f64::is_finite)
                     && nonnegative(intensity)
@@ -111,6 +136,7 @@ impl Light {
                 inner_angle,
                 outer_angle,
                 source_radius,
+                ..
             } => {
                 position.into_iter().all(f64::is_finite)
                     && valid_direction(direction)

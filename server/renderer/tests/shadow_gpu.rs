@@ -162,6 +162,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                     position: [-3.0, 0.0, -5.0],
                     intensity: [100.0; 3],
                     source_radius: radius as f32,
+                    shadow_mode: None,
                 }
             } else if spot {
                 Light::Spot {
@@ -171,12 +172,14 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                     inner_angle: 0.7,
                     outer_angle: 1.0,
                     source_radius: radius as f32,
+                    shadow_mode: None,
                 }
             } else {
                 Light::Directional {
                     direction: [0.7, 0.0, 1.0],
                     irradiance: [3.0; 3],
                     angular_radius: radius as f32,
+                    shadow_mode: None,
                 }
             };
             scene
@@ -263,6 +266,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                     direction: [0.7, 0.0, 1.0],
                     irradiance: [3.0; 3],
                     angular_radius: 0.0,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -296,6 +300,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                     direction: [0.7, 0.0, 1.0],
                     irradiance: [3.0; 3],
                     angular_radius: 0.12,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -366,6 +371,7 @@ fn pcss_contact_source_size_and_sampled_visibility() {
                     inner_angle: 0.7,
                     outer_angle: 1.0,
                     source_radius: 0.05,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -392,6 +398,228 @@ fn pcss_contact_source_size_and_sampled_visibility() {
 fn pixel(camera: &Camera, image: &[u8], world: [f64; 3]) -> u8 {
     let (p, _) = camera.project(world).unwrap();
     image[(p[1] as usize * camera.extent().width() as usize + p[0] as usize) * 4]
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn per_light_modes_control_visibility_allocation_and_budgets() {
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let extent = ImageExtent::new(192, 192).unwrap();
+    let camera = Camera::look_at(
+        extent,
+        [0.0, 0.0, -5.0],
+        [0.0; 3],
+        [0.0, -1.0, 0.0],
+        1.0,
+        0.1,
+        50.0,
+    )
+    .unwrap();
+    let mut scene = Scene::new().unwrap();
+    let quad = scene
+        .add_mesh(
+            MeshData::new(
+                vec![
+                    [-0.5, -0.5, 0.0],
+                    [0.5, -0.5, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [-0.5, 0.5, 0.0],
+                ],
+                vec![0, 2, 1, 0, 3, 2],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let material = scene
+        .add_material(PbrMaterial {
+            roughness: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut ground = ModelMatrix::IDENTITY.rows();
+    ground[0][0] = 4.0;
+    ground[1][1] = 4.0;
+    scene
+        .add_instance(quad, vec![material], ModelMatrix::new(ground).unwrap())
+        .unwrap();
+    let mut caster = ModelMatrix::IDENTITY.rows();
+    caster[2][3] = -1.0;
+    scene
+        .add_instance(quad, vec![material], ModelMatrix::new(caster).unwrap())
+        .unwrap();
+    let lights = |point_mode| {
+        Lighting::new(
+            vec![
+                Light::Directional {
+                    direction: [0.7, 0.0, 1.0],
+                    irradiance: [3.0, 0.0, 0.0],
+                    angular_radius: 0.02,
+                    shadow_mode: Some(ShadowMode::Hard),
+                },
+                Light::Point {
+                    position: [-3.0, 0.0, -5.0],
+                    intensity: [0.0, 100.0, 0.0],
+                    source_radius: 0.1,
+                    shadow_mode: point_mode,
+                },
+                Light::Spot {
+                    position: [-3.0, 0.0, -5.0],
+                    direction: [0.7, 0.0, 1.0],
+                    intensity: [0.0, 0.0, 100.0],
+                    inner_angle: 0.4,
+                    outer_angle: 0.8,
+                    source_radius: 0.1,
+                    shadow_mode: Some(ShadowMode::Pcss),
+                },
+            ],
+            None,
+        )
+        .unwrap()
+    };
+    scene.set_lighting(lights(Some(ShadowMode::Off))).unwrap();
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let settings = ShadowSettings {
+        mode: ShadowMode::Off,
+        resolution: 256,
+        depth_bias: 0.0001,
+        normal_bias: 0.003,
+        max_bytes: 2 * 256 * 256 * 4,
+        pcss: chr_renderer::PcssSettings {
+            max_samples_per_fragment: 64,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rgb = |image: &[u8]| -> [u8; 3] {
+        let (p, _) = camera.project([0.9, 0.0, 0.0]).unwrap();
+        let index = (p[1] as usize * extent.width() as usize + p[0] as usize) * 4;
+        image[index..index + 3].try_into().unwrap()
+    };
+    let mixed = render_settings(&gpu, &mut renderer, &scene, &camera, settings);
+    assert_eq!(
+        renderer.shadow_passes_last_frame(),
+        2,
+        "Off points allocate no cube faces"
+    );
+    let color = rgb(&mixed);
+    assert!(
+        color[0] < 5 && color[1] > 80 && color[2] < 5,
+        "per-light shadow overrides must not disable illumination: {color:?}"
+    );
+    assert_eq!(
+        mixed,
+        render_settings(
+            &gpu,
+            &mut renderer,
+            &scene,
+            &camera,
+            ShadowSettings {
+                mode: ShadowMode::Pcss,
+                ..settings
+            }
+        )
+    );
+    assert_eq!(
+        renderer.shadow_passes_last_frame(),
+        0,
+        "an overridden frame default must not invalidate maps"
+    );
+    scene.set_lighting(lights(None)).unwrap();
+    render_settings(&gpu, &mut renderer, &scene, &camera, settings);
+    assert_eq!(renderer.shadow_passes_last_frame(), 2);
+    assert!(
+        renderer
+            .prepare_pbr(
+                &gpu,
+                &scene.snapshot(),
+                &camera,
+                PbrSettings {
+                    shadows: ShadowSettings {
+                        mode: ShadowMode::Hard,
+                        ..settings
+                    },
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+        "enabling inherited point shadows must recheck all six faces against the budget"
+    );
+    let all = render_settings(
+        &gpu,
+        &mut renderer,
+        &scene,
+        &camera,
+        ShadowSettings {
+            mode: ShadowMode::Hard,
+            max_bytes: 8 * 256 * 256 * 4,
+            ..settings
+        },
+    );
+    assert_eq!(renderer.shadow_passes_last_frame(), 8);
+    assert!(
+        rgb(&all).into_iter().all(|channel| channel < 5),
+        "inherited point shadows must occlude the green contribution"
+    );
+    let restored = render_settings(&gpu, &mut renderer, &scene, &camera, settings);
+    assert_eq!(mixed, restored);
+    assert_eq!(renderer.shadow_passes_last_frame(), 2);
+    let invalid = ShadowSettings {
+        pcss: chr_renderer::PcssSettings {
+            filter_samples: 0,
+            ..settings.pcss
+        },
+        ..settings
+    };
+    assert!(
+        renderer
+            .prepare_pbr(
+                &gpu,
+                &scene.snapshot(),
+                &camera,
+                PbrSettings {
+                    shadows: invalid,
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+        "an explicit PCSS override validates quality even when the frame default is Off"
+    );
+    let low_budget = ShadowSettings {
+        pcss: chr_renderer::PcssSettings {
+            max_samples_per_fragment: 63,
+            ..settings.pcss
+        },
+        ..settings
+    };
+    assert!(
+        renderer
+            .prepare_pbr(
+                &gpu,
+                &scene.snapshot(),
+                &camera,
+                PbrSettings {
+                    shadows: low_budget,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    renderer.prepare(&gpu, &scene.snapshot(), &camera).unwrap();
+    OffscreenTarget::new(&gpu, extent)
+        .unwrap()
+        .render_rgba(
+            &gpu,
+            |encoder, view| renderer.encode(encoder, view),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        renderer.shadow_passes_last_frame(),
+        0,
+        "unlit diagnostics ignore authored shadow overrides"
+    );
 }
 
 #[test]
@@ -467,6 +695,7 @@ fn directional_spot_pcf_and_caster_changes() {
                     direction: [0.7, 0.0, 1.0],
                     irradiance: [3.0; 3],
                     angular_radius: 0.0,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -556,6 +785,7 @@ fn directional_spot_pcf_and_caster_changes() {
                     inner_angle: 0.4,
                     outer_angle: 0.8,
                     source_radius: 0.0,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -607,6 +837,7 @@ fn directional_spot_pcf_and_caster_changes() {
                     position: [0.0, 0.0, -5.0],
                     intensity: [1.0; 3],
                     source_radius: 0.0,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -665,6 +896,7 @@ fn point_radial_shadows_cover_all_face_edges_and_corners() {
                     position: [0.0; 3],
                     intensity: [30.0; 3],
                     source_radius: 0.2,
+                    shadow_mode: None,
                 }],
                 None,
             )
@@ -811,6 +1043,7 @@ fn point_radial_shadows_cover_all_face_edges_and_corners() {
                         position: [0.0; 3],
                         intensity: [30.0; 3],
                         source_radius: 0.0,
+                        shadow_mode: None,
                     };
                     scene
                         .set_lighting(Lighting::new(vec![point], None).unwrap())
@@ -830,6 +1063,7 @@ fn point_radial_shadows_cover_all_face_edges_and_corners() {
                                         direction: d,
                                         irradiance: [0.0; 3],
                                         angular_radius: 0.0,
+                                        shadow_mode: None,
                                     },
                                     Light::Spot {
                                         position: [0.0; 3],
@@ -838,6 +1072,7 @@ fn point_radial_shadows_cover_all_face_edges_and_corners() {
                                         inner_angle: 0.5,
                                         outer_angle: 1.0,
                                         source_radius: 0.0,
+                                        shadow_mode: None,
                                     },
                                     point,
                                 ],

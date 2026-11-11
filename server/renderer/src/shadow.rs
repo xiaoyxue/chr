@@ -5,15 +5,7 @@ use crate::{
     scene::{Aabb, Light, SceneView},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(u32)]
-pub enum ShadowMode {
-    #[default]
-    Off = 0,
-    Hard = 1,
-    Pcf = 2,
-    Pcss = 3,
-}
+pub use crate::scene::ShadowMode;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PcssSettings {
@@ -23,7 +15,7 @@ pub struct PcssSettings {
     /// Independent search/filter caps in shadow texels, not physical source sizes.
     pub max_search_radius: f32,
     pub max_filter_radius: f32,
-    /// Worst-case blocker plus filter samples across all lights per fragment.
+    /// Worst-case blocker plus filter samples across effective PCSS lights per fragment.
     pub max_samples_per_fragment: u64,
 }
 
@@ -39,8 +31,23 @@ impl Default for PcssSettings {
     }
 }
 
+impl PcssSettings {
+    pub(crate) fn validate(self) -> Result<(), BoxError> {
+        if !(1..=64).contains(&self.blocker_samples)
+            || !(1..=64).contains(&self.filter_samples)
+            || [self.max_search_radius, self.max_filter_radius]
+                .into_iter()
+                .any(|radius| !radius.is_finite() || radius <= 0.0)
+        {
+            return Err("invalid PCSS sample counts or radius limits".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowSettings {
+    /// Default for lights whose shadow_mode is None.
     pub mode: ShadowMode,
     pub resolution: u32,
     /// Radius in shadow texels for a 3x3 kernel of bilinear comparisons.
@@ -78,15 +85,6 @@ impl ShadowSettings {
             || self.normal_bias < 0.0
         {
             return Err("invalid shadow resolution, filter radius or bias".into());
-        }
-        if self.mode == ShadowMode::Pcss
-            && (!(1..=64).contains(&self.pcss.blocker_samples)
-                || !(1..=64).contains(&self.pcss.filter_samples)
-                || [self.pcss.max_search_radius, self.pcss.max_filter_radius]
-                    .into_iter()
-                    .any(|radius| !radius.is_finite() || radius <= 0.0))
-        {
-            return Err("invalid PCSS sample counts or radius limits".into());
         }
         Ok(())
     }
@@ -415,6 +413,7 @@ mod tests {
                 inner_angle: 0.3,
                 outer_angle: 0.8,
                 source_radius: 0.2,
+                shadow_mode: None,
             },
             Aabb::new([-1.0, -1.0, -1.0], [1.0, 1.0, 10.0]).unwrap(),
             ShadowSettings::default(),
@@ -439,6 +438,7 @@ mod tests {
             direction: [0.0, 0.0, 1.0],
             irradiance: [1.0; 3],
             angular_radius: 0.0,
+            shadow_mode: None,
         };
         let matrix = |offset: f64| {
             projection(
@@ -471,6 +471,7 @@ mod tests {
                     direction: [0.2, -0.4, 1.0],
                     irradiance: [1.0; 3],
                     angular_radius: 0.0,
+                    shadow_mode: None,
                 },
                 bounds,
                 ShadowSettings::default(),

@@ -103,6 +103,7 @@ fn illumination(length: f64, width: f64, mode: &str) -> Result<Lighting> {
         direction: [0.2, -0.4, 1.0],
         irradiance: [2.5, 2.35, 2.1],
         angular_radius: 0.00465,
+        shadow_mode: None,
     }];
     if mode != "sun" {
         for x in [-length / 2.0, length / 2.0] {
@@ -114,6 +115,7 @@ fn illumination(length: f64, width: f64, mode: &str) -> Result<Lighting> {
                         position,
                         intensity,
                         source_radius: 0.5,
+                        shadow_mode: None,
                     }
                 } else {
                     Light::Spot {
@@ -123,6 +125,7 @@ fn illumination(length: f64, width: f64, mode: &str) -> Result<Lighting> {
                         inner_angle: 0.4,
                         outer_angle: 0.9,
                         source_radius: 0.5,
+                        shadow_mode: None,
                     }
                 });
             }
@@ -405,6 +408,37 @@ fn main() -> Result<()> {
             renderer.shadow_passes_last_frame()
         );
     }
+    let mut mixed = scene.snapshot().lighting().lights().to_vec();
+    for (light, mode) in mixed.iter_mut().zip([
+        ShadowMode::Pcss,
+        ShadowMode::Hard,
+        ShadowMode::Pcf,
+        ShadowMode::Pcss,
+        ShadowMode::Off,
+    ]) {
+        let (Light::Directional { shadow_mode, .. }
+        | Light::Point { shadow_mode, .. }
+        | Light::Spot { shadow_mode, .. }) = light;
+        *shadow_mode = Some(mode);
+    }
+    scene.set_lighting(Lighting::new(mixed, None)?)?;
+    capture(
+        &gpu,
+        &mut renderer,
+        &scene,
+        &overview,
+        &target,
+        &directory.join("point-mixed.png"),
+        ShadowSettings {
+            mode: ShadowMode::Off,
+            resolution: 1024,
+            ..Default::default()
+        },
+    )?;
+    eprintln!(
+        "Rendered point-mixed: {} shadow depth passes.",
+        renderer.shadow_passes_last_frame()
+    );
     Ok(())
 }
 

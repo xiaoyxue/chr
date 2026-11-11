@@ -207,6 +207,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
             position: [1.0, 2.0, -35.0],
             intensity: [10.0; 3],
             source_radius: 0.0,
+            shadow_mode: None,
         }],
         Some(SkyLight {
             environment,
@@ -233,11 +234,13 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
             direction: [0.0; 3],
             irradiance: [1.0; 3],
             angular_radius: 0.0,
+            shadow_mode: None,
         },
         Light::Point {
             position: [0.0; 3],
             intensity: [-1.0; 3],
             source_radius: 0.0,
+            shadow_mode: None,
         },
         Light::Spot {
             position: [0.0; 3],
@@ -246,6 +249,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
             inner_angle: 0.5,
             outer_angle: 0.4,
             source_radius: 0.0,
+            shadow_mode: None,
         },
     ] {
         assert!(matches!(
@@ -263,6 +267,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
                 direction: [0.0, 0.0, 1.0],
                 irradiance: [1.0; 3],
                 angular_radius: radius,
+                shadow_mode: None,
             },
             Light::Spot {
                 position: [0.0, 0.0, -1.0],
@@ -271,6 +276,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
                 inner_angle: 0.2,
                 outer_angle: 0.5,
                 source_radius: radius,
+                shadow_mode: None,
             },
         ] {
             assert!(matches!(
