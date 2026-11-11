@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/rdc-core", "native/rdc-app"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/xiaoyxue/rdc"
+
+[workspace.dependencies]
+rdc-core = { path = "crates/rdc-core" }
+wgpu = "30"
+pollster = "0.4"
+log = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+
+[workspace.metadata.crane]
+name = "rdc"

@@ -1,0 +1,18 @@
+[package]
+name = "rdc-core"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "Shared wgpu rendering core with explicit world, SNC, and pixel coordinates"
+
+[lints]
+workspace = true
+
+[dependencies]
+wgpu.workspace = true
+log.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+pollster.workspace = true
