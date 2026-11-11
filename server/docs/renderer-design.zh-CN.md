@@ -599,11 +599,13 @@ cargo test --locked -p chr-app --example shadow_benchmark
 指定的非 NixOS NVIDIA 主机使用
 `nix develop --command bash -c 'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo run --locked --release -p chr-app --example shadow_benchmark'`。
 测试仅创建合成四边形并写入 `output/renderer/shadow-benchmark.json`，
-不读取所有者资产。默认 180 行覆盖方向光、聚光、点光；Hard、全部八种 PCF
+不读取所有者资产。默认 240 行覆盖单图/四级联方向光、聚光、点光；Hard、全部八种 PCF
 方形核、PCSS 8/8、32/32、64/64 遮挡搜索/过滤样本；接触、分离、
 大半影、多遮挡物和掠射视角场景。图像为 384×384，阴影图默认 512²；
 `--resolution 256|512|1024` 和 `--repetitions 1..20` 限定工作量，
 每行每种缓存状态默认重复三次。
+四级联使用最大光轴深度 12 m、split lambda 0.5、blend fraction 0.1，
+有意匹配小规模合成场景。
 
 仅该 example 请求可选 wgpu `TIMESTAMP_QUERY` 和
 `TIMESTAMP_QUERY_INSIDE_ENCODERS`。两个实际 GPU 时间戳包围现有
@@ -615,11 +617,11 @@ cargo test --locked -p chr-app --example shadow_benchmark
 
 每行先运行一帧不计时预热。**Cold** 表示在新 scene revision 中重新提交相同
 遮挡物模型，强制重新生成深度，但保留常驻资源和 pipeline；
-不是首次编译或分配延迟。**Warm** 重复同一快照。测试检查平面 1 / 点光 6
+不是首次编译或分配延迟。**Warm** 重复同一快照。测试检查单图 1 / 级联 4 / 点光 6
 个深度 pass，而 warm 必须为零，并单独比较 cold/warm RGBA 字节。
 内存明确为 `resolution² × layers × 4` 的 Depth32Float texel 数据
-（512 时平面 1 MiB / 点光 6 MiB），不是总显存或分配对齐开销。
-每片元逻辑预算计 Hard=1、PCF=核样本数、PCSS=搜索+过滤样本数；
+（512 时单图 1 MiB / 级联 4 MiB / 点光 6 MiB），不是总显存或分配对齐开销。
+每片元逻辑预算计 Hard=1、PCF=核样本数、PCSS=搜索+过滤样本数，混合级联加倍；
 双线性比较不等于一次物理纹理读取。
 
 质量评估使用不重复的接收面条带像素中心，排除遮挡物自身覆盖，
@@ -629,13 +631,17 @@ cargo test --locked -p chr-app --example shadow_benchmark
 自动门禁拒绝无效基线、非确定性复用、可见性 >1.05、参考收敛 MAE >0.01、
 Hard 点参考 MAE >0.15、PCSS 32/64 有限发光体参考 MAE >0.15。
 这些仅是有界夹具回归阈值，不是通用质量预算，也不保证 PCSS 总优于 PCF。
+另检查 PCF/PCSS 质量样本数确实改变分离场景图像，
+以及 PCSS64 部分可见像素数随分离距离、再随光源尺寸增大而增加。
 
 RTX 3090（NVIDIA 580.159.03）release Vulkan 运行使用三次重复及 512²
-阴影图，180 行全部通过：平面 cold/warm 行中位数范围 0.018–0.121 /
-0.014–0.116 ms；点光为 0.030–0.630 / 0.015–0.615 ms。
+阴影图，240 行全部通过：单图方向光/聚光 cold/warm 行中位数范围
+0.070–0.271 / 0.065–0.266 ms；四级联方向光为 0.084–0.262 /
+0.076–0.255 ms；点光为 0.039–0.740 / 0.024–0.733 ms。
 PCSS 32/64 有限发光体参考最大 MAE 为 0.071，Hard 点参考 MAE 0.046，
 积分收敛 MAE 0.006。计时包含查询开销，可能受到并发 GPU 使用、时钟和调度影响；
-微型合成场景不代表通用实时性能保证。本切片不评估级联、专门屏外遮挡物、
+微型合成场景不代表通用实时性能保证。256²/1024² 边界也通过了每状态一次重复。
+本切片不评估专门屏外遮挡物、
 cube 接缝、时间相机轨迹、LTC、大气或天空。仅可见性圆盘积分不是 BRDF 加权
 传输，点光参考是朝向场景的圆盘而非球面辐射积分。
 更广泛的方法选型仍由未关闭的 issue #35 跟踪。

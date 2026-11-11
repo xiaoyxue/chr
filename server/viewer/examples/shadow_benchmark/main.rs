@@ -57,7 +57,7 @@ struct Configuration {
 }
 
 impl Configuration {
-    fn settings(self, resolution: u32, layers: u32) -> ShadowSettings {
+    fn settings(self, resolution: u32, kind: Kind) -> ShadowSettings {
         let mut settings = ShadowSettings {
             mode: self.mode,
             resolution,
@@ -69,19 +69,23 @@ impl Configuration {
             },
             depth_bias: 0.00005,
             normal_bias: 0.0,
-            max_bytes: map_bytes(resolution, layers),
-            max_samples_per_fragment: self.budget(),
+            max_bytes: map_bytes(resolution, kind.layers()),
+            max_samples_per_fragment: self.budget(kind),
             ..Default::default()
         };
         if self.mode == ShadowMode::Pcss {
             settings.pcss.blocker_samples = self.samples;
             settings.pcss.filter_samples = self.samples;
         }
+        settings.cascades.count = kind.cascades();
+        settings.cascades.max_distance = 12.0;
         settings
     }
 
-    fn budget(self) -> u64 {
-        u64::from(self.samples) * if self.mode == ShadowMode::Pcss { 2 } else { 1 }
+    fn budget(self, kind: Kind) -> u64 {
+        u64::from(self.samples)
+            * if self.mode == ShadowMode::Pcss { 2 } else { 1 }
+            * if kind.cascades() > 1 { 2 } else { 1 }
     }
 }
 
@@ -152,6 +156,11 @@ struct Row {
     logical_sample_budget_per_fragment: u64,
     shadow_map_bytes: u64,
     shadow_layers: u32,
+    directional_cascades: u32,
+    angular_radius_radians: Option<f64>,
+    source_radius_metres: Option<f64>,
+    caster_centres_metres: Vec<[f64; 3]>,
+    camera_centre_metres: [f64; 3],
     cold: Measurements,
     warm: Measurements,
     quality: Quality,
@@ -208,7 +217,7 @@ fn run(options: Options) -> Result<()> {
     let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
     let mut rows = Vec::new();
     let mut failures = Vec::new();
-    for kind in [Kind::Directional, Kind::Spot, Kind::Point] {
+    for kind in Kind::ALL {
         for scene in [
             "contact",
             "separated",
@@ -220,8 +229,10 @@ fn run(options: Options) -> Result<()> {
             let probes = fixture.probes()?;
             prepare(&gpu, &mut renderer, &fixture, ShadowSettings::default())?;
             let off = pixels(&gpu, &mut renderer, &target)?;
+            let mut pcf_single = Vec::new();
+            let mut pcss_low = Vec::new();
             for config in configurations() {
-                let settings = config.settings(options.resolution, kind.layers());
+                let settings = config.settings(options.resolution, kind);
                 prepare(&gpu, &mut renderer, &fixture, settings)?;
                 // Untimed priming includes first-use pipelines and depth-map allocation.
                 let _ = pixels(&gpu, &mut renderer, &target)?;
@@ -270,6 +281,21 @@ fn run(options: Options) -> Result<()> {
                 let identical = image == repeated && renderer.shadow_passes_last_frame() == 0;
                 let quality = reference::quality(&probes, &off, &image)?;
                 let label = format!("{kind:?}/{scene}/{:?}/{}", config.mode, config.samples);
+                if scene == "separated" {
+                    match (config.mode, config.samples) {
+                        (ShadowMode::Pcf, 1) => pcf_single = image.clone(),
+                        (ShadowMode::Pcss, 8) => pcss_low = image.clone(),
+                        (ShadowMode::Pcf, 64) if image == pcf_single => {
+                            failures
+                                .push(format!("{label}: PCF sample count did not change pixels"));
+                        }
+                        (ShadowMode::Pcss, 64) if image == pcss_low => {
+                            failures
+                                .push(format!("{label}: PCSS sample count did not change pixels"));
+                        }
+                        _ => {}
+                    }
+                }
                 if !identical
                     || quality.max_visibility > 1.05
                     || quality.reference_48_vs_96_mae > 0.01
@@ -292,9 +318,18 @@ fn run(options: Options) -> Result<()> {
                     scene: scene.into(),
                     mode: format!("{:?}", config.mode),
                     samples: config.samples,
-                    logical_sample_budget_per_fragment: config.budget(),
+                    logical_sample_budget_per_fragment: config.budget(kind),
                     shadow_map_bytes: map_bytes(options.resolution, kind.layers()),
                     shadow_layers: kind.layers(),
+                    directional_cascades: if kind.directional() {
+                        kind.cascades()
+                    } else {
+                        0
+                    },
+                    angular_radius_radians: kind.directional().then_some(fixture.radius),
+                    source_radius_metres: (!kind.directional()).then_some(fixture.radius),
+                    caster_centres_metres: fixture.blockers.iter().map(|b| b.center).collect(),
+                    camera_centre_metres: fixture.camera.center(),
                     cold,
                     warm,
                     quality,
@@ -302,6 +337,28 @@ fn run(options: Options) -> Result<()> {
                 });
             }
             eprintln!("completed {kind:?}/{scene}");
+        }
+    }
+    for kind in Kind::ALL {
+        let light = format!("{kind:?}");
+        let partial: Vec<usize> = ["contact", "separated", "large_penumbra"]
+            .into_iter()
+            .map(|scene| {
+                rows.iter()
+                    .find(|row| {
+                        row.light == light
+                            && row.scene == scene
+                            && row.mode == "Pcss"
+                            && row.samples == 64
+                    })
+                    .map(|row| row.quality.partial_pixels)
+                    .ok_or("missing PCSS trend row")
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        if partial[0] >= partial[1] || partial[1] >= partial[2] {
+            failures.push(format!(
+                "{light}: PCSS contact/separation/source-size penumbra trend failed: {partial:?}"
+            ));
         }
     }
     let report = json!({
@@ -314,16 +371,18 @@ fn run(options: Options) -> Result<()> {
             "scope": "MeshRenderer::encode: shadow depth (cold only), main HDR mesh, tone map; excludes prepare/uploads, allocation, readback, query resolve" },
         "build": if cfg!(debug_assertions) { "debug" } else { "release" },
         "extent": [384, 384], "shadow_resolution": options.resolution,
+        "geometry": { "ground_width_metres": 8, "caster_width_metres": 1, "camera_vertical_fov_radians": 1 },
         "repetitions": options.repetitions, "untimed_priming_frames_per_row": 1,
         "settings": { "filter_radius_texels": 2.5, "depth_bias": 0.00005, "normal_bias_metres": 0.0,
-            "pcss_max_search_radius_texels": 64, "pcss_max_filter_radius_texels": 64 },
+            "pcss_max_search_radius_texels": 64, "pcss_max_filter_radius_texels": 64,
+            "cascade_max_distance_metres": 12, "cascade_split_lambda": 0.5, "cascade_blend_fraction": 0.1 },
         "cold_definition": "new scene revision with identical caster model; resident map allocation/pipelines retained",
         "memory_definition": "Depth32Float texel payload only; excludes allocation padding, main targets, meshes, query buffers and driver overhead",
-        "sample_definition": "worst-case logical comparisons + PCSS blocker fetches for one light, not physical texture fetches or measured sample count",
+        "sample_definition": "worst-case logical comparisons + PCSS blocker fetches for one light; doubled for blended cascades, not physical texture fetches or measured sample count",
         "quality_definition": "receiver-strip red-channel visibility ratio after inverse sRGB/Reinhard; independent uniform disk visibility quadrature, not BRDF-weighted area-light transport",
         "limitations": ["synthetic quads, one light, modest fixed image/scene scale",
             "timings may include concurrent GPU contention, clocks and query overhead; not a realtime guarantee",
-            "no cascades, dedicated offscreen caster, cubemap seam sweep, temporal camera sequence, LTC, atmosphere or sky evaluation",
+            "no dedicated offscreen caster, cubemap seam sweep, temporal camera sequence, LTC, atmosphere or sky evaluation",
             "point reference uses a facing emitter disk, not sphere radiometric integration"],
         "self_checks_passed": failures.is_empty(), "failures": failures, "rows": rows,
     });
@@ -378,7 +437,7 @@ mod tests {
                 .unwrap();
         assert_eq!(options.repetitions, 5);
         for config in configurations() {
-            let settings = config.settings(512, 6);
+            let settings = config.settings(512, Kind::Point);
             assert_eq!(settings.max_bytes, 6 * 512 * 512 * 4);
             let expected = match config.mode {
                 ShadowMode::Hard => 1,
@@ -389,6 +448,9 @@ mod tests {
                 ShadowMode::Off => unreachable!(),
             };
             assert_eq!(settings.max_samples_per_fragment, expected);
+            let cascaded = config.settings(512, Kind::DirectionalCascaded);
+            assert_eq!(cascaded.max_bytes, 4 * 512 * 512 * 4);
+            assert_eq!(cascaded.max_samples_per_fragment, expected * 2);
         }
     }
 

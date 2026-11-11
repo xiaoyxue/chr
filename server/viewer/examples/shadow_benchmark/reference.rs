@@ -10,13 +10,37 @@ use super::Result;
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Directional,
+    DirectionalCascaded,
     Spot,
     Point,
 }
 
 impl Kind {
+    pub const ALL: [Self; 4] = [
+        Self::Directional,
+        Self::DirectionalCascaded,
+        Self::Spot,
+        Self::Point,
+    ];
+
+    pub fn directional(self) -> bool {
+        matches!(self, Self::Directional | Self::DirectionalCascaded)
+    }
+
+    pub fn cascades(self) -> u32 {
+        if matches!(self, Self::DirectionalCascaded) {
+            4
+        } else {
+            1
+        }
+    }
+
     pub fn layers(self) -> u32 {
-        if matches!(self, Self::Point) { 6 } else { 1 }
+        if matches!(self, Self::Point) {
+            6
+        } else {
+            self.cascades()
+        }
     }
 }
 
@@ -54,11 +78,8 @@ pub struct Fixture {
 impl Fixture {
     pub fn new(kind: Kind, name: &str) -> Result<Self> {
         let height = if name == "contact" { 0.3 } else { 1.5 };
-        let radius = if matches!(kind, Kind::Directional) {
-            0.12
-        } else {
-            0.4
-        } * if name == "large_penumbra" { 2.0 } else { 1.0 };
+        let radius = if kind.directional() { 0.12 } else { 0.4 }
+            * if name == "large_penumbra" { 2.0 } else { 1.0 };
         let mut blockers = vec![Blocker {
             center: [0.0, 0.0, -height],
         }];
@@ -98,7 +119,7 @@ impl Fixture {
             scene.add_instance(mesh, vec![material], blocker.model()?)?;
         }
         let light = match kind {
-            Kind::Directional => Light::Directional {
+            Kind::Directional | Kind::DirectionalCascaded => Light::Directional {
                 direction: [0.7, 0.0, 1.0],
                 irradiance: [3.0; 3],
                 angular_radius: radius as f32,
@@ -140,11 +161,7 @@ impl Fixture {
     }
 
     fn visibility(&self, receiver: [f64; 3], radius: f64, side: u32) -> f64 {
-        let slope: f64 = if matches!(self.kind, Kind::Directional) {
-            0.7
-        } else {
-            0.6
-        };
+        let slope: f64 = if self.kind.directional() { 0.7 } else { 0.6 };
         let length = (1.0 + slope * slope).sqrt();
         let mut visible = 0;
         let mut count = 0;
@@ -155,7 +172,7 @@ impl Fixture {
                 if u * u + v * v > 1.0 {
                     continue;
                 }
-                let (direction, max_t) = if matches!(self.kind, Kind::Directional) {
+                let (direction, max_t) = if self.kind.directional() {
                     (
                         [
                             -slope / length - radius.tan() * u / length,
@@ -202,7 +219,7 @@ impl Fixture {
                 }
                 let p = std::array::from_fn(|i| ray.origin[i] + t * ray.direction[i]);
                 let height = -self.blockers[0].center[2];
-                let edge = if matches!(self.kind, Kind::Directional) {
+                let edge = if self.kind.directional() {
                     0.7 * height + 0.5
                 } else {
                     (3.0 * height + 2.5) / (5.0 - height)

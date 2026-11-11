@@ -716,11 +716,14 @@ On the designated non-NixOS NVIDIA host, use
 `nix develop --command bash -c 'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo run --locked --release -p chr-app --example shadow_benchmark'`.
 The harness only creates synthetic quads and writes
 `output/renderer/shadow-benchmark.json`; it never reads owner assets. Its default
-180 rows cover directional, spot and point lights; Hard, all eight PCF square
+240 rows cover single-map/four-cascade directional, spot and point lights;
+Hard, all eight PCF square
 kernels, and PCSS 8/8, 32/32, 64/64 blocker/filter samples; contact, separated,
 large-penumbra, multiple-caster and grazing-view scenes. Images are 384×384,
 maps default to 512². `--resolution 256|512|1024` and `--repetitions 1..20`
 bound the workload; three repetitions per row/state are the default.
+The four-cascade case uses 12 m maximum optical depth, split lambda 0.5 and
+blend fraction 0.1, deliberately fitting the modest synthetic scene.
 
 Only this example requests optional wgpu `TIMESTAMP_QUERY` and
 `TIMESTAMP_QUERY_INSIDE_ENCODERS`. Two actual GPU timestamps bracket the existing
@@ -735,11 +738,12 @@ One untimed priming frame precedes each row. **Cold** means an identical caster
 model republished in a new scene revision, forcing depth regeneration while
 retaining resident resources and pipelines; it is not cold-start compilation or
 allocation latency. **Warm** repeats that snapshot. The harness checks exactly
-1 planar / 6 point depth passes versus zero warm passes, and separately compares
+1 single-map / 4 cascaded / 6 point depth passes versus zero warm passes, and separately compares
 cold/warm RGBA bytes. Memory is explicit `resolution² × layers × 4` Depth32Float
-texel payload (1 MiB planar / 6 MiB point at 512), not total VRAM or allocator
+texel payload (1 MiB single-map / 4 MiB cascaded / 6 MiB point at 512), not total VRAM or allocator
 padding. Per-fragment logical budgets count Hard=1, PCF=kernel count,
-PCSS=blocker+filter counts; bilinear comparisons are not single physical fetches.
+PCSS=blocker+filter counts, doubled for blended cascades; bilinear comparisons
+are not single physical fetches.
 
 Quality uses distinct receiver-strip pixel centres, excluding caster coverage,
 and divides inverse-sRGB/Reinhard shadow radiance by an unshadowed baseline.
@@ -750,15 +754,19 @@ and reference counts. Automated gates reject invalid baselines, nondeterministic
 reuse, visibility >1.05, reference convergence MAE >0.01, Hard point-reference
 MAE >0.15, or PCSS 32/64 finite-reference MAE >0.15. These are bounded fixture
 regression limits, not universal quality budgets or a claim that PCSS always
-outperforms PCF.
+outperforms PCF. Additional checks require PCF/PCSS quality counts to change
+the separated-scene image and PCSS64 partial-pixel counts to grow with
+separation and then source size.
 
 A release Vulkan run on RTX 3090 (NVIDIA 580.159.03, three repetitions, 512² maps)
-passed all 180 rows: planar cold/warm row medians ranged 0.018–0.121 /
-0.014–0.116 ms; point 0.030–0.630 / 0.015–0.615 ms. Maximum PCSS 32/64
+passed all 240 rows: single-map directional/spot cold/warm row medians ranged
+0.070–0.271 / 0.065–0.266 ms; four-cascade directional 0.084–0.262 /
+0.076–0.255 ms; point 0.039–0.740 / 0.024–0.733 ms. Maximum PCSS 32/64
 finite-reference MAE was 0.071, Hard point-reference MAE 0.046, and quadrature
 convergence MAE 0.006. Timings include query overhead and may be affected by
 concurrent GPU use, clocks and scheduling; tiny synthetic scenes imply no
-general realtime guarantee. This slice does not evaluate cascades, a dedicated
+general realtime guarantee. The 256²/1024² bounds also pass one repetition per
+state. This slice does not evaluate a dedicated
 offscreen-caster scene, cube seams, temporal camera trajectories, LTC, atmosphere
 or sky. Visibility-only disk integration is not BRDF-weighted transport, and
 the point-light reference is a facing disk, not sphere radiometric integration.
