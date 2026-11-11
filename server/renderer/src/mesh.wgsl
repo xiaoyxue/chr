@@ -24,6 +24,61 @@ struct Light {
 @group(3) @binding(0) var<storage,read> lights: array<Light>;
 @group(3) @binding(1) var shadow_maps: texture_depth_2d_array;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
+struct Environment {
+    sh:array<vec4<f32>,9>, info:vec4<f32>, flags:vec4<f32>, rays:array<vec4<f32>,3>
+};
+@group(3) @binding(3) var environment_source:texture_2d<f32>;
+@group(3) @binding(4) var environment_filtered:texture_2d_array<f32>;
+@group(3) @binding(5) var environment_brdf:texture_2d<f32>;
+@group(3) @binding(6) var<uniform> environment:Environment;
+
+fn environment_direction(d:vec3<f32>)->vec3<f32> {
+    let c=environment.info.y;
+    let s=environment.info.z;
+    // Inverse yaw about world up (-Z), shared by background and illumination.
+    return vec3(c*d.x-s*d.y,s*d.x+c*d.y,d.z);
+}
+
+fn environment_diffuse(n:vec3<f32>)->vec3<f32> {
+    let basis=array<f32,9>(0.2820947918,0.4886025119*n.x,0.4886025119*n.y,0.4886025119*n.z,
+        1.0925484306*n.x*n.y,1.0925484306*n.y*n.z,1.0925484306*n.x*n.z,
+        0.3153915653*(3.0*n.z*n.z-1.0),0.5462742153*(n.x*n.x-n.y*n.y));
+    var result=vec3(0.0);
+    for(var i=0u;i<9u;i++) {result+=environment.sh[i].rgb*basis[i];}
+    return max(result,vec3(0.0));
+}
+
+fn environment_lighting(n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32,ao:f32)->vec3<f32> {
+    if environment.flags.x==0.0 || environment.info.x==0.0 {return vec3(0.0);}
+    let nv=max(dot(n,v),0.0001);
+    let f0=mix(vec3(0.04),base,metal);
+    let fresnel=f0+(max(vec3(1.0-rough),f0)-f0)*pow5(1.0-nv);
+    let diffuse=(vec3(1.0)-fresnel)*(1.0-metal)*base*environment_diffuse(environment_direction(n));
+    let uv=panorama_uv(environment_direction(reflect(-v,n)));
+    let level=rough*environment.info.w;
+    let lower=i32(floor(level));
+    let upper=min(lower+1,i32(environment.info.w));
+    let filtered=mix(sample_float_layer(environment_filtered,uv,lower),
+        sample_float_layer(environment_filtered,uv,upper),fract(level));
+    let dfg=sample_float_image(environment_brdf,vec2(nv,rough),false).rg;
+    let specular=filtered*(f0*dfg.x+vec3(dfg.y));
+    return ((diffuse+specular)*ao*environment.flags.y)*environment.info.x;
+}
+
+@vertex
+fn vs_sky(@builtin(vertex_index) index:u32)->@builtin(position) vec4<f32> {
+    let p=vec2(f32((index<<1u)&2u),f32(index&2u));
+    return vec4(p*2.0-vec2(1.0),1.0,1.0);
+}
+
+@fragment
+fn fs_sky(@builtin(position) pixel:vec4<f32>)->@location(0) vec4<f32> {
+    if environment.info.x==0.0 {return vec4(0.0,0.0,0.0,1.0);}
+    let ray=normalize(environment.rays[0].xyz+environment.rays[1].xyz*pixel.x+environment.rays[2].xyz*pixel.y);
+    let radiance=(sample_float_image(environment_source,panorama_uv(environment_direction(ray)),true)
+        *environment.flags.y)*environment.info.x;
+    return vec4(clamp(radiance,vec3(0.0),vec3(65504.0)),1.0);
+}
 
 struct Vertex {
     @location(0) position: vec3<f32>, @location(1) normal: vec3<f32>,
@@ -398,7 +453,8 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     let metal=clamp(object.factors.x*mr.b,0.0,1.0);
     // Finite raster specular lobe; roughness zero is not a sampled delta mirror.
     let rough=clamp(object.factors.y*mr.g,0.045,1.0);
-    var radiance=emissive;
+    let ao=mix(1.0,occlusion,object.factors.w);
+    var radiance=emissive+environment_lighting(n,v,base.rgb,metal,rough,ao);
     for (var i=0u;i<camera.options.y;i++) {
         let light=lights[i];
         var l=-light.direction_inner.xyz;

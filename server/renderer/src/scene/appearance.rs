@@ -157,6 +157,7 @@ impl Light {
 }
 
 /// Decoded, scene-linear RGB radiance for an equirectangular environment.
+/// +X maps to UV (0.5, 0.5), +Y to (0.75, 0.5), and upward -Z to V=0.
 /// OpenEXR decoding and filesystem I/O do not belong in retained scene storage.
 #[derive(Clone, Debug)]
 pub struct EnvironmentMap {

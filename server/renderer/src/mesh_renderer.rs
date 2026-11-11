@@ -9,6 +9,7 @@ use crate::{
     Gpu,
     camera::Camera,
     coordinates::ImageExtent,
+    environment::{self, EnvironmentGpu, EnvironmentSettings},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
     scene::{Light, MaterialId, MaterialMaps, MeshId, SceneView},
@@ -27,6 +28,7 @@ pub struct PbrSettings {
     pub exposure: f32,
     pub tone_map: ToneMap,
     pub shadows: ShadowSettings,
+    pub environment: EnvironmentSettings,
 }
 
 impl Default for PbrSettings {
@@ -35,6 +37,7 @@ impl Default for PbrSettings {
             exposure: 1.0,
             tone_map: ToneMap::Aces,
             shadows: ShadowSettings::default(),
+            environment: EnvironmentSettings::default(),
         }
     }
 }
@@ -117,6 +120,8 @@ struct ShadowCache {
 pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     pbr_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
+    environment: EnvironmentGpu,
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
@@ -157,36 +162,39 @@ impl MeshRenderer {
         let camera = uniform_buffer(device, 96);
         let camera_group = uniform_group(device, &camera_layout, &camera, 96);
         let maps = MaterialMapCache::new(device);
+        let environment = EnvironmentGpu::new(device);
+        let mut light_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(light_size),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+        ];
+        light_entries.extend(environment::layout_entries());
         let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scene lights"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(light_size),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-            ],
+            label: Some("scene lights and environment"),
+            entries: &light_entries,
         });
         let lights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scene lights"),
@@ -195,7 +203,14 @@ impl MeshRenderer {
             mapped_at_creation: false,
         });
         let shadow_atlas = ShadowAtlas::new(device, 1, 1);
-        let light_group = light_group(device, &light_layout, &lights, light_size, &shadow_atlas);
+        let light_group = light_group(
+            device,
+            &light_layout,
+            &lights,
+            light_size,
+            &shadow_atlas,
+            &environment,
+        );
         let tone_settings = uniform_buffer(device, 16);
         let tone_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("tone map"),
@@ -236,7 +251,42 @@ impl MeshRenderer {
             ],
             immediate_size: 0,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("mesh.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mesh and environment shading"),
+            source: environment::shader_source(include_str!("mesh.wgsl")),
+        });
+        let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky background"),
+            bind_group_layouts: &[None, None, None, Some(&light_layout)],
+            immediate_size: 0,
+        });
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene-linear sky"),
+            layout: Some(&sky_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_sky"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_sky"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow layout"),
             bind_group_layouts: &[
@@ -322,6 +372,8 @@ impl MeshRenderer {
             meshes: HashMap::new(),
             draws: Vec::new(),
             pbr_pipeline,
+            sky_pipeline,
+            environment,
             maps,
             lights,
             light_group,
@@ -391,11 +443,6 @@ impl MeshRenderer {
         if samples > settings.shadows.max_samples_per_fragment {
             return Err(
                 "shadow filtering exceeds the configured per-fragment sample budget".into(),
-            );
-        }
-        if scene.lighting().sky().is_some() {
-            return Err(
-                "environment lighting is not implemented in the direct-light PBR path".into(),
             );
         }
         self.prepare_mode(gpu, scene, camera, Some(settings))
@@ -597,6 +644,16 @@ impl MeshRenderer {
             Vec::new()
         };
         let shadows = settings.map_or(ShadowSettings::default(), |s| s.shadows);
+        let environment_changed = self.environment.prepare(
+            gpu,
+            if settings.is_some() {
+                scene.lighting().sky()
+            } else {
+                None
+            },
+            camera,
+            settings.map_or(EnvironmentSettings::default(), |s| s.environment),
+        )?;
         let atlas_changed =
             self.prepare_shadows(gpu, scene, camera, settings.map(|s| s.shadows))?;
         for (index, light) in lights.iter_mut().enumerate() {
@@ -654,13 +711,14 @@ impl MeshRenderer {
             });
             self.light_capacity = bytes;
         }
-        if buffer_changed || atlas_changed {
+        if buffer_changed || atlas_changed || environment_changed {
             self.light_group = light_group(
                 &gpu.device,
                 &self.light_layout,
                 &self.lights,
                 self.light_capacity,
                 &self.shadow_atlas,
+                &self.environment,
             );
         }
         if !lights.is_empty() {
@@ -774,6 +832,11 @@ impl MeshRenderer {
             }),
             ..Default::default()
         });
+        if self.pbr_active && self.environment.visible {
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(3, &self.light_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         pass.set_pipeline(if self.pbr_active {
             &self.pbr_pipeline
         } else {
@@ -886,6 +949,11 @@ impl MeshRenderer {
     /// Depth passes encoded by the last frame; zero when cached maps were reused.
     pub fn shadow_passes_last_frame(&self) -> u32 {
         self.shadow_passes_last_frame
+    }
+
+    /// Whether the last prepare rebuilt source-dependent IBL data.
+    pub fn environment_preprocessed_last_prepare(&self) -> bool {
+        self.environment.preprocessed
     }
 
     fn prepare_shadows(
@@ -1028,28 +1096,31 @@ fn light_group(
     buffer: &wgpu::Buffer,
     size: u64,
     atlas: &ShadowAtlas,
+    environment: &EnvironmentGpu,
 ) -> wgpu::BindGroup {
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer,
+                offset: 0,
+                size: NonZeroU64::new(size),
+            }),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(&atlas.view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::Sampler(&atlas.sampler),
+        },
+    ];
+    entries.extend(environment.entries());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("lights and visibility"),
+        label: Some("lights, visibility and environment"),
         layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer,
-                    offset: 0,
-                    size: NonZeroU64::new(size),
-                }),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&atlas.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(&atlas.sampler),
-            },
-        ],
+        entries: &entries,
     })
 }
 

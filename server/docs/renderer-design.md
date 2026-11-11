@@ -15,7 +15,7 @@ updates retain old resources and reject stale or cross-scene handles.
 Deleting an asset referenced by a live instance fails; singular model matrices
 are rejected, with visibility used for hiding. Geometry and material values are
 shared rather than copied on every instance update. This is a library foundation,
-not a live scene-control protocol: EXR/IBL, area/atmosphere lighting
+not a live scene-control protocol: area/atmosphere lighting
 and runtime adaptation remain follow-up work.
 The existing triangle path is unchanged.
 
@@ -55,8 +55,8 @@ Scene directional/point/spot inputs feed unshadowed direct illumination.
 An ideal point source contributes nothing at its exact singular centre; otherwise
 attenuation is inverse-square. The raster roughness floor is 0.045. Radiance is
 bounded by the RGBA16F range before one output exposure and Reinhard/ACES pass.
-Environment lighting is explicitly rejected until the IBL increment; shadow
-controls, area lighting and atmosphere are not claimed by M2.
+M2 does not include environment lighting; shadow controls, area lighting and
+atmosphere are not claimed by that increment.
 
 M3 adds directional/spot `Hard` and `Pcf` shadow maps through
 `PbrSettings::shadows`. A directional map fits the retained scene bounds,
@@ -124,7 +124,7 @@ Point contact-hardening is also compared with independent emitter visibility.
 Memory budgets count six layers per point. M5 `point-*` captures explicitly use
 1024 resolution for sun + four points (25 layers, 100 MiB); M3/M4 `shadow-*`
 retain sun + four spots at 2048. Hard/PCF/PCSS and camera changes reuse unchanged
-maps. Broad performance acceptance, sky/IBL
+maps. Broad performance acceptance, scene sky visibility
 and area/LTC remain follow-ups.
 
 M6 adds `Light::shadow_mode: Option<ShadowMode>` for all three light kinds.
@@ -182,6 +182,38 @@ casters, mixed point/cascade layer offsets, final-distance fading and budgets.
 `sun-single.png`/`sun-cascades.png` hold sun-only lighting, geometry, camera and
 1024 resolution constant while comparing one/four maps. General renderer
 performance acceptance remains separate from these functional tests.
+
+M9 implements OpenEXR-backed environment illumination and background through
+the retained `SkyLight`. Diffuse uses three-band SH with exact per-pixel
+lat-long basis integrals and Lambert convolution. Specular uses six spatial
+roughness layers, deterministic GGX importance sampling and a split-sum BRDF
+LUT with correlated Smith visibility. Float32 textures are manually bilinear
+sampled; no optional float32-filtering feature is required. Source normalization
+plus a separate scale preserves HDR values before the existing output bound.
+
+One yaw/gain applies to diffuse, reflections and backdrop; hiding the backdrop
+does not disable illumination. Coordinates map +X to UV (0.5,0.5), +Y to
+(0.75,0.5), and -Z to V=0. Source/quality changes rebuild cached data; pose/gain,
+visibility and exposure changes do not. A missing sky releases source-specific
+resources and cannot inherit a prior scene's environment. Explicit prefilter
+quality and active-resource budgets bound allocations and compute work.
+
+This remains labelled unoccluded IBL. Material AO affects indirect light only,
+and punctual shadow maps do not attenuate the environment contribution.
+Lambert diffuse differs from direct Burley; low-order SH, the normal-view
+split-sum prefilter and single-scattering GGX have known approximation/energy
+limits. The SH and split-sum approach follows the primary
+[Filament PBR documentation](https://google.github.io/filament/Filament.md.html),
+implemented independently, with full-resolution panorama layers rather than
+adopting its engine/cubemap pipeline or claiming its advanced material features.
+
+Automated synthetic tests cover constant HDR energy at tiny and larger inputs,
+rough-metal single-scattering energy, shared background/reflection rotation,
+roughness response, hidden backgrounds, AO/direct-shadow separation, resource
+replacement, exposure-independent cache reuse and budget failures.
+The example accepts an optional final `--environment <local.exr>`; without it,
+M9 captures explicitly use a synthetic studio panorama. No physical atmosphere,
+scene sky occlusion or live-control integration is implied.
 
 The offline `pbr_milestone` example consumes a locally prepared camera fixture
 and owner-provided GLBs, renders the virtual ground plane and grounded models,
@@ -278,9 +310,9 @@ Its currently supported profile is:
 
 Synthetic in-memory EXR tests cover this profile, invalid radiance, malformed
 headers/payloads, unsupported formats and retained-scene replacement. This decoder
-is independent of trd's GPU environment algorithms; none are ported here. It does
-not implement IBL convolution/prefiltering, BRDF integration, visible background,
-GPU cache invalidation or the remaining issue #19 acceptance.
+is independent of trd's GPU environment algorithms; none are ported here. The
+decoder itself does not perform IBL convolution/prefiltering or GPU work; M9's
+shared environment path supplies lighting, background and cache behavior.
 
 The full target includes **all five light families, physical atmosphere, multiple
 area shapes, and shadows including PCF and PCSS**. Staging them is an
