@@ -15,6 +15,12 @@
 | `reference/` | All reference materials (private, local-only, ignored by Git) | |
 | `output/<module>/` | Generated runtime artifacts, including renderer images in `output/renderer/` (local-only, ignored by Git) | |
 
+## Design Documentation
+
+See [product and system design](docs/README.md) for the evolving business
+workflow, proposed module boundaries, and open decisions. These documents are
+discussion drafts, not implemented interfaces or a frozen protocol.
+
 ## Development
 
 Create a dedicated branch and Git worktree under `.worktree/` before implementing a new feature. Make feature changes and run validation in that worktree, not in the primary working tree.
