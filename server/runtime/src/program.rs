@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod pitch;
 pub mod synthetic;
+pub mod video;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Reusable worker-local GPU storage, separate from immutable registered inputs.
@@ -23,6 +24,7 @@ pub struct ProgramRenderer {
     converter: UyvyConverter,
     compositor: Option<(w::ShadowMode, FrameCompositor)>,
     timestamps: Option<wgpu::QuerySet>,
+    video_lens: Option<Arc<video::VideoLens>>,
 }
 
 impl ProgramRenderer {
@@ -54,7 +56,12 @@ impl ProgramRenderer {
             converter,
             compositor: None,
             timestamps: None,
+            video_lens: None,
         })
+    }
+
+    pub fn set_video_lens(&mut self, lens: Option<Arc<video::VideoLens>>) {
+        self.video_lens = lens;
     }
 
     /// Optional native diagnostics, disabled by default (no query allocation).
@@ -170,10 +177,16 @@ impl ProgramRenderer {
             },
         )?;
         let compositor = &mut self.compositor.as_mut().expect("installed compositor").1;
-        compositor.prepare(
+        let camera_model = self
+            .video_lens
+            .as_ref()
+            .map(|lens| lens.model(&execution.provenance.input.frame))
+            .transpose()?;
+        compositor.prepare_model(
             gpu,
             execution.scene.scene(),
             &execution.camera,
+            camera_model.unwrap_or(&chr_renderer::distortion::CameraModel::Pinhole),
             &[ImageLayer::new(&view, settings.input_stage)],
         )?;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());

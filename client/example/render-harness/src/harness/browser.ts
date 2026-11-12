@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { RpcClient, connectWebSocket } from "../rpc.ts";
+import { parseSceneFrameResult } from "../scene-frame.ts";
 
 const HELP = `Usage: npm run verify:browser -- [options]
 
@@ -17,6 +19,8 @@ const HELP = `Usage: npm run verify:browser -- [options]
   --fps <n>           Server frame rate        [default 50]
   --tcp-only          Forbid UDP in Chrome, as through an SSH port forward
                       (needs chr-server --webrtc-tcp)
+  --rotation-directions Check both triangle directions and manual signed-speed input
+  --mesh-rotation     Check actual program-mesh rotation, reversal, stop and fixed ground
   --pitch-controls <json> Load owner-local native-written pitch metadata through the file picker
   --screenshot <png>  Save a screenshot        [default <repo>/output/render-harness/browser.png]`;
 
@@ -27,6 +31,8 @@ const { values: args } = parseArgs({
     seconds: { type: "string", default: "4" },
     fps: { type: "string", default: "50" },
     "tcp-only": { type: "boolean", default: false },
+    "rotation-directions": { type: "boolean", default: false },
+    "mesh-rotation": { type: "boolean", default: false },
     "pitch-controls": { type: "string" },
     screenshot: {
       type: "string",
@@ -151,6 +157,7 @@ async function main(): Promise<number> {
     return 0;
   }
   const url = new URL(args.url);
+  if (args["mesh-rotation"]) url.searchParams.set("live", "1");
   url.searchParams.set("auto", "1");
   url.searchParams.set("seconds", args.seconds);
   if (args["pitch-controls"]) {
@@ -211,6 +218,125 @@ async function main(): Promise<number> {
 
     const fps = Number(args.fps);
     let failed = 0;
+    if (args["mesh-rotation"]) {
+      const rpc = new RpcClient(await connectWebSocket(url.searchParams.get("ws") ?? "ws://127.0.0.1:8787"),
+        { idPrefix: "mesh-check" });
+      const target = { runtime_id: url.searchParams.get("runtime")!, scene_id: url.searchParams.get("scene")! };
+      const snapshot = async () => parseSceneFrameResult("scene.get", await rpc.call("scene.get", target));
+      const initial = await snapshot();
+      const original = initial.state.instances.find(instance => instance.instance_id === "mesh")!;
+      const ground = initial.state.instances.find(instance => instance.instance_id === "ground")!;
+      const evaluate = (expression: string) => cdp.send<{ result: { value?: boolean } }>("Runtime.evaluate",
+        { expression, returnByValue: true }, sessionId);
+      const stop = async () => {
+        await evaluate("document.querySelector('#stop').click()");
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          const result = await evaluate("!document.querySelector('#start').disabled && document.querySelector('#log').textContent.includes('mesh rotation stopped')");
+          if (result.result.value) return;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        throw new Error("Mesh stop did not finish");
+      };
+      try {
+        if (url.searchParams.get("calibrated") === "1") {
+          const locked = await evaluate(`document.querySelectorAll('[data-camera]').length > 0 &&
+            [...document.querySelectorAll('[data-camera]')].every(button => button.disabled)`);
+          if (!locked.result.value) throw new Error("Calibrated clip camera controls must remain disabled");
+          console.log("PASS  calibrated replay: camera controls locked");
+        }
+        for (const sign of [1, -1]) {
+          const before = (await snapshot()).state.instances.find(instance => instance.instance_id === "mesh")!;
+          const beforeAngle = Math.atan2(before.model[1][0], before.model[0][0]);
+          await evaluate(`document.querySelector('#speed').value = '90';
+            document.querySelector('#rotation-direction').value = '${sign}';
+            document.querySelector('#rotation-direction').dispatchEvent(new Event('change'));
+            document.querySelector('#start').click()`);
+          const deadline = Date.now() + 6000;
+          let moved = false;
+          while (Date.now() < deadline) {
+            const state = await snapshot();
+            const mesh = state.state.instances.find(instance => instance.instance_id === "mesh")!;
+            const currentGround = state.state.instances.find(instance => instance.instance_id === "ground")!;
+            if (JSON.stringify(currentGround) !== JSON.stringify(ground)) throw new Error("Ground rotated with mesh");
+            const delta = Math.atan2(Math.sin(Math.atan2(mesh.model[1][0], mesh.model[0][0]) - beforeAngle),
+              Math.cos(Math.atan2(mesh.model[1][0], mesh.model[0][0]) - beforeAngle));
+            if (sign * delta > 0.1 && sign * delta < 1.5) { moved = true; break; }
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          if (!moved) throw new Error(`Mesh did not rotate in direction ${sign}`);
+          await stop();
+          const stopped = (await snapshot()).state.instances.find(instance => instance.instance_id === "mesh");
+          await new Promise(resolve => setTimeout(resolve, 300));
+          const still = (await snapshot()).state.instances.find(instance => instance.instance_id === "mesh");
+          if (JSON.stringify(stopped) !== JSON.stringify(still)) throw new Error("Mesh moved after stop");
+        }
+        console.log("PASS  actual mesh: both directions, stops in place, ground unchanged");
+      } catch (error) {
+        console.log(`FAIL  actual mesh: ${String(error)}`);
+        const diagnostics = await cdp.send<{ result: { value?: string } }>("Runtime.evaluate", {
+          expression: "document.querySelector('#scene-status').textContent + '\\n' + document.querySelector('#log').textContent",
+          returnByValue: true,
+        }, sessionId);
+        console.log(diagnostics.result.value);
+        failed++;
+      } finally {
+        await stop();
+        const current = await snapshot();
+        await rpc.call("scene.mutate", {
+          ...target, expected_revision: current.scene_revision,
+          operations: [{ kind: "instance_put", instance: original }],
+        });
+        rpc.close();
+      }
+    }
+    if (args["rotation-directions"]) {
+      const evaluated = await cdp.send<{ result: { value?: string } }>("Runtime.evaluate", {
+        expression: `(async () => {
+          const speed = document.querySelector("#speed");
+          const direction = document.querySelector("#rotation-direction");
+          const original = speed.value;
+          const apply = async expected => {
+            document.querySelector("#start").click();
+            const deadline = Date.now() + 5000;
+            while (Date.now() < deadline) {
+              const label = [...document.querySelectorAll("#scene dt")]
+                .find(node => node.textContent === "speed");
+              if (parseFloat(label?.nextElementSibling?.textContent ?? "") === expected) return;
+              await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            throw new Error("Server did not apply speed " + expected);
+          };
+          try {
+            speed.value = "90";
+            direction.value = "-1";
+            direction.dispatchEvent(new Event("change"));
+            if (speed.value !== "-90") throw new Error("Counter-clockwise did not negate speed");
+            await apply(-90);
+            direction.value = "1";
+            direction.dispatchEvent(new Event("change"));
+            if (speed.value !== "90") throw new Error("Clockwise did not restore positive speed");
+            await apply(90);
+            speed.value = "-45";
+            speed.dispatchEvent(new Event("input"));
+            if (direction.value !== "-1") throw new Error("Signed speed did not update direction");
+            await apply(-45);
+            return JSON.stringify({ passed: true, appliedSpeeds: [-90, 90, -45] });
+          } catch (error) {
+            return JSON.stringify({ passed: false, error: String(error) });
+          } finally {
+            speed.value = original;
+            speed.dispatchEvent(new Event("input"));
+            document.querySelector("#start").click();
+          }
+        })()`,
+        awaitPromise: true,
+        returnByValue: true,
+      }, sessionId);
+      const rotation = JSON.parse(evaluated.result.value || "{}") as { passed?: boolean };
+      console.log(`${rotation.passed ? "PASS" : "FAIL"}  rotation directions: ${evaluated.result.value}`);
+      if (!rotation.passed) failed++;
+    }
     if (url.searchParams.get("program") === "1") {
       const evaluated = await cdp.send<{ result: { value?: string } }>("Runtime.evaluate", {
         expression: "document.querySelector('#program-result')?.textContent ?? ''", returnByValue: true,

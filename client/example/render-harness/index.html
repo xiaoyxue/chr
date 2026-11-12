@@ -229,8 +229,17 @@
 
         <section class="panel">
           <h2>Triangle</h2>
+          <p class="pipeline">Legacy triangle only, not the retained-scene overlay. Choose direction, then click Start rotation to apply.</p>
           <div class="row">
-            <label>Speed <input id="speed" type="number" value="90" step="15" /> °/s</label>
+            <label>Direction
+              <select id="rotation-direction" aria-label="Rotation direction">
+                <option value="1">Clockwise (+)</option>
+                <option value="-1">Counter-clockwise (-)</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label>Signed speed <input id="speed" type="number" value="90" step="15" /> °/s</label>
           </div>
           <div class="row">
             <button id="start" disabled>Start rotation</button>

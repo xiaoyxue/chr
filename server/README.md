@@ -10,7 +10,7 @@ repository root; its server crates live here:
 | `runtime/` | `chr-server` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, SDI-to-WebRTC monitor |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
-| `scripts/` | | Windows development helpers |
+| `scripts/` | | Windows development helpers and a Linux software video-input probe |
 
 The default draws an RGB triangle using the same pipeline in a native window,
 an offscreen hardware test, and the render server. The explicit
@@ -33,6 +33,151 @@ The Linux renderer roadmap is described in
 ([Chinese](docs/renderer-design.zh-CN.md)). It distinguishes the initial
 pinhole/persistent-scene contract from later camera and lighting extensions;
 these are design targets, not implemented features.
+
+## Software MP4 input through FFmpeg and GStreamer
+
+The Linux helper `scripts/mp4_gstreamer_source.py` reads an owner-supplied local
+MP4, runs FFmpeg at realtime speed, and consumes complete frames in a bounded
+GStreamer appsink:
+
+```text
+MP4 -> FFmpeg -> UYVY raw-video pipe -> fdsrc -> rawvideoparse -> appsink
+```
+
+This is **software input, not physical SDI**. It does not yet feed `chr-server`,
+render overlays, output SDI, encode WebRTC, record media, or connect audio.
+The existing renderer and control paths are unchanged. No source path or video
+is bundled with the helper.
+
+Run from the feature worktree root:
+
+```sh
+nix develop .#media
+python -B server/scripts/mp4_gstreamer_source.py /path/to/input.mp4
+python -B server/scripts/mp4_gstreamer_source.py /path/to/input.mp4 --loop --frames 360
+```
+
+Without `--loop`, decoding stops at EOF. `--frames N` requires exactly N frames
+and fails if the input ends early; combine it with `--loop` to cross the file
+boundary. `--loop` without a frame limit runs until interrupted. `--unpaced`
+disables realtime pacing for a bounded diagnostic run. Ctrl-C/termination stops
+the owned FFmpeg process and the GStreamer pipeline.
+
+Input must explicitly declare progressive, square-pixel, limited-range BT.709
+SDR video with a positive constant rate and even width. Dimensions and the
+rational frame rate are probed, not silently rescaled. FFmpeg explicitly converts
+the video to packed UYVY; audio, subtitles and other streams are omitted.
+Autorotation is disabled, so the feed uses the stored pixel orientation.
+Declared rates are normalized to CFR by FFmpeg; this is not a VFR-preservation
+path. Missing/unsupported metadata fails instead of guessing colour or field order.
+
+`rawvideoparse` generates a new software timeline from frame count and rate,
+continuous across file loops. These timestamps are **not** original MP4 PTS,
+captured SDI timestamps, timecode, tracking identities or calibration frame keys.
+The source is backpressured when the two-buffer appsink fills; it is an
+input probe, not the live server's drop/deadline policy. The final JSON reports
+actual received frame count, bytes, caps, first/last software PTS and pixel
+checksums. No media or metadata file is written.
+
+Synthetic checks run without private inputs or hardware:
+
+```sh
+nix develop .#media --command python -B -m unittest discover \
+  -s server/scripts -p test_mp4_gstreamer_source.py
+nix build .#checks.x86_64-linux.media-source --no-link --no-update-lock-file
+```
+
+## Live software SDI simulation
+
+The Linux-only `gstreamer-media` feature connects a local MP4 to the existing
+retained renderer, simulated SDI clock and browser controls:
+
+```text
+MP4 -> FFmpeg -> GStreamer UYVY/RGBA -> retained renderer
+    -> simulated SDI output -> GStreamer H.264 -> existing WebRTC -> WebUI
+WebUI -> existing WebSocket JSON-RPC -> retained scene/camera state
+```
+
+```sh
+nix develop .#media
+cargo run --locked -p chr-server --features gstreamer-media -- \
+  --software-video /path/to/video.mp4 --size 1280x720 --fps 30 \
+  --no-socket --ws 127.0.0.1:18771 \
+  --webrtc-udp none --webrtc-tcp 127.0.0.1:18772
+```
+
+Use the existing host-driver wrapper below if Vulkan cannot access the hardware.
+The source must be progressive, square-pixel, limited-range BT.709, with the
+same integral rate and aspect ratio as the selected output. The software profile
+retains the synthetic configuration's 1280x720 maximum. A 1920x1080 source is
+explicitly scaled to the selected 1280x720 output; no audio is connected.
+The sample geometry is deliberately small and **not calibrated to the video**.
+The orange mesh and gray ground are separate instances. The live WebUI's
+top-right mesh controller sends normal, serialized scene mutations, leaving the
+receiver fixed. This is page-driven demo animation: keep the page connected;
+Stop drains its in-flight update and holds the last applied pose.
+No private model, camera calibration or source file is bundled.
+
+The input adapter assigns a new software stream sequence before its two-buffer
+queue drops old frames; those identities and gaps survive native admission.
+Frame resources and scene snapshots use the existing owner/scheduler. Output
+still ticks independently, repeating the previous frame on underrun. Only its
+transmitted slots enter the bounded monitor tap. GStreamer encodes those slots
+with software x264; this is not zero-copy or hardware encoding.
+
+WebRTC still uses the existing implementation and ICE-TCP forwarding, not
+GStreamer's WebRTC backend. JSON-RPC and the default triangle/synthetic/pitch
+profiles remain unchanged. The separate input probe above still performs no
+rendering. Physical SDI, tracking, recording and production policy are not implied.
+
+Use `client/example/render-harness` for the WebUI. Its `live=1` query flag connects
+the program monitor and opens scene controls; supply the runtime/scene IDs printed
+by the server and its WebSocket URL. Browser traffic can remain TCP-only through
+SSH: forward the UI HTTP port, WebSocket port 18771 and ICE-TCP ports 18772-18775.
+Monitor disconnection never blocks program output.
+
+Focused checks inside the media shell:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked -p chr-server --all-targets --features gstreamer-media -- -D warnings
+cargo test --locked -p chr-server --features gstreamer-media
+```
+
+### Calibrated local clip replay
+
+Add `--video-scene /path/to/scene.json` to `--software-video` to replace the
+uncalibrated mesh with an owner-supplied static GLB, Ti/C camera, radial lens,
+per-frame warp and a transparent GPU shadow catcher (the approach in #89).
+This worktree incorporates the upstream renderer's #84–#88 changes; the public
+scene/frame protocol is unchanged.
+
+The startup-only JSON has these fields (paths are relative to the manifest):
+`width`, `height` (native pixels), `fps`, `ti` (forward row-major 3x3 ground-to-SNC),
+`center` (world metres), `radial` (`centre_px`, `scale_px`, three `coefficients`,
+nullable `support` as `[min_xy,max_xy]`), `frame_warps` (one row-major 3x3
+reference-native-pixel-to-frame-SNC matrix per decoded presentation frame),
+`model` (GLB path), `height_m`, `anchor_pixel` (ideal reference native pixel)
+and `pitch_m` (`[length,width]`). Model height and ground placement are authored,
+not inferred. All private paths, coefficients and renders must stay local.
+
+Native images remain at calibration resolution (up to 4096x2160); only the
+composed output is fitted to the selected size (up to 1280x720, same aspect).
+Startup decodes/probes the clip to require an exact warp count, matching native
+extent/rate and zero-based contiguous CFR presentation timestamps. The decoder
+does not resample frames. Its software sequence is assigned before input queue
+drops; `sequence % clip_frame_count` selects the original warp across gaps and
+loops. Repeated SDI slots reuse the composed result, not a new warp. This mapping
+is valid only for this explicitly validated file replay, not live capture,
+timecode, arbitrary VFR or tracking.
+
+Only CG and its shadows are distorted; the display-referred BT.709 footage is
+not warped or tone-mapped. Composition uses 4x MSAA, PCSS, an authored sun and
+four corner spots. Lighting is not estimated from the footage. The existing
+`mesh`/`ground` IDs let the page rotate the GLB without moving its shadow catcher.
+Use `live=1&calibrated=1` in the harness URL to label this mode and disable camera
+buttons that would invalidate the clip alignment. This is diagnostic replay:
+no scene occlusion, audio, physical SDI, hardware encoding or real-time estimator.
 
 ## M1: camera, indexed meshes and depth
 

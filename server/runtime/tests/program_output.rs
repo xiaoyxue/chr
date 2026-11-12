@@ -66,6 +66,215 @@ fn receive(tap: &mpsc::Receiver<SdiSlot>, sequence: u64) -> SdiSlot {
     }
 }
 
+fn video_manifest() -> chr_server::program::video::Manifest {
+    let s = (192_f64 * 128.).sqrt();
+    serde_json::from_value(json!({
+        "width":192,"height":128,"fps":50,
+        "ti":[[0.12,0,0],[0,0.12,0],[0,0,1]],"center":[0,0,-8],
+        "radial":{"centre_px":[96,64],"scale_px":192,"coefficients":[-0.08,0,0],"support":null},
+        "frame_warps":[
+            [[2./s,0.,-192./s],[0.,2./s,-128./s],[0,0,1]],
+            [[2./s,0.,-192./s+0.12],[0.,2./s,-128./s],[0,0,1]]
+        ],
+        "model":"unused.glb","height_m":2,"anchor_pixel":[96,82],"pitch_m":[105,68]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn calibrated_video_rejects_mismatched_or_invalid_geometry() {
+    for edit in 0..4 {
+        let mut manifest = video_manifest();
+        match edit {
+            0 => manifest.fps = 30,
+            1 => manifest.frame_warps.clear(),
+            2 => manifest.frame_warps[0] = [[0.; 3]; 3],
+            _ => manifest.height_m = 0.,
+        }
+        assert!(
+            chr_server::program::video::prepare(
+                manifest,
+                chr_server::program::pitch::block().unwrap(),
+                mode(),
+                runtime_id().unwrap(),
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn calibrated_warp_follows_native_identity_across_gaps_and_loops() {
+    let (mut program, adapter) = chr_server::program::video::prepare(
+        video_manifest(),
+        chr_server::program::pitch::block().unwrap(),
+        mode(),
+        runtime_id().unwrap(),
+    )
+    .unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let lens = program.video_lens.as_ref().unwrap().clone();
+    let mut models = Vec::new();
+    for sequence in [0, 3, 8] {
+        program
+            .inject_image(&control, sequence, &[20, 100, 40, 255].repeat(192 * 128))
+            .await
+            .unwrap()
+            .unwrap();
+        let execution = program.scheduler.next_ready().unwrap().unwrap();
+        models.push(
+            lens.model(&execution.provenance.input.frame)
+                .unwrap()
+                .clone(),
+        );
+        execution.failed().unwrap();
+    }
+    assert_eq!(models[0], models[2], "loop must use the original warp");
+    assert_ne!(
+        models[0], models[1],
+        "dropped frames must not shift the warp"
+    );
+    assert!(
+        lens.model(&w::FrameKey {
+            stream_id: id("unrelated").unwrap(),
+            sequence: 0.into()
+        })
+        .is_err()
+    );
+    let scene = call(&control, w::SCENE_GET, target(&program)).await;
+    assert_eq!(scene["state"]["shadow_mode"], "pcss");
+    assert_eq!(
+        scene["state"]["lighting"]["lights"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a native hardware GPU"]
+async fn gpu_calibrated_video_warps_cg_not_plate_and_repeats_exact_loop() {
+    let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
+    assert!(matches!(
+        gpu.adapter.get_info().device_type,
+        wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+    ));
+    let (mut program, adapter) = chr_server::program::video::prepare(
+        video_manifest(),
+        chr_server::program::pitch::block().unwrap(),
+        VideoMode {
+            width: 96,
+            height: 64,
+            fps: 50,
+        },
+        runtime_id().unwrap(),
+    )
+    .unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
+    renderer.set_video_lens(program.video_lens.clone());
+    let output = VideoMode {
+        width: 96,
+        height: 64,
+        fps: 50,
+    };
+    let (sdi, tap) =
+        SdiOutput::spawn_program(output, id("calibrated-test-output").unwrap()).unwrap();
+    let mut port = sdi.input();
+    let mut pixels = Vec::new();
+    for sequence in [0, 1, 4] {
+        program
+            .inject_image(&control, sequence, &[20, 100, 40, 255].repeat(192 * 128))
+            .await
+            .unwrap()
+            .unwrap();
+        renderer.drive(&gpu, &program.scheduler, &mut port).unwrap();
+        pixels.push(receive(&tap, sequence).uyvy);
+    }
+    assert_ne!(
+        pixels[0], pixels[1],
+        "per-frame warp must move actual CG/shadow pixels"
+    );
+    assert_eq!(
+        pixels[0], pixels[2],
+        "loop must restore identical GPU pixels"
+    );
+    assert_eq!(
+        &pixels[0][..96 * 2],
+        &pixels[1][..96 * 2],
+        "plate must not be warped"
+    );
+    let scene = call(&control, w::SCENE_GET, target(&program)).await;
+    let mut mesh = scene["state"]["instances"][0].clone();
+    mesh["visible"] = json!(false);
+    mutate(
+        &control,
+        &program,
+        json!([{"kind":"instance_put","instance":mesh}]),
+    )
+    .await;
+    program
+        .inject_image(&control, 6, &[20, 100, 40, 255].repeat(192 * 128))
+        .await
+        .unwrap()
+        .unwrap();
+    renderer.drive(&gpu, &program.scheduler, &mut port).unwrap();
+    let bare_plate = receive(&tap, 6).uyvy;
+    assert!(
+        bare_plate
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p == &bare_plate[..4]),
+        "shadow catcher without a caster must leave the solid plate unchanged"
+    );
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+async fn software_images_keep_capture_sequence_gaps_and_pixel_ownership() {
+    let (mut program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let scene = call(&control, w::SCENE_GET, target(&program)).await;
+    assert_eq!(scene["state"]["instances"].as_array().unwrap().len(), 2);
+    assert_eq!(scene["state"]["instances"][0]["instance_id"], "mesh");
+    assert_eq!(scene["state"]["instances"][1]["instance_id"], "ground");
+    assert_ne!(
+        scene["state"]["instances"][0]["asset_ref"],
+        scene["state"]["instances"][1]["asset_ref"]
+    );
+    let mut image = [30, 60, 90, 255].repeat(192 * 128);
+    program
+        .inject_image(&control, 7, &image)
+        .await
+        .unwrap()
+        .unwrap();
+    image.fill(0);
+    let execution = program.scheduler.next_ready().unwrap().unwrap();
+    assert_eq!(execution.provenance.input.frame.sequence.get(), 7);
+    assert_eq!(execution.provenance.input.position.ticks.get(), 7);
+    assert_eq!(&execution.input.pixels().unwrap()[..4], &[30, 60, 90, 255]);
+    execution.failed().unwrap();
+    assert!(program.inject_image(&control, 6, &image).await.is_err());
+    program
+        .inject_image(&control, 12, &image)
+        .await
+        .unwrap()
+        .unwrap();
+    let execution = program.scheduler.next_ready().unwrap().unwrap();
+    assert_eq!(execution.provenance.input.frame.sequence.get(), 12);
+    execution.failed().unwrap();
+    drop(control);
+    owner.await.unwrap();
+}
+
 #[tokio::test]
 async fn explicit_profile_keeps_input_and_submission_bounded() {
     let (mut synthetic, adapter) = Synthetic::install(mode(), runtime_id().unwrap()).unwrap();
@@ -113,6 +322,70 @@ async fn explicit_profile_keeps_input_and_submission_bounded() {
     invalid.output_transfer = w::OutputTransfer::Bt709;
     invalid.output_rate = w::TimeBase::new(1001, 60000).unwrap();
     assert!(chr_server::program::validate_output(&invalid).is_err());
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a native hardware GPU"]
+async fn gpu_video_mesh_turns_independently_of_ground_and_restores_pixels() {
+    let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
+    assert!(matches!(
+        gpu.adapter.get_info().device_type,
+        wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+    ));
+    let (mut program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let scene = call(&control, w::SCENE_GET, target(&program)).await;
+    let original = scene["state"]["instances"][0].clone();
+    let ground = scene["state"]["instances"][1].clone();
+    let mut positive = original.clone();
+    positive["model"] = json!([
+        [0, -0.25, 0, 0],
+        [0.25, 0, 0, 0],
+        [0, 0, 0.25, 0],
+        [0, 0, 0, 1]
+    ]);
+    let mut negative = original.clone();
+    negative["model"] = json!([
+        [0, 0.25, 0, 0],
+        [-0.25, 0, 0, 0],
+        [0, 0, 0.25, 0],
+        [0, 0, 0, 1]
+    ]);
+    let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
+    let (sdi, tap) = SdiOutput::spawn_program(mode(), id("mesh-rotation-output").unwrap()).unwrap();
+    let mut port = sdi.input();
+    let mut images = Vec::new();
+    for (sequence, instance) in [original.clone(), positive, negative, original]
+        .into_iter()
+        .enumerate()
+    {
+        mutate(
+            &control,
+            &program,
+            json!([{"kind":"instance_put","instance":instance}]),
+        )
+        .await;
+        let current = call(&control, w::SCENE_GET, target(&program)).await;
+        assert_eq!(current["state"]["instances"][1], ground);
+        program.inject(&control).await.unwrap().unwrap();
+        renderer.drive(&gpu, &program.scheduler, &mut port).unwrap();
+        images.push(receive(&tap, sequence as u64).uyvy);
+    }
+    assert_ne!(
+        images[0], images[1],
+        "positive turn must affect actual program pixels"
+    );
+    assert_ne!(
+        images[1], images[2],
+        "opposite turns must produce different poses"
+    );
+    assert_eq!(
+        images[0], images[3],
+        "restoring the mesh must restore static program pixels"
+    );
     drop(control);
     owner.await.unwrap();
 }

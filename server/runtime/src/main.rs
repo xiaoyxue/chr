@@ -38,6 +38,9 @@ Options:
   --size <WxH>            Render size; both even [default: 1280x720]
   --fps <n>               Frames per second, 1-120 [default: 50]
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
+  --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
+                          (Linux gstreamer-media feature; --fps must match source)
+  --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --webrtc-udp <addr>     Local UDP bind for WebRTC; a wildcard binds every non-loopback
@@ -61,6 +64,8 @@ struct Args {
     synthetic_program: bool,
     pitch_demo: Option<PathBuf>,
     pitch_controls: Option<PathBuf>,
+    software_video: Option<PathBuf>,
+    video_scene: Option<PathBuf>,
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -78,6 +83,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         synthetic_program: false,
         pitch_demo: None,
         pitch_controls: None,
+        software_video: None,
+        video_scene: None,
     };
     let mut use_socket = true;
     while let Some(flag) = raw.next() {
@@ -95,6 +102,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             }
             "--fps" => args.fps = value()?.parse()?,
             "--synthetic-program" => args.synthetic_program = true,
+            "--software-video" => args.software_video = Some(value()?.into()),
+            "--video-scene" => args.video_scene = Some(value()?.into()),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--webrtc-udp" => {
@@ -110,13 +119,19 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if !args.width.is_multiple_of(2) || !args.height.is_multiple_of(2) {
         return Err("H.264 4:2:0 needs an even width and height".into());
     }
-    if (args.synthetic_program && args.pitch_demo.is_some())
+    if usize::from(args.synthetic_program)
+        + usize::from(args.pitch_demo.is_some())
+        + usize::from(args.software_video.is_some())
+        > 1
         || (args.pitch_controls.is_some() && args.pitch_demo.is_none())
     {
         return Err("select one program profile; --pitch-controls requires --pitch-demo".into());
     }
     if args.ice.udp.is_none() && args.ice.tcp_base.is_none() {
         return Err("WebRTC needs UDP or TCP; do not disable both".into());
+    }
+    if args.video_scene.is_some() && args.software_video.is_none() {
+        return Err("--video-scene requires --software-video".into());
     }
     if !(1..=120).contains(&args.fps) {
         return Err("--fps must be between 1 and 120".into());
@@ -172,6 +187,9 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<()> {
+    if args.software_video.is_some() && !cfg!(all(unix, feature = "gstreamer-media")) {
+        return Err("--software-video requires Linux/Unix and the gstreamer-media feature".into());
+    }
     let extent = ImageExtent::new(args.width, args.height)?;
     let feed = Arc::new(VideoFeed::new());
     let mode = VideoMode {
@@ -196,6 +214,17 @@ fn run(args: Args) -> Result<()> {
             serde_json::to_writer_pretty(options.open(path)?, &prepared.controls)?;
         }
         Some((prepared.program, prepared.adapter))
+    } else if let Some(path) = &args.video_scene {
+        Some(chr_server::program::video::load(
+            path,
+            mode,
+            chr_server::program::synthetic::runtime_id()?,
+        )?)
+    } else if args.software_video.is_some() {
+        Some(chr_server::program::synthetic::Synthetic::install_video(
+            mode,
+            chr_server::program::synthetic::runtime_id()?,
+        )?)
     } else if args.synthetic_program {
         Some(chr_server::program::synthetic::Synthetic::install(
             mode,
@@ -204,6 +233,27 @@ fn run(args: Args) -> Result<()> {
     } else {
         None
     };
+    #[cfg(all(unix, feature = "gstreamer-media"))]
+    let mut video_source = args
+        .software_video
+        .as_ref()
+        .map(|path| {
+            let program = &installation
+                .as_ref()
+                .expect("software video installation")
+                .0;
+            let native = program.configuration.native_extent;
+            chr_server::media::VideoInput::open(
+                path,
+                VideoMode {
+                    width: native.width,
+                    height: native.height,
+                    fps: mode.fps,
+                },
+                program.video_lens.as_ref().map(|lens| lens.frame_count()),
+            )
+        })
+        .transpose()?;
     let (sdi, tap) = if let Some((synthetic, _)) = &installation {
         SdiOutput::spawn_program(
             mode,
@@ -215,6 +265,13 @@ fn run(args: Args) -> Result<()> {
     } else {
         SdiOutput::spawn(mode)?
     };
+    #[cfg(all(unix, feature = "gstreamer-media"))]
+    let monitor = if args.software_video.is_some() {
+        Monitor::spawn_gstreamer(mode, tap, Arc::clone(&feed))?
+    } else {
+        Monitor::spawn(mode, tap, Arc::clone(&feed))?
+    };
+    #[cfg(not(all(unix, feature = "gstreamer-media")))]
     let monitor = Monitor::spawn(mode, tap, Arc::clone(&feed))?;
     let render_config = RenderConfig {
         extent,
@@ -226,6 +283,7 @@ fn run(args: Args) -> Result<()> {
             sdi.input(),
             synthetic.configuration.clone(),
             synthetic.scheduler.clone(),
+            synthetic.video_lens.clone(),
         )?
     } else {
         RenderWorker::spawn(render_config, sdi.input())?
@@ -285,6 +343,14 @@ fn run(args: Args) -> Result<()> {
                 tokio::select! {
                     _ = progress.tick() => synthetic.scheduler.tick().map_err(|e| e.to_string())?,
                     _ = frames.tick() => {
+                        #[cfg(all(unix, feature = "gstreamer-media"))]
+                        if let Some(source) = &mut video_source {
+                            if let Some(frame) = source.try_frame()?
+                                && let Err(error) = synthetic.inject_image(control, frame.sequence, &frame.rgba).await {
+                                log::warn!("software input skipped: {error}");
+                            }
+                            continue;
+                        }
                         if let Err(error) = synthetic.inject(control).await {
                             log::warn!("synthetic injection skipped: {error}");
                         }
@@ -309,6 +375,8 @@ fn run(args: Args) -> Result<()> {
         if let Some(owner) = owner { owner.await?; }
         result
     });
+    #[cfg(all(unix, feature = "gstreamer-media"))]
+    drop(video_source);
     // Dropping the runtime closes listeners (removing the socket file) and connections.
     runtime.shutdown_timeout(Duration::from_secs(2));
     let stopped = worker.shutdown();
@@ -404,6 +472,28 @@ mod tests {
         );
 
         assert!(parse(&["--no-socket"]).unwrap().unwrap().socket.is_none());
+        assert!(parse(&["--software-video", "video.mp4", "--synthetic-program"]).is_err());
+        assert!(parse(&["--software-video", "video.mp4", "--pitch-demo", "demo.json"]).is_err());
+        assert!(parse(&["--video-scene", "scene.json"]).is_err());
+        assert_eq!(
+            parse(&[
+                "--software-video",
+                "video.mp4",
+                "--video-scene",
+                "scene.json"
+            ])
+            .unwrap()
+            .unwrap()
+            .video_scene,
+            Some(PathBuf::from("scene.json"))
+        );
+        assert_eq!(
+            parse(&["--software-video", "video.mp4"])
+                .unwrap()
+                .unwrap()
+                .software_video,
+            Some(PathBuf::from("video.mp4"))
+        );
         let ice = parse(&["--webrtc-udp", "none", "--webrtc-tcp", "127.0.0.1:8788"])
             .unwrap()
             .unwrap()

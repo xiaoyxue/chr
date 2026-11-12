@@ -36,6 +36,24 @@
             nodejs
             typescript
           ];
+          mediaTools = [
+            pkgs.ffmpeg
+            (pkgs.python3.withPackages (ps: [ ps.pygobject3 ]))
+            pkgs.gst_all_1.gstreamer
+            pkgs.gst_all_1.gst-plugins-base
+            pkgs.gst_all_1.gst-plugins-ugly
+          ];
+          mediaEnvironment = {
+            GI_TYPELIB_PATH = pkgs.lib.makeSearchPath "lib/girepository-1.0" [
+              (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
+              pkgs.gst_all_1.gst-plugins-base
+            ];
+            GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
+              (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
+              pkgs.gst_all_1.gst-plugins-base
+              pkgs.gst_all_1.gst-plugins-ugly
+            ];
+          };
           runtime = with pkgs; [
             vulkan-loader
             libGL
@@ -115,9 +133,23 @@
               postInstall = "wrapProgram $out/bin/chr-server --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
             }
           );
+          shell = pkgs.mkShell {
+            packages = [
+              toolchain
+              pkgs.git
+              pkgs.pkg-config
+              pkgs.nixfmt
+            ]
+            ++ clientTools
+            ++ runtime;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
+            shellHook = ''
+              export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"
+            '';
+          };
         in
         {
-          inherit app server;
+          inherit app server shell;
           checks = {
             client-toolchain =
               pkgs.runCommand "chr-client-toolchain"
@@ -129,6 +161,14 @@
                   node --version > "$out"
                   npm --version >> "$out"
                   tsc --version >> "$out"
+                '';
+            media-source =
+              pkgs.runCommand "chr-media-source" (mediaEnvironment // { nativeBuildInputs = mediaTools; })
+                ''
+                  export HOME="$TMPDIR"
+                  export PYTHONDONTWRITEBYTECODE=1
+                  python -B -m unittest discover -s ${./server/scripts} \
+                    -p test_mp4_gstreamer_source.py > "$out" 2>&1
                 '';
             fmt = craneLib.cargoFmt { inherit src; };
             clippy = craneLib.cargoClippy (
@@ -146,20 +186,14 @@
               }
             );
           };
-          shell = pkgs.mkShell {
-            packages = [
-              toolchain
-              pkgs.git
-              pkgs.pkg-config
-              pkgs.nixfmt
-            ]
-            ++ clientTools
-            ++ runtime;
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
-            shellHook = ''
-              export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"
-            '';
-          };
+          mediaShell = pkgs.mkShell (
+            mediaEnvironment
+            // {
+              inputsFrom = [ shell ];
+              inherit (shell) LD_LIBRARY_PATH;
+              packages = mediaTools;
+            }
+          );
           formatter = pkgs.nixfmt;
         };
     in
@@ -178,6 +212,7 @@
       checks = perSystem (system: (environment system).checks);
       devShells = perSystem (system: {
         default = (environment system).shell;
+        media = (environment system).mediaShell;
       });
       formatter = perSystem (system: (environment system).formatter);
     };

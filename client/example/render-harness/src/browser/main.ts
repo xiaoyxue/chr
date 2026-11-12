@@ -9,6 +9,8 @@ import { installScenePanel } from "./scene-panel.ts";
 import { programSelfTest } from "./program-self-test.ts";
 
 const params = new URLSearchParams(location.search);
+const liveProgram = params.get("live") === "1";
+const calibrated = params.get("calibrated") === "1";
 const $ = <T extends HTMLElement>(selector: string) => {
   const element = document.querySelector<T>(selector);
   if (element === null) throw new Error(`missing ${selector}`);
@@ -26,7 +28,7 @@ const video = $<HTMLVideoElement>("video");
 const overlay = $("#overlay");
 
 let rpc: RpcClient | null = null;
-installScenePanel(() => rpc);
+const scenePanel = installScenePanel(() => rpc);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 function log(message: string): void {
@@ -210,6 +212,7 @@ async function connect(): Promise<void> {
 }
 
 function disconnect(reason: string): void {
+  void scenePanel.stopRotation();
   clearInterval(pollTimer);
   closeStream();
   rpc?.close();
@@ -220,7 +223,17 @@ function disconnect(reason: string): void {
 async function poll(): Promise<void> {
   if (rpc === null) return;
   try {
-    showState(await rpc.getState());
+    if (liveProgram) {
+      const rotation = scenePanel.rotationState();
+      renderList($("#scene"), [
+        ["controller", rotation?.running ? "running" : "stopped"],
+        ["angle since start", `${((rotation?.angle ?? 0) * 180 / Math.PI).toFixed(1)}°`],
+        ["speed", `${((rotation?.speed ?? 0) * 180 / Math.PI).toFixed(1)}°/s`],
+        ["output slot", String(rotation?.frame ?? "-")],
+      ]);
+    } else {
+      showState(await rpc.getState());
+    }
     showSdi(await rpc.getSdiStatus());
     await pollStream();
   } catch (error) {
@@ -240,21 +253,76 @@ async function command(run: (client: RpcClient) => Promise<TriangleState>, label
   }
 }
 
-const speed = () => (Number($<HTMLInputElement>("#speed").value) * Math.PI) / 180;
+const speedInput = $<HTMLInputElement>("#speed");
+const directionInput = $<HTMLSelectElement>("#rotation-direction");
+const speed = () => (Number(speedInput.value) * Math.PI) / 180;
+
+directionInput.onchange = () => {
+  const magnitude = speedInput.valueAsNumber;
+  if (Number.isFinite(magnitude)) {
+    speedInput.value = String(Math.abs(magnitude) * Number(directionInput.value));
+  }
+};
+speedInput.oninput = () => {
+  if (Number.isFinite(speedInput.valueAsNumber)) {
+    directionInput.value = speedInput.valueAsNumber < 0 ? "-1" : "1";
+  }
+};
 
 connectButton.onclick = () => (rpc ? disconnect("disconnected") : void connect());
 streamButton.onclick = () => (pc ? closeStream() : void openStream());
-startButton.onclick = () =>
-  void command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
-stopButton.onclick = () => void command((client) => client.stopRotation(), "stop rotation");
+async function meshCommand(action: () => Promise<void>, label: string): Promise<void> {
+  startButton.disabled = stopButton.disabled = true;
+  try { await action(); log(label); }
+  catch (error) { log(`${label} failed: ${String(error)}`); }
+  finally {
+    startButton.disabled = stopButton.disabled = rpc === null;
+    await poll();
+  }
+}
+startButton.onclick = () => liveProgram
+  ? void meshCommand(() => scenePanel.startRotation(speed()), "mesh rotation started")
+  : void command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
+stopButton.onclick = () => liveProgram
+  ? void meshCommand(() => scenePanel.stopRotation(), "mesh rotation stopped")
+  : void command((client) => client.stopRotation(), "stop rotation");
+window.addEventListener("pagehide", () => { void scenePanel.stopRotation(); });
 setConnected(false, "disconnected");
 showStats();
+
+if (liveProgram) {
+  document.title = "chr software SDI simulation";
+  $("h1").textContent = "chr software SDI simulation";
+  $(".pipeline").textContent =
+    "MP4 / FFmpeg / GStreamer → renderer → simulated SDI → GStreamer H.264 → WebRTC";
+  const rotationPanel = startButton.closest<HTMLElement>(".panel")!;
+  rotationPanel.querySelector("h2")!.textContent = calibrated ? "Calibrated model rotation" : "Orange mesh rotation";
+  rotationPanel.querySelector(".pipeline")!.textContent =
+    calibrated
+      ? "Rotates the registered GLB through Server commands. The shadow catcher stays fixed. Keep this page connected."
+      : "Rotates only the orange mesh through Server commands. The gray receiver stays fixed. Keep this page connected.";
+  document.querySelector("aside")!.prepend(rotationPanel);
+  $<HTMLDetailsElement>("#program-scene").open = true;
+  $("#pitch-provenance").textContent =
+    calibrated
+      ? "Owner-local diagnostic calibration with per-frame distortion/warp. Authored lighting; no occlusion, physical SDI or live tracking. Camera locked to the clip."
+      : "Software video input and simulated SDI output. The sample overlay is not calibrated to the source camera.";
+  if (calibrated) {
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-camera]")) button.disabled = true;
+  }
+  if (params.get("auto") !== "1") void (async () => {
+    await connect();
+    $<HTMLButtonElement>("#scene-load").click();
+    await openStream();
+  })();
+}
 
 if (params.get("auto") === "1") {
   void (async () => {
     await connect();
+    if (liveProgram) $<HTMLButtonElement>("#scene-load").click();
     await openStream();
-    await command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
+    if (!liveProgram) await command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
     const seconds = Number(params.get("seconds") ?? 4);
     await new Promise((done) => setTimeout(done, seconds * 1000));
     if (params.get("program") === "1") {
