@@ -1,6 +1,6 @@
 # Native synthetic frame resources
 
-`chr_server::frame_resources` implements the bounded native ownership slice of
+`chr_runtime::frame_resources` implements the bounded native ownership slice of
 [#21](https://github.com/xiaoyxue/chr/issues/21), under the
 [limited synthetic contract](../../docs/scene-frame-contract.md).
 The opt-in [synthetic submission owner](frame-submissions.md) connects it to
@@ -148,7 +148,7 @@ policy, hardware capture, physical SDI acceptance, or real assets are supplied.
 From the repository root:
 
 ```sh
-nix develop --command cargo test --locked -p chr-server --lib frame_resources
+nix develop --command cargo test --locked -p chr-runtime --lib frame_resources
 ```
 
 Deterministic synthetic tests cover one-shot publication and metadata rollback,

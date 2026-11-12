@@ -3,7 +3,7 @@
 ## Project Structure
 
 - `client/`: Client-side code, primarily written in TypeScript. Source code belongs in `client/src/`; `client/example/` holds example clients and verification harnesses, each a self-contained npm package.
-- `server/`: The live render server, primarily Rust. The renderer library lives in `server/renderer/` (`chr-renderer`), the headless render server in `server/runtime/` (`chr-server`), and the native window/headless shell in `server/viewer/` (`chr-app`); further server crates are added as `server/<name>/`. Follow `server/AGENTS.md`.
+- `server/`: The live render server, primarily Rust. The renderer library lives in `server/renderer/` (`chr-renderer`), the render server runtime in `server/runtime/` (`chr-runtime`, which builds the `chr-server` executable), and the native window/headless shell in `server/viewer/` (`chr-app`); further server crates are added as `server/<name>/`. Follow `server/AGENTS.md`.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: The single Rust workspace at the repository root. Its members live under `server/` (and Rust parts of `common/`); run Cargo commands from the root.
 - `common/`: Shared communication protocols. `common/` is the Rust crate `chr-common` (JSON-RPC 2.0 control messages and the NativeSocket/WebSocket IPC transports) and is the source of truth; TypeScript clients mirror its types.
 - `algorithm/`: Scene reconstruction algorithms. Language and technology stack are undecided. Source code belongs in `algorithm/src/`; do not choose a stack without confirmation.
@@ -23,7 +23,7 @@
   unrelated flake template to replace the existing environment.
 - `nix develop .#media` extends the root shell with FFmpeg, GStreamer core/base/bad/ugly
   plugins and Python GObject bindings for the software video-input helper in
-  `server/scripts/` and the opt-in `chr-server` `gstreamer-media` feature.
+  `server/scripts/` and the opt-in `chr-runtime` `gstreamer-media` feature.
   It does not provide physical SDI or change the renderer library.
 - Keep client sources in `client/src/`, which has no client framework or package
   yet. Example packages under `client/example/` carry their own `package.json` and

@@ -1,6 +1,6 @@
 //! Resource-backed synthetic mechanics, not hardware/GPU/SDI acceptance.
 use super::*;
-use chr_server::{
+use chr_runtime::{
     frame_resources::{FrameMetadata, FrameResources, ProducerGuard, ResourceConfig},
     frame_submissions::{FrameJoin, FrameSubmissions, MonotonicClock, OutputFrame, OutputPort},
 };
@@ -759,7 +759,7 @@ mod real_ipc {
         client::NativeSocketClient,
         server::{IpcServer, NativeSocketListener, ServerConfig, WebSocketListener},
     };
-    use chr_server::{
+    use chr_runtime::{
         control::ControlHandler,
         monitor::{
             encoder::VideoFeed,

@@ -581,7 +581,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chr-server"
+name = "chr-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",

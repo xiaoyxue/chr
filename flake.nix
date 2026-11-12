@@ -128,8 +128,8 @@
             common
             // {
               inherit cargoArtifacts;
-              pname = "chr-server";
-              cargoExtraArgs = "-p chr-server";
+              pname = "chr-runtime";
+              cargoExtraArgs = "-p chr-runtime";
               doCheck = false;
               nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               postInstall = "wrapProgram $out/bin/chr-server --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";

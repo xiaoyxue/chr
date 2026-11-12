@@ -11,7 +11,7 @@ use chr_renderer::{
     glb::{GlbAsset, import_glb},
     scene::{EnvironmentMap, TextureData},
 };
-use chr_server::retained::{
+use chr_runtime::retained::{
     BoundSubmission, CameraContext, NativeSettings, Registrations, RenderAdmission, SceneAdapter,
     SceneControl,
 };
@@ -684,7 +684,7 @@ mod ipc {
         methods::{sdi, triangle, webrtc},
         server::{IpcServer, NativeSocketListener, ServerConfig, WebSocketListener},
     };
-    use chr_server::{
+    use chr_runtime::{
         control::ControlHandler,
         monitor::{
             encoder::VideoFeed,

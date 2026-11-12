@@ -12,7 +12,7 @@ configuration; it does not change `synthetic-program-v1` limits.
 From the repository root:
 
 ```sh
-nix develop --command cargo run --locked -p chr-server -- \
+nix develop --command cargo run --locked -p chr-runtime -- \
   --synthetic-program --size 640x360 --fps 50
 ```
 
@@ -20,7 +20,7 @@ On a non-NixOS NVIDIA host:
 
 ```sh
 nix develop --command bash -c \
-  'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo run --locked -p chr-server -- --synthetic-program --size 640x360 --fps 50'
+  'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo run --locked -p chr-runtime -- --synthetic-program --size 640x360 --fps 50'
 ```
 
 The startup line declares `runtime_id`, `scene_id` and `configuration_id`.
@@ -112,9 +112,9 @@ and monitor owners are destroyed; logical cancellation is not a GPU fence.
 ## Self-tests and limits
 
 ```sh
-nix develop --command cargo test --locked -p chr-server -p chr-common
+nix develop --command cargo test --locked -p chr-runtime -p chr-common
 nix develop --command bash -c \
-  'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo test --locked -p chr-server --test program_output -- --ignored --nocapture'
+  'NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- cargo test --locked -p chr-runtime --test program_output -- --ignored --nocapture'
 ```
 
 The ignored hardware test checks actual synthetic pixels, camera/light/shadow

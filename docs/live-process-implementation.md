@@ -3,7 +3,7 @@
 **Status:** `proposed` — implementation plan for the `confirmed`
 [Live process architecture](live-process-architecture.md). Field names and
 defaults below are the intended first version; each step's pull request updates
-this document if they change. Nothing here is `implemented` yet.
+this document if they change. Step 1 (#99) is `implemented`; later steps are not.
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
 ring layout, supervision and clean feed, the monitor process, and acceptance

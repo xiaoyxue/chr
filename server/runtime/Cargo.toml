@@ -1,12 +1,17 @@
 [package]
-name = "chr-server"
+name = "chr-runtime"
+default-run = "chr-server"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "Headless mock render server: rotating triangle, local IPC control, and WebRTC preview"
+description = "chr runtime: the chr-server render server and its shared program logic"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "chr-server"
+path = "src/main.rs"
 
 [features]
 gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]

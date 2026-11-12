@@ -1,6 +1,6 @@
 # Retained scene control adapter
 
-`chr_server::retained` implements the runtime-only bridge for the
+`chr_runtime::retained` implements the runtime-only bridge for the
 [approved initial synthetic contract](../../docs/scene-frame-contract.md).
 This is an **explicit native embedding opt-in**, not a new daemon default or a
 claim of production scene rendering. The shipped binary defaults to the triangle;
@@ -98,7 +98,7 @@ survive scene mutation/release and same-ID recreation. Released scene generation
 still retained by admissions count against scene capacity until their last
 snapshot is dropped.
 
-The resource owner is `chr_server::frame_resources` (#21). The synthetic admission
+The resource owner is `chr_runtime::frame_resources` (#21). The synthetic admission
 adapter uses its bounded `acquire_id` lookup, verifies registered
 FrameKey/position/extent, retains consumer leases, and checks readiness without
 blocking this control owner. It keeps physical work guards until physical completion.
@@ -113,7 +113,7 @@ changing the default daemon.
 
 ## Acceptance evidence and limits
 
-`cargo test --locked -p chr-server -p chr-common` exercises:
+`cargo test --locked -p chr-runtime -p chr-common` exercises:
 
 - Actual NativeSocket and WebSocket requests through `ControlHandler`,
   `SceneControl` and the same authoritative scene, including competing edits,

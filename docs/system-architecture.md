@@ -111,7 +111,7 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 | Path | Implemented responsibility |
 | --- | --- |
 | `server/renderer/` | `chr-renderer`：共享坐标数学、GPU 初始化与 wgpu 渲染。 |
-| `server/runtime/` | `chr-server`：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及其 WebRTC 监看。 |
+| `server/runtime/` | `chr-runtime`（构建 `chr-server`）：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及其 WebRTC 监看。 |
 | `server/viewer/` | `chr-app`：原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
 | `common/` | `chr-common`：共享控制消息、方法和 NativeSocket/WebSocket IPC 实现。 |
 | `client/example/render-harness/` | 浏览器示例客户端和验证 harness，不等同于完整业务 WebUI。 |

@@ -264,7 +264,7 @@ are unchanged, and imported Ti/C are preserved for the comparison views.
 This separates camera-induced apparent tilt from actual model orientation.
 
 The current workspace is rooted at the repository root: `server/renderer`
-(`chr-renderer`), `server/runtime` (`chr-server`), `server/viewer` (`chr-app`),
+(`chr-renderer`), `server/runtime` (`chr-runtime`), `server/viewer` (`chr-app`),
 and `common` (`chr-common`). The current server renders a rotating triangle to
 a simulated SDI port and monitors that transmitted output over WebRTC.
 

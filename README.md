@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `client/src/` | Client-side code | Primarily TypeScript |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
-| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), headless render server in `runtime/` (`chr-server`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
+| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/` and `common/` | Rust |
 | `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |
 | `algorithm/src/` | Scene reconstruction algorithms | To be decided |

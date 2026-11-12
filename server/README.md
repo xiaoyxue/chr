@@ -7,7 +7,7 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-server` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, SDI-to-WebRTC monitor |
+| `runtime/` | `chr-runtime` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, SDI-to-WebRTC monitor |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers and a Linux software video-input probe |
@@ -124,7 +124,7 @@ WebUI -> existing WebSocket JSON-RPC -> retained scene/camera state
 
 ```sh
 nix develop .#media
-cargo run --locked -p chr-server --features gstreamer-media -- \
+cargo run --locked -p chr-runtime --features gstreamer-media -- \
   --software-video /path/to/video.mp4 --size 1280x720 --fps 30 \
   --no-socket --ws 127.0.0.1:18771 \
   --webrtc-udp none --webrtc-tcp 127.0.0.1:18772
@@ -189,8 +189,8 @@ Focused checks inside the media shell:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked -p chr-server --all-targets --features gstreamer-media -- -D warnings
-cargo test --locked -p chr-server --features gstreamer-media
+cargo clippy --locked -p chr-runtime --all-targets --features gstreamer-media -- -D warnings
+cargo test --locked -p chr-runtime --features gstreamer-media
 ```
 
 ### Calibrated local clip replay
@@ -612,8 +612,8 @@ development shortcut, not the intended GPU-to-hardware-encoder path. From the
 repository root:
 
 ```sh
-cargo run --locked --release -p chr-server -- --help
-cargo run --locked --release -p chr-server -- --webrtc-tcp 127.0.0.1:8788
+cargo run --locked --release -p chr-runtime -- --help
+cargo run --locked --release -p chr-runtime -- --webrtc-tcp 127.0.0.1:8788
 ```
 
 `--webrtc-tcp` adds ICE-TCP candidates on four consecutive loopback ports so a
