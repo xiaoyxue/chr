@@ -95,6 +95,7 @@ impl Harness {
                         shape: f.shape,
                         radiance: [f.radiance; 3],
                         two_sided: f.two_sided,
+                        shadow_mode: None,
                     }],
                     None,
                 )

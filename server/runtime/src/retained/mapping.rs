@@ -475,6 +475,9 @@ fn factors(v: &w::PbrFactors) -> Result<scene::PbrMaterial, ErrorObject> {
         normal_scale: f(v.normal_scale)?,
         occlusion_strength: f(v.occlusion_strength)?,
         unlit: v.unlit,
+        // The shared wire material has no shadow-catcher field yet; adding one is a
+        // protocol change for the owning contracts.
+        shadow_catcher: false,
     })
 }
 fn shadow(mode: w::ShadowMode) -> ShadowMode {

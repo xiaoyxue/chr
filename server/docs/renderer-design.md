@@ -981,8 +981,13 @@ envelope and GPU microbudget, per-emitter error ≤ 0.02·Le + 30% of the refere
 and Lambert×(1−F0) diffuse for area lights only. The tolerance is set from measured
 LTC behaviour and is not a reference-accuracy claim. The pinned candidate passes
 its 9,632-row sampled screen. The renderer now exposes it as the experimental,
-unoccluded `Light::Area` with hardware reference and trajectory-continuity tests;
-no wire mapping or default light is added. Finite-area visibility (#27) remains open.
+`Light::Area` with hardware reference and trajectory-continuity tests; no wire
+mapping or default light is added. For #27 the owner then approved
+`area-shadow-pcss-v1`, an explicit exception to the single-point-substitute rule
+in section 4.3: one centre cubemap with PCSS sized by the emitter's equal-area
+radius, multiplied with LTC, within measured visibility-ratio limits (max 0.65,
+penumbra mean 0.15). Its penumbra ignores the emitter outline and glossy BRDF
+weighting; see the evaluation for settings, cost and limits.
 
 #### Bounded sky-visibility evaluation
 

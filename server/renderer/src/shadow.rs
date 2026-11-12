@@ -2,7 +2,7 @@ use crate::{
     camera::{Camera, CameraView},
     coordinates::ImageExtent,
     offscreen::BoxError,
-    scene::{Aabb, Light, SceneView},
+    scene::{Aabb, AreaShape, Light, SceneView},
 };
 
 pub use crate::scene::ShadowMode;
@@ -74,7 +74,8 @@ pub struct ShadowSettings {
     pub filter_radius: f32,
     /// Square kernel: 1, 4, 9, 16, 25, 36, 49 or 64 bilinear comparisons.
     pub pcf_samples: u32,
-    /// Bias in normalized shadow depth.
+    /// Bias in normalized shadow depth: a fraction of the depth span for directional maps
+    /// and of the far distance (applied to linear depth) for spot and cubemap maps.
     pub depth_bias: f32,
     /// Receiver offset along its unperturbed surface normal, in world metres.
     pub normal_bias: f32,
@@ -255,7 +256,9 @@ pub(crate) fn projection(
         Light::Point { .. } => {
             return Err("point lights require six face projections, not one planar map".into());
         }
-        Light::Area { .. } => return Err("area lights have no shadow map yet".into()),
+        Light::Area { .. } => {
+            return Err("area lights require six face projections, not one planar map".into());
+        }
     };
     let up = if direction[2].abs() > 0.99 {
         [0.0, 1.0, 0.0]
@@ -353,7 +356,7 @@ pub(crate) fn face_count(light: Light, cascades: CascadeSettings) -> usize {
         Light::Point { .. } => 6,
         Light::Directional { .. } => cascades.count as usize,
         Light::Spot { .. } => 1,
-        Light::Area { .. } => 0,
+        Light::Area { .. } => 6,
     }
 }
 
@@ -468,11 +471,20 @@ pub(crate) fn projections(
     if matches!(light, Light::Directional { .. }) && settings.cascades.count > 1 {
         return directional_cascades(light, bounds, settings, camera);
     }
-    let Light::Point { position, .. } = light else {
-        return Ok(vec![projection(light, bounds, settings)?]);
+    // Spherical exclusion in metres; the face near plane includes its corners. A sphere
+    // emitter excludes its own volume so an emitter mesh casts no shadow. Planar emitters
+    // keep the small exclusion: occluders close in front of them still cast shadows,
+    // and a mesh in the emitter plane does not block the directions it emits into.
+    let (position, near) = match light {
+        Light::Point { position, .. } => (position, 0.01),
+        Light::Area {
+            position,
+            shape: AreaShape::Sphere { radius },
+            ..
+        } => (position, f64::from(radius).max(0.01)),
+        Light::Area { position, .. } => (position, 0.01),
+        _ => return Ok(vec![projection(light, bounds, settings)?]),
     };
-    // Spherical exclusion in metres; the face near plane includes its corners.
-    let near: f64 = 0.01;
     let closest =
         std::array::from_fn(|axis| position[axis].clamp(bounds.min()[axis], bounds.max()[axis]));
     let delta = sub(closest, position);
@@ -706,6 +718,50 @@ mod tests {
             ..settings
         };
         assert!(projections(light, bounds, invalid, &camera).is_err());
+    }
+
+    #[test]
+    fn area_cubemaps_exclude_only_sphere_emitter_volumes() {
+        let camera = Camera::look_at(
+            ImageExtent::new(8, 8).unwrap(),
+            [0.0, -10.0, -5.0],
+            [0.0; 3],
+            [0.0, 0.0, -1.0],
+            1.0,
+            0.1,
+            100.0,
+        )
+        .unwrap();
+        let bounds = Aabb::new([-5.0, -5.0, -1.0], [5.0, 5.0, 0.0]).unwrap();
+        for (shape, exclusion) in [
+            (AreaShape::Sphere { radius: 0.8 }, 0.8),
+            (
+                AreaShape::Rectangle {
+                    half_width: 2.0,
+                    half_height: 0.25,
+                },
+                0.01,
+            ),
+            (AreaShape::Disk { radius: 1.0 }, 0.01),
+        ] {
+            let light = Light::Area {
+                position: [0.0, 0.0, -3.0],
+                normal: [0.0, 0.0, 1.0],
+                tangent: [1.0, 0.0, 0.0],
+                shape,
+                radiance: [1.0; 3],
+                two_sided: false,
+                shadow_mode: None,
+            };
+            assert_eq!(face_count(light, CascadeSettings::default()), 6);
+            let faces = projections(light, bounds, ShadowSettings::default(), &camera).unwrap();
+            assert_eq!(faces.len(), 6);
+            for face in faces {
+                let face = face.unwrap();
+                assert!((f64::from(face.depth_scale[0]) - exclusion).abs() < 1e-6);
+                assert_eq!(face.point_position, Some([0.0, 0.0, -3.0]));
+            }
+        }
     }
 
     #[test]

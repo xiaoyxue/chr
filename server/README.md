@@ -114,8 +114,11 @@ spots use a cone-matched perspective map. This bounded-scene implementation does
 uses a single directional map. M5 adds point-light cubemaps and M8 adds cascades.
 
 Settings expose resolution, a square bilinear-comparison PCF radius in texels,
-normalized depth bias, world-metre normal bias, and a memory budget. Defaults
-are shadow-off, 2048 texels and a 256 MiB budget. Receiver-plane depth correction
+normalized depth bias, world-metre normal bias, and a memory budget. The depth
+bias is a fraction of the depth span for directional maps and of the far distance,
+applied to linear depth, for spot and cubemap maps; spot maps therefore keep a
+metre-scale bias even when scene geometry beside or behind the light pulls their
+fitted near plane close to it. Defaults are shadow-off, 2048 texels and a 256 MiB budget. Receiver-plane depth correction
 prevents sloping surfaces from shadowing themselves. Caster alpha masks and
 sidedness match the main material path.
 
@@ -288,8 +291,20 @@ vertices or `AREA_CURVE_SEGMENTS` (64) curved/silhouette vertices clipped to the
 receiver hemisphere. Accuracy is the owner-approved approximation profile in
 `docs/area-light-evaluation.md` (per emitter `<= 0.02*Le + 30%` of the reference
 inside its domain), not reference accuracy; outside that domain the same
-approximation is unqualified. Area lights cast no shadows yet (#27) and draw no
-visible emitter; add an emissive mesh when the emitter itself should appear.
+approximation is unqualified. Area lights draw no visible emitter; add an emissive
+mesh when the emitter itself should appear (inside a sphere emitter, or in or behind
+a planar emitter's plane, so it casts no shadow on its own light).
+
+Area-light shadows follow the per-light `shadow_mode` like other lights and use the
+owner-approved `area-shadow-pcss-v1` approximation: one centre cubemap filtered by
+PCSS with `AreaShape::equivalent_radius` as the source radius, multiplied with the
+unoccluded LTC result. Penumbrae ignore the emitter outline and glossy BRDF
+weighting. The default 64-texel PCSS caps clip metre-scale penumbrae; scenes with
+shadowed area lights should use `resolution: 1024`, `max_search_radius` and
+`max_filter_radius` of 512 texels and 16 + 16 PCSS samples (24 MiB per area light).
+`cargo test --locked --release -p chr-renderer --test area_shadow_gpu -- --ignored --nocapture`
+enforces the approved error limits against a ray-cast reference, checks cache
+invalidation and emitter stand-ins, and prints 1080p frame costs.
 
 The table is redistributed under `server/renderer/src/ltc/LICENSE.ltc`, which
 requires retaining its notice **and citing** Heitz, Dupuy, Hill and Neubelt,
@@ -342,10 +357,22 @@ as scene radiance.
 cargo run --locked -p chr-app --example composition_milestone
 ```
 
+`PbrMaterial::shadow_catcher` marks an invisible receiver, typically a ground plane
+standing in for captured footage. In shaded PBR views it outputs premultiplied
+black with alpha `1 - shadowed/unshadowed`, the luminance ratio of its direct light
+with and without visibility (unoccluded IBL counted in both), computed in linear HDR
+on the GPU. "Over" blending therefore multiplies whatever lies behind it, the clear
+colour or a display background, by that ratio; it occludes and casts shadows like
+real ground and is drawn after opaque geometry. Ratios are luminance-weighted, so
+coloured light gives grey shadows; virtual light never brightens the plate. The
+shared wire material has no catcher field yet.
+
 This synthetic offscreen example verifies that changing CG exposure leaves its
 display plate and overlay unchanged. GPU regressions cover colour domains,
 premultiplied filtering, BT.709, native Ti alignment, virtual depth, orthographic/
-pinhole MSAA, source replacement, resize and budget/target failures. These checks
+pinhole MSAA, source replacement, resize and budget/target failures, and
+`shadow_catcher_gpu` checks that catchers halve a plate where one of two equal
+lights is blocked, leave it unchanged without shadows, and draw no colour alone. These checks
 need no server and do not claim live protocol or physical SDI acceptance.
 
 ## Render server
