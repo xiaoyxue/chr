@@ -40,12 +40,12 @@ export function installScenePanel(client: () => RpcClient | null) {
   };
   const report = () => {
     const snapshot = editor?.snapshot;
+    controls.disabled = !snapshot || rotation?.running === true;
     status.textContent = snapshot ? `revision ${snapshot.scene_revision}, effect ${snapshot.effect.sequence}${editor?.uncertain ? " — reload required" : ""}` : "Not loaded";
     if (rotation?.error) status.textContent += ` — ${rotation.error}`;
   };
   panel.querySelector<HTMLButtonElement>("#scene-load")!.onclick = async () => {
     try {
-      await rotation?.stop();
       const rpc = client();
       if (rpc === null) throw new Error("Connect WebSocket first");
       if (editor === null || connection !== rpc || editor.target.runtime_id !== runtime.value || editor.target.scene_id !== scene.value) {
@@ -119,6 +119,9 @@ export function installScenePanel(client: () => RpcClient | null) {
       await rotation.start(speed);
     },
     async stopRotation() { await rotation?.stop(); },
-    rotationState: () => rotation,
+    async rotationState() {
+      await rotation?.refresh();
+      return rotation;
+    },
   };
 }

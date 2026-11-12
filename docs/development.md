@@ -66,10 +66,11 @@ The root development shell provides:
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
 
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
-GStreamer core/base/ugly plugins, and Python GObject bindings. It runs the video-only
+GStreamer core/base/bad/ugly plugins, and Python GObject bindings. It runs the video-only
 software input helper under `server/scripts/` and builds the opt-in
 `chr-server` `gstreamer-media` feature; it does not install SDI drivers,
-provide a physical SDI device, or change the renderer/control protocol.
+provide a physical SDI device, or change the renderer protocol. The bad plugins
+provide H.264 parsing, MPEG-TS muxing and direct SRT output for the software simulation.
 
 Use Nix for Linux development dependencies, not global npm tool installation.
 Node.js and TypeScript come from the existing pinned nixpkgs input. Keep

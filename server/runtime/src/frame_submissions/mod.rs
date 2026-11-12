@@ -534,12 +534,15 @@ impl RenderAdmission for FrameSubmissions {
             })
             .collect::<Result<Vec<_>, _>>()?;
         state.next_output = next_output;
-        state.records[slot] = Some(Record {
+        // Keep admission order when reusing capacity: a new frame must not jump
+        // ahead of older ready work just because its storage slot was released.
+        state.records.remove(slot);
+        state.records.push(Some(Record {
             bound,
             public: true,
             deadline,
             frames,
-        });
+        }));
         Ok(())
     }
     fn get(&self, target: &w::SubmissionTarget) -> Result<w::SubmissionSnapshot, ErrorObject> {

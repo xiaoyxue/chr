@@ -1,5 +1,5 @@
 //! Synthetic program acceptance, including the real GPU -> simulated SDI -> software monitor.
-use chr_common::scene_frame as w;
+use chr_common::{methods::mesh, scene_frame as w};
 use chr_renderer::Gpu;
 use chr_server::{
     monitor::{Monitor, encoder::VideoFeed},
@@ -64,6 +64,188 @@ fn receive(tap: &mpsc::Receiver<SdiSlot>, sequence: u64) -> SdiSlot {
             return slot;
         }
     }
+}
+
+#[tokio::test]
+async fn server_rotation_advances_without_browser_edits_and_preserves_bound_scenes() {
+    let (mut program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter.with_rotation(), 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let mut request = target(&program);
+    request["instance_id"] = json!("mesh");
+    let initial = call(&control, w::SCENE_GET, target(&program)).await;
+    let mut start = request.clone();
+    start["angular_velocity_rad_per_s"] = json!(std::f64::consts::PI);
+    control
+        .rotate(mesh::START_ROTATION, Some(start.clone()), 7)
+        .await
+        .unwrap();
+    let mut bound = Vec::new();
+    for frame in [8, 9, 32] {
+        control.advance_rotation(frame).await.unwrap();
+        program.inject(&control).await.unwrap().unwrap();
+        let execution = program.scheduler.next_ready().unwrap().unwrap();
+        bound.push(execution.scene.clone());
+        execution.failed().unwrap();
+    }
+    let pose = |index: usize| bound[index].snapshot().state.instances[0].model;
+    assert_ne!(
+        pose(0),
+        pose(1),
+        "each native frame gets a new pose without any browser command"
+    );
+    assert!((pose(2)[0][0].get()).abs() < 1e-12);
+    assert!(
+        (pose(2)[1][0].get() - 0.25).abs() < 1e-12,
+        "phase follows slot gaps, not mutation count"
+    );
+    assert_ne!(
+        pose(0),
+        pose(2),
+        "earlier admitted snapshots stay immutable"
+    );
+    for scene in &bound {
+        assert_eq!(
+            serde_json::to_value(&scene.snapshot().state.instances[1]).unwrap(),
+            initial["state"]["instances"][1]
+        );
+    }
+    start["angular_velocity_rad_per_s"] = json!(-std::f64::consts::PI);
+    let reversed = control
+        .rotate(mesh::START_ROTATION, Some(start), 32)
+        .await
+        .unwrap();
+    assert!((reversed["angle_rad"].as_f64().unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    control.advance_rotation(57).await.unwrap();
+    let stopped = control
+        .rotate(mesh::STOP_ROTATION, Some(request.clone()), 57)
+        .await
+        .unwrap();
+    let frozen = call(&control, w::SCENE_GET, target(&program)).await;
+    control.advance_rotation(5000).await.unwrap();
+    assert_eq!(call(&control, w::SCENE_GET, target(&program)).await, frozen);
+    assert!(!stopped["rotating"].as_bool().unwrap());
+    assert!(
+        (frozen["state"]["instances"][0]["model"][0][0]
+            .as_f64()
+            .unwrap()
+            - 0.25)
+            .abs()
+            < 1e-12
+    );
+    assert!(
+        control
+            .rotate(
+                mesh::START_ROTATION,
+                Some(json!({
+                    "runtime_id":program.configuration.runtime_id,"scene_id":program.scene_id,
+                    "instance_id":"mesh","angular_velocity_rad_per_s":1,"extra":true
+                })),
+                5000
+            )
+            .await
+            .is_err()
+    );
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+async fn external_model_edits_stop_animation_and_other_profiles_do_not_enable_it() {
+    let (program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let mut request = target(&program);
+    request["instance_id"] = json!("mesh");
+    assert_eq!(
+        control
+            .rotate(mesh::GET_ROTATION, Some(request), 0)
+            .await
+            .unwrap_err()
+            .code,
+        -32601
+    );
+    drop(control);
+    owner.await.unwrap();
+
+    let (program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter.with_rotation(), 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let mut request = target(&program);
+    request["instance_id"] = json!("mesh");
+    let mut start = request.clone();
+    start["angular_velocity_rad_per_s"] = json!(1.);
+    control
+        .rotate(mesh::START_ROTATION, Some(start), 0)
+        .await
+        .unwrap();
+    control.advance_rotation(1).await.unwrap();
+    let scene = call(&control, w::SCENE_GET, target(&program)).await;
+    let mut instance = scene["state"]["instances"][0].clone();
+    instance["model"][0][3] = json!(4.0);
+    mutate(
+        &control,
+        &program,
+        json!([{"kind":"instance_put","instance":instance}]),
+    )
+    .await;
+    control.advance_rotation(2).await.unwrap();
+    let state = control
+        .rotate(mesh::GET_ROTATION, Some(request), 2)
+        .await
+        .unwrap();
+    assert_eq!(state["rotating"], false);
+    assert_eq!(
+        call(&control, w::SCENE_GET, target(&program)).await["state"]["instances"][0],
+        instance
+    );
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a native hardware GPU"]
+async fn gpu_server_rotation_changes_program_pixels_and_stop_freezes_them() {
+    let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
+    assert!(matches!(
+        gpu.adapter.get_info().device_type,
+        wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+    ));
+    let (mut program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter.with_rotation(), 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let mut request = target(&program);
+    request["instance_id"] = json!("mesh");
+    let mut start = request.clone();
+    start["angular_velocity_rad_per_s"] = json!(std::f64::consts::PI);
+    control
+        .rotate(mesh::START_ROTATION, Some(start), 0)
+        .await
+        .unwrap();
+    let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
+    let (sdi, tap) = SdiOutput::spawn_program(mode(), id("rotation-test-output").unwrap()).unwrap();
+    let mut port = sdi.input();
+    let mut pixels = Vec::new();
+    for (sequence, frame) in [0, 25, 50, 75].into_iter().enumerate() {
+        if frame == 50 {
+            control
+                .rotate(mesh::STOP_ROTATION, Some(request.clone()), frame)
+                .await
+                .unwrap();
+        }
+        control.advance_rotation(frame).await.unwrap();
+        program.inject(&control).await.unwrap().unwrap();
+        renderer.drive(&gpu, &program.scheduler, &mut port).unwrap();
+        pixels.push(receive(&tap, sequence as u64).uyvy);
+    }
+    assert_ne!(pixels[0], pixels[1]);
+    assert_ne!(pixels[1], pixels[2]);
+    assert_eq!(
+        pixels[2], pixels[3],
+        "stopped pose produces identical program pixels"
+    );
+    control.shutdown().await;
+    owner.await.unwrap();
 }
 
 fn video_manifest() -> chr_server::program::video::Manifest {

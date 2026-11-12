@@ -5,6 +5,7 @@
 
 mod mapping;
 mod owner;
+mod rotation;
 
 pub use mapping::{CameraContext, NativeSettings, Registrations};
 pub use owner::{BoundScene, BoundSubmission, RenderAdmission, SceneAdapter};
@@ -19,6 +20,15 @@ enum Command {
     Apply {
         params: wire::Params,
         reply: oneshot::Sender<Reply>,
+    },
+    Rotate {
+        request: rotation::Request,
+        frame: u64,
+        reply: oneshot::Sender<Reply>,
+    },
+    Advance {
+        frame: u64,
+        reply: oneshot::Sender<Result<(), ErrorObject>>,
     },
     Shutdown(oneshot::Sender<()>),
 }
@@ -51,6 +61,16 @@ impl SceneControl {
                         // An uncertain/disconnected reply does not retract an applied effect.
                         let _ = reply.send(adapter.apply(params));
                     }
+                    Command::Rotate {
+                        request,
+                        frame,
+                        reply,
+                    } => {
+                        let _ = reply.send(adapter.rotate(request, frame));
+                    }
+                    Command::Advance { frame, reply } => {
+                        let _ = reply.send(adapter.advance_rotation(frame));
+                    }
                     Command::Shutdown(reply) => {
                         receiver.close();
                         stopped = Some(reply);
@@ -74,6 +94,28 @@ impl SceneControl {
         self.call(method, Some(value(params)?)).await
     }
 
+    pub async fn rotate(&self, method: &str, params: Option<Value>, frame: u64) -> Reply {
+        let request = rotation::Request::parse(method, params)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Command::Rotate {
+            request,
+            frame,
+            reply,
+        })?;
+        response
+            .await
+            .map_err(|_| reject(wire::RejectionKind::InvalidState, "scene control stopped"))?
+    }
+
+    /// Native output-clock tick, serialized with scene edits before input admission.
+    pub async fn advance_rotation(&self, frame: u64) -> Result<(), ErrorObject> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::Advance { frame, reply })?;
+        response
+            .await
+            .map_err(|_| reject(wire::RejectionKind::InvalidState, "scene control stopped"))?
+    }
+
     /// Stop native admission and drain already accepted CPU commands, even when
     /// connected transport handlers still hold endpoints. This is not a GPU fence.
     pub async fn shutdown(&self) {
@@ -85,19 +127,21 @@ impl SceneControl {
 
     async fn enqueue(&self, params: wire::Params) -> Reply {
         let (reply, response) = oneshot::channel();
-        self.commands
-            .try_send(Command::Apply { params, reply })
-            .map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    reject(wire::RejectionKind::Capacity, "scene command queue is full")
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    reject(wire::RejectionKind::InvalidState, "scene control stopped")
-                }
-            })?;
+        self.send(Command::Apply { params, reply })?;
         response
             .await
             .map_err(|_| reject(wire::RejectionKind::InvalidState, "scene control stopped"))?
+    }
+
+    fn send(&self, command: Command) -> Result<(), ErrorObject> {
+        self.commands.try_send(command).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                reject(wire::RejectionKind::Capacity, "scene command queue is full")
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                reject(wire::RejectionKind::InvalidState, "scene control stopped")
+            }
+        })
     }
 }
 

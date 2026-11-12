@@ -42,6 +42,48 @@ pub mod triangle {
     }
 }
 
+/// Server-owned instance animation in the opt-in software-video simulation.
+pub mod mesh {
+    use super::*;
+    use crate::scene_frame::Id;
+
+    pub const START_ROTATION: &str = "mesh.start_rotation";
+    pub const STOP_ROTATION: &str = "mesh.stop_rotation";
+    pub const GET_ROTATION: &str = "mesh.get_rotation";
+    pub const METHODS: &[&str] = &[START_ROTATION, STOP_ROTATION, GET_ROTATION];
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct RotationTarget {
+        pub runtime_id: Id,
+        pub scene_id: Id,
+        pub instance_id: Id,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct StartRotation {
+        pub runtime_id: Id,
+        pub scene_id: Id,
+        pub instance_id: Id,
+        /// Local XY rotation in radians per second of SDI output-slot time.
+        pub angular_velocity_rad_per_s: f64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct RotationState {
+        pub runtime_id: Id,
+        pub scene_id: Id,
+        pub instance_id: Id,
+        pub rotating: bool,
+        /// Accumulated local Z angle since the model was first selected.
+        pub angle_rad: f64,
+        pub angular_velocity_rad_per_s: f64,
+        /// SDI output-slot count of the last applied pose.
+        pub frame: u64,
+    }
+}
+
 /// WebRTC signaling. Media itself never travels over the control transports.
 pub mod webrtc {
     use super::*;

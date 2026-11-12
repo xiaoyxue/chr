@@ -113,9 +113,16 @@ retains the synthetic configuration's 1280x720 maximum. A 1920x1080 source is
 explicitly scaled to the selected 1280x720 output; no audio is connected.
 The sample geometry is deliberately small and **not calibrated to the video**.
 The orange mesh and gray ground are separate instances. The live WebUI's
-top-right mesh controller sends normal, serialized scene mutations, leaving the
-receiver fixed. This is page-driven demo animation: keep the page connected;
-Stop drains its in-flight update and holds the last applied pose.
+top-right mesh controller sends server-owned rotation commands, leaving the
+receiver fixed. The `mesh.start_rotation`, `mesh.stop_rotation` and
+`mesh.get_rotation` commands target `{runtime_id,scene_id,instance_id}`; Start
+also requires `angular_velocity_rad_per_s`. They are enabled only with
+`--software-video`. Server advances the local XY pose before each native input
+admission using the SDI output-slot clock, preserving normal immutable scene
+revisions and admitted-frame provenance. Speed changes preserve the angle;
+Stop holds the pose. Page disconnects do not stop animation. External instance
+edits stop it instead of being overwritten. Stop before other scene edits to
+avoid optimistic-revision conflicts. Only one instance can animate at a time.
 No private model, camera calibration or source file is bundled.
 
 The input adapter assigns a new software stream sequence before its two-buffer
@@ -127,7 +134,7 @@ with software x264; this is not zero-copy or hardware encoding.
 
 WebRTC still uses the existing implementation and ICE-TCP forwarding, not
 GStreamer's WebRTC backend. JSON-RPC and the default triangle/synthetic/pitch
-profiles remain unchanged. The separate input probe above still performs no
+scene/frame methods remain unchanged. The separate input probe above still performs no
 rendering. Physical SDI, tracking, recording and production policy are not implied.
 
 Use `client/example/render-harness` for the WebUI. Its `live=1` query flag connects
@@ -135,6 +142,24 @@ the program monitor and opens scene controls; supply the runtime/scene IDs print
 by the server and its WebSocket URL. Browser traffic can remain TCP-only through
 SSH: forward the UI HTTP port, WebSocket port 18771 and ICE-TCP ports 18772-18775.
 Monitor disconnection never blocks program output.
+
+Add `--srt 127.0.0.1:9001` (or an explicitly reachable interface address) to expose
+a direct MPEG-TS/SRT listener. Open `srt://SERVER_IP:9001` in VLC. Remote callers
+need UDP reachability and a source-restricted firewall rule; SSH `-L` forwards
+TCP only. The native path is:
+
+```text
+simulated SDI -> GStreamer H.264 -> bounded encoded fan-out -> WebRTC
+                                                        -> h264parse -> mpegtsmux -> srtsink
+```
+
+Both outputs share the same encoded SDI access units; SRT never receives or
+decodes WebRTC and never re-encodes H.264. A slow SRT consumer loses queued
+access units and resumes at an IDR without stalling WebRTC or SDI. The SRT
+listener keeps encoding without browser viewers, requests an IDR on caller
+connect, and accepts reconnecting callers. This is software simulation, not
+physical SDI or hardware encoding. The media shell includes the bad plugins
+needed for H.264 parsing, MPEG-TS and SRT.
 
 Focused checks inside the media shell:
 

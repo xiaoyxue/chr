@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chr_common::{
     jsonrpc::{ErrorObject, INVALID_PARAMS, SERVER_BUSY, SERVER_UNAVAILABLE},
     methods::{
-        sdi,
+        mesh, sdi,
         triangle::{self, StartRotationParams, TriangleState},
         webrtc::{self, SdpType, SessionDescription},
     },
@@ -124,6 +124,14 @@ impl Handler for ControlHandler {
         raw_params: Option<Value>,
     ) -> Result<Value, ErrorObject> {
         match method {
+            method if mesh::METHODS.contains(&method) => match &self.scenes {
+                Some(scenes) => {
+                    scenes
+                        .rotate(method, raw_params, self.sdi.status().frames_output)
+                        .await
+                }
+                None => Err(ErrorObject::method_not_found(method)),
+            },
             method if chr_common::scene_frame::METHODS.contains(&method) => match &self.scenes {
                 Some(scenes) => scenes.call(method, raw_params).await,
                 None => Err(ErrorObject::method_not_found(method)),

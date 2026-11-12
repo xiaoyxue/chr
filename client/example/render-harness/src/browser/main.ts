@@ -212,7 +212,6 @@ async function connect(): Promise<void> {
 }
 
 function disconnect(reason: string): void {
-  void scenePanel.stopRotation();
   clearInterval(pollTimer);
   closeStream();
   rpc?.close();
@@ -224,7 +223,7 @@ async function poll(): Promise<void> {
   if (rpc === null) return;
   try {
     if (liveProgram) {
-      const rotation = scenePanel.rotationState();
+      const rotation = await scenePanel.rotationState();
       renderList($("#scene"), [
         ["controller", rotation?.running ? "running" : "stopped"],
         ["angle since start", `${((rotation?.angle ?? 0) * 180 / Math.PI).toFixed(1)}°`],
@@ -286,7 +285,6 @@ startButton.onclick = () => liveProgram
 stopButton.onclick = () => liveProgram
   ? void meshCommand(() => scenePanel.stopRotation(), "mesh rotation stopped")
   : void command((client) => client.stopRotation(), "stop rotation");
-window.addEventListener("pagehide", () => { void scenePanel.stopRotation(); });
 setConnected(false, "disconnected");
 showStats();
 
@@ -299,8 +297,8 @@ if (liveProgram) {
   rotationPanel.querySelector("h2")!.textContent = calibrated ? "Calibrated model rotation" : "Orange mesh rotation";
   rotationPanel.querySelector(".pipeline")!.textContent =
     calibrated
-      ? "Rotates the registered GLB through Server commands. The shadow catcher stays fixed. Keep this page connected."
-      : "Rotates only the orange mesh through Server commands. The gray receiver stays fixed. Keep this page connected.";
+      ? "Server advances the GLB every input tick using the SDI frame clock. The shadow catcher stays fixed."
+      : "Server advances the orange mesh using the SDI frame clock. The gray receiver stays fixed.";
   document.querySelector("aside")!.prepend(rotationPanel);
   $<HTMLDetailsElement>("#program-scene").open = true;
   $("#pitch-provenance").textContent =

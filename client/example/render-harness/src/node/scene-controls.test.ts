@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { SceneControls, editCamera, type SceneRpc } from "../scene-controls.ts";
 import { parseSceneFrameResult, type RenderSceneSnapshot } from "../scene-frame.ts";
-import { advanceRotation, rotateModelZ } from "../object-rotation.ts";
+import { ObjectRotation } from "../object-rotation.ts";
 
 const fixtures = JSON.parse(readFileSync(new URL("../../../../../common/tests/fixtures/scene_frame.json", import.meta.url), "utf8"));
 const create = fixtures.calls.find((call: { name: string }) => call.name === "create").params;
@@ -64,29 +64,36 @@ test("serialized mutations query current revision; uncertain reply reconciles bu
   assert.equal(revisions[3], "3");
 });
 
-test("mesh rotation preserves translation/height and reverses without accumulating pose drift", () => {
-  const model = snapshot().state.instances[0]!.model;
-  const base = structuredClone(model);
-  base[0][0] = 0.25; base[1][1] = 0.25; base[2][2] = 0.25;
-  base[0][3] = 4; base[1][3] = 7; base[2][3] = -1;
-  const rotated = rotateModelZ(base, Math.PI / 2);
-  assert.deepEqual(rotated.map(row => row[3]), [4, 7, -1, 1]);
-  assert.equal(rotated[2][2], 0.25);
-  assert.ok(rotated[1][0] > 0);
-  const restored = rotateModelZ(rotated, -Math.PI / 2);
-  for (let row = 0; row < 4; row++) for (let col = 0; col < 4; col++) {
-    assert.ok(Math.abs(restored[row]![col]! - base[row]![col]!) < 1e-12);
-  }
-  assert.deepEqual(model, snapshot().state.instances[0]!.model);
-});
-
-test("rotation phase follows output-slot gaps, pauses and signed speed rather than timer calls", () => {
-  const rate = { numerator: 1, denominator: 30 };
-  const forward = advanceRotation(0, Math.PI, 7, 22, rate);
-  assert.ok(Math.abs(forward - Math.PI / 2) < 1e-12);
-  assert.equal(advanceRotation(forward, Math.PI, 22, 22, rate), forward);
-  assert.ok(advanceRotation(forward, -Math.PI, 22, 37, rate) < 1e-12);
-  const intermediate = advanceRotation(0, Math.PI, 7, 10, rate);
-  assert.ok(Math.abs(advanceRotation(intermediate, Math.PI, 10, 22, rate) - forward) < 1e-12);
-  assert.throws(() => advanceRotation(0, 1, 8, 7, rate), /timeline/);
+test("mesh controller sends one command per action and displays server-owned phase", async () => {
+  const scene = snapshot();
+  const target = { runtime_id: scene.runtime_id, scene_id: scene.scene_id, instance_id: "mesh" };
+  const calls: string[] = [];
+  const state = { ...target, rotating: false, angle_rad: 1.25, angular_velocity_rad_per_s: 0, frame: 7 };
+  const rpc: SceneRpc = {
+    async call(method, params) {
+      calls.push(method);
+      if (method === "mesh.start_rotation") {
+        state.rotating = true;
+        state.angular_velocity_rad_per_s = (params as { angular_velocity_rad_per_s: number }).angular_velocity_rad_per_s;
+      } else if (method === "mesh.stop_rotation") state.rotating = false;
+      else assert.equal(method, "mesh.get_rotation", "no page-driven scene mutations");
+      assert.deepEqual({ ...params as object, angular_velocity_rad_per_s: undefined },
+        { ...target, angular_velocity_rad_per_s: undefined });
+      return structuredClone(state);
+    },
+  };
+  const rotation = new ObjectRotation(new SceneControls(rpc,
+    { runtime_id: target.runtime_id, scene_id: target.scene_id }), () => {});
+  await rotation.start(Math.PI);
+  assert.equal(rotation.running, true);
+  state.angle_rad = 2;
+  state.frame = 22;
+  await rotation.refresh();
+  assert.equal(rotation.angle, 2);
+  await rotation.start(-Math.PI);
+  assert.equal(rotation.angle, 2, "direction change does not reset the server pose");
+  await rotation.stop();
+  assert.equal(rotation.running, false);
+  assert.deepEqual(calls, ["mesh.start_rotation", "mesh.get_rotation", "mesh.start_rotation", "mesh.stop_rotation"]);
+  await assert.rejects(rotation.start(NaN), /finite/);
 });
