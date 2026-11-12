@@ -965,6 +965,16 @@ rectangles and 64-sided disk/sphere silhouettes for an owner-approved experiment
 not production acceptance. The Burley/Fresnel mismatch, grazing fit errors and
 under-resolved near-field references remain explicit gates. API/wire contracts,
 area-light priority and the separate finite-area visibility work are unchanged.
+On 2026-11-12 the owner approved the bounded next experiment and its stated
+envelope, quality criteria and GPU microbudget, while retaining GGX/Burley and
+explicit radiance/sidedness units. This is not permission to substitute Lambert,
+relax failed criteria or enable production area lights. Sky and atmosphere remain
+paused.
+The approved-profile follow-up now finds resolved pure-metal counterexamples
+inside that envelope, including failures of both absolute and relative error
+criteria. Independent area/solid-angle oracles and the actual native WGSL BRDF
+agree. The current pinned LTC fit therefore blocks experimental renderer-path
+integration; no production path was added and the approved limits were not relaxed.
 
 #### Bounded sky-visibility evaluation
 
