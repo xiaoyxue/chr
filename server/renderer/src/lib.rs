@@ -4,6 +4,7 @@ pub mod camera;
 pub mod composition;
 pub mod coordinates;
 mod diagnostics;
+pub mod distortion;
 pub use diagnostics::{DiagnosticOverlays, DiagnosticView, RenderSettings};
 mod environment;
 pub mod exr;

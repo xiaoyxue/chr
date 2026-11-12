@@ -236,3 +236,27 @@ fn orthographic_rejects_invalid_spans_pose_clips_and_nonfinite_operations() {
         "GPU-unrepresentable matrices fail explicitly"
     );
 }
+
+#[test]
+fn guard_band_margins_shift_pixels_and_keep_rays() {
+    let camera = chr_renderer::camera::Camera::look_at(
+        chr_renderer::coordinates::ImageExtent::new(320, 180).unwrap(),
+        [0.0, 12.0, -8.0],
+        [0.0; 3],
+        [0.0, 0.0, -1.0],
+        0.9,
+        0.1,
+        200.0,
+    )
+    .unwrap();
+    let wide = camera.with_margins([7, 3, 11, 5]).unwrap();
+    assert_eq!((wide.extent().width(), wide.extent().height()), (338, 188));
+    for world in [[0.0, 0.0, 0.0], [4.0, -2.0, -1.5], [-6.0, 3.0, 0.0]] {
+        let (a, depth_a) = camera.project(world).unwrap();
+        let (b, depth_b) = wide.project(world).unwrap();
+        assert!((b[0] - a[0] - 7.0).abs() < 1e-9 && (b[1] - a[1] - 3.0).abs() < 1e-9);
+        assert!((depth_a - depth_b).abs() < 1e-12);
+    }
+    assert!(wide.source_ti().is_none());
+    assert!(camera.with_margins([u32::MAX, 0, 0, 0]).is_err());
+}
