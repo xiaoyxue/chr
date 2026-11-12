@@ -81,7 +81,8 @@ the same mesh renderer now also offers `prepare_pbr`.
 The PBR path supports material maps, correct colour-space mipmaps, normal mapping,
 alpha masking, direct directional/point/spot lights, and one HDR exposure/tone-map
 pass. M2 captures leave shadows and IBL disabled. Later milestones add them;
-area lights and interactive control integration remain follow-up work.
+interactive control integration remains follow-up work; experimental area lights are
+described below.
 
 The offline example uses a private native diagnostic JSON fixture containing
 `width`, `height`, forward row-major `ti`, world `center`, and `pitch` dimensions.
@@ -274,6 +275,33 @@ captures use a labelled synthetic studio panorama, not physical atmosphere.
 Automated CPU/GPU checks cover HDR energy, roughness, reflection/background
 rotation, visibility independence, AO/direct-shadow separation, cache replacement
 and budget errors. No manual image approval is required.
+
+## Experimental area lights (`ltc-plausible-v1`)
+
+`Light::Area` adds unoccluded rectangle, disk and outward-sphere emitters with
+explicit centre, front normal, tangent, dimensions, linear RGB radiance in
+W/(m^2 sr) and planar sidedness. `AreaShape::radiance_from_flux` converts a fixed
+total power to radiance so a size change can keep power instead of radiance fixed.
+Shading uses the pinned official LTC GGX table with Schlick amplitude for
+specular and `base*(1-metal)*(1-F0)*Lambert` diffuse, integrating four rectangle
+vertices or `AREA_CURVE_SEGMENTS` (64) curved/silhouette vertices clipped to the
+receiver hemisphere. Accuracy is the owner-approved approximation profile in
+`docs/area-light-evaluation.md` (per emitter `<= 0.02*Le + 30%` of the reference
+inside its domain), not reference accuracy; outside that domain the same
+approximation is unqualified. Area lights cast no shadows yet (#27) and draw no
+visible emitter; add an emissive mesh when the emitter itself should appear.
+
+The table is redistributed under `server/renderer/src/ltc/LICENSE.ltc`, which
+requires retaining its notice **and citing** Heitz, Dupuy, Hill and Neubelt,
+"Real-Time Polygonal-Light Shading with Linearly Transformed Cosines", ACM TOG
+35(4), 2016, alongside any binary that contains it, including the renderer,
+viewer and runtime binaries.
+
+GPU checks: `cargo test --locked -p chr-renderer --test area_light_gpu -- --ignored`
+reproduces the pinned candidate values, compares six fixtures with an independent
+high-sample reference of the shared GGX/Burley material, and checks sidedness,
+sphere interiors, fixed-radiance/fixed-power size changes and continuity along
+moving-emitter and view trajectories.
 
 ## Native image composition
 

@@ -96,14 +96,85 @@ pub enum Light {
         /// None inherits the frame default; Some(Off) disables only this light's shadows.
         shadow_mode: Option<ShadowMode>,
     },
+    /// Experimental uniform, isotropic finite emitter shaded with the owner-approved
+    /// `ltc-plausible-v1` approximation profile (see `server/docs/area-light-evaluation.md`).
+    /// Unoccluded: shadows and other scene visibility are not applied.
+    Area {
+        /// Emitter centre in world metres.
+        position: [f64; 3],
+        /// Front-face direction of planar emitters; ignored by spheres. Need not be unit length.
+        normal: [f64; 3],
+        /// Rectangle width axis, projected perpendicular to `normal`; must not be parallel to it.
+        tangent: [f64; 3],
+        shape: AreaShape,
+        /// Linear RGB radiance in W/(m^2 sr), uniform over the emitting surface.
+        radiance: [f32; 3],
+        /// Planar emitters also emit from their back face. Spheres emit outward only.
+        two_sided: bool,
+    },
+}
+
+/// Experimental finite emitter geometry in metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AreaShape {
+    /// Half extents along `tangent` and `normal x tangent`.
+    Rectangle {
+        half_width: f32,
+        half_height: f32,
+    },
+    Disk {
+        radius: f32,
+    },
+    /// Outward-emitting sphere.
+    Sphere {
+        radius: f32,
+    },
+}
+
+impl AreaShape {
+    /// Emitting surface area in square metres.
+    pub fn area(self) -> f64 {
+        match self {
+            Self::Rectangle {
+                half_width,
+                half_height,
+            } => 4.0 * f64::from(half_width) * f64::from(half_height),
+            Self::Disk { radius } => std::f64::consts::PI * f64::from(radius).powi(2),
+            Self::Sphere { radius } => 4.0 * std::f64::consts::PI * f64::from(radius).powi(2),
+        }
+    }
+
+    /// Radiance giving total emitted power `flux` (linear RGB watts), so size changes can
+    /// keep power fixed instead of radiance: `flux = pi * area * radiance` per emitting side.
+    pub fn radiance_from_flux(self, flux: [f32; 3], two_sided: bool) -> [f32; 3] {
+        let sides = if two_sided && !matches!(self, Self::Sphere { .. }) {
+            2.0
+        } else {
+            1.0
+        };
+        flux.map(|f| (f64::from(f) / (std::f64::consts::PI * self.area() * sides)) as f32)
+    }
+
+    fn valid(self) -> bool {
+        let positive = |v: f32| v.is_finite() && v > 0.0;
+        match self {
+            Self::Rectangle {
+                half_width,
+                half_height,
+            } => positive(half_width) && positive(half_height),
+            Self::Disk { radius } | Self::Sphere { radius } => positive(radius),
+        }
+    }
 }
 
 impl Light {
     pub(crate) fn effective_shadow_mode(self, default: ShadowMode) -> ShadowMode {
-        let (Self::Directional { shadow_mode, .. }
-        | Self::Point { shadow_mode, .. }
-        | Self::Spot { shadow_mode, .. }) = self;
-        shadow_mode.unwrap_or(default)
+        match self {
+            Self::Directional { shadow_mode, .. }
+            | Self::Point { shadow_mode, .. }
+            | Self::Spot { shadow_mode, .. } => shadow_mode.unwrap_or(default),
+            Self::Area { .. } => ShadowMode::Off,
+        }
     }
 
     fn validate(self) -> Result<(), SceneError> {
@@ -146,6 +217,22 @@ impl Light {
                     && outer_angle < std::f64::consts::FRAC_PI_2
                     && source_radius.is_finite()
                     && source_radius >= 0.0
+            }
+            Self::Area {
+                position,
+                normal,
+                tangent,
+                shape,
+                radiance,
+                two_sided,
+            } => {
+                position.into_iter().all(f64::is_finite)
+                    && valid_direction(normal)
+                    && valid_direction(tangent)
+                    && !parallel(normal, tangent)
+                    && shape.valid()
+                    && nonnegative(radiance)
+                    && !(two_sided && matches!(shape, AreaShape::Sphere { .. }))
             }
         };
         if valid {
@@ -231,6 +318,23 @@ impl Lighting {
 
 fn nonnegative(values: [f32; 3]) -> bool {
     values.into_iter().all(|v| v.is_finite() && v >= 0.0)
+}
+
+// Rejects nearly parallel axes whose perpendicular tangent would be ill-conditioned.
+// Callers pass finite, nonzero directions, so the scaled lengths are finite.
+fn parallel(a: [f64; 3], b: [f64; 3]) -> bool {
+    let scaled = |v: [f64; 3]| {
+        let scale = v.into_iter().map(f64::abs).fold(0.0, f64::max);
+        v.map(|x| x / scale)
+    };
+    let (a, b) = (scaled(a), scaled(b));
+    let cross = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ];
+    let length = |v: [f64; 3]| v.into_iter().map(|x| x * x).sum::<f64>().sqrt();
+    length(cross) <= 1e-6 * length(a) * length(b)
 }
 
 fn valid_direction(direction: [f64; 3]) -> bool {

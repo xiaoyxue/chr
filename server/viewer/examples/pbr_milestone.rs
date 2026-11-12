@@ -381,6 +381,8 @@ fn main() -> Result<()> {
             Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
                 *source_radius *= 4.0
             }
+            // This milestone authors no area lights; they have no shadow source size yet.
+            Light::Area { .. } => {}
         }
     }
     scene.set_lighting(Lighting::new(larger_sources, None)?)?;
@@ -443,10 +445,12 @@ fn main() -> Result<()> {
         ShadowMode::Pcss,
         ShadowMode::Off,
     ]) {
-        let (Light::Directional { shadow_mode, .. }
+        if let Light::Directional { shadow_mode, .. }
         | Light::Point { shadow_mode, .. }
-        | Light::Spot { shadow_mode, .. }) = light;
-        *shadow_mode = Some(mode);
+        | Light::Spot { shadow_mode, .. } = light
+        {
+            *shadow_mode = Some(mode);
+        }
     }
     scene.set_lighting(Lighting::new(mixed, None)?)?;
     capture(

@@ -255,6 +255,7 @@ pub(crate) fn projection(
         Light::Point { .. } => {
             return Err("point lights require six face projections, not one planar map".into());
         }
+        Light::Area { .. } => return Err("area lights have no shadow map yet".into()),
     };
     let up = if direction[2].abs() > 0.99 {
         [0.0, 1.0, 0.0]
@@ -352,6 +353,7 @@ pub(crate) fn face_count(light: Light, cascades: CascadeSettings) -> usize {
         Light::Point { .. } => 6,
         Light::Directional { .. } => cascades.count as usize,
         Light::Spot { .. } => 1,
+        Light::Area { .. } => 0,
     }
 }
 

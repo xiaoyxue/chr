@@ -19,7 +19,7 @@ mod shadow;
 mod triangle;
 
 pub use gpu::Gpu;
-pub use mesh_renderer::{MeshRenderer, PbrSettings, ToneMap};
+pub use mesh_renderer::{AREA_CURVE_SEGMENTS, MeshRenderer, PbrSettings, ToneMap};
 pub use offscreen::{OffscreenTarget, render_rotated_triangle_rgba, render_triangle_rgba};
 pub use sdi::UyvyConverter;
 pub use shadow::{CascadeSettings, PcssSettings, ShadowMode, ShadowSettings};

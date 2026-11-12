@@ -980,8 +980,9 @@ approved a separately named approximation profile, `ltc-plausible-v1`: the same
 envelope and GPU microbudget, per-emitter error ≤ 0.02·Le + 30% of the reference,
 and Lambert×(1−F0) diffuse for area lights only. The tolerance is set from measured
 LTC behaviour and is not a reference-accuracy claim. The pinned candidate passes
-its 9,632-row sampled screen. Renderer-path integration, temporal qualification and
-visibility remain open.
+its 9,632-row sampled screen. The renderer now exposes it as the experimental,
+unoccluded `Light::Area` with hardware reference and trajectory-continuity tests;
+no wire mapping or default light is added. Finite-area visibility (#27) remains open.
 
 #### Bounded sky-visibility evaluation
 
