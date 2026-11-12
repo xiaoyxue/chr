@@ -1,7 +1,10 @@
 use super::*;
 use wgpu::util::DeviceExt;
 
-fn read(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, Box<dyn Error>> {
+pub(super) fn read(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let (tx, rx) = std::sync::mpsc::channel();
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);

@@ -2,13 +2,24 @@
 
 Research date: **2026-11-12**. Scope: the unoccluded rectangle/disk/sphere part of
 method selection #35 for #26, after the PBR prerequisite. **Candidate selection,
-not owner approval or production implementation.** Area lighting stays low
+not production approval or implementation.** Area lighting stays low
 priority. The renderer API, defaults, material shader and `scene_frame_v1` are
 unchanged. Finite-emitter visibility belongs to #27: these results include
 emitter self-visibility, but no scene shadows, centre-shadow substitute, or soft
 shadow claim. Sky and atmosphere work remains deferred.
 
 ## Decision
+
+**Follow-up:** the owner approved the bounded experiment below, but its necessary
+quality screen rejects the current pinned single-LTC fit even inside that
+envelope. See **Approved-profile counterexamples**.
+
+**Second follow-up (2026-11-12):** measurements showed that no single LTC can meet
+those reference-accuracy criteria, so the owner explicitly approved a separately
+named approximation profile, **`ltc-plausible-v1`**, following common real-time
+practice. The pinned candidate passes its sampled screen. See **Approximation
+profile `ltc-plausible-v1`**. The reference-accuracy criteria and their
+counterexamples remain recorded; the candidate still fails them.
 
 Select **clipped LTC polygon integration** for the next owner-approved
 renderer-native experiment: four vertices for rectangles, **64 vertices** for
@@ -259,30 +270,236 @@ No general FPS, 1080p, Windows, native-UI, SDI or device acceptance is implied.
 
 ## Owner decision and remaining gates
 
-**Recommended decision:** authorize a renderer-native *experimental* unoccluded
-LTC path for rectangles and 64-sided disk/sphere silhouettes, retaining the
-current shared GGX/Burley material and explicit radiance/shape/sidedness units.
-Do not approve the current Lambert shortcut or freeze a production algorithm.
+**Owner-approved experiment (2026-11-12):** after reviewing the scope, material
+and budget decision summary, the owner replied "Agree". This authorizes a
+bounded renderer-native *experimental* unoccluded LTC path for rectangles and
+64-sided disk/sphere silhouettes, retaining the current shared GGX/Burley
+material and explicit radiance/shape/sidedness units. It does **not** approve the
+current Lambert shortcut, production integration or a frozen production algorithm.
 Before production, either fit/qualify the actual Burley×`(1-F)` diffuse lobe
 and bound specular Fresnel/truncation error, or explicitly approve a separately
 named approximation profile. A new fit would need reproducible licensed fitting
-inputs/code and reference validation, not an invented LUT.
+inputs/code and reference validation, not an invented LUT. The owner later took
+the second route: see **Approximation profile `ltc-plausible-v1`**.
 
-Provisional **next-experiment** envelope: uniform isotropic emitters, external
+Approved **experimental** envelope: uniform isotropic emitters, external
 noncoplanar receivers, roughness 0.15–0.85, NdotV ≥0.3, centre distance/radius
-≥1.5, and planar perpendicular separation ≥radius. Proposed acceptance:
+≥1.5, and planar perpendicular separation ≥radius. Experimental acceptance:
 absolute error ≤0.005×Le **and** relative error ≤3% when reference ≥1e-4×Le;
 below that level retain absolute and raw relative errors. Reference deltas and
-independent formulations must first establish adequate resolution. Proposed
+independent formulations must first establish adequate resolution. Experimental
 GPU microbudget: ≤1 ms for this 256²/8-light workload, ≤128 KiB LUT, one shading
-dispatch and no shadow views. **These budgets/envelopes need owner approval**;
-the sparse scalar grid does not certify them. The 0.045 roughness floor,
+dispatch and no shadow views. **Approval establishes criteria, not passing
+results**; the sparse scalar grid does not certify them. The 0.045 roughness floor,
 grazing/near/on-emitter domains, arbitrary poses and full material maps need
 additional qualification. Do not silently clamp or discard unsupported inputs.
 
 Temporal noise is absent (deterministic integration, no history), but moving
 light/receiver trajectories, LUT interpolation continuity and moving silhouette
 faceting have not been accepted. No finite-area visibility method is selected.
+
+## Approved-profile counterexamples
+
+The follow-up first checks a **necessary condition**, before adding an
+experimental scene API or replacing a material component. With metallic=1 and
+base=0.7, the existing GGX/Burley material has exactly zero diffuse contribution.
+Thus a specular failure cannot be repaired by changing the Burley approximation.
+The pinned lookup/packing/amplitude conventions were rechecked against the
+official shader; the LTC data and implementation are unchanged.
+
+`--profile` retains **240 new rows**, separate from the original 240-row report:
+three shapes, roughness 0.15/0.3/0.5/0.85, NdotV 0.3/0.5/0.8/1, and axial,
+mirror-centred, highlight-edge, off-axis and distance-2 fixtures. Every row must
+pass the experimental admission screen. For rectangles, this screen
+conservatively uses `sqrt(half_width²+half_height²)` as the enclosing radius;
+this is a tested-subset convention, not a new public geometry contract.
+No material maps, coloured channels, scene shadows or arbitrary poses are
+qualified by this necessary-condition check.
+
+The 256²/512² surface screen yields **88 candidate failures, 10 unresolved
+references and 142 rows within the sampled thresholds**. By shape, the
+failure/unresolved/within counts are rectangle 28/0/52, disk 31/4/45 and sphere
+29/6/45. "Within" does not certify reference accuracy or a continuous domain.
+The unresolved rows remain visible; for example, the smooth normal-view sphere
+still misses narrow specular energy with uniform surface sampling.
+
+The worst normalized-to-budget and worst absolute screened failure per shape
+are refined with 1024²/2048² surface integration and **independent solid-angle
+integration**. The latter samples a bounding cone, intersects rays with the
+actual planar shape (or the outward sphere cone), and uses a solid-angle PDF,
+not the surface Jacobian. Its planar hit indicator has discretization error:
+coarse/fine agreement alone is insufficient, so cross-formulation discrepancy
+is also retained. A confirmed counterexample requires all three empirical
+discrepancies to be at most 1/16 of the applicable error budget and the candidate
+error minus their maximum to still exceed that budget. This is falsification,
+not a rigorous universal quadrature bound.
+
+All six selected cases have NdotV=0.3, Le=1, centre `(0,0,2)` in the local
+N=+Z frame, planar tilt zero, radius/half-width=1 and rectangle half-height=0.6.
+They satisfy both the distance and plane-separation limits; they are not excluded
+near-field or out-of-domain grazing cases.
+
+| Shape | Roughness | Refined reference | LTC64 | Absolute error | Relative error |
+|---|---:|---:|---:|---:|---:|
+| Rectangle | 0.15 | 0.0005238664 | 0.0003075307 | 0.0002163357 | 41.30% |
+| Disk | 0.15 | 0.0005960376 | 0.0003096965 | 0.0002863410 | 48.04% |
+| Sphere | 0.15 | 0.0007955595 | 0.0004052331 | 0.0003903264 | 49.06% |
+| Rectangle | 0.5 | 0.0410949057 | 0.0296018885 | 0.0114930171 | 27.97% |
+| Disk | 0.5 | 0.0481605568 | 0.0323913665 | 0.0157691903 | 32.74% |
+| Sphere | 0.5 | 0.0625779920 | 0.0414708538 | 0.0211071381 | 33.73% |
+
+The roughness-0.15 cases are dim tail energy: absolute errors are below 0.005,
+but references exceed the approved 1e-4 relative-error cutoff and fail 3%.
+The roughness-0.5 cases fail **both** absolute and relative criteria. Maximum
+observed surface/angular/cross discrepancy across these six is `5.30e-6`, well
+below the corresponding budgets. Increasing curved polygons to 256 sides does
+not repair the failures: the roughness-0.5 disk/sphere candidates become
+0.0324335041/0.0415243457, still far from the references. The rectangle has no
+curved-polygon discretization at all.
+
+### Actual renderer-material cross-check
+
+`--profile-gpu` uses native `Gpu`/`PbrMaterial` and compiles the **unmodified**
+`environment_sampling.wgsl` and `mesh.wgsl` together with a small compute entry
+point that calls the real `brdf()` function. No copied/replaced WGSL BRDF and no
+production source/API change are needed. The oracle converts the local shading
+fixtures to the public negative-Z-up world frame; the receiver is at world zero
+and emitter centre at `(0,0,-2)` metres.
+
+Actual RTX 3090 / NVIDIA 580.159.03 / Vulkan runs at 512², 1024² and 2048²
+produce **18 retained rows** for the six counterexamples. The largest
+same-sample native-f32 versus scalar-f64 difference is `3.75e-9`; the failures
+persist against the actual renderer material. One scalar channel is checked
+because the fixtures have identical linear RGB channels.
+
+This is an expensive **oracle**, not a new real-time candidate or a performance
+claim: it reads back up to 16 MiB of sample contributions and sums them in f64.
+No optional wgpu features are requested. It does not evaluate mesh rasterization,
+normal maps, temporal trajectories or integrated lighting cost. The earlier LTC
+microtimings remain historical candidate measurements, not acceptance of this
+profile. Further timing/temporal qualification cannot turn a failed quality
+screen into acceptance.
+
+**Outcome:** the approved experiment has a confirmed method-fit blocker.
+Do not integrate the current fit, silently narrow the approved domain, substitute
+Lambert, increase the relative-error cutoff or relax budgets. Further work must
+demonstrate a reproducible licensed fit/correction satisfying the shared material
+and existing criteria, or obtain a separate explicit scope/profile decision.
+This rejects the tested pinned candidate, not LTC as an entire method family.
+Production implementation and #26/#27 remain incomplete; sky and atmosphere stay
+paused.
+
+## Approximation profile `ltc-plausible-v1`
+
+### Why the reference-accuracy criteria cannot be met by a single LTC
+
+A convention audit found no lookup, matrix-layout, frame, Jacobian or amplitude
+discrepancy against the pinned official fitter and shader. An exploratory local
+NumPy probe (not committed; independent GGX, LTC density and solid-angle
+integration, no shared Rust/WGSL code) then checked the table itself. Table
+magnitudes match independent directional albedo within 1%, so the energy is
+consistent; the fitted **shape** is not:
+
+- At grazing view the fitted lobe underestimates the GGX tail towards the normal:
+  F=1 axial-sphere errors at NdotV=0.3 are −36% (roughness 0.5) and −52% (0.15),
+  versus −2.6% at NdotV=0.8, roughness 0.5.
+- The LTC support is a transformed hemisphere. Near the horizon on the view side
+  (back-scatter) its density is exactly zero while GGX exceeds the 1e-4·Le cutoff,
+  at every tested NdotV including 0.8.
+- Freely optimizing all five single-LTC parameters per (roughness, NdotV) directly
+  against admitted sphere caps leaves maximum relative errors of 31–95%; constraining
+  the support to the physical hemisphere is worse. Refitting cannot reach 3%.
+
+Production engines accept this class of error: Unreal's raster path uses LTC for
+rectangle-light specular and representative points for spheres/tubes, and its
+higher-quality MegaLights path is stochastic with denoising. The owner therefore
+chose a named approximation profile rather than stochastic integration.
+
+### Definition (owner-approved 2026-11-12)
+
+- **Domain unchanged:** uniform isotropic emitters, external noncoplanar receivers,
+  roughness 0.15–0.85, NdotV ≥0.3, centre distance/radius ≥1.5, planar perpendicular
+  separation ≥ radius (rectangles use the circumscribed radius).
+- **Accuracy, per emitter:** `|candidate − reference| ≤ 0.02·Le + 0.30·reference`,
+  after adding the reference's own refinement/cross-formulation discrepancy to the
+  error. This tolerance was **set from measured LTC behaviour**. It bounds an
+  accepted approximation; it is not a reference-accuracy claim.
+- **Diffuse:** the profile accepts `base·(1−metal)·(1−F0)·Lambert` for area lights.
+  The shared GGX/Burley material and its other light paths are unchanged.
+- **Budgets unchanged:** ≤1 ms for 256²/eight lights, ≤128 KiB LUT, one shading
+  dispatch, no shadow views.
+
+The owner first approved `0.02·Le + 0.25·reference`, based on a coarser NumPy cap
+estimate (23.1% needed). The Rust screen below then found one failing row at
+1.0066× that tolerance (metal, roughness 0.5, NdotV 0.3, sphere at the admitted
+distance limit, polar 45°, side azimuth), so the owner explicitly approved
+`0.30·reference` instead of the threshold being adjusted silently.
+
+### Sampled screen
+
+`--plausible` evaluates **9,632 admitted rows**, writing
+`output/area-light-native/plausible.csv`:
+
+- 672 fixture rows: the seven positions (the five profile positions plus two at polar
+  80°, distance 8, on the mirror and view sides) × three shapes × roughness
+  0.15/0.3/0.5/0.85 × NdotV 0.3/0.5/0.8/1 × metal 0/1.
+- 8,960 outward-sphere sweep rows: half-angles 3/8/15/25° and the admitted limit
+  (distance 1.5) × polar 0–82.5° in 7.5° steps × azimuth 0–180° in 45° steps
+  (y ≥ 0 by symmetry), including caps that cross the horizon, × the same
+  roughness/NdotV/metal grid.
+
+Each reference uses 256²/512² surface integration, or 1024²/2048² independent
+angular integration when the surface estimate is not resolved within 1/16 of the
+tolerance. Result: **0 failures, 0 unresolved**; the maximum
+`(error + discrepancy) / tolerance` is **0.927**. The worst region is metal,
+roughness 0.5, NdotV 0.3, near spheres to the side, where LTC still underestimates
+the emitter's contribution by up to ~59%. Passing means this approximation is
+accepted there; the error remains.
+
+The six reference-accuracy counterexamples pass the new profile, and a test verifies
+that losing half of a bright admitted highlight still fails it, so the gate is not
+vacuous. Sampled rows do not certify the continuous envelope, moving
+light/receiver trajectories, LUT interpolation continuity or silhouette faceting.
+Renderer-path integration, temporal qualification, visibility (#27) and Windows
+validation remain open.
+
+## Same-scene visual comparison
+
+`--images` renders an actual GPU diagnostic for each emitter: a rough metal
+ground plane under the finite emitter, seen by an orthographic camera with
+NdotV=0.3. Material roughness is 0.5, metallic is 1, base is 0.7 and Le is 1;
+the emitter centre is two metres above the ground. All ground receivers are
+inside the approved envelope. The scene uses no ambient fill, IBL, private
+assets or additional occluders. Analytic camera-ray intersections show the
+outward sphere's emission or the planar emitter's non-emitting back identically
+in both images.
+
+The 256×256 reference calls the actual native WGSL BRDF with 256² samples per
+pixel: area sampling for planes and exact solid-angle-cone sampling for outward
+spheres, avoiding under-resolved surface caps. The GPU candidate uses the
+existing LUT, lookup and clipped polygon helpers (four rectangle vertices,
+64 curved vertices). This is a compute diagnostic, not integration into the
+production mesh renderer.
+
+Both appearance images use **the same +2 EV exposure**, the renderer's Reinhard
+mapping and sRGB output, without per-image normalization. The third panel is
+the **absolute scene-linear difference before tone mapping**, explicitly shown
+on a fixed 0–0.03 black/red/yellow scale. Error colours are not an appearance
+render. All direct-emitter pixels are excluded from ground statistics.
+
+The final framing's maximum 128²→256² reference difference is `1.01e-6`.
+A sparse CPU angular-oracle cross-check differs by at most `5.19e-6`, and the
+GPU LTC versus scalar candidate difference is below `6.0e-8`. Maximum absolute
+ground errors are rectangle **0.01535**, disk **0.01971**, sphere **0.02610**.
+These are empirical checks for the rendered images, not continuous-domain
+certification or a new candidate timing result.
+
+Generated artifacts stay in `output/area-light-native/comparison/`: nine PNGs,
+raw scene-linear reference/candidate/mask buffers, `metrics.csv` and an
+`index.html` viewer. The viewer switches shapes and reports paired linear
+pixel values on hover; it never changes the render exposure. Serve only that
+synthetic-artifact directory when sharing it. A browser screenshot is optional;
+neither private inputs nor images are uploaded by the example.
 
 ## Reproduction and verification
 
@@ -294,6 +511,14 @@ cargo run --locked --release -p chr-renderer --example area_light_evaluation
 NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
   cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --gpu
 python3 server/renderer/examples/area_light_evaluation/summarize.py
+cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --profile
+NIXPKGS_ALLOW_UNFREE=1 WGPU_BACKEND=vulkan \
+  nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --profile-gpu
+NIXPKGS_ALLOW_UNFREE=1 WGPU_BACKEND=vulkan \
+  nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --images
+cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --plausible
 ```
 
 Six focused example tests cover analytic Lambert integrals, emitter sidedness
@@ -303,3 +528,14 @@ solid-angle integration. They are separate from workspace default tests and
 the unrelated sky example. The exact final-source validation record is retained
 in ignored `output/area-light-methods/verification.txt`, with scalar/GPU CSVs,
 logs and provenance alongside it. No dependencies or lockfiles change.
+
+The follow-up adds three focused tests for profile admission, independent angular
+transport and the absolute/relative gate counterexamples (**nine example tests
+total**). Its separate local evidence directory is `output/area-light-native/`:
+`profile.csv`, `refinement.csv`, `native.csv` and final committed-source
+`verification.txt`. Successful test/evaluator execution means the experiment
+reproduces its results, not that the candidate passes the quality criteria.
+
+The `ltc-plausible-v1` follow-up adds two tests (counterexamples within the profile
+but half-energy rejection; horizon and sweep fixtures admitted), **eleven example
+tests total**. `--plausible` exits with an error unless every row passes.

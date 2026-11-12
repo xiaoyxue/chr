@@ -4,7 +4,10 @@
 
 use std::{error::Error, f64::consts::PI, fs, io::Write};
 
+mod comparison;
 mod gpu;
+mod profile;
+mod profile_gpu;
 
 #[derive(Clone, Copy, Debug)]
 struct V(f64, f64, f64);
@@ -401,6 +404,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let table = Table::load();
+    if std::env::args().nth(1).as_deref() == Some("--images") {
+        return pollster::block_on(comparison::run(&table));
+    }
+    if std::env::args().nth(1).as_deref() == Some("--profile") {
+        return profile::run(&table);
+    }
+    if std::env::args().nth(1).as_deref() == Some("--plausible") {
+        return profile::run_plausible(&table);
+    }
+    if std::env::args().nth(1).as_deref() == Some("--profile-gpu") {
+        return pollster::block_on(profile_gpu::run(&table));
+    }
     if std::env::args().nth(1).as_deref() == Some("--gpu") {
         return pollster::block_on(gpu::run(&table));
     }

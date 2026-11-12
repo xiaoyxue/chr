@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Area light: native reference vs LTC</title>
+<style>
+  :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101318; color: #e5e9f0; }
+  body { max-width: 1240px; margin: auto; padding: 28px 20px; }
+  h1 { margin: 0 0 10px; font-size: 28px; }
+  p { line-height: 1.6; }
+  .muted, figcaption, footer { color: #aab4c3; }
+  .parameters { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+  .parameters span { background: #222b38; border-radius: 6px; padding: 7px 10px; }
+  select { font: inherit; margin-left: 10px; padding: 6px 12px; }
+  .panels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 20px; }
+  figure { margin: 0; }
+  h2 { font-size: 18px; margin: 0 0 10px; }
+  img { width: 100%; aspect-ratio: 1; background: #000; border: 1px solid #394658; box-sizing: border-box; }
+  figcaption { font-size: 13px; margin-top: 8px; min-height: 42px; line-height: 1.5; }
+  .legend { width: 256px; height: 14px; background: linear-gradient(90deg, #000, #800000, #ff0); }
+  .ticks { display: flex; justify-content: space-between; width: 256px; font-size: 12px; margin-top: 4px; }
+  #readout { padding: 14px; background: #1a2230; font: 14px ui-monospace, monospace; min-height: 38px; white-space: pre-wrap; }
+  a { color: #a7cdff; }
+  footer { margin-top: 24px; font-size: 13px; }
+  @media(max-width: 780px) { .panels { grid-template-columns: 1fr; } figure { max-width: 512px; } }
+</style>
+<h1>Area light: native reference vs LTC</h1>
+<p class="muted">Actual RTX 3090 / Vulkan output, not an illustration.
+  The same rough metal plane, emitter, camera and exposure are used on both sides.</p>
+<div class="parameters">
+  <span>Metallic 1.0</span><span>Roughness 0.5</span><span>N&middot;V 0.3</span>
+  <span>Le = 1</span><span>Emitter height 2 m</span><span>256 &times; 256</span>
+  <span>Exposure +2 EV / Reinhard / sRGB</span>
+</div>
+<label for="shape">Emitter</label>
+<select id="shape">
+  <option value="rectangle">Rectangle / 4 vertices</option>
+  <option value="disk">Disk / 64 vertices</option>
+  <option value="sphere" selected>Sphere / 64 vertices</option>
+</select>
+<div class="panels">
+  <figure>
+    <h2>High-sample reference</h2>
+    <a id="reference-link"><img id="reference" alt="Native renderer BRDF high-sample reference"></a>
+    <figcaption>65,536 samples/pixel. Calls the actual renderer GGX/Burley WGSL.
+      Area sampling for planes; exact solid-angle cone for outward spheres.</figcaption>
+  </figure>
+  <figure>
+    <h2>Current LTC candidate</h2>
+    <a id="ltc-link"><img id="ltc" alt="GPU LTC candidate under identical conditions"></a>
+    <figcaption>The existing pinned LUT and clipped polygon integration.
+      No independent exposure, normalization or image enhancement.</figcaption>
+  </figure>
+  <figure>
+    <h2>Absolute linear error</h2>
+    <a id="error-link"><img id="error" alt="Absolute scene-linear radiance difference heatmap"></a>
+    <figcaption>|LTC &minus; reference| before exposure and tone mapping.
+      Fixed scale; this panel intentionally visualizes error, not appearance.</figcaption>
+  </figure>
+</div>
+<div class="legend" aria-label="Fixed error scale from zero black to 0.03 yellow"></div>
+<div class="ticks"><span>0</span><span>0.015</span><span>0.03</span></div>
+<p id="stats">Loading measured image statistics...</p>
+<p id="readout">Move over any image to inspect the same pixel in both renders.</p>
+<p><strong>What to inspect:</strong> compare the illumination above and around the main highlight.
+  The LTC fit loses visible off-specular energy; the hard dark transition is not present in the reference.
+  The bright circle is the emitting sphere itself. Planar emitters show their dark, non-emitting backs.</p>
+<footer>
+  <p>Synthetic orthographic diagnostic, entirely within the approved ground-receiver envelope.
+    No scene shadows, ambient fill, IBL, private assets or production area-light path.
+    The directly visible emitter is identical in both images and excluded from ground error statistics.
+    All ground materials are pure metal, so a diffuse substitution cannot explain the difference.</p>
+  <p>Click an image to open its original PNG.
+    <a href="metrics.csv">Image metrics</a>.
+    Reproduce from the worktree root with the renderer example's <code>--images</code> mode.
+    The 128&sup2;/256&sup2; difference is an empirical reference convergence check, not a universal bound.</p>
+</footer>
+<script>
+  const selector = document.querySelector("#shape");
+  const readout = document.querySelector("#readout");
+  const data = new Map();
+  let metrics;
+  async function show() {
+    const shape = selector.value;
+    for (const kind of ["reference", "ltc", "error"]) {
+      const path = `${shape}-${kind}.png`;
+      document.querySelector(`#${kind}`).src = path;
+      document.querySelector(`#${kind}-link`).href = path;
+    }
+    readout.textContent = "Move over any image to inspect the same pixel in both renders.";
+    if (!data.has(shape)) {
+      const response = await fetch(`${shape}-linear.bin`);
+      if (!response.ok) throw new Error(`Linear data: HTTP ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength !== 256 * 256 * 12) throw new Error("Unexpected linear image size");
+      data.set(shape, new DataView(buffer));
+    }
+    if (!metrics) {
+      const response = await fetch("metrics.csv");
+      if (!response.ok) throw new Error(`Metrics: HTTP ${response.status}`);
+      metrics = (await response.text()).trim().split("\n").slice(1).map(row => row.split(","));
+    }
+    if (selector.value !== shape) return;
+    const row = metrics.find(row => row[0].toLowerCase() === shape);
+    document.querySelector("#stats").textContent =
+      `Ground max absolute error: ${Number(row[4]).toFixed(6)} | ` +
+      `mean: ${Number(row[5]).toFixed(6)} | ` +
+      `reference 128^2 -> 256^2 max delta: ${Number(row[1]).toExponential(2)}`;
+  }
+  for (const image of document.querySelectorAll("img")) {
+    image.addEventListener("pointermove", event => {
+      const buffer = data.get(selector.value);
+      if (!buffer) return;
+      const rect = image.getBoundingClientRect();
+      const x = Math.min(255, Math.max(0, Math.floor((event.clientX - rect.left) / rect.width * 256)));
+      const y = Math.min(255, Math.max(0, Math.floor((event.clientY - rect.top) / rect.height * 256)));
+      const offset = (y * 256 + x) * 12;
+      const reference = buffer.getFloat32(offset, true);
+      const ltc = buffer.getFloat32(offset + 4, true);
+      const ground = buffer.getFloat32(offset + 8, true) > 0.5;
+      const absolute = Math.abs(reference - ltc);
+      const relative = reference > 0 ? `${(100 * absolute / reference).toFixed(2)}%` : "undefined";
+      readout.textContent = `Pixel (${x}, ${y}) - ${ground ? "metal ground" : "direct emitter"}\n` +
+        `Reference ${reference.toPrecision(6)} | LTC ${ltc.toPrecision(6)} | ` +
+        `absolute ${absolute.toPrecision(4)} | relative ${relative}`;
+    });
+  }
+  function load() { show().catch(error => { readout.textContent = error.message; }); }
+  selector.addEventListener("change", load);
+  load();
+</script>
+</html>
