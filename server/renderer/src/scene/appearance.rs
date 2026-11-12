@@ -16,6 +16,11 @@ pub struct PbrMaterial {
     pub normal_scale: f32,
     pub occlusion_strength: f32,
     pub unlit: bool,
+    /// Invisible receiver for compositing over captured footage: in shaded PBR views it
+    /// draws no colour and darkens whatever lies behind it (the clear colour or, through
+    /// composition, a background image) by its luminance ratio of shadowed to unshadowed
+    /// light. It still occludes and casts shadows like the ground it stands in for.
+    pub shadow_catcher: bool,
 }
 
 impl Default for PbrMaterial {
@@ -30,6 +35,7 @@ impl Default for PbrMaterial {
             normal_scale: 1.0,
             occlusion_strength: 1.0,
             unlit: false,
+            shadow_catcher: false,
         }
     }
 }

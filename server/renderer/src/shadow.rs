@@ -74,7 +74,8 @@ pub struct ShadowSettings {
     pub filter_radius: f32,
     /// Square kernel: 1, 4, 9, 16, 25, 36, 49 or 64 bilinear comparisons.
     pub pcf_samples: u32,
-    /// Bias in normalized shadow depth.
+    /// Bias in normalized shadow depth: a fraction of the depth span for directional maps
+    /// and of the far distance (applied to linear depth) for spot and cubemap maps.
     pub depth_bias: f32,
     /// Receiver offset along its unperturbed surface normal, in world metres.
     pub normal_bias: f32,

@@ -114,8 +114,11 @@ spots use a cone-matched perspective map. This bounded-scene implementation does
 uses a single directional map. M5 adds point-light cubemaps and M8 adds cascades.
 
 Settings expose resolution, a square bilinear-comparison PCF radius in texels,
-normalized depth bias, world-metre normal bias, and a memory budget. Defaults
-are shadow-off, 2048 texels and a 256 MiB budget. Receiver-plane depth correction
+normalized depth bias, world-metre normal bias, and a memory budget. The depth
+bias is a fraction of the depth span for directional maps and of the far distance,
+applied to linear depth, for spot and cubemap maps; spot maps therefore keep a
+metre-scale bias even when scene geometry beside or behind the light pulls their
+fitted near plane close to it. Defaults are shadow-off, 2048 texels and a 256 MiB budget. Receiver-plane depth correction
 prevents sloping surfaces from shadowing themselves. Caster alpha masks and
 sidedness match the main material path.
 
@@ -354,10 +357,22 @@ as scene radiance.
 cargo run --locked -p chr-app --example composition_milestone
 ```
 
+`PbrMaterial::shadow_catcher` marks an invisible receiver, typically a ground plane
+standing in for captured footage. In shaded PBR views it outputs premultiplied
+black with alpha `1 - shadowed/unshadowed`, the luminance ratio of its direct light
+with and without visibility (unoccluded IBL counted in both), computed in linear HDR
+on the GPU. "Over" blending therefore multiplies whatever lies behind it, the clear
+colour or a display background, by that ratio; it occludes and casts shadows like
+real ground and is drawn after opaque geometry. Ratios are luminance-weighted, so
+coloured light gives grey shadows; virtual light never brightens the plate. The
+shared wire material has no catcher field yet.
+
 This synthetic offscreen example verifies that changing CG exposure leaves its
 display plate and overlay unchanged. GPU regressions cover colour domains,
 premultiplied filtering, BT.709, native Ti alignment, virtual depth, orthographic/
-pinhole MSAA, source replacement, resize and budget/target failures. These checks
+pinhole MSAA, source replacement, resize and budget/target failures, and
+`shadow_catcher_gpu` checks that catchers halve a plate where one of two equal
+lights is blocked, leave it unchanged without shadows, and draw no colour alone. These checks
 need no server and do not claim live protocol or physical SDI acceptance.
 
 ## Render server

@@ -125,6 +125,7 @@ struct Draw {
     indices: Range<u32>,
     offset: u32,
     material: MaterialId,
+    shadow_catcher: bool,
 }
 
 #[derive(PartialEq)]
@@ -148,6 +149,7 @@ enum PipelineKind {
     Mesh,
     Wire,
     Sky,
+    ShadowCatcher,
 }
 
 fn scene_pipeline(
@@ -160,6 +162,7 @@ fn scene_pipeline(
 ) -> wgpu::RenderPipeline {
     let sky = matches!(kind, PipelineKind::Sky);
     let wire = matches!(kind, PipelineKind::Wire);
+    let catcher = matches!(kind, PipelineKind::ShadowCatcher);
     let buffers = [Some(vertex_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("shared scene raster"),
@@ -176,11 +179,18 @@ fn scene_pipeline(
                 "fs_sky"
             } else if wire {
                 "fs_wire"
+            } else if catcher {
+                "fs_shadow_catcher"
             } else {
                 "fs_main"
             }),
             compilation_options: Default::default(),
-            targets: &[Some(format.into())],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // Premultiplied black over the destination multiplies it by 1 - alpha.
+                blend: catcher.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         primitive: wgpu::PrimitiveState {
             topology: if wire {
@@ -223,6 +233,7 @@ pub struct MeshRenderer {
     msaa: Option<(ImageExtent, wgpu::TextureFormat, wgpu::TextureView)>,
     pipeline: wgpu::RenderPipeline,
     pbr_pipeline: wgpu::RenderPipeline,
+    catcher_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     environment: EnvironmentGpu,
     camera: wgpu::Buffer,
@@ -428,6 +439,14 @@ impl MeshRenderer {
             |format| scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Mesh);
         let pipeline = create_pipeline(format);
         let pbr_pipeline = create_pipeline(wgpu::TextureFormat::Rgba16Float);
+        let catcher_pipeline = scene_pipeline(
+            device,
+            &layout,
+            &shader,
+            wgpu::TextureFormat::Rgba16Float,
+            1,
+            PipelineKind::ShadowCatcher,
+        );
         let wire_pipeline = scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Wire);
         let overlays = Overlays::new(device, format, &camera_layout);
         Self {
@@ -451,6 +470,7 @@ impl MeshRenderer {
             meshes: HashMap::new(),
             draws: Vec::new(),
             pbr_pipeline,
+            catcher_pipeline,
             sky_pipeline,
             environment,
             maps,
@@ -498,6 +518,10 @@ impl MeshRenderer {
             };
             self.pipeline = create(self.format, PipelineKind::Mesh);
             self.pbr_pipeline = create(wgpu::TextureFormat::Rgba16Float, PipelineKind::Mesh);
+            self.catcher_pipeline = create(
+                wgpu::TextureFormat::Rgba16Float,
+                PipelineKind::ShadowCatcher,
+            );
             self.wire_pipeline = create(self.format, PipelineKind::Wire);
             self.sky_pipeline = scene_pipeline(
                 &gpu.device,
@@ -626,6 +650,7 @@ impl MeshRenderer {
                     indices: part.clone(),
                     offset,
                     material: *material,
+                    shadow_catcher: factors.shadow_catcher,
                 });
                 uniforms.push(DrawUniform {
                     model,
@@ -1062,7 +1087,16 @@ impl MeshRenderer {
         });
         pass.set_bind_group(0, &self.camera_group, &[]);
         pass.set_bind_group(3, &self.light_group, &[]);
-        for draw in &self.draws {
+        // Catchers blend over whatever lies behind them, so they follow opaque geometry;
+        // depth testing hides catcher pixels behind real objects.
+        let (opaque, deferred): (Vec<_>, Vec<_>) = self
+            .draws
+            .iter()
+            .partition(|draw| !(physical && draw.shadow_catcher));
+        for draw in opaque.into_iter().chain(deferred) {
+            if physical && draw.shadow_catcher {
+                pass.set_pipeline(&self.catcher_pipeline);
+            }
             let mesh = &self.meshes[&draw.mesh];
             pass.set_bind_group(1, &self.object_group, &[draw.offset]);
             pass.set_bind_group(2, self.maps.group(draw.material), &[]);
