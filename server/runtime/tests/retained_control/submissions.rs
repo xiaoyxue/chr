@@ -150,6 +150,55 @@ impl OutputPort for Port {
 }
 
 #[tokio::test]
+async fn reusing_a_released_submission_slot_does_not_reorder_ready_video_frames() {
+    let h = Harness::new(4, 4, 4).await;
+    for sequence in 0..2 {
+        let (image, guard) = h.image(sequence).await;
+        guard.ready().unwrap();
+        guard.complete();
+        h.submit(&format!("frame-{sequence}"), vec![input(&image)])
+            .await;
+    }
+    let first = h.port.next_ready().unwrap().unwrap();
+    assert_eq!(first.provenance.input.frame.sequence.get(), 0);
+    first.rendered("first").unwrap();
+    let mut output = Port {
+        capacity: 4,
+        ..Default::default()
+    };
+    h.port.handoff(&mut output).unwrap();
+    output.frames[0]
+        .observer
+        .transmitted(id("output-stream"), 0.into())
+        .unwrap();
+    call(&h.control, w::RENDER_RELEASE, target_submission("frame-0")).await;
+
+    let (image, guard) = h.image(2).await;
+    guard.ready().unwrap();
+    guard.complete();
+    h.submit("frame-2", vec![input(&image)]).await;
+    for sequence in 1..3 {
+        let execution = h.port.next_ready().unwrap().unwrap();
+        assert_eq!(
+            execution.provenance.input.frame.sequence.get(),
+            sequence,
+            "a newly reused slot must not bypass an older ready frame"
+        );
+        execution.rendered(sequence).unwrap();
+    }
+    h.port.handoff(&mut output).unwrap();
+    assert_eq!(
+        output
+            .frames
+            .iter()
+            .map(|frame| frame.provenance.input.frame.sequence.get())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
 async fn reordered_join_atomic_last_ref_snapshot_and_retained_retry() {
     let h = Harness::new(4, 2, 2).await;
     call(&h.control, w::SCENE_RELEASE, target("scene-demo")).await;

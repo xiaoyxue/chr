@@ -41,6 +41,7 @@ Options:
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
   --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
+  --srt <ip:port>        Direct MPEG-TS/SRT listener (requires --software-video)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --webrtc-udp <addr>     Local UDP bind for WebRTC; a wildcard binds every non-loopback
@@ -66,6 +67,7 @@ struct Args {
     pitch_controls: Option<PathBuf>,
     software_video: Option<PathBuf>,
     video_scene: Option<PathBuf>,
+    srt: Option<SocketAddr>,
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -85,6 +87,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         pitch_controls: None,
         software_video: None,
         video_scene: None,
+        srt: None,
     };
     let mut use_socket = true;
     while let Some(flag) = raw.next() {
@@ -104,6 +107,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--synthetic-program" => args.synthetic_program = true,
             "--software-video" => args.software_video = Some(value()?.into()),
             "--video-scene" => args.video_scene = Some(value()?.into()),
+            "--srt" => args.srt = Some(value()?.parse()?),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--webrtc-udp" => {
@@ -132,6 +136,12 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if args.video_scene.is_some() && args.software_video.is_none() {
         return Err("--video-scene requires --software-video".into());
+    }
+    if args.srt.is_some() && args.software_video.is_none() {
+        return Err("--srt requires --software-video".into());
+    }
+    if args.srt.is_some_and(|address| address.port() == 0) {
+        return Err("--srt requires a nonzero listen port".into());
     }
     if !(1..=120).contains(&args.fps) {
         return Err("--fps must be between 1 and 120".into());
@@ -266,6 +276,11 @@ fn run(args: Args) -> Result<()> {
         SdiOutput::spawn(mode)?
     };
     #[cfg(all(unix, feature = "gstreamer-media"))]
+    let srt = args
+        .srt
+        .map(|bind| chr_server::monitor::srt::SrtOutput::spawn(mode, bind, Arc::clone(&feed)))
+        .transpose()?;
+    #[cfg(all(unix, feature = "gstreamer-media"))]
     let monitor = if args.software_video.is_some() {
         Monitor::spawn_gstreamer(mode, tap, Arc::clone(&feed))?
     } else {
@@ -301,6 +316,7 @@ fn run(args: Args) -> Result<()> {
     let served = runtime.block_on(async {
         let installed = match installation {
             Some((synthetic, adapter)) => {
+                let adapter = if args.software_video.is_some() { adapter.with_rotation() } else { adapter };
                 let (control, owner) = chr_server::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
                 synthetic.create_scene(&control).await?;
                 log::info!("local program runtime_id={} scene_id={} configuration_id={}",
@@ -345,6 +361,7 @@ fn run(args: Args) -> Result<()> {
                     _ = frames.tick() => {
                         #[cfg(all(unix, feature = "gstreamer-media"))]
                         if let Some(source) = &mut video_source {
+                            control.advance_rotation(sdi.stats().status().frames_output).await.map_err(|e| e.to_string())?;
                             if let Some(frame) = source.try_frame()?
                                 && let Err(error) = synthetic.inject_image(control, frame.sequence, &frame.rgba).await {
                                 log::warn!("software input skipped: {error}");
@@ -381,6 +398,8 @@ fn run(args: Args) -> Result<()> {
     runtime.shutdown_timeout(Duration::from_secs(2));
     let stopped = worker.shutdown();
     drop(sdi);
+    #[cfg(all(unix, feature = "gstreamer-media"))]
+    drop(srt);
     drop(monitor);
     served?;
     stopped.map_err(Into::into)
@@ -475,6 +494,17 @@ mod tests {
         assert!(parse(&["--software-video", "video.mp4", "--synthetic-program"]).is_err());
         assert!(parse(&["--software-video", "video.mp4", "--pitch-demo", "demo.json"]).is_err());
         assert!(parse(&["--video-scene", "scene.json"]).is_err());
+        assert!(parse(&["--srt", "127.0.0.1:9001"]).is_err());
+        assert!(parse(&["--software-video", "video.mp4", "--srt", "127.0.0.1:0"]).is_err());
+        assert_eq!(
+            parse(&["--software-video", "video.mp4", "--srt", "127.0.0.1:9001"])
+                .unwrap()
+                .unwrap()
+                .srt
+                .unwrap()
+                .port(),
+            9001
+        );
         assert_eq!(
             parse(&[
                 "--software-video",

@@ -41,6 +41,7 @@
             (pkgs.python3.withPackages (ps: [ ps.pygobject3 ]))
             pkgs.gst_all_1.gstreamer
             pkgs.gst_all_1.gst-plugins-base
+            pkgs.gst_all_1.gst-plugins-bad
             pkgs.gst_all_1.gst-plugins-ugly
           ];
           mediaEnvironment = {
@@ -51,6 +52,7 @@
             GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
               (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
               pkgs.gst_all_1.gst-plugins-base
+              pkgs.gst_all_1.gst-plugins-bad
               pkgs.gst_all_1.gst-plugins-ugly
             ];
           };

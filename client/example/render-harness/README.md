@@ -33,16 +33,16 @@ These legacy commands do not animate the retained-scene overlay in
 `--synthetic-program`, `--pitch-demo` or `--software-video`.
 
 With `live=1`, the top-right panel instead becomes **Orange mesh rotation**.
-It sends bounded, serialized `scene.mutate` instance updates to Server for the
-software-video scene's orange `mesh`; its separate `ground` is unchanged.
-Start uses the selected signed speed, and Stop waits for the in-flight update.
-Restarting in the opposite direction preserves the current pose.
-Phase follows the simulated SDI output-slot clock and configured time base,
-not source frame identity or browser wall-clock duration. This is a page-driven demonstration,
-not an autonomous server animation protocol: keep the controller page connected.
-Disconnect/closing the page stops future updates; the server retains the last
-applied pose. External model edits or uncertain replies stop the controller
-instead of blindly retrying.
+It sends `mesh.start_rotation`, `mesh.stop_rotation` and `mesh.get_rotation`
+commands targeting the software-video scene's `mesh`; its separate `ground`
+is unchanged. Server advances the pose before each native input admission using
+the simulated SDI output-slot clock and configured time base, not browser timers
+or source identity. Changing signed speed preserves the pose; Stop holds it.
+Closing or disconnecting the page does not stop server animation. Polling only
+displays state and never drives motion. External instance edits stop animation
+instead of being overwritten. Stop before manual scene edits to avoid revision
+conflicts. This opt-in profile permits one animated instance at a time; it does
+not repurpose the legacy triangle methods or add a general animation timeline.
 
 ## Synthetic scene controls
 

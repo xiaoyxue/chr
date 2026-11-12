@@ -3,14 +3,16 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use chr_common::{jsonrpc::ErrorObject, scene_frame as w};
+use chr_common::{jsonrpc::ErrorObject, methods::mesh, scene_frame as w};
 use chr_renderer::{camera::Camera, scene::SceneView};
 use serde_json::Value;
 
 use super::{
     incompatible,
     mapping::{NativeSettings, Registrations},
-    reject, value,
+    reject,
+    rotation::{Request as RotationRequest, Rotation},
+    value,
 };
 
 /// The exact retained revision handed to admission, never a lazy scene-ID lookup.
@@ -89,6 +91,8 @@ pub struct SceneAdapter {
     generations: Vec<Weak<()>>,
     sequence: w::U64,
     admission: Box<dyn RenderAdmission>,
+    rotation_enabled: bool,
+    rotation: Option<Rotation>,
 }
 
 impl SceneAdapter {
@@ -106,7 +110,134 @@ impl SceneAdapter {
             generations: Vec::new(),
             sequence: w::U64::from(0),
             admission,
+            rotation_enabled: false,
+            rotation: None,
         })
+    }
+
+    /// Software-video-only animation; ordinary retained profiles remain unchanged.
+    pub fn with_rotation(mut self) -> Self {
+        self.rotation_enabled = true;
+        self
+    }
+
+    fn rotation_instance(&self, target: &mesh::RotationTarget) -> Result<w::Instance, ErrorObject> {
+        self.runtime(&target.runtime_id)?;
+        self.scene(&target.scene_id)?
+            .snapshot
+            .state
+            .instances
+            .iter()
+            .find(|instance| instance.instance_id == target.instance_id)
+            .cloned()
+            .ok_or_else(|| reject(w::RejectionKind::NotFound, "rotation instance is absent"))
+    }
+
+    pub(super) fn rotate(
+        &mut self,
+        request: RotationRequest,
+        frame: u64,
+    ) -> Result<Value, ErrorObject> {
+        if !self.rotation_enabled {
+            return Err(ErrorObject::method_not_found("mesh rotation"));
+        }
+        let target = request.target();
+        self.rotation_instance(&target)?;
+        if let RotationRequest::Start(start) = &request
+            && !start.angular_velocity_rad_per_s.is_finite()
+        {
+            return Err(ErrorObject::invalid_params("rotation speed must be finite"));
+        }
+        let same = self
+            .rotation
+            .as_ref()
+            .is_some_and(|rotation| rotation.matches(&target));
+        if !same
+            && self
+                .rotation
+                .as_ref()
+                .is_some_and(|rotation| rotation.state.rotating)
+            && !matches!(request, RotationRequest::Get(_))
+        {
+            return Err(reject(
+                w::RejectionKind::Conflict,
+                "another instance is rotating",
+            ));
+        }
+        if !matches!(request, RotationRequest::Get(_)) && same {
+            self.advance_rotation(frame)?;
+        }
+        let instance = self.rotation_instance(&target)?;
+        match request {
+            RotationRequest::Get(_) => {
+                if same {
+                    value(&self.rotation.as_ref().expect("matching rotation").state)
+                } else {
+                    value(Rotation::new(target, instance, frame).state)
+                }
+            }
+            RotationRequest::Start(start) => {
+                if !same
+                    || self
+                        .rotation
+                        .as_ref()
+                        .is_some_and(|rotation| rotation.last != instance)
+                {
+                    self.rotation = Some(Rotation::new(target, instance, frame));
+                }
+                let rotation = self.rotation.as_mut().expect("selected rotation");
+                rotation.state.rotating = true;
+                rotation.state.angular_velocity_rad_per_s = start.angular_velocity_rad_per_s;
+                rotation.state.frame = frame;
+                value(&rotation.state)
+            }
+            RotationRequest::Stop(_) => {
+                if same {
+                    let rotation = self.rotation.as_mut().expect("matching rotation");
+                    rotation.state.rotating = false;
+                    value(&rotation.state)
+                } else {
+                    value(Rotation::new(target, instance, frame).state)
+                }
+            }
+        }
+    }
+
+    pub(super) fn advance_rotation(&mut self, frame: u64) -> Result<(), ErrorObject> {
+        let Some(rotation) = &self.rotation else {
+            return Ok(());
+        };
+        if !rotation.state.rotating || frame <= rotation.state.frame {
+            return Ok(());
+        }
+        let target = mesh::RotationTarget {
+            runtime_id: rotation.state.runtime_id.clone(),
+            scene_id: rotation.state.scene_id.clone(),
+            instance_id: rotation.state.instance_id.clone(),
+        };
+        // Never overwrite an external instance edit or a released/recreated scene.
+        if self.rotation_instance(&target).as_ref().ok() != Some(&rotation.last) {
+            self.rotation
+                .as_mut()
+                .expect("active rotation")
+                .state
+                .rotating = false;
+            return Ok(());
+        }
+        let (angle, instance) = rotation.pose(frame, self.config.output_rate)?;
+        self.mutate(w::SceneMutate {
+            runtime_id: target.runtime_id,
+            scene_id: target.scene_id.clone(),
+            expected_revision: self.scene(&target.scene_id)?.snapshot.scene_revision,
+            operations: vec![w::SceneOperation::InstancePut {
+                instance: instance.clone(),
+            }],
+        })?;
+        let rotation = self.rotation.as_mut().expect("active rotation");
+        rotation.last = instance;
+        rotation.state.angle_rad = angle;
+        rotation.state.frame = frame;
+        Ok(())
     }
 
     fn runtime(&self, id: &w::Id) -> Result<(), ErrorObject> {
@@ -345,6 +476,13 @@ impl SceneAdapter {
                     let effect = self.next_effect()?;
                     self.scenes.remove(&target.scene_id);
                     self.sequence = effect.sequence;
+                    if self
+                        .rotation
+                        .as_ref()
+                        .is_some_and(|rotation| rotation.state.scene_id == target.scene_id)
+                    {
+                        self.rotation = None;
+                    }
                 }
                 value(w::ReleaseResult { released })
             }

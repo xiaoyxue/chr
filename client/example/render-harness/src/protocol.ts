@@ -36,6 +36,11 @@ export type RpcResponse =
   | { jsonrpc: typeof JSONRPC_VERSION; id: Id; error: RpcErrorObject };
 
 export const Methods = {
+  mesh: {
+    startRotation: "mesh.start_rotation",
+    stopRotation: "mesh.stop_rotation",
+    getRotation: "mesh.get_rotation",
+  },
   triangle: {
     startRotation: "triangle.start_rotation",
     stopRotation: "triangle.stop_rotation",
@@ -63,6 +68,19 @@ export interface TriangleState {
   /** Index of the first frame rendered with this state. */
   frame: number;
 }
+
+export interface MeshRotationTarget {
+  runtime_id: string;
+  scene_id: string;
+  instance_id: string;
+}
+
+export interface MeshStartRotation extends MeshRotationTarget {
+  /** Model-local XY rotation, radians per second of SDI output-slot time. */
+  angular_velocity_rad_per_s: number;
+}
+
+export interface MeshRotationState extends MeshRotationTarget, TriangleState {}
 
 /** Same shape as the browser's RTCSessionDescriptionInit. */
 export interface SessionDescription {

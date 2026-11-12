@@ -9,6 +9,8 @@
 //! intended path hands the GPU's SDI frame to a hardware encoder such as NVENC.
 
 pub mod encoder;
+#[cfg(all(unix, feature = "gstreamer-media"))]
+pub mod srt;
 pub mod webrtc;
 
 use std::{
