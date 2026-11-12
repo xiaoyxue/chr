@@ -318,6 +318,19 @@ high-sample reference of the shared GGX/Burley material, and checks sidedness,
 sphere interiors, fixed-radiance/fixed-power size changes and continuity along
 moving-emitter and view trajectories.
 
+## Lens distortion (`radial-poly-native-px-v1`)
+
+`distortion::CameraModel` selects the ideal pinhole or a distorted native image:
+`RadialDistortion` (explicit centre and scale in native pixels, `k1..k3`, optional
+validated support rectangle) plus an optional per-frame `FrameWarp` homography from
+reference native pixels to frame SNC. `LensDistortion` offers CPU forward/inverse
+mapping with explicit failures; `FrameCompositor::prepare_model` renders ideal CG
+over a guard band and inverse-warps it on the GPU, leaving footage layers unwarped.
+See `docs/renderer-design.md` section 3.3. GPU checks (`distortion_gpu`) cover
+zero-coefficient identity, sub-0.3 px marker alignment for both models, unwarped
+footage with no CG at non-invertible pixels, and guard-band budgeting. No wire
+or calibration-storage fields are added.
+
 ## Native image composition
 
 `composition::FrameCompositor` records renderer-only image/CG composition into a
