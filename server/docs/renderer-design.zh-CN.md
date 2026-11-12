@@ -786,6 +786,14 @@ cube 接缝、时间相机轨迹、LTC、大气或天空。仅可见性圆盘积
 传输，点光参考是朝向场景的圆盘而非球面辐射积分。
 更广泛的方法选型仍由未关闭的 issue #35 跟踪。
 
+#### 有界天空可见性评估
+
+[天空可见性评估](sky-visibility-evaluation.md) 记录主要公开来源，以及独立 CPU
+合成比较：有界方向积分、角向 probe 可见性及其局限。它不选定或批准生产方法，
+不测量光栅天空候选方法的 GPU 成本，也不改变现有无遮挡 IBL 路径。
+后续深度感知 probe 实验及其暂定预算仍须所有者同意；天空实现 #29 的依赖保持不变，
+大气 #28 继续暂停。
+
 主要参考：
 
 - [Heitz 等，Real-Time Polygonal-Light Shading with Linearly Transformed Cosines（2016）](https://eheitzresearch.wordpress.com/415-2/)。
