@@ -9,6 +9,7 @@
 | `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/` and `common/` | Rust |
 | `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |
+| `common/shm/` | `chr-shm`: shared-memory frame rings between processes | Rust |
 | `algorithm/src/` | Scene reconstruction algorithms | To be decided |
 | `flake.nix`, `flake.lock` | Shared, pinned Linux development environment and renderer build/check entry points | Nix |
 | `docs/` | Repository-wide documentation, including `docs/development.md`; server contracts live in `server/docs/` | |

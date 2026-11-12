@@ -3,7 +3,7 @@
 **Status:** `proposed` — implementation plan for the `confirmed`
 [Live process architecture](live-process-architecture.md). Field names and
 defaults below are the intended first version; each step's pull request updates
-this document if they change. Step 1 (#99) is `implemented`; later steps are not.
+this document if they change. Step 1 (#99) and the `chr-shm` ring of step 2 are `implemented`; the rest is not.
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
 ring layout, supervision and clean feed, the monitor process, and acceptance
@@ -16,7 +16,8 @@ tests. Physical SDI (#80) and tracking results (#60) are excluded.
 ## Delivery order
 
 Each step is one pull request that keeps the workspace green and the existing
-demos runnable.
+demos runnable. Step 2 lands as two: `chr-shm` first, because the worker also
+needs it, then the program tap, `chr-monitor` and the harness.
 
 | Step | Issue | Change |
 | --- | --- | --- |
@@ -66,6 +67,9 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
 - Read: load `sequence` (acquire); if odd, the slot is busy. Copy, acquire
   fence, reload `sequence`; the copy is valid only if both loads match.
 - Writers never wait for readers. Torn reads are detected and discarded.
+- The writer stages the file and renames it into place, so a reader never maps
+  a partial header. `push` writes slots round-robin; readers of such rings (the
+  program tap) find the newest slot from `write_count`.
 - Linux first. A Windows file-mapping backend is required before Windows
   acceptance of steps 2 and 4.
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["server/renderer", "server/viewer", "server/runtime", "common"]
+members = ["server/renderer", "server/viewer", "server/runtime", "common", "common/shm"]
 resolver = "3"
 
 [workspace.package]

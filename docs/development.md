@@ -30,6 +30,7 @@ server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
 common/                   chr-common: JSON-RPC 2.0 messages and local IPC (Rust)
+common/shm/               chr-shm: shared-memory frame rings; the only crate with unsafe
 algorithm/src/            Scene reconstruction algorithms (stack undecided)
 docs/                     Repository-wide documentation
 reference/                Private, local-only reference materials
