@@ -371,7 +371,8 @@ fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
 
 fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
     if light.pcss.w==0.0 || light.shadow_params.x<0.0 {return 1.0;}
-    if light.position_kind.w==1.0 {
+    // Point and area lights share one centre cubemap.
+    if light.position_kind.w==1.0 || light.position_kind.w==3.0 {
         return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
     }
     let count=u32(light.pcss_samples.w);
@@ -600,7 +601,10 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     for (var i=0u;i<camera.options.y;i++) {
         let light=lights[i];
         if light.position_kind.w>2.5 {
-            radiance+=area_lighting(light,surface.position,n,v,base.rgb,metal,rough);
+            let shaded=area_lighting(light,surface.position,n,v,base.rgb,metal,rough);
+            if any(shaded>vec3(0.0)) {
+                radiance+=shaded*shadow_visibility(light,surface.position,shadow_normal,px,py);
+            }
             continue;
         }
         var l=-light.direction_inner.xyz;

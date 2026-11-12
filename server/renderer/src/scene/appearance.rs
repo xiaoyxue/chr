@@ -98,7 +98,8 @@ pub enum Light {
     },
     /// Experimental uniform, isotropic finite emitter shaded with the owner-approved
     /// `ltc-plausible-v1` approximation profile (see `server/docs/area-light-evaluation.md`).
-    /// Unoccluded: shadows and other scene visibility are not applied.
+    /// Shadows use one centre cubemap with PCSS sized by `AreaShape::equivalent_radius`:
+    /// an owner-approved approximation whose penumbra ignores the emitter's outline.
     Area {
         /// Emitter centre in world metres.
         position: [f64; 3],
@@ -111,6 +112,10 @@ pub enum Light {
         radiance: [f32; 3],
         /// Planar emitters also emit from their back face. Spheres emit outward only.
         two_sided: bool,
+        /// None inherits the frame default; Some(Off) disables only this light's shadows.
+        /// Casters inside a sphere emitter are ignored, so an emissive mesh representing it
+        /// casts no shadow; a planar emitter's mesh must lie in or behind its plane.
+        shadow_mode: Option<ShadowMode>,
     },
 }
 
@@ -155,6 +160,18 @@ impl AreaShape {
         flux.map(|f| (f64::from(f) / (std::f64::consts::PI * self.area() * sides)) as f32)
     }
 
+    /// PCSS source radius in metres: the radius of a disk with the same area for
+    /// rectangles, otherwise the shape radius.
+    pub fn equivalent_radius(self) -> f32 {
+        match self {
+            Self::Rectangle {
+                half_width,
+                half_height,
+            } => (4.0 * half_width * half_height / std::f32::consts::PI).sqrt(),
+            Self::Disk { radius } | Self::Sphere { radius } => radius,
+        }
+    }
+
     fn valid(self) -> bool {
         let positive = |v: f32| v.is_finite() && v > 0.0;
         match self {
@@ -172,8 +189,8 @@ impl Light {
         match self {
             Self::Directional { shadow_mode, .. }
             | Self::Point { shadow_mode, .. }
-            | Self::Spot { shadow_mode, .. } => shadow_mode.unwrap_or(default),
-            Self::Area { .. } => ShadowMode::Off,
+            | Self::Spot { shadow_mode, .. }
+            | Self::Area { shadow_mode, .. } => shadow_mode.unwrap_or(default),
         }
     }
 
@@ -225,6 +242,7 @@ impl Light {
                 shape,
                 radiance,
                 two_sided,
+                ..
             } => {
                 position.into_iter().all(f64::is_finite)
                     && valid_direction(normal)

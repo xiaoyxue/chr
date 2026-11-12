@@ -317,6 +317,7 @@ impl Area {
             shape: self.shape,
             radiance: self.radiance,
             two_sided: self.two_sided,
+            shadow_mode: None,
         }
     }
 }

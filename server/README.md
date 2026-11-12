@@ -288,8 +288,20 @@ vertices or `AREA_CURVE_SEGMENTS` (64) curved/silhouette vertices clipped to the
 receiver hemisphere. Accuracy is the owner-approved approximation profile in
 `docs/area-light-evaluation.md` (per emitter `<= 0.02*Le + 30%` of the reference
 inside its domain), not reference accuracy; outside that domain the same
-approximation is unqualified. Area lights cast no shadows yet (#27) and draw no
-visible emitter; add an emissive mesh when the emitter itself should appear.
+approximation is unqualified. Area lights draw no visible emitter; add an emissive
+mesh when the emitter itself should appear (inside a sphere emitter, or in or behind
+a planar emitter's plane, so it casts no shadow on its own light).
+
+Area-light shadows follow the per-light `shadow_mode` like other lights and use the
+owner-approved `area-shadow-pcss-v1` approximation: one centre cubemap filtered by
+PCSS with `AreaShape::equivalent_radius` as the source radius, multiplied with the
+unoccluded LTC result. Penumbrae ignore the emitter outline and glossy BRDF
+weighting. The default 64-texel PCSS caps clip metre-scale penumbrae; scenes with
+shadowed area lights should use `resolution: 1024`, `max_search_radius` and
+`max_filter_radius` of 512 texels and 16 + 16 PCSS samples (24 MiB per area light).
+`cargo test --locked --release -p chr-renderer --test area_shadow_gpu -- --ignored --nocapture`
+enforces the approved error limits against a ray-cast reference, checks cache
+invalidation and emitter stand-ins, and prints 1080p frame costs.
 
 The table is redistributed under `server/renderer/src/ltc/LICENSE.ltc`, which
 requires retaining its notice **and citing** Heitz, Dupuy, Hill and Neubelt,

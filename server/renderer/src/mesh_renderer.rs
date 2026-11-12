@@ -1148,6 +1148,7 @@ impl MeshRenderer {
                 shape,
                 radiance,
                 two_sided,
+                ..
             } => {
                 let n = normalize(normal).map(f64::from);
                 let t = normalize(tangent).map(f64::from);
@@ -1188,7 +1189,7 @@ impl MeshRenderer {
                     Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
                         source_radius
                     }
-                    Light::Area { .. } => 0.0,
+                    Light::Area { shape, .. } => shape.equivalent_radius(),
                 },
                 0.0,
                 0.0,
