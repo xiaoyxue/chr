@@ -1,0 +1,7 @@
+{
+  "camera": "pitch-camera.json",
+  "models": [
+    {"path": null, "model": [[4, 0, 0, -12], [0, 3, 0, 0], [0, 0, 4, 5], [0, 0, 0, 1]]},
+    {"path": null, "model": [[-3, 0, 0, 12], [0, 0, -3, 0], [0, 6, 0, 7], [0, 0, 0, 1]], "height_m": 10, "anchor_pixel": [400, 230]}
+  ]
+}

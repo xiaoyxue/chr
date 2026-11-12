@@ -26,9 +26,9 @@ and error codes synchronized with `common/src/scene_frame/`.
 
 Start the server with `--synthetic-program --size 640x360 --fps 50` to opt into
 the [named synthetic integration profile](../../../server/docs/program-output.md).
-Enter its printed runtime and scene IDs in **Synthetic program scene**, then
+Enter its printed runtime and scene IDs in **Local program scene**, then
 **Load / reconcile**. The panel supports zoom, dolly, orbit around the synthetic
-world origin, reset to the loaded camera, and atomic sun/shadow edits. These are
+world origin, local yaw/pitch/roll, reset to the loaded camera, and atomic sun/shadow edits. These are
 ordinary WebSocket JSON-RPC `scene.get`/`scene.mutate` calls shared with NativeSocket
 clients, not renderer bypasses. The video stays the decoded SDI monitor.
 
@@ -61,6 +61,30 @@ launcher exits silently, pass `--chrome` with the actual installed Chrome binary
 The legacy `verify` rotation-content check is for the default triangle only;
 do not interpret it as synthetic scene acceptance. Unit geometry tests are not
 browser/WebRTC evidence.
+
+## Owner-local pitch demo
+
+The separate [pitch-demo-v1 guide](../../../server/docs/pitch-demo.md) describes
+`--pitch-demo <local-manifest.json> --pitch-controls <new-local-controls.json>`.
+Load that native-written controls file in the panel before Load / reconcile.
+It supplies opaque model IDs and the renderer-derived editable pose; no GLB path
+is sent through RPC. The original source-frame identity, Ti/C, native extent and
+dimension status remain local and immutable, including after reconnects.
+
+The pitch panel adds grounded model selection/scale/yaw/mirror, authored tower
+heights, independent sun, four-point/four-spot rig comparisons and
+radius/cone/target/emission controls. NativeSocket uses the same helpers:
+
+```sh
+npm run scene -- --socket /path/to/control.sock --pitch-controls /path/to/controls.json --camera reset --rig spots+sun --shadow pcss --summary
+npm run verify:browser -- --url 'http://127.0.0.1:5173/?ws=ws://127.0.0.1:8787' --pitch-controls /path/to/controls.json --fps 25
+```
+
+The real Chrome check uploads metadata through the local file picker, clicks the
+actual panel and inspects decoded SDI video. Keep metadata, full CLI snapshots
+and screenshots private. `--summary` emits only revision/effect/count aggregates.
+No measured pose/calibration, source-video decoding or production-policy approval
+is implied.
 
 ## Run
 

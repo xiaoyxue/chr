@@ -6,7 +6,8 @@ import {
 
 type PoseCamera = Extract<RenderPinhole, { kind: "intrinsics_pose" }>;
 export type CameraEdit = "zoom-in" | "zoom-out" | "dolly-in" | "dolly-out" |
-  "orbit-left" | "orbit-right" | "orbit-up" | "orbit-down";
+  "orbit-left" | "orbit-right" | "orbit-up" | "orbit-down" |
+  "yaw-left" | "yaw-right" | "pitch-up" | "pitch-down" | "roll-left" | "roll-right";
 
 /** Forward row-major pose; local +Z looks forward, world up is -Z. */
 export function editCamera(camera: RenderPinhole, edit: CameraEdit): PoseCamera {
@@ -25,9 +26,10 @@ export function editCamera(camera: RenderPinhole, edit: CameraEdit): PoseCamera 
     // Orbit the synthetic scene's origin, rotating centre and basis together.
     // This also works at the initial top-down view without a look-at pole singularity.
     const horizontal = edit === "orbit-left" || edit === "orbit-right";
+    const axisIndex = edit.startsWith("roll") ? 2 : edit.startsWith("yaw") ? 1 : 0;
     const axis: RenderVec3 = horizontal ? [0, 0, -1] :
-      [camera.camera_to_world[0][0], camera.camera_to_world[1][0], camera.camera_to_world[2][0]];
-    const angle = (edit === "orbit-left" || edit === "orbit-up" ? 1 : -1) * Math.PI / 36;
+      [camera.camera_to_world[0][axisIndex]!, camera.camera_to_world[1][axisIndex]!, camera.camera_to_world[2][axisIndex]!];
+    const angle = (edit.endsWith("left") || edit.endsWith("up") ? 1 : -1) * Math.PI / 36;
     const [x, y, z] = axis;
     const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
     const rotation = [
@@ -35,7 +37,7 @@ export function editCamera(camera: RenderPinhole, edit: CameraEdit): PoseCamera 
       [t*x*y+s*z, t*y*y+c, t*y*z-s*x],
       [t*x*z-s*y, t*y*z+s*x, t*z*z+c],
     ];
-    for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 3; row++) for (let col = 0; col < (edit.startsWith("orbit") ? 4 : 3); col++) {
       next.camera_to_world[row]![col] = rotation[row]!.reduce(
         (sum, coefficient, index) => sum + coefficient * camera.camera_to_world[index]![col]!, 0);
     }
