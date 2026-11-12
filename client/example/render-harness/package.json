@@ -12,6 +12,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "verify": "node src/harness/verify.ts",
+    "scene": "node src/harness/scene.ts",
     "test": "node --test src/node/*.test.ts",
     "verify:browser": "node src/harness/browser.ts"
   },

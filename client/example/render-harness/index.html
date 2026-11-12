@@ -182,6 +182,23 @@
       </div>
 
       <aside>
+        <output id="program-result" hidden></output>
+        <details class="panel" id="program-scene">
+          <summary>Synthetic program scene (opt-in)</summary>
+          <p>Enter IDs printed by <code>--synthetic-program</code>. Video remains the SDI monitor.</p>
+          <div class="row"><input id="runtime-id" placeholder="runtime_id" aria-label="Runtime ID" /></div>
+          <div class="row"><input id="scene-id" placeholder="scene_id" aria-label="Scene ID" /><button id="scene-load">Load / reconcile</button></div>
+          <p id="scene-status">Not loaded</p>
+          <fieldset disabled>
+            <legend>Camera and lighting</legend>
+            <div class="row"><button data-camera="zoom-in">Zoom +</button><button data-camera="zoom-out">Zoom −</button></div>
+            <div class="row"><button data-camera="dolly-in">Dolly in</button><button data-camera="dolly-out">Dolly out</button></div>
+            <div class="row"><button data-camera="orbit-left">Orbit ←</button><button data-camera="orbit-right">Orbit →</button><button data-camera="orbit-up">Orbit ↑</button><button data-camera="orbit-down">Orbit ↓</button></div>
+            <div class="row"><button data-camera="reset">Reset loaded camera</button></div>
+            <div class="row"><label>Sun <input id="sun-gain" type="number" min="0" max="20" step="0.5" value="3" /></label></div>
+            <div class="row"><label>Shadows <select id="shadow-mode"><option>off</option><option>hard</option><option selected>pcf</option><option>pcss</option></select></label><button id="scene-lighting">Apply atomically</button></div>
+          </fieldset>
+        </details>
         <section class="panel">
           <h2>Server</h2>
           <div class="row">

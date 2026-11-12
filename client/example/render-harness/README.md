@@ -22,6 +22,46 @@ payload validation, reexported as `SceneFrame`. It does not enable those methods
 in the triangle runtime. Keep its required-nullable fields, method/result maps
 and error codes synchronized with `common/src/scene_frame/`.
 
+## Synthetic scene controls
+
+Start the server with `--synthetic-program --size 640x360 --fps 50` to opt into
+the [named synthetic integration profile](../../../server/docs/program-output.md).
+Enter its printed runtime and scene IDs in **Synthetic program scene**, then
+**Load / reconcile**. The panel supports zoom, dolly, orbit around the synthetic
+world origin, reset to the loaded camera, and atomic sun/shadow edits. These are
+ordinary WebSocket JSON-RPC `scene.get`/`scene.mutate` calls shared with NativeSocket
+clients, not renderer bypasses. The video stays the decoded SDI monitor.
+
+NativeSocket CLI/agent example (omit edit flags to query; `--ws URL` selects the
+same methods over WebSocket):
+
+```sh
+npm run scene -- --socket /path/to/render.sock --runtime PRINTED_RUNTIME --scene PRINTED_SCENE --camera orbit-up --sun 3 --shadow pcf
+```
+
+Edits are serialized and query the current revision. An uncertain reply triggers
+reconciliation and requires an explicit reload; it is never blindly retried.
+Camera controls require a manual `intrinsics_pose` camera. World up is -Z and poses
+are forward row-major matrices with no half-pixel offset. Reset does not create a
+new timeline or change input frame identity.
+
+For a real-browser control and decoded-video self-test, while this opt-in server
+and the harness are running:
+
+```sh
+npm run verify:browser -- --url 'http://127.0.0.1:5173/?program=1&runtime=PRINTED_RUNTIME&scene=PRINTED_SCENE'
+```
+
+This clicks every camera action and the lighting/shadow panel, verifies revision
+progress and camera reset, and measures changed pixels in decoded monitor video.
+On deep Linux worktrees, Chrome may exceed Unix socket path limits with an absolute
+profile directory. Create root `output/render-harness/chrome`, then use
+`TMPDIR=../../../output/render-harness/chrome` from this package. If a distribution
+launcher exits silently, pass `--chrome` with the actual installed Chrome binary.
+The legacy `verify` rotation-content check is for the default triangle only;
+do not interpret it as synthetic scene acceptance. Unit geometry tests are not
+browser/WebRTC evidence.
+
 ## Run
 
 Requires Node.js 24 or newer, which runs the `.ts` scripts directly.

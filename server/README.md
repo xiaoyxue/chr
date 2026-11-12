@@ -12,19 +12,21 @@ repository root; its server crates live here:
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers |
 
-The current slice draws an RGB triangle using the same pipeline in a native
-window, an offscreen hardware test, and the render server. No live scene-output,
-video input, or calibration pipeline is included yet.
+The default draws an RGB triangle using the same pipeline in a native window,
+an offscreen hardware test, and the render server. The explicit
+[`--synthetic-program` opt-in](docs/program-output.md) connects retained scene/image
+composition to the existing simulated SDI and WebRTC monitor. Physical video
+input, output cards and calibration are not included.
 
 The runtime library now provides an explicitly installed
 [retained scene control adapter](docs/retained-control.md), using the shared
 scene/frame DTOs and the same handler over both IPC transports. Its synthetic
-admission-port tests do not replace the daemon's triangle or establish live GPU,
-frame-resource, SDI or monitor integration.
+admission-port tests remain CPU-only; the separate program-output hardware test
+exercises the opt-in GPU/resource/SDI/monitor integration.
 
 The runtime library also exposes an isolated, bounded
-[native synthetic frame-resource owner](docs/frame-resources.md). It is not yet
-wired into control, scene scheduling, or physical capture/output.
+[native synthetic frame-resource owner](docs/frame-resources.md), connected through
+the submission scheduler in that opt-in. It does not implement physical capture/output.
 
 The Linux renderer roadmap is described in
 [Simplified renderer scope and design](docs/renderer-design.md)

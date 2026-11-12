@@ -23,7 +23,8 @@ pub struct CameraContext {
 }
 
 /// Startup registration only; moving this into the owner freezes the registry.
-/// Model bytes already passed through import_glb (including its single basis conversion).
+/// Models are imported GLB assets (already basis-converted) or trusted synthetic
+/// meshes constructed directly in native -Z-up coordinates.
 #[derive(Default)]
 pub struct Registrations {
     models: HashMap<w::Id, GlbAsset>,

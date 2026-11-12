@@ -24,6 +24,8 @@ pub struct EncodedFrame {
     /// True for IDR frames, which carry SPS/PPS and start a decodable sequence.
     pub keyframe: bool,
     pub data: Bytes,
+    /// Native sidecar only; never a new public wire envelope.
+    pub program: Option<crate::sdi::ProgramAssociation>,
 }
 
 /// Bounded fan-out from the monitor encoder to viewers. A viewer that falls behind

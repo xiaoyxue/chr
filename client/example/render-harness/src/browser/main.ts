@@ -5,6 +5,8 @@
 
 import type { SdiStatus, TriangleState } from "../protocol.ts";
 import { RpcClient, connectWebSocket } from "../rpc.ts";
+import { installScenePanel } from "./scene-panel.ts";
+import { programSelfTest } from "./program-self-test.ts";
 
 const params = new URLSearchParams(location.search);
 const $ = <T extends HTMLElement>(selector: string) => {
@@ -24,6 +26,7 @@ const video = $<HTMLVideoElement>("video");
 const overlay = $("#overlay");
 
 let rpc: RpcClient | null = null;
+installScenePanel(() => rpc);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
 function log(message: string): void {
@@ -254,6 +257,14 @@ if (params.get("auto") === "1") {
     await command((client) => client.startRotation({ angular_velocity_rad_per_s: speed() }), "start rotation");
     const seconds = Number(params.get("seconds") ?? 4);
     await new Promise((done) => setTimeout(done, seconds * 1000));
+    if (params.get("program") === "1") {
+      try {
+        if (rpc === null) throw new Error("No RPC connection");
+        $("#program-result").textContent = JSON.stringify(await programSelfTest(rpc, video));
+      } catch (error) {
+        $("#program-result").textContent = JSON.stringify({ passed: false, error: String(error) });
+      }
+    }
     await poll();
     const result = $("#result");
     result.textContent = JSON.stringify([stats]);

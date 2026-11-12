@@ -10,8 +10,9 @@ use crate::{
 ///
 /// Each 4-byte group is `Cb, Y0, Cr, Y1` for two horizontally adjacent pixels; rows are
 /// top-down and `width * 2` bytes long. Colors use BT.709 coefficients and 8-bit limited
-/// range (Y 16-235, Cb/Cr 16-240), computed from the stored sRGB-encoded values. Chroma
-/// is the mean of each pixel pair.
+/// range (Y 16-235, Cb/Cr 16-240). Chroma is the mean of each pixel pair.
+/// `new` preserves the legacy triangle's stored sRGB approximation;
+/// `from_bt709_texture` accepts correctly BT.709-encoded program RGB.
 pub struct UyvyConverter {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
@@ -26,7 +27,36 @@ impl UyvyConverter {
 
     /// Binds `source`; convert only frames rendered into that same target.
     pub fn new(gpu: &Gpu, source: &OffscreenTarget) -> Result<Self, BoxError> {
-        let extent = source.extent();
+        Self::from_view(gpu, source.encoded_view(), source.extent())
+    }
+
+    /// Converts caller-owned BT.709-encoded RGB, without another transfer operation.
+    /// The texture must remain alive and immutable until `convert` completes.
+    pub fn from_bt709_texture(gpu: &Gpu, source: &wgpu::Texture) -> Result<Self, BoxError> {
+        if source.format() != wgpu::TextureFormat::Rgba8Unorm
+            || source.dimension() != wgpu::TextureDimension::D2
+            || source.depth_or_array_layers() != 1
+            || source.sample_count() != 1
+            || !source
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+        {
+            return Err(
+                "BT.709 conversion requires a sampleable single-sample RGBA8 texture".into(),
+            );
+        }
+        Self::from_view(
+            gpu,
+            &source.create_view(&Default::default()),
+            crate::coordinates::ImageExtent::new(source.width(), source.height())?,
+        )
+    }
+
+    fn from_view(
+        gpu: &Gpu,
+        source: &wgpu::TextureView,
+        extent: crate::coordinates::ImageExtent,
+    ) -> Result<Self, BoxError> {
         if !extent.width().is_multiple_of(2) {
             return Err("UYVY 4:2:2 needs an even width".into());
         }
@@ -64,7 +94,7 @@ impl UyvyConverter {
             layout: &layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(source.encoded_view()),
+                resource: wgpu::BindingResource::TextureView(source),
             }],
         });
         let pipeline_layout = gpu

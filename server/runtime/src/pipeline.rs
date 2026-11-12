@@ -61,6 +61,26 @@ pub struct RenderWorker {
 impl RenderWorker {
     /// Starts the worker and waits until the GPU, renderer, and encoder are ready.
     pub fn spawn(config: RenderConfig, sdi: SdiInput) -> Result<Self, BoxError> {
+        Self::spawn_inner(config, sdi, None)
+    }
+
+    pub fn spawn_program(
+        config: RenderConfig,
+        sdi: SdiInput,
+        profile: chr_common::scene_frame::Configuration,
+        scheduler: crate::frame_submissions::FrameSubmissions,
+    ) -> Result<Self, BoxError> {
+        Self::spawn_inner(config, sdi, Some((profile, scheduler)))
+    }
+
+    fn spawn_inner(
+        config: RenderConfig,
+        sdi: SdiInput,
+        program: Option<(
+            chr_common::scene_frame::Configuration,
+            crate::frame_submissions::FrameSubmissions,
+        )>,
+    ) -> Result<Self, BoxError> {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -68,7 +88,7 @@ impl RenderWorker {
         let thread = std::thread::Builder::new()
             .name("chr-render".into())
             .spawn(move || {
-                let mut worker = match Worker::new(config, sdi, receiver, thread_stop) {
+                let mut worker = match Worker::new(config, sdi, receiver, thread_stop, program) {
                     Ok(worker) => {
                         let _ = ready_tx.send(Ok(()));
                         worker
@@ -115,6 +135,10 @@ struct Worker {
     stop: Arc<AtomicBool>,
     scene: Scene,
     fps: u32,
+    program: Option<(
+        crate::program::ProgramRenderer,
+        crate::frame_submissions::FrameSubmissions,
+    )>,
 }
 
 impl Worker {
@@ -123,6 +147,10 @@ impl Worker {
         sdi: SdiInput,
         commands: mpsc::Receiver<Command>,
         stop: Arc<AtomicBool>,
+        program: Option<(
+            chr_common::scene_frame::Configuration,
+            crate::frame_submissions::FrameSubmissions,
+        )>,
     ) -> Result<Self, BoxError> {
         let instance = Gpu::instance();
         let gpu =
@@ -131,6 +159,12 @@ impl Worker {
         let renderer = TriangleRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
         renderer.resize(&gpu.queue, config.extent);
         let uyvy = UyvyConverter::new(&gpu, &target)?;
+        let program = program
+            .map(|(profile, scheduler)| {
+                crate::program::ProgramRenderer::new(&gpu, &profile)
+                    .map(|renderer| (renderer, scheduler))
+            })
+            .transpose()?;
         Ok(Self {
             gpu,
             target,
@@ -141,6 +175,7 @@ impl Worker {
             stop,
             scene: Scene::new(config.fps),
             fps: config.fps,
+            program,
         })
     }
 
@@ -190,6 +225,9 @@ impl Worker {
     }
 
     fn render_frame(&mut self) -> Result<(), BoxError> {
+        if let Some((renderer, scheduler)) = &mut self.program {
+            return renderer.drive(&self.gpu, scheduler, &mut self.sdi);
+        }
         self.renderer
             .set_rotation(&self.gpu.queue, self.scene.angle_rad());
         let renderer = &self.renderer;
@@ -200,6 +238,7 @@ impl Worker {
         self.sdi.submit(SdiFrame {
             source_frame: self.scene.frame(),
             uyvy: Arc::new(uyvy),
+            program: None,
         });
         Ok(())
     }
