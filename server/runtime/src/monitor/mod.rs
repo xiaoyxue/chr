@@ -34,6 +34,47 @@ pub struct Monitor {
 }
 
 impl Monitor {
+    #[cfg(all(unix, feature = "gstreamer-media"))]
+    pub fn spawn_gstreamer(
+        mode: VideoMode,
+        tap: Receiver<SdiSlot>,
+        feed: Arc<VideoFeed>,
+    ) -> Result<Self, BoxError> {
+        let mut encoder = crate::media::Encoder::new(mode)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("chr-gst-monitor".into())
+            .spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    let slot = match tap.recv_timeout(POLL) {
+                        Ok(slot) => slot,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    };
+                    if !feed.has_viewers() {
+                        continue;
+                    }
+                    match encoder.encode(slot.slot, &slot.uyvy, feed.take_keyframe_request()) {
+                        Ok((data, keyframe)) => feed.publish(EncodedFrame {
+                            frame: slot.slot,
+                            keyframe,
+                            data: Bytes::from(data),
+                            program: slot.association,
+                        }),
+                        Err(error) => {
+                            log::error!("GStreamer monitor stopped: {error}");
+                            return;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
     /// Encodes slots from `tap` into `feed` while anyone watches.
     pub fn spawn(
         mode: VideoMode,

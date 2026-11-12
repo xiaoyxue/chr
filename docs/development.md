@@ -65,6 +65,12 @@ The root development shell provides:
 | Build and maintenance | Git, pkg-config, and nixfmt |
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
 
+The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
+GStreamer core/base/ugly plugins, and Python GObject bindings. It runs the video-only
+software input helper under `server/scripts/` and builds the opt-in
+`chr-server` `gstreamer-media` feature; it does not install SDI drivers,
+provide a physical SDI device, or change the renderer/control protocol.
+
 Use Nix for Linux development dependencies, not global npm tool installation.
 Node.js and TypeScript come from the existing pinned nixpkgs input. Keep
 `flake.lock` and `Cargo.lock` tracked, and do not upgrade their revisions
@@ -111,6 +117,7 @@ viewer; no client package is advertised.
 | Check | Coverage |
 | --- | --- |
 | `client-toolchain` | Node.js, npm, and TypeScript version commands execute in a Nix build sandbox |
+| `media-source` | Synthetic MP4 decoding into a GStreamer appsink, pixel integrity, fractional-rate loop timing and short-input failure |
 | `fmt` | Rust workspace formatting |
 | `clippy` | Rust workspace and all targets, with warnings treated as errors |
 | `tests` | Rust workspace CPU tests; hardware GPU tests remain explicitly ignored |

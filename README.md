@@ -44,6 +44,11 @@ They also retain the renderer package and checks. Tool versions come from the
 existing locked inputs; the Cargo workspace and Rust toolchain file are at the
 repository root. No client framework or algorithm stack is selected.
 
+For the video-only FFmpeg-to-GStreamer software input helper and optional
+`chr-server --software-video` simulation (`--features gstreamer-media`), use
+`nix develop .#media`; see `server/README.md`. This optional shell adds media
+tools without changing the default renderer environment or providing SDI hardware.
+
 From the repository root:
 
 ```sh

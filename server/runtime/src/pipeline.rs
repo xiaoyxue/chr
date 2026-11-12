@@ -61,7 +61,7 @@ pub struct RenderWorker {
 impl RenderWorker {
     /// Starts the worker and waits until the GPU, renderer, and encoder are ready.
     pub fn spawn(config: RenderConfig, sdi: SdiInput) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, None)
+        Self::spawn_inner(config, sdi, None, None)
     }
 
     pub fn spawn_program(
@@ -69,8 +69,9 @@ impl RenderWorker {
         sdi: SdiInput,
         profile: chr_common::scene_frame::Configuration,
         scheduler: crate::frame_submissions::FrameSubmissions,
+        lens: Option<Arc<crate::program::video::VideoLens>>,
     ) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, Some((profile, scheduler)))
+        Self::spawn_inner(config, sdi, Some((profile, scheduler)), lens)
     }
 
     fn spawn_inner(
@@ -80,6 +81,7 @@ impl RenderWorker {
             chr_common::scene_frame::Configuration,
             crate::frame_submissions::FrameSubmissions,
         )>,
+        lens: Option<Arc<crate::program::video::VideoLens>>,
     ) -> Result<Self, BoxError> {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
@@ -88,17 +90,18 @@ impl RenderWorker {
         let thread = std::thread::Builder::new()
             .name("chr-render".into())
             .spawn(move || {
-                let mut worker = match Worker::new(config, sdi, receiver, thread_stop, program) {
-                    Ok(worker) => {
-                        let _ = ready_tx.send(Ok(()));
-                        worker
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        let _ = ready_tx.send(Err(message.clone()));
-                        return Err(message);
-                    }
-                };
+                let mut worker =
+                    match Worker::new(config, sdi, receiver, thread_stop, program, lens) {
+                        Ok(worker) => {
+                            let _ = ready_tx.send(Ok(()));
+                            worker
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            let _ = ready_tx.send(Err(message.clone()));
+                            return Err(message);
+                        }
+                    };
                 worker.run().map_err(|error| error.to_string())
             })?;
         match ready_rx.recv() {
@@ -151,6 +154,7 @@ impl Worker {
             chr_common::scene_frame::Configuration,
             crate::frame_submissions::FrameSubmissions,
         )>,
+        lens: Option<Arc<crate::program::video::VideoLens>>,
     ) -> Result<Self, BoxError> {
         let instance = Gpu::instance();
         let gpu =
@@ -161,8 +165,10 @@ impl Worker {
         let uyvy = UyvyConverter::new(&gpu, &target)?;
         let program = program
             .map(|(profile, scheduler)| {
-                crate::program::ProgramRenderer::new(&gpu, &profile)
-                    .map(|renderer| (renderer, scheduler))
+                crate::program::ProgramRenderer::new(&gpu, &profile).map(|mut renderer| {
+                    renderer.set_video_lens(lens);
+                    (renderer, scheduler)
+                })
             })
             .transpose()?;
         Ok(Self {

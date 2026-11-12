@@ -475,6 +475,7 @@ fn factors(v: &w::PbrFactors) -> Result<scene::PbrMaterial, ErrorObject> {
         normal_scale: f(v.normal_scale)?,
         occlusion_strength: f(v.occlusion_strength)?,
         unlit: v.unlit,
+        shadow_catcher: false,
     })
 }
 fn shadow(mode: w::ShadowMode) -> ShadowMode {

@@ -2,6 +2,8 @@
 pub mod control;
 pub mod frame_resources;
 pub mod frame_submissions;
+#[cfg(all(unix, feature = "gstreamer-media"))]
+pub mod media;
 pub mod monitor;
 pub mod pipeline;
 pub mod program;

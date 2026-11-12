@@ -2,11 +2,12 @@ import { SceneControls, editCamera, type CameraEdit } from "../scene-controls.ts
 import type { RpcClient } from "../rpc.ts";
 import type { RenderShadowMode } from "../scene-frame.ts";
 import { PitchControls, type RigEdit } from "../pitch-controls.ts";
+import { ObjectRotation } from "../object-rotation.ts";
 
 let pitch: PitchControls | null = null;
 export const pitchMetadata = () => pitch?.metadata ?? null;
 
-export function installScenePanel(client: () => RpcClient | null): void {
+export function installScenePanel(client: () => RpcClient | null) {
   const panel = document.querySelector<HTMLElement>("#program-scene")!;
   const runtime = panel.querySelector<HTMLInputElement>("#runtime-id")!;
   const scene = panel.querySelector<HTMLInputElement>("#scene-id")!;
@@ -17,6 +18,7 @@ export function installScenePanel(client: () => RpcClient | null): void {
   scene.value = params.get("scene") ?? "";
   let editor: SceneControls | null = null;
   let connection: RpcClient | null = null;
+  let rotation: ObjectRotation | null = null;
   const number = (id: string) => Number(panel.querySelector<HTMLInputElement>(id)!.value);
   panel.querySelector<HTMLInputElement>("#pitch-file")!.onchange = async event => {
     try {
@@ -39,14 +41,17 @@ export function installScenePanel(client: () => RpcClient | null): void {
   const report = () => {
     const snapshot = editor?.snapshot;
     status.textContent = snapshot ? `revision ${snapshot.scene_revision}, effect ${snapshot.effect.sequence}${editor?.uncertain ? " — reload required" : ""}` : "Not loaded";
+    if (rotation?.error) status.textContent += ` — ${rotation.error}`;
   };
   panel.querySelector<HTMLButtonElement>("#scene-load")!.onclick = async () => {
     try {
+      await rotation?.stop();
       const rpc = client();
       if (rpc === null) throw new Error("Connect WebSocket first");
       if (editor === null || connection !== rpc || editor.target.runtime_id !== runtime.value || editor.target.scene_id !== scene.value) {
         editor = new SceneControls(rpc, { runtime_id: runtime.value, scene_id: scene.value });
         connection = rpc;
+        rotation = new ObjectRotation(editor, report);
       }
       const snapshot = await editor.load();
       pitch?.check(snapshot);
@@ -107,5 +112,13 @@ export function installScenePanel(client: () => RpcClient | null): void {
       await editor.mutate(snapshot => pitch!.model(snapshot, index, scale, yaw, mirror));
       report();
     } catch (error) { report(); status.textContent += ` — ${error}`; }
+  };
+  return {
+    async startRotation(speed: number) {
+      if (!rotation || connection !== client()) throw new Error("Load the program scene first");
+      await rotation.start(speed);
+    },
+    async stopRotation() { await rotation?.stop(); },
+    rotationState: () => rotation,
   };
 }

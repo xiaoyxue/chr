@@ -329,6 +329,30 @@ impl Camera {
         })
     }
 
+    /// Same pose, focal lengths and skew on a raster grown by whole pixels on each side:
+    /// ideal native pixel `(u, v)` becomes `(u + left, v + top)`. Used for distortion
+    /// guard bands; the result has no source Ti because Ti is tied to the native extent.
+    pub fn with_margins(&self, margins: [u32; 4]) -> Result<Self, CameraError> {
+        let [left, top, right, bottom] = margins;
+        let width = u64::from(self.extent.width()) + u64::from(left) + u64::from(right);
+        let height = u64::from(self.extent.height()) + u64::from(top) + u64::from(bottom);
+        let extent = u32::try_from(width)
+            .ok()
+            .zip(u32::try_from(height).ok())
+            .and_then(|(w, h)| ImageExtent::new(w, h).ok())
+            .ok_or(CameraError::InvalidGeometry)?;
+        Ok(Self {
+            extent,
+            intrinsics: Intrinsics {
+                cx: self.intrinsics.cx + f64::from(left),
+                cy: self.intrinsics.cy + f64::from(top),
+                ..self.intrinsics
+            },
+            source_ti: None,
+            ..self.clone()
+        })
+    }
+
     pub fn extent(&self) -> ImageExtent {
         self.extent
     }

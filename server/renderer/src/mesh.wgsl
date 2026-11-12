@@ -10,7 +10,7 @@ struct Light {
     position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>,
     shadow_matrix: array<mat4x4<f32>,4>, shadow_params: vec4<f32>,
     shadow_depth: array<vec4<f32>,4>, pcss: vec4<f32>, pcss_samples: vec4<f32>,
-    cascade_splits: vec4<f32>, cascade_params: vec4<f32>
+    cascade_splits: vec4<f32>, cascade_params: vec4<f32>, area: array<vec4<f32>,2>
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
@@ -34,6 +34,9 @@ struct Environment {
 @group(3) @binding(4) var environment_filtered:texture_2d_array<f32>;
 @group(3) @binding(5) var environment_brdf:texture_2d<f32>;
 @group(3) @binding(6) var<uniform> environment:Environment;
+// Pinned official LTC GGX table, Heitz et al. SIGGRAPH 2016; see ltc/LICENSE.ltc.
+struct LtcEntry { matrix:vec4<f32>, amplitude:vec4<f32> };
+@group(3) @binding(7) var<storage,read> ltc_table:array<LtcEntry>;
 
 fn environment_direction(d:vec3<f32>)->vec3<f32> {
     let c=environment.info.y;
@@ -332,7 +335,16 @@ fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     let uv=ndc.xy*vec2(0.5,-0.5)+vec2(0.5);
     if any(uv<vec2(0.0)) || any(uv>=vec2(1.0)) || ndc.z<0.0 || ndc.z>1.0 {return 1.0;}
     let layer=i32(light.shadow_params.x)+i32(cascade);
-    let depth=ndc.z-light.shadow_params.y;
+    var depth=ndc.z-light.shadow_params.y;
+    if light.position_kind.w==2.0 {
+        // Perspective spot depth is nonlinear: apply the bias to linear depth as a fraction
+        // of the far distance, like point cubemaps, so a near plane fitted close to the
+        // light cannot stretch it over many metres.
+        let near=light.shadow_depth[cascade].x;
+        let far=light.shadow_depth[cascade].y;
+        let z=linear_shadow_depth(light,clamp(ndc.z,0.0,1.0),cascade)-light.shadow_params.y*far;
+        depth=far*(z-near)/(max(z,near)*(far-near));
+    }
     let size=textureDimensions(shadow_maps);
     let hx=matrix*vec4(px,0.0);
     let hy=matrix*vec4(py,0.0);
@@ -368,7 +380,8 @@ fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
 
 fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
     if light.pcss.w==0.0 || light.shadow_params.x<0.0 {return 1.0;}
-    if light.position_kind.w==1.0 {
+    // Point and area lights share one centre cubemap.
+    if light.position_kind.w==1.0 || light.position_kind.w==3.0 {
         return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
     }
     let count=u32(light.pcss_samples.w);
@@ -387,6 +400,149 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     var next=1.0;
     if cascade+1u<count {next=planar_visibility(light,position,normal,px,py,cascade+1u);}
     return mix(visibility,next,smoothstep(blend_start,end,depth));
+}
+
+// Bilinear texel-centre lookup at (roughness, sqrt(1 - NdotV)) on the 64x64 table.
+fn ltc_lookup(rough:f32,nv:f32)->LtcEntry {
+    let uv=clamp(vec2(rough,sqrt(1.0-nv)),vec2(0.0),vec2(1.0))*63.0;
+    let p=min(vec2<u32>(floor(uv)),vec2(63u));
+    let q=min(p+vec2(1u),vec2(63u));
+    let f=fract(uv);
+    let a=ltc_table[p.x+64u*p.y];
+    let b=ltc_table[q.x+64u*p.y];
+    let c=ltc_table[p.x+64u*q.y];
+    let d=ltc_table[q.x+64u*q.y];
+    return LtcEntry(mix(mix(a.matrix,b.matrix,f.x),mix(c.matrix,d.matrix,f.x),f.y),
+        mix(mix(a.amplitude,b.amplitude,f.x),mix(c.amplitude,d.amplitude,f.x),f.y));
+}
+
+// Cosine-weighted edge integral; the polygon total is divided by 2*pi.
+fn ltc_edge(a_in:vec3<f32>,b_in:vec3<f32>)->f32 {
+    let a=normalize(a_in);
+    let b=normalize(b_in);
+    let c=cross(a,b);
+    let s=length(c);
+    if s<=1e-7 {return 0.0;}
+    return c.z*atan2(s,dot(a,b))/s;
+}
+
+struct EdgeSum { first:vec3<f32>, previous:vec3<f32>, sum:f32, count:u32 };
+fn edge_push(state:EdgeSum,p:vec3<f32>)->EdgeSum {
+    var next=state;
+    if next.count==0u {next.first=p;} else {next.sum+=ltc_edge(next.previous,p);}
+    next.previous=p;
+    next.count++;
+    return next;
+}
+
+// Streams physically clipped vertices; the LTC copy is clipped again after transforming.
+struct AreaIntegral { first:vec3<f32>, previous:vec3<f32>, count:u32, diffuse:f32, specular:EdgeSum };
+fn area_append(state:AreaIntegral,p:vec3<f32>,m:mat3x3<f32>)->AreaIntegral {
+    var next=state;
+    if next.count==0u {
+        next.first=p;
+    } else {
+        next.diffuse+=ltc_edge(next.previous,p);
+        let a=m*next.previous;
+        let b=m*p;
+        if a.z>0.0 {next.specular=edge_push(next.specular,a);}
+        if (a.z>0.0)!=(b.z>0.0) {next.specular=edge_push(next.specular,a+(b-a)*(a.z/(a.z-b.z)));}
+    }
+    next.previous=p;
+    next.count++;
+    return next;
+}
+
+fn perpendicular(d:vec3<f32>)->vec3<f32> {
+    return normalize(cross(d,select(vec3(0.0,0.0,1.0),vec3(1.0,0.0,0.0),abs(d.z)>0.9)));
+}
+
+const AREA_CURVE_SEGMENTS:u32=64u;
+
+// Unoccluded ltc-plausible-v1 emitter: Schlick LTC specular plus Lambert*(1-F0) diffuse.
+fn area_lighting(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    let shape=u32(light.emission_outer.w);
+    var center=light.position_kind.xyz-x;
+    var normal=light.direction_inner.xyz;
+    var u=light.area[0].xyz;
+    var extent=light.area[0].w;
+    if shape==2u {
+        let d2=dot(center,center);
+        // Outward emission never reaches a receiver inside or on the sphere.
+        if d2<=extent*extent {return vec3(0.0);}
+        // Integrate the receiver-dependent tangent silhouette, not a disk at the centre.
+        let factor=1.0-extent*extent/d2;
+        normal=-center*inverseSqrt(d2);
+        u=perpendicular(normal);
+        center*=factor;
+        extent*=sqrt(factor);
+    } else {
+        let side=-dot(normal,center);
+        if side==0.0 || (side<0.0 && light.direction_inner.w==0.0) {return vec3(0.0);}
+    }
+    let w=cross(normal,u);
+    let nv=clamp(dot(n,v),1e-4,1.0);
+    var t1=v-n*dot(v,n);
+    t1=select(perpendicular(n),normalize(t1),dot(t1,t1)>1e-12);
+    let t2=cross(n,t1);
+    let entry=ltc_lookup(rough,nv);
+    let t=entry.matrix;
+    let m=mat3x3(vec3(t.x,0.0,t.y),vec3(0.0,1.0,0.0),vec3(t.z,0.0,t.w));
+    let count=select(AREA_CURVE_SEGMENTS,4u,shape==0u);
+    var integral:AreaIntegral;
+    var previous=vec3(0.0);
+    for(var i=0u;i<=count;i++) {
+        var offset=vec3(0.0);
+        if shape==0u {
+            let k=i%4u;
+            offset=select(-1.0,1.0,k==1u || k==2u)*extent*u+select(-1.0,1.0,k>=2u)*light.area[1].x*w;
+        } else {
+            let angle=6.283185307*f32(i%count)/f32(count);
+            offset=extent*(cos(angle)*u+sin(angle)*w);
+        }
+        let world=center+offset;
+        let p=vec3(dot(world,t1),dot(world,t2),dot(world,n));
+        if i>0u {
+            if previous.z>0.0 {integral=area_append(integral,previous,m);}
+            if (previous.z>0.0)!=(p.z>0.0) {
+                integral=area_append(integral,previous+(p-previous)*(previous.z/(previous.z-p.z)),m);
+            }
+        }
+        previous=p;
+    }
+    if integral.count==0u {return vec3(0.0);}
+    integral=area_append(integral,integral.first,m);
+    // The clipped horizon's closing edge has a nonzero azimuth integral.
+    if integral.specular.count>0u {integral.specular=edge_push(integral.specular,integral.specular.first);}
+    let lambert=abs(integral.diffuse)/6.283185307;
+    let specular=abs(integral.specular.sum)/6.283185307;
+    let f0=mix(vec3(0.04),base,metal);
+    return light.emission_outer.rgb*(specular*(f0*entry.amplitude.x+(vec3(1.0)-f0)*entry.amplitude.y)
+        +base*(1.0-metal)*(vec3(1.0)-f0)*lambert);
+}
+
+// Unoccluded direct contribution of one light; visibility is applied by the caller.
+fn direct_light(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    if light.position_kind.w>2.5 {return area_lighting(light,x,n,v,base,metal,rough);}
+    var l=-light.direction_inner.xyz;
+    var attenuation=1.0;
+    if light.position_kind.w>0.5 {
+        let delta=light.position_kind.xyz-x;
+        let distance2=dot(delta,delta);
+        // An ideal point source has no defined direction at its exact centre.
+        if distance2==0.0 {return vec3(0.0);}
+        l=delta*inverseSqrt(distance2);
+        attenuation=1.0/distance2;
+        if light.position_kind.w>1.5 {
+            let cosine=dot(-l,light.direction_inner.xyz);
+            if cosine<=light.emission_outer.w {return vec3(0.0);}
+            if cosine<light.direction_inner.w {
+                attenuation*=smoothstep(light.emission_outer.w,light.direction_inner.w,cosine);
+            }
+        }
+    }
+    if dot(n,l)<=0.0 {return vec3(0.0);}
+    return light.emission_outer.rgb*attenuation*brdf(n,v,l,base,metal,rough);
 }
 
 // GGX with height-correlated Smith visibility and Burley diffuse.
@@ -477,26 +633,49 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     var radiance=emissive+environment_lighting(n,v,base.rgb,metal,rough,ao);
     for (var i=0u;i<camera.options.y;i++) {
         let light=lights[i];
-        var l=-light.direction_inner.xyz;
-        var attenuation=1.0;
-        if light.position_kind.w>0.5 {
-            let delta=light.position_kind.xyz-surface.position;
-            let distance2=dot(delta,delta);
-            // An ideal point source has no defined direction at its exact centre.
-            if distance2==0.0 {continue;}
-            l=delta*inverseSqrt(distance2);
-            attenuation=1.0/distance2;
-            if light.position_kind.w>1.5 {
-                let cosine=dot(-l,light.direction_inner.xyz);
-                if cosine<=light.emission_outer.w {continue;}
-                if cosine<light.direction_inner.w {
-                    attenuation*=smoothstep(light.emission_outer.w,light.direction_inner.w,cosine);
-                }
-            }
-        }
-        if dot(n,l)>0.0 {
-            radiance+=light.emission_outer.rgb*attenuation*shadow_visibility(light,surface.position,shadow_normal,px,py)*brdf(n,v,l,base.rgb,metal,rough);
+        let shaded=direct_light(light,surface.position,n,v,base.rgb,metal,rough);
+        if any(shaded>vec3(0.0)) {
+            radiance+=shaded*shadow_visibility(light,surface.position,shadow_normal,px,py);
         }
     }
     return vec4(clamp(radiance,vec3(0.0),vec3(65504.0)),1.0);
+}
+
+// Shadow catcher: premultiplied black whose alpha is the luminance fraction of light
+// removed by shadows, so "over" blending multiplies what lies behind by
+// shadowed / unshadowed light. Computed in linear HDR before any tone mapping.
+@fragment
+fn fs_shadow_catcher(surface:Surface,@builtin(front_facing) front_facing:bool)->@location(0) vec4<f32> {
+    let px=dpdx(surface.position); let py=dpdy(surface.position);
+    let front=select(front_facing,!front_facing,object.flags.w!=0u);
+    if !front && object.flags.z==0u {discard;}
+    var v=-camera.optical_depth.xyz;
+    if camera.options.z==0u {v=normalize(camera.eye.xyz-surface.position);}
+    var n=surface.normal;
+    if dot(n,n)<1e-12 {
+        n=normalize(cross(px,py));
+        n=select(-n,n,dot(n,v)>=0.0);
+    } else {
+        n=normalize(n);
+        if !front {n=-n;}
+    }
+    let base=object.color.rgb;
+    let metal=clamp(object.factors.x,0.0,1.0);
+    let rough=clamp(object.factors.y,0.045,1.0);
+    // Unoccluded environment light reaches shadowed and lit ground alike.
+    let ambient=environment_lighting(n,v,base,metal,rough,1.0);
+    var open=ambient;
+    var lit=ambient;
+    for (var i=0u;i<camera.options.y;i++) {
+        let light=lights[i];
+        let shaded=direct_light(light,surface.position,n,v,base,metal,rough);
+        if any(shaded>vec3(0.0)) {
+            open+=shaded;
+            lit+=shaded*shadow_visibility(light,surface.position,n,px,py);
+        }
+    }
+    let weights=vec3(0.2126,0.7152,0.0722);
+    let total=dot(open,weights);
+    if total<=0.0 {return vec4(0.0);}
+    return vec4(0.0,0.0,0.0,1.0-clamp(dot(lit,weights)/total,0.0,1.0));
 }

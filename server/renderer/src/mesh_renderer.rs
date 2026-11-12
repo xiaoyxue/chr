@@ -13,7 +13,7 @@ use crate::{
     environment::{self, EnvironmentGpu, EnvironmentSettings},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
-    scene::{Light, MaterialId, MaterialMaps, MeshId, SceneView},
+    scene::{AreaShape, Light, MaterialId, MaterialMaps, MeshId, SceneView},
     shadow::{self, CascadeSettings, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
 };
 
@@ -78,6 +78,29 @@ struct LightUniform {
     pcss_samples: [f32; 4],
     cascade_splits: [f32; 4],
     cascade_params: [f32; 4],
+    // Area lights: unit tangent + half width/radius, then half height.
+    area: [[f32; 4]; 2],
+}
+
+/// Curved-emitter polygon sides qualified by `ltc-plausible-v1`.
+pub const AREA_CURVE_SEGMENTS: u32 = 64;
+
+/// Pinned official LTC GGX table (see `ltc/LICENSE.ltc`), padded to two vec4s per texel.
+fn ltc_table(device: &wgpu::Device) -> wgpu::Buffer {
+    let values: Vec<f32> = include_bytes!("ltc/ltc.bin")
+        .chunks_exact(24)
+        .flat_map(|texel| {
+            let v: [f32; 6] = std::array::from_fn(|i| {
+                f32::from_le_bytes(texel[4 * i..4 * i + 4].try_into().expect("4-byte f32"))
+            });
+            [v[0], v[1], v[2], v[3], v[4], v[5], 0.0, 0.0]
+        })
+        .collect();
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("LTC GGX table"),
+        contents: bytemuck::cast_slice(&values),
+        usage: wgpu::BufferUsages::STORAGE,
+    })
 }
 
 #[repr(C)]
@@ -102,6 +125,7 @@ struct Draw {
     indices: Range<u32>,
     offset: u32,
     material: MaterialId,
+    shadow_catcher: bool,
 }
 
 #[derive(PartialEq)]
@@ -125,6 +149,7 @@ enum PipelineKind {
     Mesh,
     Wire,
     Sky,
+    ShadowCatcher,
 }
 
 fn scene_pipeline(
@@ -137,6 +162,7 @@ fn scene_pipeline(
 ) -> wgpu::RenderPipeline {
     let sky = matches!(kind, PipelineKind::Sky);
     let wire = matches!(kind, PipelineKind::Wire);
+    let catcher = matches!(kind, PipelineKind::ShadowCatcher);
     let buffers = [Some(vertex_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("shared scene raster"),
@@ -153,11 +179,18 @@ fn scene_pipeline(
                 "fs_sky"
             } else if wire {
                 "fs_wire"
+            } else if catcher {
+                "fs_shadow_catcher"
             } else {
                 "fs_main"
             }),
             compilation_options: Default::default(),
-            targets: &[Some(format.into())],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // Premultiplied black over the destination multiplies it by 1 - alpha.
+                blend: catcher.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         primitive: wgpu::PrimitiveState {
             topology: if wire {
@@ -200,6 +233,7 @@ pub struct MeshRenderer {
     msaa: Option<(ImageExtent, wgpu::TextureFormat, wgpu::TextureView)>,
     pipeline: wgpu::RenderPipeline,
     pbr_pipeline: wgpu::RenderPipeline,
+    catcher_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     environment: EnvironmentGpu,
     camera: wgpu::Buffer,
@@ -214,6 +248,7 @@ pub struct MeshRenderer {
     draws: Vec<Draw>,
     maps: MaterialMapCache,
     lights: wgpu::Buffer,
+    ltc: wgpu::Buffer,
     light_group: wgpu::BindGroup,
     light_layout: wgpu::BindGroupLayout,
     light_capacity: u64,
@@ -272,6 +307,16 @@ impl MeshRenderer {
             },
         ];
         light_entries.extend(environment::layout_entries());
+        light_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(64 * 64 * 32),
+            },
+            count: None,
+        });
         let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene lights and environment"),
             entries: &light_entries,
@@ -283,6 +328,7 @@ impl MeshRenderer {
             mapped_at_creation: false,
         });
         let shadow_atlas = ShadowAtlas::new(device, 1, 1);
+        let ltc = ltc_table(device);
         let light_group = light_group(
             device,
             &light_layout,
@@ -290,6 +336,7 @@ impl MeshRenderer {
             light_size,
             &shadow_atlas,
             &environment,
+            &ltc,
         );
         let tone_settings = uniform_buffer(device, 16);
         let tone_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -392,6 +439,14 @@ impl MeshRenderer {
             |format| scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Mesh);
         let pipeline = create_pipeline(format);
         let pbr_pipeline = create_pipeline(wgpu::TextureFormat::Rgba16Float);
+        let catcher_pipeline = scene_pipeline(
+            device,
+            &layout,
+            &shader,
+            wgpu::TextureFormat::Rgba16Float,
+            1,
+            PipelineKind::ShadowCatcher,
+        );
         let wire_pipeline = scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Wire);
         let overlays = Overlays::new(device, format, &camera_layout);
         Self {
@@ -415,10 +470,12 @@ impl MeshRenderer {
             meshes: HashMap::new(),
             draws: Vec::new(),
             pbr_pipeline,
+            catcher_pipeline,
             sky_pipeline,
             environment,
             maps,
             lights,
+            ltc,
             light_group,
             light_layout,
             light_capacity: light_size,
@@ -461,6 +518,10 @@ impl MeshRenderer {
             };
             self.pipeline = create(self.format, PipelineKind::Mesh);
             self.pbr_pipeline = create(wgpu::TextureFormat::Rgba16Float, PipelineKind::Mesh);
+            self.catcher_pipeline = create(
+                wgpu::TextureFormat::Rgba16Float,
+                PipelineKind::ShadowCatcher,
+            );
             self.wire_pipeline = create(self.format, PipelineKind::Wire);
             self.sky_pipeline = scene_pipeline(
                 &gpu.device,
@@ -589,6 +650,7 @@ impl MeshRenderer {
                     indices: part.clone(),
                     offset,
                     material: *material,
+                    shadow_catcher: factors.shadow_catcher,
                 });
                 uniforms.push(DrawUniform {
                     model,
@@ -852,6 +914,7 @@ impl MeshRenderer {
                 self.light_capacity,
                 &self.shadow_atlas,
                 &self.environment,
+                &self.ltc,
             );
         }
         if !lights.is_empty() {
@@ -1024,7 +1087,16 @@ impl MeshRenderer {
         });
         pass.set_bind_group(0, &self.camera_group, &[]);
         pass.set_bind_group(3, &self.light_group, &[]);
-        for draw in &self.draws {
+        // Catchers blend over whatever lies behind them, so they follow opaque geometry;
+        // depth testing hides catcher pixels behind real objects.
+        let (opaque, deferred): (Vec<_>, Vec<_>) = self
+            .draws
+            .iter()
+            .partition(|draw| !(physical && draw.shadow_catcher));
+        for draw in opaque.into_iter().chain(deferred) {
+            if physical && draw.shadow_catcher {
+                pass.set_pipeline(&self.catcher_pipeline);
+            }
             let mesh = &self.meshes[&draw.mesh];
             pass.set_bind_group(1, &self.object_group, &[draw.offset]);
             pass.set_bind_group(2, self.maps.group(draw.material), &[]);
@@ -1069,6 +1141,7 @@ impl MeshRenderer {
             let len = v.into_iter().map(|x| x * x).sum::<f64>().sqrt();
             v.map(|x| (x / len) as f32)
         };
+        let mut area = [[0.0; 4]; 2];
         let (position, kind, direction, emission, inner, outer) = match light {
             Light::Directional {
                 direction,
@@ -1102,6 +1175,40 @@ impl MeshRenderer {
                 inner_angle.cos() as f32,
                 outer_angle.cos() as f32,
             ),
+            Light::Area {
+                position,
+                normal,
+                tangent,
+                shape,
+                radiance,
+                two_sided,
+                ..
+            } => {
+                let n = normalize(normal).map(f64::from);
+                let t = normalize(tangent).map(f64::from);
+                let along = n.iter().zip(t).map(|(a, b)| a * b).sum::<f64>();
+                let tangent = normalize(std::array::from_fn(|i| t[i] - along * n[i]));
+                let (code, extent, height) = match shape {
+                    AreaShape::Rectangle {
+                        half_width,
+                        half_height,
+                    } => (0.0, half_width, half_height),
+                    AreaShape::Disk { radius } => (1.0, radius, 0.0),
+                    AreaShape::Sphere { radius } => (2.0, radius, 0.0),
+                };
+                area = [
+                    [tangent[0], tangent[1], tangent[2], extent],
+                    [height, 0.0, 0.0, 0.0],
+                ];
+                (
+                    position.map(|v| v as f32),
+                    3.0,
+                    n.map(|v| v as f32),
+                    radiance,
+                    f32::from(u8::from(two_sided)),
+                    code,
+                )
+            }
         };
         let uniform = LightUniform {
             position_kind: [position[0], position[1], position[2], kind],
@@ -1116,6 +1223,7 @@ impl MeshRenderer {
                     Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
                         source_radius
                     }
+                    Light::Area { shape, .. } => shape.equivalent_radius(),
                 },
                 0.0,
                 0.0,
@@ -1124,6 +1232,7 @@ impl MeshRenderer {
             pcss_samples: [0.0; 4],
             cascade_splits: [0.0; 4],
             cascade_params: [0.0; 4],
+            area,
         };
         if !bytemuck::cast_slice::<_, f32>(&[uniform])
             .iter()
@@ -1292,6 +1401,7 @@ fn light_group(
     size: u64,
     atlas: &ShadowAtlas,
     environment: &EnvironmentGpu,
+    ltc: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let mut entries = vec![
         wgpu::BindGroupEntry {
@@ -1312,6 +1422,10 @@ fn light_group(
         },
     ];
     entries.extend(environment.entries());
+    entries.push(wgpu::BindGroupEntry {
+        binding: 7,
+        resource: ltc.as_entire_binding(),
+    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("lights, visibility and environment"),
         layout,

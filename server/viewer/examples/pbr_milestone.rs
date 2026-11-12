@@ -381,6 +381,7 @@ fn main() -> Result<()> {
             Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
                 *source_radius *= 4.0
             }
+            Light::Area { .. } => {}
         }
     }
     scene.set_lighting(Lighting::new(larger_sources, None)?)?;
@@ -445,7 +446,8 @@ fn main() -> Result<()> {
     ]) {
         let (Light::Directional { shadow_mode, .. }
         | Light::Point { shadow_mode, .. }
-        | Light::Spot { shadow_mode, .. }) = light;
+        | Light::Spot { shadow_mode, .. }
+        | Light::Area { shadow_mode, .. }) = light;
         *shadow_mode = Some(mode);
     }
     scene.set_lighting(Lighting::new(mixed, None)?)?;

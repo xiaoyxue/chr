@@ -1,4 +1,4 @@
-// Experimental LTC polygon integration; see LICENSE.ltc and the method report.
+// Experimental LTC polygon integration; see src/ltc/LICENSE.ltc and the method report.
 struct Params { shape: u32, lights: u32, size: u32, sides: u32 };
 struct Entry { matrix: vec4<f32>, amplitude: vec4<f32> };
 @group(0) @binding(0) var<storage, read> lut: array<Entry>;

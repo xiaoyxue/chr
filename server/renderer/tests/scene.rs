@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chr_renderer::{
     coordinates::ImageExtent,
     scene::{
-        EnvironmentMap, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene, SceneError,
-        SkyLight,
+        AreaShape, EnvironmentMap, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene,
+        SceneError, SkyLight,
     },
 };
 
@@ -285,4 +285,116 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
             ));
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct Area {
+    position: [f64; 3],
+    normal: [f64; 3],
+    tangent: [f64; 3],
+    shape: AreaShape,
+    radiance: [f32; 3],
+    two_sided: bool,
+}
+
+impl Area {
+    fn new(shape: AreaShape) -> Self {
+        Self {
+            position: [0.0, 0.0, -3.0],
+            normal: [0.0, 0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0],
+            shape,
+            radiance: [2.0; 3],
+            two_sided: false,
+        }
+    }
+
+    fn light(self) -> Light {
+        Light::Area {
+            position: self.position,
+            normal: self.normal,
+            tangent: self.tangent,
+            shape: self.shape,
+            radiance: self.radiance,
+            two_sided: self.two_sided,
+            shadow_mode: None,
+        }
+    }
+}
+
+#[test]
+fn area_lights_validate_geometry_emission_and_sidedness() {
+    let rectangle = AreaShape::Rectangle {
+        half_width: 1.0,
+        half_height: 0.5,
+    };
+    let sphere = AreaShape::Sphere { radius: 0.5 };
+    let valid = [
+        Area::new(rectangle),
+        Area::new(AreaShape::Disk { radius: 2.0 }),
+        Area::new(sphere),
+        // Non-unit, non-perpendicular axes are accepted and orthonormalized for shading.
+        Area {
+            normal: [0.0, 1e3, 1e3],
+            tangent: [2.0, 0.0, 1.0],
+            two_sided: true,
+            ..Area::new(rectangle)
+        },
+    ];
+    assert!(Lighting::new(valid.iter().map(|a| a.light()).collect(), None).is_ok());
+    for area in [
+        Area::new(AreaShape::Rectangle {
+            half_width: 0.0,
+            half_height: 0.5,
+        }),
+        Area::new(AreaShape::Disk { radius: -1.0 }),
+        Area::new(AreaShape::Sphere { radius: f32::NAN }),
+        Area {
+            radiance: [1.0, -1.0, 1.0],
+            ..Area::new(rectangle)
+        },
+        Area {
+            position: [f64::INFINITY, 0.0, 0.0],
+            ..Area::new(rectangle)
+        },
+        Area {
+            normal: [0.0; 3],
+            ..Area::new(rectangle)
+        },
+        Area {
+            tangent: [0.0, 0.0, -4.0],
+            ..Area::new(rectangle)
+        },
+        Area {
+            two_sided: true,
+            ..Area::new(sphere)
+        },
+    ] {
+        let light = area.light();
+        assert!(
+            matches!(
+                Lighting::new(vec![light], None),
+                Err(SceneError::InvalidLighting)
+            ),
+            "{light:?}"
+        );
+    }
+}
+
+#[test]
+fn area_radiance_separates_fixed_radiance_from_fixed_power() {
+    let disk = AreaShape::Disk { radius: 1.0 };
+    // flux = pi * area * radiance, and the unit disk has area pi.
+    let flux = [std::f32::consts::PI * std::f32::consts::PI; 3];
+    assert!((disk.radiance_from_flux(flux, false)[0] - 1.0).abs() < 1e-6);
+    // Two emitting faces share the power; a sphere has one outward face.
+    assert!((disk.radiance_from_flux(flux, true)[0] - 0.5).abs() < 1e-6);
+    let sphere = AreaShape::Sphere { radius: 0.5 };
+    assert!((sphere.area() - std::f64::consts::PI).abs() < 1e-12);
+    assert_eq!(
+        sphere.radiance_from_flux(flux, true),
+        sphere.radiance_from_flux(flux, false)
+    );
+    let doubled = AreaShape::Disk { radius: 2.0 };
+    assert!((doubled.radiance_from_flux(flux, false)[0] - 0.25).abs() < 1e-6);
 }

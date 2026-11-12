@@ -5,8 +5,12 @@ use std::num::NonZeroU64;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, MeshRenderer, PbrSettings, RenderSettings, ToneMap, camera::CameraView,
-    coordinates::ImageExtent, offscreen::BoxError, scene::SceneView,
+    Gpu, MeshRenderer, PbrSettings, RenderSettings, ToneMap,
+    camera::{Camera, CameraView},
+    coordinates::ImageExtent,
+    distortion::{CameraModel, DistortionError, LensDistortion},
+    offscreen::BoxError,
+    scene::SceneView,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +332,101 @@ impl ImagePipeline {
     }
 }
 
+/// Inverse lens warp from guard-banded ideal CG into the distorted native canvas.
+struct WarpPipeline {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl WarpPipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lens distortion warp"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(112),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lens distortion warp"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::include_wgsl!("distortion.wgsl"));
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lens distortion warp"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { layout, pipeline }
+    }
+
+    fn group(
+        &self,
+        device: &wgpu::Device,
+        source: &wgpu::TextureView,
+        data: [[f32; 4]; 7],
+    ) -> wgpu::BindGroup {
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lens distortion parameters"),
+            contents: bytemuck::cast_slice(&data),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lens distortion warp"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+}
+
 fn layer_uniform(
     image: &ImageView,
     rect: PixelRect,
@@ -432,6 +531,7 @@ fn draw(
 pub struct FrameCompositor {
     renderer: MeshRenderer,
     pipeline: ImagePipeline,
+    warp_pipeline: WarpPipeline,
     config: CompositionOutput,
     format: wgpu::TextureFormat,
     transfer: Transfer,
@@ -439,6 +539,8 @@ pub struct FrameCompositor {
     display_canvas: ImageView,
     layers: Vec<ImagePass>,
     cg: Option<wgpu::BindGroup>,
+    /// Replaces the direct CG draw when the frame was prepared with a lens model.
+    warp: Option<wgpu::BindGroup>,
     tone: Option<wgpu::BindGroup>,
     output: wgpu::BindGroup,
 }
@@ -489,6 +591,7 @@ impl FrameCompositor {
         Ok(Self {
             renderer: MeshRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba16Float),
             pipeline,
+            warp_pipeline: WarpPipeline::new(&gpu.device),
             config,
             format,
             transfer,
@@ -496,6 +599,7 @@ impl FrameCompositor {
             display_canvas,
             layers: Vec::new(),
             cg: None,
+            warp: None,
             tone: None,
             output,
         })
@@ -521,11 +625,73 @@ impl FrameCompositor {
         camera: &dyn CameraView,
         layers: &[ImageLayer<'_>],
     ) -> Result<(), BoxError> {
+        self.prepare_layers(gpu, scene, camera, camera.extent(), 0, layers)
+    }
+
+    /// Like `prepare`, but for footage whose native pixels follow `lens`
+    /// (`radial-poly-native-px-v1`). CG is rendered by the ideal pinhole `camera` over a
+    /// guard band and inverse-warped into the distorted native canvas; image layers are
+    /// already in native pixels and are not warped. Native pixels without an ideal
+    /// preimage receive no CG instead of stretched edge colours.
+    pub fn prepare_distorted(
+        &mut self,
+        gpu: &Gpu,
+        scene: &SceneView,
+        camera: &Camera,
+        lens: &LensDistortion,
+        layers: &[ImageLayer<'_>],
+    ) -> Result<(), BoxError> {
+        if camera.extent() != lens.extent() {
+            return Err(DistortionError::ExtentMismatch.into());
+        }
+        let margins = lens.guard_band()?;
+        let ideal = camera.with_margins(margins)?;
+        let guard = u64::from(ideal.extent().width()) * u64::from(ideal.extent().height()) * 8;
+        self.prepare_layers(gpu, scene, &ideal, camera.extent(), guard, layers)?;
+        let view = self
+            .renderer
+            .linear_view()
+            .ok_or("no prepared shaded HDR view")?;
+        self.warp = Some(
+            self.warp_pipeline
+                .group(&gpu.device, view, lens.gpu_uniform(margins)),
+        );
+        Ok(())
+    }
+
+    /// Prepares with either supported image model: ideal pinhole or distorted.
+    pub fn prepare_model(
+        &mut self,
+        gpu: &Gpu,
+        scene: &SceneView,
+        camera: &Camera,
+        model: &CameraModel,
+        layers: &[ImageLayer<'_>],
+    ) -> Result<(), BoxError> {
+        match model {
+            CameraModel::Pinhole => self.prepare(gpu, scene, camera, layers),
+            CameraModel::Distorted(lens) => {
+                self.prepare_distorted(gpu, scene, camera, lens, layers)
+            }
+        }
+    }
+
+    /// `render` draws CG for the `native` canvas; with a guard band its extent is larger.
+    fn prepare_layers(
+        &mut self,
+        gpu: &Gpu,
+        scene: &SceneView,
+        render: &dyn CameraView,
+        native: ImageExtent,
+        extra_bytes: u64,
+        layers: &[ImageLayer<'_>],
+    ) -> Result<(), BoxError> {
         self.cg = None;
-        let native = camera.extent();
+        self.warp = None;
         let bytes = (u64::from(native.width()) * u64::from(native.height())
             + u64::from(self.config.extent.width()) * u64::from(self.config.extent.height()))
-            * 8;
+            * 8
+            + extra_bytes;
         if bytes > self.config.max_intermediate_bytes {
             return Err("composition canvases exceed the configured memory budget".into());
         }
@@ -540,7 +706,7 @@ impl FrameCompositor {
             }
         }
         self.renderer
-            .prepare_pbr(gpu, scene, camera, self.config.pbr)?;
+            .prepare_pbr(gpu, scene, render, self.config.pbr)?;
         if self
             .scene_canvas
             .as_ref()
@@ -555,7 +721,7 @@ impl FrameCompositor {
                 .linear_view()
                 .ok_or("no prepared shaded HDR view")?
                 .clone(),
-            extent: native,
+            extent: render.extent(),
             decode: Transfer::Linear,
             alpha: AlphaMode::Premultiplied,
         };
@@ -653,7 +819,10 @@ impl FrameCompositor {
         {
             draw(encoder, &scene.view, &self.pipeline.blend, &layer.group);
         }
-        draw(encoder, &scene.view, &self.pipeline.blend, cg);
+        match &self.warp {
+            Some(warp) => draw(encoder, &scene.view, &self.warp_pipeline.pipeline, warp),
+            None => draw(encoder, &scene.view, &self.pipeline.blend, cg),
+        }
         for layer in self
             .layers
             .iter()

@@ -22,6 +22,28 @@ payload validation, reexported as `SceneFrame`. It does not enable those methods
 in the triangle runtime. Keep its required-nullable fields, method/result maps
 and error codes synchronized with `common/src/scene_frame/`.
 
+## Triangle rotation
+
+The legacy **Triangle** panel provides Clockwise (+) and Counter-clockwise (-)
+direction choices. Select a direction, then click **Start rotation** to apply it;
+restarting changes velocity without resetting the angle. Signed speed entry is
+still supported and keeps the direction selector synchronized. Positive angles
+rotate clockwise because this triangle uses the Y-down SNC image coordinates.
+These legacy commands do not animate the retained-scene overlay in
+`--synthetic-program`, `--pitch-demo` or `--software-video`.
+
+With `live=1`, the top-right panel instead becomes **Orange mesh rotation**.
+It sends bounded, serialized `scene.mutate` instance updates to Server for the
+software-video scene's orange `mesh`; its separate `ground` is unchanged.
+Start uses the selected signed speed, and Stop waits for the in-flight update.
+Restarting in the opposite direction preserves the current pose.
+Phase follows the simulated SDI output-slot clock and configured time base,
+not source frame identity or browser wall-clock duration. This is a page-driven demonstration,
+not an autonomous server animation protocol: keep the controller page connected.
+Disconnect/closing the page stops future updates; the server retains the last
+applied pose. External model edits or uncertain replies stop the controller
+instead of blindly retrying.
+
 ## Synthetic scene controls
 
 Start the server with `--synthetic-program --size 640x360 --fps 50` to opt into
@@ -88,6 +110,25 @@ is implied.
 
 ## Run
 
+The Linux `chr-server --software-video /path/to/video.mp4 --fps 30` opt-in
+requires the `gstreamer-media` Cargo feature and root `nix develop .#media`
+environment. It composites the local MP4 with the retained sample scene,
+passes frames through the existing simulated SDI clock, and uses GStreamer
+for source conversion and H.264 encoding. WebRTC signaling and ICE-TCP remain
+the existing implementation so the documented SSH forwarding path is retained.
+This is not a physical SDI device, a camera-calibration replay, or a full
+GStreamer WebRTC backend.
+
+Open the page with `?live=1&runtime=PRINTED_RUNTIME&scene=PRINTED_SCENE&ws=WS_URL`
+to connect, load the scene controls and open the program stream automatically.
+Without `live=1`, existing manual and self-test behavior is unchanged.
+
+For the owner's `--software-video ... --video-scene ...` calibrated replay,
+also pass `calibrated=1`. The rotation panel then controls the registered GLB,
+the fixed ground is a transparent shadow catcher, and camera buttons are disabled
+to preserve alignment. The label is a UI hint, not calibration discovery or an
+RPC extension. Per-frame lens/warp data and asset paths stay server-local.
+
 Requires Node.js 24 or newer, which runs the `.ts` scripts directly.
 
 ```sh
@@ -111,6 +152,8 @@ npm test                          # depacketizer, framing and shared scene/frame
 npm run verify                    # IPC, SDI status, and the WebRTC stream via werift + ffmpeg
 npm run verify:browser            # the stream decoded by a headless Chrome
 npm run verify:browser -- --tcp-only   # same, with UDP forbidden (SSH forward case)
+npm run verify:browser -- --rotation-directions # exercise both signs through the actual UI
+npm run verify:browser -- --mesh-rotation --url 'http://127.0.0.1:5173/?ws=ws://127.0.0.1:8787&runtime=PRINTED_RUNTIME&scene=PRINTED_SCENE'
 ```
 
 `verify` writes the captured streams to the repository's

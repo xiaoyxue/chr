@@ -47,6 +47,7 @@ pub struct Synthetic {
     pub scheduler: FrameSubmissions,
     pub scene_id: w::Id,
     pub stream_id: w::Id,
+    pub video_lens: Option<Arc<super::video::VideoLens>>,
     pixels: Vec<u8>,
     next: u64,
     pending: Vec<w::Id>,
@@ -54,6 +55,11 @@ pub struct Synthetic {
 }
 
 impl Synthetic {
+    /// Small uncalibrated overlay for the opt-in software video demonstration.
+    pub fn install_video(mode: VideoMode, runtime: w::Id) -> Result<(Self, SceneAdapter), Error> {
+        Self::install_kind(mode, runtime, true)
+    }
+
     pub(super) fn configuration(
         mode: VideoMode,
         runtime: &w::Id,
@@ -82,6 +88,14 @@ impl Synthetic {
     }
 
     pub fn install(mode: VideoMode, runtime: w::Id) -> Result<(Self, SceneAdapter), Error> {
+        Self::install_kind(mode, runtime, false)
+    }
+
+    fn install_kind(
+        mode: VideoMode,
+        runtime: w::Id,
+        video: bool,
+    ) -> Result<(Self, SceneAdapter), Error> {
         let configuration = Self::configuration(mode, &runtime)?;
         let mut registrations = Registrations::default();
         registrations
@@ -90,19 +104,27 @@ impl Synthetic {
             )?)
             .map_err(|e| e.to_string())?;
         // Native -Z-up ground receiver plus an elevated red triangle. No asset files.
-        let mesh = MeshData::new(
-            vec![
-                [-4., -3., 0.],
-                [4., -3., 0.],
-                [4., 3., 0.],
-                [-4., 3., 0.],
-                [-1.2, -0.8, -1.],
-                [0., 1.2, -1.],
-                [1.2, -0.8, -1.],
-            ],
-            vec![0, 2, 1, 0, 3, 2, 4, 5, 6],
-            vec![0..6, 6..9],
-        )?;
+        let mesh = if video {
+            MeshData::new(
+                vec![[-1.2, -0.8, -1.], [0., 1.2, -1.], [1.2, -0.8, -1.]],
+                vec![0, 1, 2],
+                std::iter::once(0..3).collect(),
+            )?
+        } else {
+            MeshData::new(
+                vec![
+                    [-4., -3., 0.],
+                    [4., -3., 0.],
+                    [4., 3., 0.],
+                    [-4., 3., 0.],
+                    [-1.2, -0.8, -1.],
+                    [0., 1.2, -1.],
+                    [1.2, -0.8, -1.],
+                ],
+                vec![0, 2, 1, 0, 3, 2, 4, 5, 6],
+                vec![0..6, 6..9],
+            )?
+        };
         let material = |color| ImportedMaterial {
             factors: PbrMaterial {
                 base_color: color,
@@ -117,16 +139,36 @@ impl Synthetic {
                 id("synthetic-mesh")?,
                 GlbAsset {
                     mesh,
-                    materials: vec![
-                        material([0.55, 0.55, 0.55, 1.]),
-                        material([0.8, 0.08, 0.02, 1.]),
-                    ],
+                    materials: if video {
+                        vec![material([0.8, 0.08, 0.02, 1.])]
+                    } else {
+                        vec![
+                            material([0.55, 0.55, 0.55, 1.]),
+                            material([0.8, 0.08, 0.02, 1.]),
+                        ]
+                    },
                     warnings: Vec::new(),
                 },
             )
             .map_err(|e| e.to_string())?;
+        if video {
+            registrations
+                .register_model(
+                    id("synthetic-ground")?,
+                    GlbAsset {
+                        mesh: MeshData::new(
+                            vec![[-4., -3., 0.], [4., -3., 0.], [4., 3., 0.], [-4., 3., 0.]],
+                            vec![0, 2, 1, 0, 3, 2],
+                            std::iter::once(0..6).collect(),
+                        )?,
+                        materials: vec![material([0.55, 0.55, 0.55, 1.])],
+                        warnings: Vec::new(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+        }
         let e = &configuration.native_extent;
-        let state = serde_json::from_value(json!({
+        let mut state: w::SceneState = serde_json::from_value(json!({
                 "world":{"id":"synthetic-world","revision":"1"},"configuration_id":configuration.configuration_id,
                 "camera":{"mode":"manual","camera":{"kind":"intrinsics_pose","extent":e,"near_m":0.1,"far_m":100,
                     "intrinsics":{"fx":e.width as f64 * 0.8,"fy":e.width as f64 * 0.8,"skew":0,"cx":e.width as f64 / 2.,"cy":e.height as f64 / 2.},
@@ -137,6 +179,17 @@ impl Synthetic {
                     "irradiance":[3,3,3],"angular_radius":0.00465,"shadow_mode":null}],"environment":null},
                 "shadow_mode":"pcf"
         }))?;
+        if video {
+            let mut ground = state.instances[0].clone();
+            ground.instance_id = id("ground")?;
+            ground.asset_ref = id("synthetic-ground")?;
+            state.instances.push(ground);
+            for instance in &mut state.instances {
+                for axis in 0..3 {
+                    instance.model[axis][axis] = 0.25.try_into()?;
+                }
+            }
+        }
         Self::install_registered(configuration, registrations, state)
     }
 
@@ -183,6 +236,7 @@ impl Synthetic {
                 scheduler,
                 scene_id,
                 stream_id,
+                video_lens: None,
                 pixels: [32, 64, 96, 255].repeat(e.width as usize * e.height as usize),
                 next: 0,
                 pending: Vec::new(),
@@ -202,6 +256,27 @@ impl Synthetic {
     /// One native frame, submitted through the same strict control queue as both IPCs.
     /// Terminal native-generated receipts are explicitly released; external receipts are not touched.
     pub async fn inject(&mut self, control: &SceneControl) -> Result<Option<w::Id>, Error> {
+        self.inject_inner(control, None).await
+    }
+
+    /// Software capture assigns sequence before its bounded queue can drop a frame.
+    pub async fn inject_image(
+        &mut self,
+        control: &SceneControl,
+        sequence: u64,
+        pixels: &[u8],
+    ) -> Result<Option<w::Id>, Error> {
+        if sequence < self.next {
+            return Err("software input frame sequence went backwards".into());
+        }
+        self.inject_inner(control, Some((sequence, pixels))).await
+    }
+
+    async fn inject_inner(
+        &mut self,
+        control: &SceneControl,
+        input: Option<(u64, &[u8])>,
+    ) -> Result<Option<w::Id>, Error> {
         let runtime = &self.configuration.runtime_id;
         let mut retained = Vec::new();
         for submission in self.pending.drain(..) {
@@ -234,9 +309,8 @@ impl Synthetic {
         if self.pending.len() >= 4 {
             return Ok(None);
         }
-        let sequence = self.next;
-        self.next = self
-            .next
+        let sequence = input.map_or(self.next, |(sequence, _)| sequence);
+        self.next = sequence
             .checked_add(1)
             .ok_or("synthetic sequence exhausted")?;
         let timeline = id(format!("{}-timeline", runtime.as_str()))?;
@@ -262,7 +336,10 @@ impl Synthetic {
         };
         let (ticket, producer) = self
             .scheduler
-            .register(metadata.clone(), &self.pixels)
+            .register(
+                metadata.clone(),
+                input.map_or(self.pixels.as_slice(), |(_, pixels)| pixels),
+            )
             .map_err(|e| e.to_string())?;
         producer.ready()?;
         producer.complete();
