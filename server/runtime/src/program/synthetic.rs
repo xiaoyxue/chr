@@ -47,7 +47,7 @@ pub struct Synthetic {
     pub scheduler: FrameSubmissions,
     pub scene_id: w::Id,
     pub stream_id: w::Id,
-    pub video_lens: Option<Arc<super::video::VideoLens>>,
+    pub video_lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     pixels: Vec<u8>,
     next: u64,
     pending: Vec<w::Id>,

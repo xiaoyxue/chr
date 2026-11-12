@@ -69,7 +69,7 @@ impl RenderWorker {
         sdi: SdiInput,
         profile: chr_common::scene_frame::Configuration,
         scheduler: crate::frame_submissions::FrameSubmissions,
-        lens: Option<Arc<crate::program::video::VideoLens>>,
+        lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     ) -> Result<Self, BoxError> {
         Self::spawn_inner(config, sdi, Some((profile, scheduler)), lens)
     }
@@ -81,7 +81,7 @@ impl RenderWorker {
             chr_common::scene_frame::Configuration,
             crate::frame_submissions::FrameSubmissions,
         )>,
-        lens: Option<Arc<crate::program::video::VideoLens>>,
+        lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     ) -> Result<Self, BoxError> {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
@@ -154,7 +154,7 @@ impl Worker {
             chr_common::scene_frame::Configuration,
             crate::frame_submissions::FrameSubmissions,
         )>,
-        lens: Option<Arc<crate::program::video::VideoLens>>,
+        lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     ) -> Result<Self, BoxError> {
         let instance = Gpu::instance();
         let gpu =

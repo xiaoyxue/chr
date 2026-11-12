@@ -4,6 +4,7 @@ use super::{
     synthetic::{Synthetic, id},
 };
 use crate::{
+    calibration::replay::{Radial, VideoLens},
     retained::{Registrations, SceneAdapter},
     sdi::VideoMode,
 };
@@ -11,7 +12,6 @@ use chr_common::scene_frame as w;
 use chr_renderer::{
     camera::Camera,
     coordinates::{ImageExtent, Ti},
-    distortion::{CameraModel, FrameWarp, LensDistortion, RadialDistortion, SupportRect},
     glb::{GlbAsset, ImportedMaterial, import_glb},
     scene::{MeshData, ModelMatrix, PbrMaterial},
 };
@@ -35,36 +35,6 @@ pub struct Manifest {
     /// Ideal reference native pixel, not a distorted frame pixel.
     pub anchor_pixel: [f64; 2],
     pub pitch_m: [f64; 2],
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Radial {
-    pub centre_px: [f64; 2],
-    pub scale_px: f64,
-    pub coefficients: [f64; 3],
-    pub support: Option<[[f64; 2]; 2]>,
-}
-
-/// Bound to the native producer, not output slots or mutable scene revisions.
-pub struct VideoLens {
-    stream: w::Id,
-    models: Vec<CameraModel>,
-}
-
-impl VideoLens {
-    pub fn frame_count(&self) -> usize {
-        self.models.len()
-    }
-
-    pub fn model(&self, frame: &w::FrameKey) -> Result<&CameraModel, Error> {
-        if frame.stream_id != self.stream {
-            return Err("calibrated video requires its registered native input stream".into());
-        }
-        // The decoder loops an exact, startup-validated CFR clip. Sequence is
-        // assigned before queue drops, so gaps never shift the calibration.
-        Ok(&self.models[(frame.sequence.get() % self.models.len() as u64) as usize])
-    }
 }
 
 pub fn load(
@@ -113,26 +83,7 @@ pub fn prepare(
         return Err("invalid calibrated video extent, rate, frames or scene dimensions".into());
     }
     let camera = Camera::from_ti(e, Ti::new(manifest.ti)?, manifest.center, 0.1, 10000.0)?;
-    let radial = RadialDistortion::new(
-        manifest.radial.centre_px,
-        manifest.radial.scale_px,
-        manifest.radial.coefficients,
-        manifest
-            .radial
-            .support
-            .map(|[min, max]| SupportRect { min, max }),
-    )?;
-    let models = manifest
-        .frame_warps
-        .iter()
-        .map(|rows| {
-            Ok(CameraModel::Distorted(Box::new(LensDistortion::new(
-                e,
-                radial,
-                Some(FrameWarp::new(*rows)?),
-            ))))
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let models = manifest.radial.models(e, &manifest.frame_warps)?;
     let ray = camera.ray(manifest.anchor_pixel)?;
     let distance = -ray.origin[2] / ray.direction[2];
     if !distance.is_finite() || distance <= 0.0 {
@@ -220,9 +171,6 @@ pub fn prepare(
         "lighting":lighting,"shadow_mode":"pcss"
     }))?;
     let (mut program, adapter) = Synthetic::install_registered(config, registrations, state)?;
-    program.video_lens = Some(Arc::new(VideoLens {
-        stream: program.stream_id.clone(),
-        models,
-    }));
+    program.video_lens = Some(Arc::new(VideoLens::new(program.stream_id.clone(), models)));
     Ok((program, adapter))
 }
