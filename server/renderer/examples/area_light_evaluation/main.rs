@@ -410,6 +410,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().nth(1).as_deref() == Some("--profile") {
         return profile::run(&table);
     }
+    if std::env::args().nth(1).as_deref() == Some("--plausible") {
+        return profile::run_plausible(&table);
+    }
     if std::env::args().nth(1).as_deref() == Some("--profile-gpu") {
         return pollster::block_on(profile_gpu::run(&table));
     }

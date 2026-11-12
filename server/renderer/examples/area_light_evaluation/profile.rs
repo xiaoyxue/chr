@@ -71,30 +71,46 @@ struct Case {
 }
 
 fn cases() -> Vec<Case> {
+    profile_cases(&[1.0], false)
+}
+
+// Polar 80 degrees at distance 8 keeps planar separation above the bounding radius.
+const HORIZON: [(&str, V); 2] = [
+    ("horizon_mirror_side", V(-7.878462, 0.0, 1.389185)),
+    ("horizon_view_side", V(7.878462, 0.0, 1.389185)),
+];
+
+fn profile_cases(metals: &[f64], horizon: bool) -> Vec<Case> {
     let mut cases = Vec::new();
-    for shape in [Shape::Rectangle, Shape::Disk, Shape::Sphere] {
-        for roughness in [0.15, 0.3, 0.5, 0.85] {
-            for nv in [0.3_f64, 0.5, 0.8, 1.0] {
-                let mirror_x = -3.0 * (1.0 - nv * nv).sqrt() / nv;
-                for (name, center) in [
-                    ("axial", V(0.0, 0.0, 3.0)),
-                    ("mirror", V(mirror_x, 0.0, 3.0)),
-                    ("edge", V(mirror_x + 1.0, 0.0, 3.0)),
-                    ("off_axis", V(mirror_x, 1.0, 3.0)),
-                    ("near_admitted", V(0.0, 0.0, 2.0)),
-                ] {
-                    cases.push(Case {
-                        name,
-                        light: Light {
-                            center,
-                            ..default_light(shape)
-                        },
-                        material: Material {
-                            roughness,
-                            nv,
-                            metal: 1.0,
-                        },
-                    });
+    for &metal in metals {
+        for shape in [Shape::Rectangle, Shape::Disk, Shape::Sphere] {
+            for roughness in [0.15, 0.3, 0.5, 0.85] {
+                for nv in [0.3_f64, 0.5, 0.8, 1.0] {
+                    let mirror_x = -3.0 * (1.0 - nv * nv).sqrt() / nv;
+                    let mut centers = vec![
+                        ("axial", V(0.0, 0.0, 3.0)),
+                        ("mirror", V(mirror_x, 0.0, 3.0)),
+                        ("edge", V(mirror_x + 1.0, 0.0, 3.0)),
+                        ("off_axis", V(mirror_x, 1.0, 3.0)),
+                        ("near_admitted", V(0.0, 0.0, 2.0)),
+                    ];
+                    if horizon {
+                        centers.extend(HORIZON);
+                    }
+                    for (name, center) in centers {
+                        cases.push(Case {
+                            name,
+                            light: Light {
+                                center,
+                                ..default_light(shape)
+                            },
+                            material: Material {
+                                roughness,
+                                nv,
+                                metal,
+                            },
+                        });
+                    }
                 }
             }
         }
@@ -102,6 +118,14 @@ fn cases() -> Vec<Case> {
     cases
 }
 
+/// Owner-approved `ltc-plausible-v1` approximation profile (2026-11-12): per emitter,
+/// |candidate - reference| <= 0.02 * Le + 0.30 * reference. Set from measured LTC
+/// behaviour; it bounds an accepted approximation, not reference accuracy.
+pub(super) fn plausible_tolerance(reference: f64, radiance: f64) -> f64 {
+    0.02 * radiance + 0.30 * reference
+}
+
+// The original reference-accuracy criteria, which the pinned fit fails.
 fn tolerance(reference: f64, radiance: f64) -> f64 {
     let absolute = 0.005 * radiance;
     if reference >= 1e-4 * radiance {
@@ -240,6 +264,153 @@ pub(super) fn run(table: &Table) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// Outward spheres over the upper hemisphere (y >= 0 by symmetry), from small far
+// emitters to the admitted limit centre distance = 1.5 radius, including caps that
+// cross the horizon. Unit radius; distance = 1 / sin(half angle).
+fn sphere_sweep(metals: &[f64]) -> Vec<Case> {
+    let mut cases = Vec::new();
+    for &metal in metals {
+        for roughness in [0.15, 0.3, 0.5, 0.85] {
+            for nv in [0.3, 0.5, 0.8, 1.0] {
+                for distance in [
+                    1.0 / 3_f64.to_radians().sin(),
+                    1.0 / 8_f64.to_radians().sin(),
+                    1.0 / 15_f64.to_radians().sin(),
+                    1.0 / 25_f64.to_radians().sin(),
+                    // The admitted limit; the epsilon absorbs rounding in the unit direction.
+                    1.5 + 1e-9,
+                ] {
+                    for polar_step in 0..12 {
+                        let polar = (7.5 * polar_step as f64).to_radians();
+                        let azimuths: &[f64] = if polar_step == 0 {
+                            &[0.0]
+                        } else {
+                            &[0.0, 45.0, 90.0, 135.0, 180.0]
+                        };
+                        for azimuth in azimuths.iter().map(|a| a.to_radians()) {
+                            cases.push(Case {
+                                name: "sphere_sweep",
+                                light: Light {
+                                    center: V(
+                                        polar.sin() * azimuth.cos(),
+                                        polar.sin() * azimuth.sin(),
+                                        polar.cos(),
+                                    ) * distance,
+                                    ..default_light(Shape::Sphere)
+                                },
+                                material: Material {
+                                    roughness,
+                                    nv,
+                                    metal,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cases
+}
+
+struct Resolved {
+    reference: f64,
+    discrepancy: f64,
+    oracle: &'static str,
+}
+
+// Area-sampled reference first; under-resolved rows fall back to the independent
+// angular oracle. Either must agree with its own refinement within 1/16 of the limit.
+fn plausible_reference(case: Case, table: &Table) -> Option<Resolved> {
+    let low = surface(case, table, 256);
+    let high = surface(case, table, 512);
+    let radiance = case.light.radiance;
+    if (high - low).abs() <= plausible_tolerance(high, radiance) / 16.0 {
+        return Some(Resolved {
+            reference: high,
+            discrepancy: (high - low).abs(),
+            oracle: "surface512",
+        });
+    }
+    let coarse = angular_reference(case.light, case.material, 1024);
+    let fine = angular_reference(case.light, case.material, 2048);
+    let discrepancy = (fine - coarse).abs();
+    (discrepancy <= plausible_tolerance(fine, radiance) / 16.0).then_some(Resolved {
+        reference: fine,
+        discrepancy,
+        oracle: "angular2048",
+    })
+}
+
+pub(super) fn run_plausible(table: &Table) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all("output/area-light-native")?;
+    let mut csv = fs::File::create("output/area-light-native/plausible.csv")?;
+    writeln!(
+        csv,
+        "shape,case,roughness,nv,metal,center_x,center_y,center_z,oracle,reference,discrepancy,candidate64,absolute_error,relative_error,tolerance,error_over_tolerance,result"
+    )?;
+    let (mut rows, mut failures, mut unresolved, mut worst) = (0, 0, 0, 0.0_f64);
+    for case in profile_cases(&[0.0, 1.0], true)
+        .into_iter()
+        .chain(sphere_sweep(&[0.0, 1.0]))
+    {
+        if !admitted(case.light, case.material) {
+            return Err("plausible fixture is outside the approved envelope".into());
+        }
+        rows += 1;
+        let c = candidate(case.light, case.material, table.lookup(case.material), 64);
+        let value = c[2] + c[3];
+        let (reference, discrepancy, oracle, result, limit) = match plausible_reference(case, table)
+        {
+            Some(r) => {
+                let limit = plausible_tolerance(r.reference, case.light.radiance);
+                let error = (value - r.reference).abs();
+                worst = worst.max((error + r.discrepancy) / limit);
+                let result = if error + r.discrepancy <= limit {
+                    "pass"
+                } else {
+                    failures += 1;
+                    "fail"
+                };
+                (r.reference, r.discrepancy, r.oracle, result, limit)
+            }
+            None => {
+                unresolved += 1;
+                (f64::NAN, f64::NAN, "none", "unresolved", f64::NAN)
+            }
+        };
+        let error = (value - reference).abs();
+        let relative = if reference > 0.0 {
+            format!("{:.12e}", error / reference)
+        } else {
+            "undefined".into()
+        };
+        writeln!(
+            csv,
+            "{:?},{},{},{},{},{:.12e},{:.12e},{:.12e},{oracle},{reference:.12e},{discrepancy:.12e},{value:.12e},{error:.12e},{relative},{limit:.12e},{:.12e},{result}",
+            case.light.shape,
+            case.name,
+            case.material.roughness,
+            case.material.nv,
+            case.material.metal,
+            case.light.center.0,
+            case.light.center.1,
+            case.light.center.2,
+            error / limit,
+        )?;
+    }
+    println!(
+        "ltc-plausible-v1 rows={rows} failures={failures} unresolved={unresolved} max_(error+discrepancy)/tolerance={worst:.4}"
+    );
+    if failures > 0 || unresolved > 0 {
+        return Err("ltc-plausible-v1 screen did not pass; inspect plausible.csv".into());
+    }
+    println!(
+        "Sampled rows pass; this does not certify the continuous envelope or temporal behaviour."
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +503,57 @@ mod tests {
                 assert!(error > limit);
             }
         }
+    }
+
+    #[test]
+    fn counterexamples_meet_plausible_profile_but_not_half_energy() {
+        let table = Table::load();
+        for shape in [Shape::Rectangle, Shape::Disk, Shape::Sphere] {
+            for roughness in [0.15, 0.5] {
+                let (light, material) = counterexample(shape, roughness);
+                let case = Case {
+                    name: "near_admitted",
+                    light,
+                    material,
+                };
+                let fine = surface(case, &table, 1024);
+                let angular = angular_reference(light, material, 1024);
+                let limit = plausible_tolerance(fine, light.radiance);
+                let discrepancy = (fine - angular).abs();
+                assert!(discrepancy < limit / 16.0);
+                let c = candidate(light, material, table.lookup(material), 64)[2];
+                assert!(
+                    (c - fine).abs() + discrepancy <= limit,
+                    "{shape:?} {roughness}"
+                );
+            }
+            // Not vacuous: losing half of a bright highlight (reference > 0.08 Le) fails.
+            let mirror = profile_cases(&[1.0], false)
+                .into_iter()
+                .find(|c| {
+                    c.light.shape == shape
+                        && c.name == "mirror"
+                        && c.material.roughness == 0.5
+                        && c.material.nv == 0.8
+                })
+                .expect("mirror fixture");
+            let bright = surface(mirror, &table, 512);
+            assert!(
+                0.5 * bright > plausible_tolerance(bright, 1.0),
+                "{shape:?} {bright}"
+            );
+        }
+    }
+
+    #[test]
+    fn horizon_fixtures_are_admitted_near_the_horizon() {
+        for (_, center) in HORIZON {
+            assert!((center.length() - 8.0).abs() < 1e-5);
+            assert!((center.2 / center.length() - 80_f64.to_radians().cos()).abs() < 1e-6);
+        }
+        assert_eq!(profile_cases(&[0.0, 1.0], true).len(), 672);
+        let sweep = sphere_sweep(&[1.0]);
+        assert_eq!(sweep.len(), 16 * 280);
+        assert!(sweep.iter().all(|c| admitted(c.light, c.material)));
     }
 }
