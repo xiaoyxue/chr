@@ -20,7 +20,7 @@ Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
-server/runtime/           chr-server: headless render server with IPC and video outputs
+server/runtime/           chr-runtime: the chr-server render server with IPC and video outputs
   src/input/              Video acquisition adapters (currently software MP4)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
@@ -83,7 +83,7 @@ The root development shell provides:
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
 GStreamer core/base/bad/ugly plugins, and Python GObject bindings. It runs the video-only
 software input helper under `server/scripts/` and builds the opt-in
-`chr-server` `gstreamer-media` feature; it does not install SDI drivers,
+`chr-runtime` `gstreamer-media` feature; it does not install SDI drivers,
 provide a physical SDI device, or change the renderer protocol. The bad plugins
 provide H.264 parsing, MPEG-TS muxing and direct SRT output for the software simulation.
 

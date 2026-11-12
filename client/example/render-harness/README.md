@@ -134,7 +134,7 @@ Requires Node.js 24 or newer, which runs the `.ts` scripts directly.
 ```sh
 # Terminal 1, from the repository root (see server/README.md for GPU access on
 # non-NixOS hosts)
-cargo run --locked --release -p chr-server -- --webrtc-tcp 127.0.0.1:8788
+cargo run --locked --release -p chr-runtime -- --webrtc-tcp 127.0.0.1:8788
 
 # Terminal 2, from here
 npm install

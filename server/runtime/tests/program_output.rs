@@ -1,7 +1,7 @@
 //! Synthetic program acceptance, including the real GPU -> simulated SDI -> software monitor.
 use chr_common::{methods::mesh, scene_frame as w};
 use chr_renderer::Gpu;
-use chr_server::{
+use chr_runtime::{
     monitor::{Monitor, encoder::VideoFeed},
     program::{
         ProgramRenderer,
@@ -248,7 +248,7 @@ async fn gpu_server_rotation_changes_program_pixels_and_stop_freezes_them() {
     owner.await.unwrap();
 }
 
-fn video_manifest() -> chr_server::program::video::Manifest {
+fn video_manifest() -> chr_runtime::program::video::Manifest {
     let s = (192_f64 * 128.).sqrt();
     serde_json::from_value(json!({
         "width":192,"height":128,"fps":50,
@@ -274,9 +274,9 @@ fn calibrated_video_rejects_mismatched_or_invalid_geometry() {
             _ => manifest.height_m = 0.,
         }
         assert!(
-            chr_server::program::video::prepare(
+            chr_runtime::program::video::prepare(
                 manifest,
-                chr_server::program::pitch::block().unwrap(),
+                chr_runtime::program::pitch::block().unwrap(),
                 mode(),
                 runtime_id().unwrap(),
             )
@@ -287,9 +287,9 @@ fn calibrated_video_rejects_mismatched_or_invalid_geometry() {
 
 #[tokio::test]
 async fn calibrated_warp_follows_native_identity_across_gaps_and_loops() {
-    let (mut program, adapter) = chr_server::program::video::prepare(
+    let (mut program, adapter) = chr_runtime::program::video::prepare(
         video_manifest(),
-        chr_server::program::pitch::block().unwrap(),
+        chr_runtime::program::pitch::block().unwrap(),
         mode(),
         runtime_id().unwrap(),
     )
@@ -345,9 +345,9 @@ async fn gpu_calibrated_video_warps_cg_not_plate_and_repeats_exact_loop() {
         gpu.adapter.get_info().device_type,
         wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
     ));
-    let (mut program, adapter) = chr_server::program::video::prepare(
+    let (mut program, adapter) = chr_runtime::program::video::prepare(
         video_manifest(),
-        chr_server::program::pitch::block().unwrap(),
+        chr_runtime::program::pitch::block().unwrap(),
         VideoMode {
             width: 96,
             height: 64,
@@ -500,10 +500,10 @@ async fn explicit_profile_keeps_input_and_submission_bounded() {
     }
     let mut invalid = synthetic.configuration.clone();
     invalid.output_transfer = w::OutputTransfer::Srgb;
-    assert!(chr_server::program::validate_output(&invalid).is_err());
+    assert!(chr_runtime::program::validate_output(&invalid).is_err());
     invalid.output_transfer = w::OutputTransfer::Bt709;
     invalid.output_rate = w::TimeBase::new(1001, 60000).unwrap();
-    assert!(chr_server::program::validate_output(&invalid).is_err());
+    assert!(chr_runtime::program::validate_output(&invalid).is_err());
     drop(control);
     owner.await.unwrap();
 }

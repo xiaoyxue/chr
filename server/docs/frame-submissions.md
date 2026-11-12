@@ -1,6 +1,6 @@
 # Synthetic frame admission and scheduling
 
-`chr_server::frame_submissions` implements the approved native mechanics of #22.
+`chr_runtime::frame_submissions` implements the approved native mechanics of #22.
 It is an explicit embedding opt-in, **not** the shipped daemon's renderer, GPU
 integration or hardware SDI acceptance by itself. The
 [program-output opt-in](program-output.md) supplies its real GPU/simulated SDI
@@ -116,7 +116,7 @@ destroying resource owners; logical release or dropping futures is not a fence.
 
 ## Evidence and policy boundary
 
-`cargo test --locked -p chr-server -p chr-common` includes real resource-backed
+`cargo test --locked -p chr-runtime -p chr-common` includes real resource-backed
 publication/admission over NativeSocket and WebSocket through one handler/scene
 queue, strict metadata errors, retry/query/cancel/release, reordered keyed joins,
 whole-batch rollback, frozen snapshots, independent deadlines/readiness failures,

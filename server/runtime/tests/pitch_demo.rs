@@ -5,7 +5,7 @@ use chr_renderer::{
     coordinates::{ImageExtent, Ti},
     scene::ModelMatrix,
 };
-use chr_server::{
+use chr_runtime::{
     program::{
         ProgramRenderer,
         pitch::{self, CameraFixture, Prepared},

@@ -17,14 +17,14 @@ use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duratio
 use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
 use chr_renderer::coordinates::ImageExtent;
 
-use chr_server::control::ControlHandler;
-use chr_server::monitor::{
+use chr_runtime::control::ControlHandler;
+use chr_runtime::monitor::{
     Monitor,
     encoder::VideoFeed,
     webrtc::{IceConfig, WebRtcHub},
 };
-use chr_server::pipeline::{RenderConfig, RenderWorker};
-use chr_server::sdi::{self, SdiOutput, VideoMode};
+use chr_runtime::pipeline::{RenderConfig, RenderWorker};
+use chr_runtime::sdi::{self, SdiOutput, VideoMode};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -208,10 +208,10 @@ fn run(args: Args) -> Result<()> {
         fps: args.fps,
     };
     let installation = if let Some(path) = &args.pitch_demo {
-        let prepared = chr_server::program::pitch::Prepared::load(
+        let prepared = chr_runtime::program::pitch::Prepared::load(
             path,
             mode,
-            chr_server::program::synthetic::runtime_id()?,
+            chr_runtime::program::synthetic::runtime_id()?,
         )?;
         if let Some(path) = &args.pitch_controls {
             let mut options = std::fs::OpenOptions::new();
@@ -225,20 +225,20 @@ fn run(args: Args) -> Result<()> {
         }
         Some((prepared.program, prepared.adapter))
     } else if let Some(path) = &args.video_scene {
-        Some(chr_server::program::video::load(
+        Some(chr_runtime::program::video::load(
             path,
             mode,
-            chr_server::program::synthetic::runtime_id()?,
+            chr_runtime::program::synthetic::runtime_id()?,
         )?)
     } else if args.software_video.is_some() {
-        Some(chr_server::program::synthetic::Synthetic::install_video(
+        Some(chr_runtime::program::synthetic::Synthetic::install_video(
             mode,
-            chr_server::program::synthetic::runtime_id()?,
+            chr_runtime::program::synthetic::runtime_id()?,
         )?)
     } else if args.synthetic_program {
-        Some(chr_server::program::synthetic::Synthetic::install(
+        Some(chr_runtime::program::synthetic::Synthetic::install(
             mode,
-            chr_server::program::synthetic::runtime_id()?,
+            chr_runtime::program::synthetic::runtime_id()?,
         )?)
     } else {
         None
@@ -253,7 +253,7 @@ fn run(args: Args) -> Result<()> {
                 .expect("software video installation")
                 .0;
             let native = program.configuration.native_extent;
-            chr_server::input::software::VideoInput::open(
+            chr_runtime::input::software::VideoInput::open(
                 path,
                 VideoMode {
                     width: native.width,
@@ -267,7 +267,7 @@ fn run(args: Args) -> Result<()> {
     let (sdi, tap) = if let Some((synthetic, _)) = &installation {
         SdiOutput::spawn_program(
             mode,
-            chr_server::program::synthetic::id(format!(
+            chr_runtime::program::synthetic::id(format!(
                 "{}-program",
                 synthetic.configuration.runtime_id.as_str()
             ))?,
@@ -278,7 +278,7 @@ fn run(args: Args) -> Result<()> {
     #[cfg(all(unix, feature = "gstreamer-media"))]
     let srt = args
         .srt
-        .map(|bind| chr_server::monitor::srt::SrtOutput::spawn(mode, bind, Arc::clone(&feed)))
+        .map(|bind| chr_runtime::monitor::srt::SrtOutput::spawn(mode, bind, Arc::clone(&feed)))
         .transpose()?;
     #[cfg(all(unix, feature = "gstreamer-media"))]
     let monitor = if args.software_video.is_some() {
@@ -317,7 +317,7 @@ fn run(args: Args) -> Result<()> {
         let installed = match installation {
             Some((synthetic, adapter)) => {
                 let adapter = if args.software_video.is_some() { adapter.with_rotation() } else { adapter };
-                let (control, owner) = chr_server::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
+                let (control, owner) = chr_runtime::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
                 synthetic.create_scene(&control).await?;
                 log::info!("local program runtime_id={} scene_id={} configuration_id={}",
                     synthetic.configuration.runtime_id.as_str(), synthetic.scene_id.as_str(), synthetic.configuration.configuration_id.as_str());

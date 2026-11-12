@@ -11,7 +11,7 @@ From the worktree root, inside the existing Nix environment:
 ```sh
 mkdir -p output/pitch-demo
 chmod 700 output/pitch-demo
-nix develop --command cargo run --locked -p chr-server -- \
+nix develop --command cargo run --locked -p chr-runtime -- \
   --pitch-demo server/runtime/tests/fixtures/pitch-demo.json \
   --pitch-controls output/pitch-demo/controls.json \
   --size 640x360 --fps 25 --ws 127.0.0.1:8787 \
@@ -175,12 +175,12 @@ a throughput promise.
 ## Automated acceptance
 
 ```sh
-nix develop --command cargo test --locked -p chr-server --test pitch_demo
+nix develop --command cargo test --locked -p chr-runtime --test pitch_demo
 # Run through nixGL on a non-NixOS NVIDIA host:
-cargo test --locked -p chr-server --test pitch_demo gpu_pitch_program -- --ignored --nocapture
+cargo test --locked -p chr-runtime --test pitch_demo gpu_pitch_program -- --ignored --nocapture
 # Explicit local input; no private data is committed or uploaded:
 CHR_PITCH_FIXTURE=output/pitch-demo/private-demo.json \
-  cargo test --locked -p chr-server --test pitch_demo gpu_private_pitch_program -- --ignored --nocapture
+  cargo test --locked -p chr-runtime --test pitch_demo gpu_private_pitch_program -- --ignored --nocapture
 
 nix develop --command npm --prefix client/example/render-harness run typecheck
 nix develop --command npm --prefix client/example/render-harness test

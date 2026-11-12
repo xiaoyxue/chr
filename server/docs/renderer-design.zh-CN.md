@@ -209,7 +209,7 @@ CPU/GPU 测试覆盖原生拟合、预乘 alpha、颜色域分离、BT.709、虚
 从而区分相机投影造成的视觉倾斜和模型本身的朝向。
 
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
-`server/runtime`（`chr-server`）、`server/viewer`（`chr-app`）和
+`server/runtime`（`chr-runtime`）、`server/viewer`（`chr-app`）和
 `common`（`chr-common`）。当前服务已将旋转三角形送入模拟 SDI 端口，
 并通过 WebRTC 监看端口实际发出的画面。
 
