@@ -328,7 +328,9 @@ mapping with explicit failures; `FrameCompositor::prepare_model` renders ideal C
 over a guard band and inverse-warps it on the GPU, leaving footage layers unwarped.
 See `docs/renderer-design.md` section 3.3. GPU checks (`distortion_gpu`) cover
 zero-coefficient identity, sub-0.3 px marker alignment for both models, unwarped
-footage with no CG at non-invertible pixels, and guard-band budgeting. No wire
+footage with no CG at non-invertible pixels, guard-band budgeting, and output
+resizing (Contain/Cover/Stretch fit the distorted native image without rescaling
+Ti or calibration). No wire
 or calibration-storage fields are added.
 
 ## Native image composition

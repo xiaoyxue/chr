@@ -5,7 +5,8 @@ use chr_renderer::{
     Gpu, OffscreenTarget,
     camera::Camera,
     composition::{
-        AlphaMode, CompositionOutput, FrameCompositor, ImageLayer, ImageStage, ImageView, Transfer,
+        AlphaMode, CompositionOutput, FrameCompositor, ImageFit, ImageLayer, ImageStage, ImageView,
+        Transfer,
     },
     coordinates::ImageExtent,
     distortion::{CameraModel, FrameWarp, LensDistortion, RadialDistortion},
@@ -117,7 +118,7 @@ fn render(
     compositor
         .prepare_model(gpu, &scene.snapshot(), &camera(), model, &layers)
         .unwrap();
-    let target = OffscreenTarget::new(gpu, extent()).unwrap();
+    let target = OffscreenTarget::new(gpu, config.extent).unwrap();
     let mut pixels = Vec::new();
     target
         .render_rgba(
@@ -230,13 +231,14 @@ fn marker_scene(camera: &Camera) -> (Scene, Vec<[f64; 3]>) {
     (scene, centres)
 }
 
-/// Intensity-weighted centroid in native coordinates (texel index + 0.5).
-fn centroid(pixels: &[u8], around: [f64; 2]) -> [f64; 2] {
+/// Intensity-weighted centroid in image coordinates (texel index + 0.5).
+fn centroid(pixels: &[u8], size: [u32; 2], around: [f64; 2]) -> [f64; 2] {
     let (mut sum, mut sx, mut sy) = (0.0, 0.0, 0.0);
     let (cx, cy) = (around[0] as i64, around[1] as i64);
-    for y in (cy - 8).max(0)..(cy + 9).min(i64::from(H)) {
-        for x in (cx - 8).max(0)..(cx + 9).min(i64::from(W)) {
-            let value = f64::from(pixels[((y * i64::from(W) + x) * 4) as usize]);
+    let (w, h) = (i64::from(size[0]), i64::from(size[1]));
+    for y in (cy - 8).max(0)..(cy + 9).min(h) {
+        for x in (cx - 8).max(0)..(cx + 9).min(w) {
+            let value = f64::from(pixels[((y * w + x) * 4) as usize]);
             sum += value;
             sx += value * (x as f64 + 0.5);
             sy += value * (y as f64 + 0.5);
@@ -259,7 +261,7 @@ fn markers_follow_both_camera_models() {
         let pixels = render(&gpu, &scene, &model, None, config);
         for &centre in &centres {
             let expected = model.project(&camera, centre).unwrap();
-            let found = centroid(&pixels, expected.native);
+            let found = centroid(&pixels, [W, H], expected.native);
             let error = (found[0] - expected.native[0]).hypot(found[1] - expected.native[1]);
             assert!(
                 error < 0.3,
@@ -322,4 +324,93 @@ fn guard_band_counts_against_the_composition_budget() {
             .prepare_model(&gpu, &scene, &camera(), &distorted, &[])
             .is_err()
     );
+}
+
+/// Native-to-output rectangle as documented for `ImageFit` (centred Contain/Cover).
+fn viewport(output: [u32; 2], fit: ImageFit) -> [f64; 4] {
+    let (w, h) = (f64::from(output[0]), f64::from(output[1]));
+    if fit == ImageFit::Stretch {
+        return [0.0, 0.0, w, h];
+    }
+    let (sx, sy) = (w / f64::from(W), h / f64::from(H));
+    let scale = if fit == ImageFit::Contain {
+        sx.min(sy)
+    } else {
+        sx.max(sy)
+    };
+    let (vw, vh) = (f64::from(W) * scale, f64::from(H) * scale);
+    [(w - vw) / 2.0, (h - vh) / 2.0, vw, vh]
+}
+
+/// Output resizing happens after the native projection and lens mapping: the distorted
+/// native image is fitted into the output, and Ti/calibration are never rescaled.
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn output_resizing_fits_the_distorted_native_image() {
+    let gpu = gpu();
+    let camera = camera();
+    let (scene, centres) = marker_scene(&camera);
+    let distortion = lens([-0.08, 0.01, 0.0], true);
+    let model = CameraModel::Distorted(Box::new(distortion));
+    let native: Vec<_> = centres
+        .iter()
+        .map(|&c| model.project(&camera, c).unwrap().native)
+        .collect();
+    for (output, fit) in [
+        ([480, 360], ImageFit::Contain),
+        ([480, 360], ImageFit::Cover),
+        ([400, 300], ImageFit::Stretch),
+    ] {
+        let mut config = CompositionOutput::new(ImageExtent::new(output[0], output[1]).unwrap());
+        config.fit = fit;
+        let pixels = render(&gpu, &scene, &model, None, config);
+        let [vx, vy, vw, vh] = viewport(output, fit);
+        let (sx, sy) = (vw / f64::from(W), vh / f64::from(H));
+        let mut checked = 0;
+        for n in &native {
+            let expected = [vx + n[0] * sx, vy + n[1] * sy];
+            // Cover crops the native image; skip markers too close to the output border.
+            if expected[0] < 10.0
+                || expected[1] < 10.0
+                || expected[0] > f64::from(output[0]) - 10.0
+                || expected[1] > f64::from(output[1]) - 10.0
+            {
+                continue;
+            }
+            let found = centroid(&pixels, output, expected);
+            let error = (found[0] - expected[0]).hypot(found[1] - expected[1]);
+            assert!(
+                error < 0.3 * sx.max(sy) + 0.1,
+                "{fit:?} {output:?}: {found:?} vs {expected:?} ({error})"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 9,
+            "{fit:?}: only {checked} markers inside the output"
+        );
+        // Zero coefficients still reproduce the pinhole composition at this output size.
+        let plate = gradient(&gpu);
+        let pinhole = render(
+            &gpu,
+            &shaded_scene(),
+            &CameraModel::Pinhole,
+            Some(&plate),
+            config,
+        );
+        let identity = CameraModel::Distorted(Box::new(lens([0.0; 3], false)));
+        let zero = render(&gpu, &shaded_scene(), &identity, Some(&plate), config);
+        let worst = pinhole
+            .iter()
+            .zip(&zero)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= 1, "{fit:?}: max byte difference {worst}");
+    }
+    // Resizing the output never rewrites the camera or lens calibration.
+    assert_eq!(model, CameraModel::Distorted(Box::new(distortion)));
+    for (centre, n) in centres.iter().zip(&native) {
+        assert_eq!(model.project(&camera, *centre).unwrap().native, *n);
+    }
 }
