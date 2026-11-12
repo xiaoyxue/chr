@@ -1,6 +1,7 @@
 # 精简渲染器功能范围与设计
 
-状态：**路线图；静态 GLB 和直接光 PBR 已实现**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
+状态：**除可选的大气与天空可见性外，路线图已在 Linux 上实现；见
+[renderer-acceptance.zh-CN.md](renderer-acceptance.zh-CN.md)**。本文对照本地 `trd` 的 `9c7bccc` 与 `chr`
 的 `dcebb33`，提出更小的渲染器，而不是移植参考项目的整套应用。
 英文配对文档为 [renderer-design.md](renderer-design.md)。
 

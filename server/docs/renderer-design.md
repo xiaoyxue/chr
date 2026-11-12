@@ -1,6 +1,7 @@
 # Simplified renderer scope and design
 
-Status: **roadmap; static GLB and direct-light PBR implemented**. This document compares the local `trd`
+Status: **roadmap implemented on Linux except optional atmosphere/sky visibility; see
+[renderer-acceptance.md](renderer-acceptance.md)**. This document compares the local `trd`
 reference at `9c7bccc` with the `chr` baseline at `dcebb33`. It proposes a smaller
 renderer, not a port of the reference application suite. The paired translation
 is [renderer-design.zh-CN.md](renderer-design.zh-CN.md).
