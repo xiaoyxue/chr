@@ -1,0 +1,10 @@
+{
+  "width": 640,
+  "height": 360,
+  "ti": [[0.02, 0, 0], [0, 0.02, 0], [0, 0, 1]],
+  "center": [0, 0, -100],
+  "pitch": [100, 64],
+  "source_frame": "synthetic-pitch-frame-0007",
+  "center_semantics": "synthetic",
+  "ground_status": "synthetic dimensions, not a measured venue"
+}

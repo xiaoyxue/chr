@@ -338,6 +338,21 @@ impl Camera {
     pub fn center(&self) -> [f64; 3] {
         self.center
     }
+    /// Forward row-major camera-to-world pose, including the optical frame
+    /// derived by `from_ti`. This does not imply measured calibration.
+    pub fn camera_to_world(&self) -> [[f64; 4]; 4] {
+        std::array::from_fn(|row| {
+            std::array::from_fn(|column| {
+                if row == 3 {
+                    if column == 3 { 1.0 } else { 0.0 }
+                } else if column == 3 {
+                    self.center[row]
+                } else {
+                    self.axes[column][row]
+                }
+            })
+        })
+    }
     pub(crate) fn depth_range(&self) -> [f64; 2] {
         [self.near, self.far]
     }

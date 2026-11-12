@@ -184,8 +184,10 @@
       <aside>
         <output id="program-result" hidden></output>
         <details class="panel" id="program-scene">
-          <summary>Synthetic program scene (opt-in)</summary>
-          <p>Enter IDs printed by <code>--synthetic-program</code>. Video remains the SDI monitor.</p>
+          <summary>Local program scene (opt-in)</summary>
+          <p>Enter IDs printed by <code>--synthetic-program</code>, or load local metadata written by <code>--pitch-controls</code>. Video remains the SDI monitor.</p>
+          <label>Pitch controls metadata <input id="pitch-file" type="file" accept=".json" /></label>
+          <p id="pitch-provenance"></p>
           <div class="row"><input id="runtime-id" placeholder="runtime_id" aria-label="Runtime ID" /></div>
           <div class="row"><input id="scene-id" placeholder="scene_id" aria-label="Scene ID" /><button id="scene-load">Load / reconcile</button></div>
           <p id="scene-status">Not loaded</p>
@@ -194,7 +196,19 @@
             <div class="row"><button data-camera="zoom-in">Zoom +</button><button data-camera="zoom-out">Zoom −</button></div>
             <div class="row"><button data-camera="dolly-in">Dolly in</button><button data-camera="dolly-out">Dolly out</button></div>
             <div class="row"><button data-camera="orbit-left">Orbit ←</button><button data-camera="orbit-right">Orbit →</button><button data-camera="orbit-up">Orbit ↑</button><button data-camera="orbit-down">Orbit ↓</button></div>
-            <div class="row"><button data-camera="reset">Reset loaded camera</button></div>
+            <div class="row"><button data-camera="yaw-left">Yaw ←</button><button data-camera="yaw-right">Yaw →</button><button data-camera="pitch-up">Pitch ↑</button><button data-camera="pitch-down">Pitch ↓</button><button data-camera="roll-left">Roll ←</button><button data-camera="roll-right">Roll →</button></div>
+            <div class="row"><button data-camera="reset">Reset original camera</button></div>
+            <section id="pitch-options" hidden>
+              <div class="row"><label>Model <select id="pitch-model"></select></label></div>
+              <div class="row"><label>Scale <input id="model-scale" type="number" min="0.05" max="10" step="0.1" value="1" /></label><label>Yaw ° <input id="model-yaw" type="number" value="0" /></label></div>
+              <div class="row"><label><input id="model-mirror" type="checkbox" /> Mirror</label><button id="model-apply">Apply grounded model</button></div>
+              <div class="row"><label>Comparison <select id="pitch-rig"><option value="sun">Sun only</option><option value="points">Four points</option><option value="spots">Four spots</option><option value="points+sun">Points + sun</option><option value="spots+sun" selected>Spots + sun</option></select></label></div>
+              <div class="row"><label>Tower height m (authored) <input id="tower-height" type="number" min="30" max="40" value="35" /></label></div>
+              <div class="row"><label>Tower emission <input id="tower-emission" type="number" min="0" max="100000" value="4200" /></label><label>Source radius m <input id="source-radius" type="number" min="0" max="5" step="0.1" value="0.5" /></label></div>
+              <div class="row"><label>Inner cone rad <input id="cone-inner" type="number" value="0.4" step="0.05" /></label><label>Outer cone rad <input id="cone-outer" type="number" value="0.9" step="0.05" /></label></div>
+              <div class="row"><label>Four spot targets XY <input id="spot-targets" value="[[0,0],[0,0],[0,0],[0,0]]" /></label></div>
+              <div class="row"><label>Sun direction XYZ <input id="sun-direction" value="[0.2,-0.4,1]" /></label><label>Sun angular radius rad <input id="sun-radius" type="number" value="0.00465" min="0" max="0.1" step="0.001" /></label></div>
+            </section>
             <div class="row"><label>Sun <input id="sun-gain" type="number" min="0" max="20" step="0.5" value="3" /></label></div>
             <div class="row"><label>Shadows <select id="shadow-mode"><option>off</option><option>hard</option><option selected>pcf</option><option>pcss</option></select></label><button id="scene-lighting">Apply atomically</button></div>
           </fieldset>

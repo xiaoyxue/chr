@@ -17,6 +17,7 @@ const HELP = `Usage: npm run verify:browser -- [options]
   --fps <n>           Server frame rate        [default 50]
   --tcp-only          Forbid UDP in Chrome, as through an SSH port forward
                       (needs chr-server --webrtc-tcp)
+  --pitch-controls <json> Load owner-local native-written pitch metadata through the file picker
   --screenshot <png>  Save a screenshot        [default <repo>/output/render-harness/browser.png]`;
 
 const { values: args } = parseArgs({
@@ -26,6 +27,7 @@ const { values: args } = parseArgs({
     seconds: { type: "string", default: "4" },
     fps: { type: "string", default: "50" },
     "tcp-only": { type: "boolean", default: false },
+    "pitch-controls": { type: "string" },
     screenshot: {
       type: "string",
       default: fileURLToPath(new URL("../../../../../output/render-harness/browser.png", import.meta.url)),
@@ -151,6 +153,10 @@ async function main(): Promise<number> {
   const url = new URL(args.url);
   url.searchParams.set("auto", "1");
   url.searchParams.set("seconds", args.seconds);
+  if (args["pitch-controls"]) {
+    url.searchParams.set("program", "1");
+    url.searchParams.set("pitch", "1");
+  }
   const profile = mkdtempSync(join(tmpdir(), "chr-chrome-"));
   let chrome: Awaited<ReturnType<typeof launchChrome>>;
   try {
@@ -169,6 +175,19 @@ async function main(): Promise<number> {
     });
     await cdp.send("Runtime.enable", {}, sessionId);
     await cdp.send("Page.navigate", { url: url.href }, sessionId);
+    if (args["pitch-controls"]) {
+      await cdp.send("DOM.enable", {}, sessionId);
+      const ready = Date.now() + 15000;
+      let nodeId = 0;
+      while (nodeId === 0 && Date.now() < ready) {
+        await new Promise(done => setTimeout(done, 100));
+        const doc = await cdp.send<{ root: { nodeId: number } }>("DOM.getDocument", {}, sessionId);
+        const found = await cdp.send<{ nodeId: number }>("DOM.querySelector", { nodeId: doc.root.nodeId, selector: "#pitch-file" }, sessionId);
+        nodeId = found.nodeId;
+      }
+      if (!nodeId) throw new Error("Pitch file picker did not become ready");
+      await cdp.send("DOM.setFileInputFiles", { nodeId, files: [resolve(args["pitch-controls"])] }, sessionId);
+    }
     const deadline = Date.now() + (Number(args.seconds) + (url.searchParams.get("program") === "1" ? 60 : 20)) * 1000;
     let report = "";
     while (Date.now() < deadline && report === "") {

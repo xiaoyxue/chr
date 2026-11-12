@@ -5,6 +5,10 @@ Without that flag, the rotating triangle, signaling and status behavior is uncha
 This is the approved trusted-local synthetic integration, not production
 registration/authentication, capture, tracking-loss, hot-configuration or latency policy.
 
+The separate [owner-local pitch demo](pitch-demo.md) uses this same program
+chain with explicit local camera/model registration and a named five-light
+configuration; it does not change `synthetic-program-v1` limits.
+
 From the repository root:
 
 ```sh
@@ -20,7 +24,7 @@ nix develop --command bash -c \
 ```
 
 The startup line declares `runtime_id`, `scene_id` and `configuration_id`.
-Copy the first two into the example harness's **Synthetic program scene** panel,
+Copy the first two into the example harness's **Local program scene** panel,
 connect its existing WebSocket and open its existing WebRTC stream. Alternatively
 pass `?runtime=…&scene=…` to the page. `render.get_configuration` takes the printed
 runtime ID. NativeSocket clients use exactly the same JSON-RPC methods and IDs.
@@ -95,8 +99,10 @@ slot, including repeats, and propagates its native provenance/slot to encoded
 frames. No second render-direct stream exists.
 
 Scene mutation currently rebuilds native resources and changes resource IDs.
-The program compositor is rebuilt at bound scene-effect changes, so edits can
-cause reuploads and shadow cache rebuilds. This is not an incremental optimization
+Camera/light edits reuse the compositor pipelines; the renderer evicts stale
+resources on prepare, but edits still cause reuploads and shadow cache rebuilds.
+A changed default shadow mode rebuilds the compositor. This narrow reuse avoids
+recompiling pipelines for every camera edit; it is not incremental scene mapping
 or a guaranteed real-time performance claim.
 
 On shutdown, native admission is closed and queued CPU edits drain, even if

@@ -80,6 +80,7 @@
                 craneLib.filterCargoSources path type
                 || pkgs.lib.hasSuffix ".wgsl" path
                 || relative == "common/tests/fixtures/scene_frame.json"
+                || pkgs.lib.hasPrefix "server/runtime/tests/fixtures/" relative
               );
           };
           common = {

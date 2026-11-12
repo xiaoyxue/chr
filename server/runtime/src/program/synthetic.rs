@@ -50,10 +50,14 @@ pub struct Synthetic {
     pixels: Vec<u8>,
     next: u64,
     pending: Vec<w::Id>,
+    initial_state: w::SceneState,
 }
 
 impl Synthetic {
-    pub fn install(mode: VideoMode, runtime: w::Id) -> Result<(Self, SceneAdapter), Error> {
+    pub(super) fn configuration(
+        mode: VideoMode,
+        runtime: &w::Id,
+    ) -> Result<w::Configuration, Error> {
         if mode.width > 1280 || mode.height > 720 {
             return Err("synthetic-program-v1 supports at most 1280x720".into());
         }
@@ -74,28 +78,11 @@ impl Synthetic {
             "limits":{"scenes":4,"instances_per_scene":8,"lights_per_scene":4,"operations_per_mutation":8,
                 "published_frames":8,"frames_per_submission":4,"inflight_frames":4,"retained_submissions":8,"render_timeout_ms":5000}
         }))?;
-        super::validate_output(&configuration)?;
-        let stream_id = id(format!("{}-input", runtime.as_str()))?;
-        let resources = FrameResources::new(
-            ResourceConfig {
-                runtime_id: runtime.clone(),
-                native_extent: configuration.native_extent,
-                max_frames: 8,
-                max_frame_bytes: mode.width as usize * mode.height as usize * 8 * 8,
-                max_assets: 1,
-                max_asset_bytes: 4,
-                max_producers: 1,
-            },
-            vec![stream_id.clone()],
-        )?;
-        let producer = resources.producer(&stream_id)?;
-        let scheduler = FrameSubmissions::new(
-            configuration.clone(),
-            resources,
-            producer,
-            Arc::new(Clock(Instant::now())),
-        )
-        .map_err(|e| e.to_string())?;
+        Ok(configuration)
+    }
+
+    pub fn install(mode: VideoMode, runtime: w::Id) -> Result<(Self, SceneAdapter), Error> {
+        let configuration = Self::configuration(mode, &runtime)?;
         let mut registrations = Registrations::default();
         registrations
             .register_world(serde_json::from_value(
@@ -138,32 +125,9 @@ impl Synthetic {
                 },
             )
             .map_err(|e| e.to_string())?;
-        let adapter = SceneAdapter::new(
-            configuration.clone(),
-            registrations,
-            Box::new(scheduler.clone()),
-        )
-        .map_err(|e| e.to_string())?;
-        let pixels = [32, 64, 96, 255].repeat(mode.width as usize * mode.height as usize);
-        Ok((
-            Self {
-                configuration,
-                scheduler,
-                scene_id: id(format!("{}-scene", runtime.as_str()))?,
-                stream_id,
-                pixels,
-                next: 0,
-                pending: Vec::new(),
-            },
-            adapter,
-        ))
-    }
-
-    pub async fn create_scene(&self, control: &SceneControl) -> Result<(), Error> {
-        let e = &self.configuration.native_extent;
-        control.call(w::SCENE_CREATE, Some(json!({
-            "runtime_id":self.configuration.runtime_id,"scene_id":self.scene_id,
-            "state":{"world":{"id":"synthetic-world","revision":"1"},"configuration_id":self.configuration.configuration_id,
+        let e = &configuration.native_extent;
+        let state = serde_json::from_value(json!({
+                "world":{"id":"synthetic-world","revision":"1"},"configuration_id":configuration.configuration_id,
                 "camera":{"mode":"manual","camera":{"kind":"intrinsics_pose","extent":e,"near_m":0.1,"far_m":100,
                     "intrinsics":{"fx":e.width as f64 * 0.8,"fy":e.width as f64 * 0.8,"skew":0,"cx":e.width as f64 / 2.,"cy":e.height as f64 / 2.},
                     "camera_to_world":[[1,0,0,0],[0,1,0,0],[0,0,1,-8],[0,0,0,1]]}},
@@ -171,7 +135,66 @@ impl Synthetic {
                     "visible":true,"material_overrides":[]}],
                 "lighting":{"lights":[{"light_id":"sun","kind":"directional","direction":[0.4,0.2,1],
                     "irradiance":[3,3,3],"angular_radius":0.00465,"shadow_mode":null}],"environment":null},
-                "shadow_mode":"pcf"}
+                "shadow_mode":"pcf"
+        }))?;
+        Self::install_registered(configuration, registrations, state)
+    }
+
+    /// Shared native image producer and scheduler for explicitly installed local demos.
+    pub(super) fn install_registered(
+        configuration: w::Configuration,
+        registrations: Registrations,
+        initial_state: w::SceneState,
+    ) -> Result<(Self, SceneAdapter), Error> {
+        super::validate_output(&configuration)?;
+        let runtime = &configuration.runtime_id;
+        let stream_id = id(format!("{}-input", runtime.as_str()))?;
+        let e = configuration.native_extent;
+        let resources = FrameResources::new(
+            ResourceConfig {
+                runtime_id: runtime.clone(),
+                native_extent: e,
+                max_frames: 8,
+                max_frame_bytes: e.width as usize * e.height as usize * 8 * 8,
+                max_assets: 1,
+                max_asset_bytes: 4,
+                max_producers: 1,
+            },
+            vec![stream_id.clone()],
+        )?;
+        let producer = resources.producer(&stream_id)?;
+        let scheduler = FrameSubmissions::new(
+            configuration.clone(),
+            resources,
+            producer,
+            Arc::new(Clock(Instant::now())),
+        )
+        .map_err(|e| e.to_string())?;
+        let adapter = SceneAdapter::new(
+            configuration.clone(),
+            registrations,
+            Box::new(scheduler.clone()),
+        )
+        .map_err(|e| e.to_string())?;
+        let scene_id = id(format!("{}-scene", runtime.as_str()))?;
+        Ok((
+            Self {
+                configuration,
+                scheduler,
+                scene_id,
+                stream_id,
+                pixels: [32, 64, 96, 255].repeat(e.width as usize * e.height as usize),
+                next: 0,
+                pending: Vec::new(),
+                initial_state,
+            },
+            adapter,
+        ))
+    }
+
+    pub async fn create_scene(&self, control: &SceneControl) -> Result<(), Error> {
+        control.call(w::SCENE_CREATE, Some(json!({
+            "runtime_id":self.configuration.runtime_id,"scene_id":self.scene_id,"state":self.initial_state,
         }))).await.map_err(|e| e.to_string())?;
         Ok(())
     }

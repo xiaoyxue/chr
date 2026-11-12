@@ -38,6 +38,8 @@ Options:
   --size <WxH>            Render size; both even [default: 1280x720]
   --fps <n>               Frames per second, 1-120 [default: 50]
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
+  --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
+  --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --webrtc-udp <addr>     Local UDP bind for WebRTC; a wildcard binds every non-loopback
                           interface; \"none\" disables UDP [default: 0.0.0.0:0]
   --webrtc-tcp <addr>     First ICE-TCP listen address; previews use 4 consecutive
@@ -57,6 +59,8 @@ struct Args {
     ice: IceConfig,
     allowed_origins: Vec<String>,
     synthetic_program: bool,
+    pitch_demo: Option<PathBuf>,
+    pitch_controls: Option<PathBuf>,
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -72,6 +76,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         },
         allowed_origins: Vec::new(),
         synthetic_program: false,
+        pitch_demo: None,
+        pitch_controls: None,
     };
     let mut use_socket = true;
     while let Some(flag) = raw.next() {
@@ -89,6 +95,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             }
             "--fps" => args.fps = value()?.parse()?,
             "--synthetic-program" => args.synthetic_program = true,
+            "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
+            "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--webrtc-udp" => {
                 let addr = value()?;
                 args.ice.udp = (addr != "none").then_some(addr);
@@ -101,6 +109,11 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if !args.width.is_multiple_of(2) || !args.height.is_multiple_of(2) {
         return Err("H.264 4:2:0 needs an even width and height".into());
+    }
+    if (args.synthetic_program && args.pitch_demo.is_some())
+        || (args.pitch_controls.is_some() && args.pitch_demo.is_none())
+    {
+        return Err("select one program profile; --pitch-controls requires --pitch-demo".into());
     }
     if args.ice.udp.is_none() && args.ice.tcp_base.is_none() {
         return Err("WebRTC needs UDP or TCP; do not disable both".into());
@@ -166,7 +179,24 @@ fn run(args: Args) -> Result<()> {
         height: args.height,
         fps: args.fps,
     };
-    let installation = if args.synthetic_program {
+    let installation = if let Some(path) = &args.pitch_demo {
+        let prepared = chr_server::program::pitch::Prepared::load(
+            path,
+            mode,
+            chr_server::program::synthetic::runtime_id()?,
+        )?;
+        if let Some(path) = &args.pitch_controls {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            serde_json::to_writer_pretty(options.open(path)?, &prepared.controls)?;
+        }
+        Some((prepared.program, prepared.adapter))
+    } else if args.synthetic_program {
         Some(chr_server::program::synthetic::Synthetic::install(
             mode,
             chr_server::program::synthetic::runtime_id()?,
@@ -215,7 +245,7 @@ fn run(args: Args) -> Result<()> {
             Some((synthetic, adapter)) => {
                 let (control, owner) = chr_server::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
                 synthetic.create_scene(&control).await?;
-                log::info!("synthetic-program-v1 runtime_id={} scene_id={} configuration_id={}",
+                log::info!("local program runtime_id={} scene_id={} configuration_id={}",
                     synthetic.configuration.runtime_id.as_str(), synthetic.scene_id.as_str(), synthetic.configuration.configuration_id.as_str());
                 Some((synthetic, control, owner))
             }

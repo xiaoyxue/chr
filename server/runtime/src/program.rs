@@ -10,15 +10,19 @@ use chr_renderer::{
 };
 use std::sync::Arc;
 
+pub mod pitch;
 pub mod synthetic;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Reusable worker-local GPU storage, separate from immutable registered inputs.
 /// Completed UYVY allocations move into the bounded scheduler/SDI/monitor chain.
 pub struct ProgramRenderer {
+    configuration_id: w::Id,
+    runtime_id: w::Id,
     target: wgpu::Texture,
     converter: UyvyConverter,
-    compositor: Option<(w::Effect, FrameCompositor)>,
+    compositor: Option<(w::ShadowMode, FrameCompositor)>,
+    timestamps: Option<wgpu::QuerySet>,
 }
 
 impl ProgramRenderer {
@@ -44,10 +48,38 @@ impl ProgramRenderer {
         });
         let converter = UyvyConverter::from_bt709_texture(gpu, &target)?;
         Ok(Self {
+            configuration_id: config.configuration_id.clone(),
+            runtime_id: config.runtime_id.clone(),
             target,
             converter,
             compositor: None,
+            timestamps: None,
         })
+    }
+
+    /// Optional native diagnostics, disabled by default (no query allocation).
+    /// Supply two timestamp queries from this device with both TIMESTAMP_QUERY
+    /// and TIMESTAMP_QUERY_INSIDE_ENCODERS enabled, or None for the normal path.
+    /// Each executed frame overwrites slots 0/1 around composition (including
+    /// shadows) and UYVY conversion, before the pixel copy or CPU readback.
+    /// Resolve/read externally before the next execution; there is no wire metric.
+    pub fn set_timestamp_queries(
+        &mut self,
+        gpu: &Gpu,
+        queries: Option<wgpu::QuerySet>,
+    ) -> Result<(), Error> {
+        if let Some(queries) = &queries
+            && (!gpu.device.features().contains(
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+            ) || queries.count() < 2
+                || !matches!(queries.ty(), wgpu::QueryType::Timestamp))
+        {
+            return Err(
+                "program timestamps require two timestamp queries and enabled features".into(),
+            );
+        }
+        self.timestamps = queries;
+        Ok(())
     }
 
     /// A successful conversion fences the entire queue, including input upload and CG.
@@ -68,16 +100,25 @@ impl ProgramRenderer {
     }
 
     fn render(&mut self, gpu: &Gpu, execution: &Execution) -> Result<Vec<u8>, Error> {
+        let snapshot = execution.scene.snapshot();
+        if snapshot.runtime_id != self.runtime_id
+            || snapshot.state.configuration_id != self.configuration_id
+        {
+            return Err("program worker cannot switch immutable configurations".into());
+        }
         let settings = execution.scene.settings();
-        let effect = &execution.scene.snapshot().effect;
+        // Configuration is immutable for this worker. Camera/light edits only
+        // change the scene; MeshRenderer evicts stale resource IDs in prepare.
+        // Recompiling the compositor on every effect made camera edits >100 ms.
+        let shadow_mode = execution.scene.snapshot().state.shadow_mode;
         if self
             .compositor
             .as_ref()
-            .is_none_or(|(old, _)| old != effect)
+            .is_none_or(|(old, _)| *old != shadow_mode)
         {
             let mut compositor = FrameCompositor::new(gpu, self.target.format(), settings.output)?;
             compositor.set_sample_count(gpu, settings.raster.sample_count)?;
-            self.compositor = Some((effect.clone(), compositor));
+            self.compositor = Some((shadow_mode, compositor));
         }
         let image = &execution.input.metadata().image;
         let format = match image.format {
@@ -136,10 +177,16 @@ impl ProgramRenderer {
             &[ImageLayer::new(&view, settings.input_stage)],
         )?;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        if let Some(queries) = &self.timestamps {
+            encoder.write_timestamp(queries, 0);
+        }
         compositor.encode(&mut encoder, &self.target)?;
-        gpu.queue.submit([encoder.finish()]);
+        self.converter.encode(&mut encoder);
+        if let Some(queries) = &self.timestamps {
+            encoder.write_timestamp(queries, 1);
+        }
         let mut pixels = Vec::new();
-        self.converter.convert(gpu, &mut pixels)?;
+        self.converter.submit_readback(gpu, encoder, &mut pixels)?;
         Ok(pixels)
     }
 
