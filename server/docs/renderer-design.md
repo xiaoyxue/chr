@@ -956,6 +956,16 @@ or sky. Visibility-only disk integration is not BRDF-weighted transport, and
 the point-light reference is a facing disk, not sphere radiometric integration.
 Issue #35 remains open for the broader method selection.
 
+#### Bounded sky-visibility evaluation
+
+The [sky-visibility evaluation](sky-visibility-evaluation.md) records primary
+sources and an independent CPU synthetic comparison of bounded directional
+integration, angular probe visibility and their limitations. It does not select
+or approve a production method, measure a raster sky candidate's GPU cost, or
+change the unoccluded IBL path. The next depth-aware probe experiment and its
+provisional budgets require owner agreement; sky implementation #29 retains its
+dependencies and atmosphere #28 remains paused.
+
 Primary references:
 
 - [Heitz et al., Real-Time Polygonal-Light Shading with Linearly Transformed Cosines (2016)](https://eheitzresearch.wordpress.com/415-2/).
