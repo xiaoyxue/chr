@@ -79,6 +79,8 @@
               && (
                 craneLib.filterCargoSources path type
                 || pkgs.lib.hasSuffix ".wgsl" path
+                || relative == "server/renderer/examples/area_light_evaluation/ltc.bin"
+                || relative == "server/renderer/examples/area_light_evaluation/LICENSE.ltc"
                 || relative == "common/tests/fixtures/scene_frame.json"
                 || pkgs.lib.hasPrefix "server/runtime/tests/fixtures/" relative
               );
