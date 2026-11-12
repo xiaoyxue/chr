@@ -956,6 +956,16 @@ or sky. Visibility-only disk integration is not BRDF-weighted transport, and
 the point-light reference is a facing disk, not sphere radiometric integration.
 Issue #35 remains open for the broader method selection.
 
+#### Bounded finite-emitter illumination evaluation
+
+The [finite-emitter evaluation](area-light-evaluation.md) records licensed,
+pinned LTC data, 240 synthetic rectangle/disk/sphere cases, six focused tests
+and actual RTX 3090 Vulkan timestamp measurements. It recommends clipped LTC
+rectangles and 64-sided disk/sphere silhouettes for an owner-approved experiment,
+not production acceptance. The Burley/Fresnel mismatch, grazing fit errors and
+under-resolved near-field references remain explicit gates. API/wire contracts,
+area-light priority and the separate finite-area visibility work are unchanged.
+
 #### Bounded sky-visibility evaluation
 
 The [sky-visibility evaluation](sky-visibility-evaluation.md) records primary
