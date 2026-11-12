@@ -58,7 +58,7 @@ BSD-style license **with an additional paper-citation condition**, not an
 assumption that a downloadable LUT is public domain.
 
 The complete notice is retained in
-[`LICENSE.ltc`](../renderer/examples/area_light_evaluation/LICENSE.ltc).
+[`LICENSE.ltc`](../renderer/src/ltc/LICENSE.ltc).
 The standalone binary exposes it with `--license`; distribute that notice and
 this paper citation alongside any binary containing the data:
 
@@ -462,6 +462,19 @@ vacuous. Sampled rows do not certify the continuous envelope, moving
 light/receiver trajectories, LUT interpolation continuity or silhouette faceting.
 Renderer-path integration, temporal qualification, visibility (#27) and Windows
 validation remain open.
+
+### Renderer integration
+
+The shared mesh renderer now exposes this profile as the experimental
+`Light::Area` (#26): the pinned table is a 128 KiB storage buffer, the fragment
+shader reuses the qualified candidate's lookup, clipping and closure in each
+shading point's (N, V) frame, and curved emitters use 64 vertices. Hardware tests
+on RTX 3090/Vulkan reproduce the six recorded LTC64 values within 1.5% plus 8-bit
+quantization, compare six fixtures (dielectric and metal, all shapes, tilted and
+offset placements) with an independent f64 reference of the shared material within
+the profile, and find no popping along moving-emitter or NdotV sweeps within 8-bit
+quantization. The emitter is unoccluded and not drawn; no wire/protocol mapping,
+default light or runtime change is added. Shadows remain #27.
 
 ## Same-scene visual comparison
 

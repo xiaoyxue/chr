@@ -10,7 +10,7 @@ struct Light {
     position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>,
     shadow_matrix: array<mat4x4<f32>,4>, shadow_params: vec4<f32>,
     shadow_depth: array<vec4<f32>,4>, pcss: vec4<f32>, pcss_samples: vec4<f32>,
-    cascade_splits: vec4<f32>, cascade_params: vec4<f32>
+    cascade_splits: vec4<f32>, cascade_params: vec4<f32>, area: array<vec4<f32>,2>
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
@@ -34,6 +34,9 @@ struct Environment {
 @group(3) @binding(4) var environment_filtered:texture_2d_array<f32>;
 @group(3) @binding(5) var environment_brdf:texture_2d<f32>;
 @group(3) @binding(6) var<uniform> environment:Environment;
+// Pinned official LTC GGX table, Heitz et al. SIGGRAPH 2016; see ltc/LICENSE.ltc.
+struct LtcEntry { matrix:vec4<f32>, amplitude:vec4<f32> };
+@group(3) @binding(7) var<storage,read> ltc_table:array<LtcEntry>;
 
 fn environment_direction(d:vec3<f32>)->vec3<f32> {
     let c=environment.info.y;
@@ -389,6 +392,125 @@ fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     return mix(visibility,next,smoothstep(blend_start,end,depth));
 }
 
+// Bilinear texel-centre lookup at (roughness, sqrt(1 - NdotV)) on the 64x64 table.
+fn ltc_lookup(rough:f32,nv:f32)->LtcEntry {
+    let uv=clamp(vec2(rough,sqrt(1.0-nv)),vec2(0.0),vec2(1.0))*63.0;
+    let p=min(vec2<u32>(floor(uv)),vec2(63u));
+    let q=min(p+vec2(1u),vec2(63u));
+    let f=fract(uv);
+    let a=ltc_table[p.x+64u*p.y];
+    let b=ltc_table[q.x+64u*p.y];
+    let c=ltc_table[p.x+64u*q.y];
+    let d=ltc_table[q.x+64u*q.y];
+    return LtcEntry(mix(mix(a.matrix,b.matrix,f.x),mix(c.matrix,d.matrix,f.x),f.y),
+        mix(mix(a.amplitude,b.amplitude,f.x),mix(c.amplitude,d.amplitude,f.x),f.y));
+}
+
+// Cosine-weighted edge integral; the polygon total is divided by 2*pi.
+fn ltc_edge(a_in:vec3<f32>,b_in:vec3<f32>)->f32 {
+    let a=normalize(a_in);
+    let b=normalize(b_in);
+    let c=cross(a,b);
+    let s=length(c);
+    if s<=1e-7 {return 0.0;}
+    return c.z*atan2(s,dot(a,b))/s;
+}
+
+struct EdgeSum { first:vec3<f32>, previous:vec3<f32>, sum:f32, count:u32 };
+fn edge_push(state:EdgeSum,p:vec3<f32>)->EdgeSum {
+    var next=state;
+    if next.count==0u {next.first=p;} else {next.sum+=ltc_edge(next.previous,p);}
+    next.previous=p;
+    next.count++;
+    return next;
+}
+
+// Streams physically clipped vertices; the LTC copy is clipped again after transforming.
+struct AreaIntegral { first:vec3<f32>, previous:vec3<f32>, count:u32, diffuse:f32, specular:EdgeSum };
+fn area_append(state:AreaIntegral,p:vec3<f32>,m:mat3x3<f32>)->AreaIntegral {
+    var next=state;
+    if next.count==0u {
+        next.first=p;
+    } else {
+        next.diffuse+=ltc_edge(next.previous,p);
+        let a=m*next.previous;
+        let b=m*p;
+        if a.z>0.0 {next.specular=edge_push(next.specular,a);}
+        if (a.z>0.0)!=(b.z>0.0) {next.specular=edge_push(next.specular,a+(b-a)*(a.z/(a.z-b.z)));}
+    }
+    next.previous=p;
+    next.count++;
+    return next;
+}
+
+fn perpendicular(d:vec3<f32>)->vec3<f32> {
+    return normalize(cross(d,select(vec3(0.0,0.0,1.0),vec3(1.0,0.0,0.0),abs(d.z)>0.9)));
+}
+
+const AREA_CURVE_SEGMENTS:u32=64u;
+
+// Unoccluded ltc-plausible-v1 emitter: Schlick LTC specular plus Lambert*(1-F0) diffuse.
+fn area_lighting(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    let shape=u32(light.emission_outer.w);
+    var center=light.position_kind.xyz-x;
+    var normal=light.direction_inner.xyz;
+    var u=light.area[0].xyz;
+    var extent=light.area[0].w;
+    if shape==2u {
+        let d2=dot(center,center);
+        // Outward emission never reaches a receiver inside or on the sphere.
+        if d2<=extent*extent {return vec3(0.0);}
+        // Integrate the receiver-dependent tangent silhouette, not a disk at the centre.
+        let factor=1.0-extent*extent/d2;
+        normal=-center*inverseSqrt(d2);
+        u=perpendicular(normal);
+        center*=factor;
+        extent*=sqrt(factor);
+    } else {
+        let side=-dot(normal,center);
+        if side==0.0 || (side<0.0 && light.direction_inner.w==0.0) {return vec3(0.0);}
+    }
+    let w=cross(normal,u);
+    let nv=clamp(dot(n,v),1e-4,1.0);
+    var t1=v-n*dot(v,n);
+    t1=select(perpendicular(n),normalize(t1),dot(t1,t1)>1e-12);
+    let t2=cross(n,t1);
+    let entry=ltc_lookup(rough,nv);
+    let t=entry.matrix;
+    let m=mat3x3(vec3(t.x,0.0,t.y),vec3(0.0,1.0,0.0),vec3(t.z,0.0,t.w));
+    let count=select(AREA_CURVE_SEGMENTS,4u,shape==0u);
+    var integral:AreaIntegral;
+    var previous=vec3(0.0);
+    for(var i=0u;i<=count;i++) {
+        var offset=vec3(0.0);
+        if shape==0u {
+            let k=i%4u;
+            offset=select(-1.0,1.0,k==1u || k==2u)*extent*u+select(-1.0,1.0,k>=2u)*light.area[1].x*w;
+        } else {
+            let angle=6.283185307*f32(i%count)/f32(count);
+            offset=extent*(cos(angle)*u+sin(angle)*w);
+        }
+        let world=center+offset;
+        let p=vec3(dot(world,t1),dot(world,t2),dot(world,n));
+        if i>0u {
+            if previous.z>0.0 {integral=area_append(integral,previous,m);}
+            if (previous.z>0.0)!=(p.z>0.0) {
+                integral=area_append(integral,previous+(p-previous)*(previous.z/(previous.z-p.z)),m);
+            }
+        }
+        previous=p;
+    }
+    if integral.count==0u {return vec3(0.0);}
+    integral=area_append(integral,integral.first,m);
+    // The clipped horizon's closing edge has a nonzero azimuth integral.
+    if integral.specular.count>0u {integral.specular=edge_push(integral.specular,integral.specular.first);}
+    let lambert=abs(integral.diffuse)/6.283185307;
+    let specular=abs(integral.specular.sum)/6.283185307;
+    let f0=mix(vec3(0.04),base,metal);
+    return light.emission_outer.rgb*(specular*(f0*entry.amplitude.x+(vec3(1.0)-f0)*entry.amplitude.y)
+        +base*(1.0-metal)*(vec3(1.0)-f0)*lambert);
+}
+
 // GGX with height-correlated Smith visibility and Burley diffuse.
 fn brdf(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
     let nl=max(dot(n,l),0.0);
@@ -477,6 +599,10 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     var radiance=emissive+environment_lighting(n,v,base.rgb,metal,rough,ao);
     for (var i=0u;i<camera.options.y;i++) {
         let light=lights[i];
+        if light.position_kind.w>2.5 {
+            radiance+=area_lighting(light,surface.position,n,v,base.rgb,metal,rough);
+            continue;
+        }
         var l=-light.direction_inner.xyz;
         var attenuation=1.0;
         if light.position_kind.w>0.5 {

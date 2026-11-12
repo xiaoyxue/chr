@@ -1,6 +1,6 @@
 //! Synthetic scalar method gate, not a renderer light API or production integrator.
 //! LTC tables and parameterization: Heitz et al., SIGGRAPH 2016, official reference
-//! revision 31e5e96b54f98f33098f8503003119ba2231a1c6. See LICENSE.ltc and the report.
+//! revision 31e5e96b54f98f33098f8503003119ba2231a1c6. See src/ltc/LICENSE.ltc and the report.
 
 use std::{error::Error, f64::consts::PI, fs, io::Write};
 
@@ -220,7 +220,7 @@ struct Table(Vec<[f64; 6]>);
 impl Table {
     fn load() -> Self {
         Self(
-            include_bytes!("ltc.bin")
+            include_bytes!("../../src/ltc/ltc.bin")
                 .chunks_exact(24)
                 .map(|bytes| {
                     std::array::from_fn(|i| {
@@ -400,7 +400,7 @@ fn default_light(shape: Shape) -> Light {
 
 fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().nth(1).as_deref() == Some("--license") {
-        println!("{}", include_str!("LICENSE.ltc"));
+        println!("{}", include_str!("../../src/ltc/LICENSE.ltc"));
         return Ok(());
     }
     let table = Table::load();

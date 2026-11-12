@@ -13,7 +13,7 @@ use crate::{
     environment::{self, EnvironmentGpu, EnvironmentSettings},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
-    scene::{Light, MaterialId, MaterialMaps, MeshId, SceneView},
+    scene::{AreaShape, Light, MaterialId, MaterialMaps, MeshId, SceneView},
     shadow::{self, CascadeSettings, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
 };
 
@@ -78,6 +78,29 @@ struct LightUniform {
     pcss_samples: [f32; 4],
     cascade_splits: [f32; 4],
     cascade_params: [f32; 4],
+    // Area lights: unit tangent + half width/radius, then half height.
+    area: [[f32; 4]; 2],
+}
+
+/// Curved-emitter polygon sides qualified by `ltc-plausible-v1`.
+pub const AREA_CURVE_SEGMENTS: u32 = 64;
+
+/// Pinned official LTC GGX table (see `ltc/LICENSE.ltc`), padded to two vec4s per texel.
+fn ltc_table(device: &wgpu::Device) -> wgpu::Buffer {
+    let values: Vec<f32> = include_bytes!("ltc/ltc.bin")
+        .chunks_exact(24)
+        .flat_map(|texel| {
+            let v: [f32; 6] = std::array::from_fn(|i| {
+                f32::from_le_bytes(texel[4 * i..4 * i + 4].try_into().expect("4-byte f32"))
+            });
+            [v[0], v[1], v[2], v[3], v[4], v[5], 0.0, 0.0]
+        })
+        .collect();
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("LTC GGX table"),
+        contents: bytemuck::cast_slice(&values),
+        usage: wgpu::BufferUsages::STORAGE,
+    })
 }
 
 #[repr(C)]
@@ -214,6 +237,7 @@ pub struct MeshRenderer {
     draws: Vec<Draw>,
     maps: MaterialMapCache,
     lights: wgpu::Buffer,
+    ltc: wgpu::Buffer,
     light_group: wgpu::BindGroup,
     light_layout: wgpu::BindGroupLayout,
     light_capacity: u64,
@@ -272,6 +296,16 @@ impl MeshRenderer {
             },
         ];
         light_entries.extend(environment::layout_entries());
+        light_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(64 * 64 * 32),
+            },
+            count: None,
+        });
         let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene lights and environment"),
             entries: &light_entries,
@@ -283,6 +317,7 @@ impl MeshRenderer {
             mapped_at_creation: false,
         });
         let shadow_atlas = ShadowAtlas::new(device, 1, 1);
+        let ltc = ltc_table(device);
         let light_group = light_group(
             device,
             &light_layout,
@@ -290,6 +325,7 @@ impl MeshRenderer {
             light_size,
             &shadow_atlas,
             &environment,
+            &ltc,
         );
         let tone_settings = uniform_buffer(device, 16);
         let tone_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -419,6 +455,7 @@ impl MeshRenderer {
             environment,
             maps,
             lights,
+            ltc,
             light_group,
             light_layout,
             light_capacity: light_size,
@@ -852,6 +889,7 @@ impl MeshRenderer {
                 self.light_capacity,
                 &self.shadow_atlas,
                 &self.environment,
+                &self.ltc,
             );
         }
         if !lights.is_empty() {
@@ -1069,6 +1107,7 @@ impl MeshRenderer {
             let len = v.into_iter().map(|x| x * x).sum::<f64>().sqrt();
             v.map(|x| (x / len) as f32)
         };
+        let mut area = [[0.0; 4]; 2];
         let (position, kind, direction, emission, inner, outer) = match light {
             Light::Directional {
                 direction,
@@ -1102,6 +1141,39 @@ impl MeshRenderer {
                 inner_angle.cos() as f32,
                 outer_angle.cos() as f32,
             ),
+            Light::Area {
+                position,
+                normal,
+                tangent,
+                shape,
+                radiance,
+                two_sided,
+            } => {
+                let n = normalize(normal).map(f64::from);
+                let t = normalize(tangent).map(f64::from);
+                let along = n.iter().zip(t).map(|(a, b)| a * b).sum::<f64>();
+                let tangent = normalize(std::array::from_fn(|i| t[i] - along * n[i]));
+                let (code, extent, height) = match shape {
+                    AreaShape::Rectangle {
+                        half_width,
+                        half_height,
+                    } => (0.0, half_width, half_height),
+                    AreaShape::Disk { radius } => (1.0, radius, 0.0),
+                    AreaShape::Sphere { radius } => (2.0, radius, 0.0),
+                };
+                area = [
+                    [tangent[0], tangent[1], tangent[2], extent],
+                    [height, 0.0, 0.0, 0.0],
+                ];
+                (
+                    position.map(|v| v as f32),
+                    3.0,
+                    n.map(|v| v as f32),
+                    radiance,
+                    f32::from(u8::from(two_sided)),
+                    code,
+                )
+            }
         };
         let uniform = LightUniform {
             position_kind: [position[0], position[1], position[2], kind],
@@ -1116,6 +1188,7 @@ impl MeshRenderer {
                     Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
                         source_radius
                     }
+                    Light::Area { .. } => 0.0,
                 },
                 0.0,
                 0.0,
@@ -1124,6 +1197,7 @@ impl MeshRenderer {
             pcss_samples: [0.0; 4],
             cascade_splits: [0.0; 4],
             cascade_params: [0.0; 4],
+            area,
         };
         if !bytemuck::cast_slice::<_, f32>(&[uniform])
             .iter()
@@ -1292,6 +1366,7 @@ fn light_group(
     size: u64,
     atlas: &ShadowAtlas,
     environment: &EnvironmentGpu,
+    ltc: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let mut entries = vec![
         wgpu::BindGroupEntry {
@@ -1312,6 +1387,10 @@ fn light_group(
         },
     ];
     entries.extend(environment.entries());
+    entries.push(wgpu::BindGroupEntry {
+        binding: 7,
+        resource: ltc.as_entire_binding(),
+    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("lights, visibility and environment"),
         layout,
