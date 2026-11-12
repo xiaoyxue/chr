@@ -131,7 +131,7 @@ impl Drop for SrtOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{media::Encoder, monitor::encoder::EncodedFrame};
+    use crate::monitor::{encoder::EncodedFrame, gstreamer::Encoder};
     use bytes::Bytes;
     use gstreamer_app::AppSink;
     use std::{

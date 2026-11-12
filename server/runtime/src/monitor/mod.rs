@@ -10,6 +10,8 @@
 
 pub mod encoder;
 #[cfg(all(unix, feature = "gstreamer-media"))]
+pub mod gstreamer;
+#[cfg(all(unix, feature = "gstreamer-media"))]
 pub mod srt;
 pub mod webrtc;
 
@@ -42,7 +44,7 @@ impl Monitor {
         tap: Receiver<SdiSlot>,
         feed: Arc<VideoFeed>,
     ) -> Result<Self, BoxError> {
-        let mut encoder = crate::media::Encoder::new(mode)?;
+        let mut encoder = gstreamer::Encoder::new(mode)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let thread = std::thread::Builder::new()

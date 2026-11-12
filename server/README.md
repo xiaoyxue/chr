@@ -12,6 +12,30 @@ repository root; its server crates live here:
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers and a Linux software video-input probe |
 
+### Runtime module ownership
+
+| Path under `runtime/src/` | Responsibility |
+| --- | --- |
+| `input/software.rs` | FFmpeg/GStreamer MP4 acquisition and native input sequence assignment |
+| `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
+| `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
+| `pipeline.rs` | In-process render worker and render-loop pacing |
+| `sdi.rs` | Simulated SDI output clock, bounded output queue, and transmitted-slot tap |
+| `monitor/gstreamer.rs` | GStreamer H.264 encoding of transmitted SDI slots |
+| `monitor/encoder.rs`, `monitor/webrtc.rs`, `monitor/srt.rs` | Encoded fan-out and client monitoring transports |
+| `gstreamer_support.rs` | Private shared mode validation and pipeline-error handling |
+
+`chr-server` currently calls the `chr-renderer` library in-process on its
+`chr-render` thread. #94 decided to move production rendering into a
+restartable worker process; that change is tracked in #95-#97.
+
+Algorithm estimation stays in repository-root `algorithm/`. Runtime calibration
+consumption does not implement that algorithm: the existing replay loads local
+lens data at startup and associates it by native stream/frame identity.
+`program/video.rs` retains the demo-specific GLB and scene setup. Physical SDI
+adapters, online tracking-result ingestion, and a public distortion protocol
+remain separate work; the current general frame contract is still pinhole-only.
+
 The default draws an RGB triangle using the same pipeline in a native window,
 an offscreen hardware test, and the render server. The explicit
 [`--synthetic-program` opt-in](docs/program-output.md) connects retained scene/image

@@ -21,6 +21,11 @@ rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
 server/runtime/           chr-server: headless render server with IPC and video outputs
+  src/input/              Video acquisition adapters (currently software MP4)
+  src/calibration/        Calibration consumption and frame/lens association
+  src/program/            Demo scenes and admitted-frame rendering bridge
+  src/sdi.rs              Simulated SDI output port and output clock
+  src/monitor/            Transmitted-slot encoding and WebRTC/SRT fan-out
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
@@ -39,6 +44,16 @@ materials into documentation, source files, fixtures, or Nix build inputs.
 The shared protocol is implemented in Rust (`common/`), with TypeScript
 mirrors in clients. No client framework or algorithm
 technology stack is chosen by this environment setup.
+
+Algorithm estimation belongs in `algorithm/`; receiving and associating its
+results belongs in the runtime, not the renderer. The current `calibration/replay`
+module is only a startup-loaded lens replay for a validated clip. Online algorithm
+transport, the public distortion contract, and physical SDI adapters are not
+implemented by this layout.
+
+`chr-server` currently calls `chr-renderer` in-process on its render worker
+thread. #94 decided to move production rendering into a restartable worker
+process; that change is tracked in #95-#97.
 
 ## Start a feature
 

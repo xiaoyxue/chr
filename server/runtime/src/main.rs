@@ -253,7 +253,7 @@ fn run(args: Args) -> Result<()> {
                 .expect("software video installation")
                 .0;
             let native = program.configuration.native_extent;
-            chr_server::media::VideoInput::open(
+            chr_server::input::software::VideoInput::open(
                 path,
                 VideoMode {
                     width: native.width,

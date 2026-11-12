@@ -1,6 +1,7 @@
 //! Explicit synthetic program bridge. Rendering and colour math stay in chr-renderer.
 //! One GPU worker executes at a time; the scene owner and SDI clock never wait on it.
 
+use crate::calibration::replay::VideoLens;
 use crate::frame_submissions::{Execution, FrameSubmissions};
 use crate::sdi::SdiInput;
 use chr_common::scene_frame as w;
@@ -24,7 +25,7 @@ pub struct ProgramRenderer {
     converter: UyvyConverter,
     compositor: Option<(w::ShadowMode, FrameCompositor)>,
     timestamps: Option<wgpu::QuerySet>,
-    video_lens: Option<Arc<video::VideoLens>>,
+    video_lens: Option<Arc<VideoLens>>,
 }
 
 impl ProgramRenderer {
@@ -60,7 +61,7 @@ impl ProgramRenderer {
         })
     }
 
-    pub fn set_video_lens(&mut self, lens: Option<Arc<video::VideoLens>>) {
+    pub fn set_video_lens(&mut self, lens: Option<Arc<VideoLens>>) {
         self.video_lens = lens;
     }
 

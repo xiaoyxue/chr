@@ -23,6 +23,13 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 - Start new server functionality as modules of an existing crate; split out a
   crate when it brings heavy dependencies or needs its own lint exception, such
   as hardware FFI.
+- Runtime ownership: `src/input/` acquires video; `src/calibration/` consumes
+  calibration and associates it with frames; `src/program/` assembles demo
+  scenes and bridges admitted frames into rendering; `src/sdi.rs` owns the
+  simulated output port; `src/monitor/` encodes transmitted slots and fans them
+  out to WebRTC/SRT. Shared GStreamer helpers remain private to the runtime.
+  Keep algorithm estimation in `algorithm/`; replay calibration is not a live
+  tracking service or a public distortion protocol.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
 - Keep generated PNGs in repository-root `output/renderer/`, ignored by Git but retained locally.
   PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in `renderer/`.
