@@ -58,7 +58,7 @@ BSD-style license **with an additional paper-citation condition**, not an
 assumption that a downloadable LUT is public domain.
 
 The complete notice is retained in
-[`LICENSE.ltc`](../renderer/examples/area_light_evaluation/LICENSE.ltc).
+[`LICENSE.ltc`](../renderer/src/ltc/LICENSE.ltc).
 The standalone binary exposes it with `--license`; distribute that notice and
 this paper citation alongside any binary containing the data:
 
@@ -462,6 +462,80 @@ vacuous. Sampled rows do not certify the continuous envelope, moving
 light/receiver trajectories, LUT interpolation continuity or silhouette faceting.
 Renderer-path integration, temporal qualification, visibility (#27) and Windows
 validation remain open.
+
+### Renderer integration
+
+The shared mesh renderer now exposes this profile as the experimental
+`Light::Area` (#26): the pinned table is a 128 KiB storage buffer, the fragment
+shader reuses the qualified candidate's lookup, clipping and closure in each
+shading point's (N, V) frame, and curved emitters use 64 vertices. Hardware tests
+on RTX 3090/Vulkan reproduce the six recorded LTC64 values within 1.5% plus 8-bit
+quantization, compare six fixtures (dielectric and metal, all shapes, tilted and
+offset placements) with an independent f64 reference of the shared material within
+the profile, and find no popping along moving-emitter or NdotV sweeps within 8-bit
+quantization. The emitter is unoccluded and not drawn; no wire/protocol mapping,
+default light or runtime change is added. Shadows remain #27.
+
+## Area-light shadows: `area-shadow-pcss-v1`
+
+**Owner decision (2026-11-12):** for #27 the owner chose the Unreal Engine 4 style
+centre-shadow approach over shadow-map ray tracing or a further method study, and
+explicitly approved it as an exception to renderer-design section 4.3's "a single
+point-light substitute cannot establish shape-correct shadows". This is a named
+approximation, not shape-correct or BRDF-weighted visibility.
+
+**Method.** Each shadowed area light renders one six-face radial-depth cubemap at
+its centre, reusing the point-light path, and filters it with PCSS whose source
+radius is `AreaShape::equivalent_radius` (the shape radius, or the equal-area disk
+radius for rectangles). The unoccluded `ltc-plausible-v1` result is multiplied by
+that visibility. Sphere emitters exclude casters inside their own volume, so an
+emissive stand-in mesh casts no shadow; planar emitters keep the 1 cm exclusion
+so close occluders in front of them still shadow, and their stand-in mesh must lie
+in or behind the emitter plane.
+
+**Evaluation.** `area_shadow_gpu` renders 23 synthetic cases on RTX 3090/Vulkan:
+rectangle, disk and sphere emitters with a raised plate, a ground-contact box,
+a large penumbra, two blockers at different heights, a grazing view, glossy metal
+and an occluder outside the camera view, plus an elongated 4 m x 0.5 m rectangle
+seen along and across its long axis. For one image row it compares the GPU
+**visibility ratio** (shadowed / unshadowed, which removes the LTC shading error)
+with a ray-cast reference of the shared GGX/Burley material against the analytic
+occluders (96^2 emitter samples per pixel, exact cone sampling for spheres).
+
+| Settings | Max error | Mean penumbra error |
+|---|---:|---:|
+| Defaults (2048, 64-texel caps, 32+32 samples) | 0.832 | 0.248 |
+| 2048, 1024-texel caps, 16+16 | 0.583 | 0.124 |
+| **1024, 512-texel caps, 16+16 (recommended)** | **0.583** | **0.124** |
+| 512, 256-texel caps, 64+64 | 0.489 | 0.111 |
+
+The default caps clip area-light penumbrae (about 0.06 rad on a 2048 face against
+0.2-0.5 rad for a metre-scale emitter). With the recommended settings, rough
+surfaces stay within a per-case maximum of 0.33 and penumbra mean of 0.16; the
+elongated emitter reaches 0.44 / 0.15 because the penumbra ignores its outline;
+glossy metal reaches 0.58 / 0.32 because PCSS estimates unweighted emitter
+visibility while a glossy lobe weights it. The owner approved the limits
+**overall max <= 0.65, overall penumbra mean <= 0.15 and per-case penumbra mean
+<= 0.35**, which the test enforces. Tests also verify that moving an occluder
+invalidates the cached cubemap (matching a fresh renderer) and that emitter
+stand-in meshes do not shadow their own light.
+
+**Cost** (whole 1080p frame, median of seven, recommended settings, small synthetic
+scene; diagnostic, not a frame budget):
+
+| Area lights | Shadows off | PCSS 16+16 | PCSS 32+32 |
+|---|---:|---:|---:|
+| 1 rectangle | 0.31 ms | 1.5 ms | 2.9 ms |
+| 4 mixed shapes | 5.5 ms | 10.4 ms | 16.5 ms |
+| 8 mixed shapes | 13.0 ms | 23.4 ms | 36.7 ms |
+
+Curved emitters dominate unshadowed cost (about 2.5-3 ms each at 1080p with 64
+vertices): the earlier 1 ms microbudget covered a 256^2 grid, not a full frame.
+A 1024 cubemap uses 24 MiB per area light, so eight fit the default 256 MiB budget;
+at 2048 four already exceed it and the renderer reports the overflow. Shadow
+resolution and caps are frame-wide `ShadowSettings`; the defaults are unchanged so
+sun and point shadows keep their quality, and scenes that need area-light shadows
+should use the recommended values. Shadow-pass cost grows with scene geometry.
 
 ## Same-scene visual comparison
 

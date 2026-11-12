@@ -1,6 +1,7 @@
 # Simplified renderer scope and design
 
-Status: **roadmap; static GLB and direct-light PBR implemented**. This document compares the local `trd`
+Status: **roadmap implemented on Linux except optional atmosphere/sky visibility; see
+[renderer-acceptance.md](renderer-acceptance.md)**. This document compares the local `trd`
 reference at `9c7bccc` with the `chr` baseline at `dcebb33`. It proposes a smaller
 renderer, not a port of the reference application suite. The paired translation
 is [renderer-design.zh-CN.md](renderer-design.zh-CN.md).
@@ -662,8 +663,10 @@ camera code, private assets or calibration records are copied.
 
 ### 3.3 Distorted lenses
 
-The initial live frame profile has no distortion. For a later, separately
-approved extension, propose `None` and **Brown-Conrady radial/tangential distortion**.
+The initial live frame profile has no distortion. The renderer supports two
+image models: the ideal **pinhole** (`S^-1 Ti A(C)`) and, as an opt-in extension,
+**`radial-poly-native-px-v1`** (implemented; see below). Focal-normalised
+**Brown-Conrady radial/tangential distortion** remains a proposal.
 The model identifier, calibration extent, normalization K, valid image domain,
 and coefficients are explicit. Do not infer the model from coefficient count
 or silently treat rational/fisheye calibration as Brown-Conrady.
@@ -700,6 +703,33 @@ If a later caller composites an already-distorted real image, warp only the
 virtual layer and its premultiplied alpha, then composite in the same pixel
 domain; do not distort the real image twice. Picking must invert the same
 mapping, not use an independent approximate camera.
+
+#### Implemented: `radial-poly-native-px-v1`
+
+Deployed broadcast calibrations (#33) use a native-pixel radial polynomial with
+its own centre and scale, then an optional per-frame homography, rather than
+focal-normalised Brown-Conrady:
+
+```text
+a      = ideal native pixel from S^-1 Ti A(C)
+rho^2  = |(a - centre) / scale|^2
+r      = centre + (a - centre) * (1 + k1 rho^2 + k2 rho^4 + k3 rho^6)
+n      = pi(W [r, 1])          frame SNC; without a frame warp W = S
+u, v   = (s n + (W, H)) / 2,   s = sqrt(W H)
+```
+
+`scale` is a calibration pixel length, not a focal length, so focal-normalised
+coefficients are not interchangeable. The frame warp is per-frame data, not lens
+calibration. `distortion::CameraModel::{Pinhole, Distorted}` selects the model;
+`FrameCompositor::prepare_model` renders ideal HDR CG over a guard band
+(`Camera::with_margins` keeps intrinsics and pose) and a GPU pass inverse-maps
+each native sample position: exact inverse frame warp, then Newton on the
+monotonic radial branch. Native pixels without a preimage receive no CG; the
+optional validated support rectangle is reported as extrapolation, not enforced.
+Image layers, including captured footage, are not warped. Zero coefficients
+without a frame warp reproduce the pinhole composition. The guard band counts
+against the composition memory budget. Wire/calibration fields remain gated by
+#12/#36/#59.
 
 ## 4. Lighting and shadows
 
@@ -980,8 +1010,14 @@ approved a separately named approximation profile, `ltc-plausible-v1`: the same
 envelope and GPU microbudget, per-emitter error ≤ 0.02·Le + 30% of the reference,
 and Lambert×(1−F0) diffuse for area lights only. The tolerance is set from measured
 LTC behaviour and is not a reference-accuracy claim. The pinned candidate passes
-its 9,632-row sampled screen. Renderer-path integration, temporal qualification and
-visibility remain open.
+its 9,632-row sampled screen. The renderer now exposes it as the experimental,
+`Light::Area` with hardware reference and trajectory-continuity tests; no wire
+mapping or default light is added. For #27 the owner then approved
+`area-shadow-pcss-v1`, an explicit exception to the single-point-substitute rule
+in section 4.3: one centre cubemap with PCSS sized by the emitter's equal-area
+radius, multiplied with LTC, within measured visibility-ratio limits (max 0.65,
+penumbra mean 0.15). Its penumbra ignores the emitter outline and glossy BRDF
+weighting; see the evaluation for settings, cost and limits.
 
 #### Bounded sky-visibility evaluation
 
