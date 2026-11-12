@@ -22,7 +22,7 @@ fn admitted(light: Light, m: Material) -> bool {
 
 // Sample a solid-angle cone enclosing the emitter, then independently intersect
 // rays with its geometry. There is no area PDF or surface Jacobian in this oracle.
-fn angular_reference(light: Light, m: Material, n: usize) -> f64 {
+pub(super) fn angular_reference(light: Light, m: Material, n: usize) -> f64 {
     let d = light.center.length();
     let w = light.center * (1.0 / d);
     let u = V(0.0, 1.0, 0.0).cross(w).unit();

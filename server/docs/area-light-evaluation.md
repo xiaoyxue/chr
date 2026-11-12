@@ -383,6 +383,44 @@ This rejects the tested pinned candidate, not LTC as an entire method family.
 Production implementation and #26/#27 remain incomplete; sky and atmosphere stay
 paused.
 
+## Same-scene visual comparison
+
+`--images` renders an actual GPU diagnostic for each emitter: a rough metal
+ground plane under the finite emitter, seen by an orthographic camera with
+NdotV=0.3. Material roughness is 0.5, metallic is 1, base is 0.7 and Le is 1;
+the emitter centre is two metres above the ground. All ground receivers are
+inside the approved envelope. The scene uses no ambient fill, IBL, private
+assets or additional occluders. Analytic camera-ray intersections show the
+outward sphere's emission or the planar emitter's non-emitting back identically
+in both images.
+
+The 256×256 reference calls the actual native WGSL BRDF with 256² samples per
+pixel: area sampling for planes and exact solid-angle-cone sampling for outward
+spheres, avoiding under-resolved surface caps. The GPU candidate uses the
+existing LUT, lookup and clipped polygon helpers (four rectangle vertices,
+64 curved vertices). This is a compute diagnostic, not integration into the
+production mesh renderer.
+
+Both appearance images use **the same +2 EV exposure**, the renderer's Reinhard
+mapping and sRGB output, without per-image normalization. The third panel is
+the **absolute scene-linear difference before tone mapping**, explicitly shown
+on a fixed 0–0.03 black/red/yellow scale. Error colours are not an appearance
+render. All direct-emitter pixels are excluded from ground statistics.
+
+The final framing's maximum 128²→256² reference difference is `1.01e-6`.
+A sparse CPU angular-oracle cross-check differs by at most `5.19e-6`, and the
+GPU LTC versus scalar candidate difference is below `6.0e-8`. Maximum absolute
+ground errors are rectangle **0.01535**, disk **0.01971**, sphere **0.02610**.
+These are empirical checks for the rendered images, not continuous-domain
+certification or a new candidate timing result.
+
+Generated artifacts stay in `output/area-light-native/comparison/`: nine PNGs,
+raw scene-linear reference/candidate/mask buffers, `metrics.csv` and an
+`index.html` viewer. The viewer switches shapes and reports paired linear
+pixel values on hover; it never changes the render exposure. Serve only that
+synthetic-artifact directory when sharing it. A browser screenshot is optional;
+neither private inputs nor images are uploaded by the example.
+
 ## Reproduction and verification
 
 From the workspace root, inside its Nix development environment:
@@ -397,6 +435,9 @@ cargo run --locked --release -p chr-renderer --example area_light_evaluation -- 
 NIXPKGS_ALLOW_UNFREE=1 WGPU_BACKEND=vulkan \
   nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
   cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --profile-gpu
+NIXPKGS_ALLOW_UNFREE=1 WGPU_BACKEND=vulkan \
+  nix run --impure github:nix-community/nixGL#nixGLNvidia -- \
+  cargo run --locked --release -p chr-renderer --example area_light_evaluation -- --images
 ```
 
 Six focused example tests cover analytic Lambert integrals, emitter sidedness

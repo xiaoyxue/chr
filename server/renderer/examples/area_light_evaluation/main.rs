@@ -4,6 +4,7 @@
 
 use std::{error::Error, f64::consts::PI, fs, io::Write};
 
+mod comparison;
 mod gpu;
 mod profile;
 mod profile_gpu;
@@ -403,6 +404,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let table = Table::load();
+    if std::env::args().nth(1).as_deref() == Some("--images") {
+        return pollster::block_on(comparison::run(&table));
+    }
     if std::env::args().nth(1).as_deref() == Some("--profile") {
         return profile::run(&table);
     }
