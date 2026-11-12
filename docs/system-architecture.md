@@ -114,6 +114,7 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 | `server/runtime/` | `chr-runtime`（构建 `chr-server`）：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及其 WebRTC 监看。 |
 | `server/viewer/` | `chr-app`：原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
 | `common/` | `chr-common`：共享控制消息、方法和 NativeSocket/WebSocket IPC 实现。 |
+| `common/shm/` | `chr-shm`：进程间共享内存帧环；唯一允许 `unsafe` 的 crate（仅限其映射模块）。 |
 | `client/example/render-harness/` | 浏览器示例客户端和验证 harness，不等同于完整业务 WebUI。 |
 
 遵守 [server/AGENTS.md](../server/AGENTS.md)：渲染算法留在 renderer，交付壳不维护另一套渲染实现。

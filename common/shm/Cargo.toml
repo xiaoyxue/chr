@@ -1,0 +1,20 @@
+[package]
+name = "chr-shm"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "Shared-memory frame rings between chr processes"
+
+# The workspace forbids `unsafe`, which a crate cannot relax while inheriting the
+# workspace lints. This crate denies it and allows it only in its mapping module.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+undocumented_unsafe_blocks = "deny"
+
+[dependencies]
+memmap2 = "0.9"
+thiserror = "2"
