@@ -53,7 +53,7 @@
 | Recording | 输入/输出录制需求、诊断关联与资源隔离。 |
 | Deployment | 模块部署、素材与校准交付、控制和媒体通道。 |
 | Geometry ingestion | 对接已有 pinhole 坐标契约，细化图像域、Ti/C 关联与几何不可用状态。 |
-| Failure recovery | 输入、渲染、进程或硬件失败的分别处理，是否需要外部旁路。 |
+| Failure recovery | 输入与硬件失败的处理，是否需要外部旁路。渲染进程故障已由 [Live process architecture](live-process-architecture.md) 决定（clean feed + worker 重启）。 |
 
 渲染服务的具体部署及双输出提案由 [PR #4](https://github.com/xiaoyxue/chr/pull/4)
 单独推进；其方案仍需与这里的产品需求和执行约束对齐。
