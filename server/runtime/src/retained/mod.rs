@@ -15,9 +15,12 @@ use tokio::sync::{mpsc, oneshot};
 
 type Reply = Result<Value, ErrorObject>;
 
-struct Command {
-    params: wire::Params,
-    reply: oneshot::Sender<Reply>,
+enum Command {
+    Apply {
+        params: wire::Params,
+        reply: oneshot::Sender<Reply>,
+    },
+    Shutdown(oneshot::Sender<()>),
 }
 
 /// Cloneable acquisition endpoint shared by NativeSocket, WebSocket and native callers.
@@ -41,10 +44,21 @@ impl SceneControl {
         }
         let (commands, mut receiver) = mpsc::channel::<Command>(capacity);
         let worker = tokio::spawn(async move {
+            let mut stopped = None;
             while let Some(command) = receiver.recv().await {
-                // An uncertain/disconnected reply does not retract an applied effect.
-                let result = adapter.apply(command.params);
-                let _ = command.reply.send(result);
+                match command {
+                    Command::Apply { params, reply } => {
+                        // An uncertain/disconnected reply does not retract an applied effect.
+                        let _ = reply.send(adapter.apply(params));
+                    }
+                    Command::Shutdown(reply) => {
+                        receiver.close();
+                        stopped = Some(reply);
+                    }
+                }
+            }
+            if let Some(reply) = stopped {
+                let _ = reply.send(());
             }
         });
         Ok((Self { commands }, worker))
@@ -60,10 +74,19 @@ impl SceneControl {
         self.call(method, Some(value(params)?)).await
     }
 
+    /// Stop native admission and drain already accepted CPU commands, even when
+    /// connected transport handlers still hold endpoints. This is not a GPU fence.
+    pub async fn shutdown(&self) {
+        let (reply, done) = oneshot::channel();
+        if self.commands.send(Command::Shutdown(reply)).await.is_ok() {
+            let _ = done.await;
+        }
+    }
+
     async fn enqueue(&self, params: wire::Params) -> Reply {
         let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command { params, reply })
+            .try_send(Command::Apply { params, reply })
             .map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => {
                     reject(wire::RejectionKind::Capacity, "scene command queue is full")

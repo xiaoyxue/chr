@@ -14,7 +14,7 @@ use crate::{
 use super::lock;
 
 /// Identity and logical content are preserved independently of dispatch order.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Provenance {
     pub receipt: w::SubmissionAccepted,
     pub input: w::FrameInput,

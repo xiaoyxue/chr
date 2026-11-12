@@ -118,8 +118,17 @@ function launchChrome(profile: string): Promise<{ endpoint: string; stop(): Prom
   return new Promise((resolve, reject) => {
     let stderr = "";
     let started = false;
-    const timer = setTimeout(() => reject(new Error(`Chrome did not start: ${stderr}`)), 15_000);
-    chrome.on("error", (error) => reject(error));
+    const timer = setTimeout(() => {
+      chrome.kill("SIGTERM");
+      reject(new Error(`Chrome did not start: ${stderr}`));
+    }, 15_000);
+    chrome.on("error", (error) => { clearTimeout(timer); reject(error); });
+    chrome.once("exit", (code, signal) => {
+      if (!started) {
+        clearTimeout(timer);
+        reject(new Error(`Chrome exited before readiness (${code ?? signal}): ${stderr}`));
+      }
+    });
     // Keep draining stderr after startup so Chrome never blocks on a full pipe.
     chrome.stderr.on("data", (chunk: Buffer) => {
       if (started) return;
@@ -143,7 +152,13 @@ async function main(): Promise<number> {
   url.searchParams.set("auto", "1");
   url.searchParams.set("seconds", args.seconds);
   const profile = mkdtempSync(join(tmpdir(), "chr-chrome-"));
-  const chrome = await launchChrome(profile);
+  let chrome: Awaited<ReturnType<typeof launchChrome>>;
+  try {
+    chrome = await launchChrome(profile);
+  } catch (error) {
+    rmSync(profile, { recursive: true, force: true, maxRetries: 5 });
+    throw error;
+  }
   const cdp = await Cdp.connect(chrome.endpoint);
   try {
     // Attach to a blank page first so console output from the very start is captured.
@@ -154,7 +169,7 @@ async function main(): Promise<number> {
     });
     await cdp.send("Runtime.enable", {}, sessionId);
     await cdp.send("Page.navigate", { url: url.href }, sessionId);
-    const deadline = Date.now() + (Number(args.seconds) + 20) * 1000;
+    const deadline = Date.now() + (Number(args.seconds) + (url.searchParams.get("program") === "1" ? 60 : 20)) * 1000;
     let report = "";
     while (Date.now() < deadline && report === "") {
       await new Promise((done) => setTimeout(done, 500));
@@ -177,6 +192,14 @@ async function main(): Promise<number> {
 
     const fps = Number(args.fps);
     let failed = 0;
+    if (url.searchParams.get("program") === "1") {
+      const evaluated = await cdp.send<{ result: { value?: string } }>("Runtime.evaluate", {
+        expression: "document.querySelector('#program-result')?.textContent ?? ''", returnByValue: true,
+      }, sessionId);
+      const program = JSON.parse(evaluated.result.value || "{}") as { passed?: boolean };
+      console.log(`${program.passed ? "PASS" : "FAIL"}  program controls: ${evaluated.result.value}`);
+      if (!program.passed) failed++;
+    }
     for (const stats of JSON.parse(report) as PreviewStats[]) {
       const problems = [
         stats.state !== "connected" && `state ${stats.state}`,

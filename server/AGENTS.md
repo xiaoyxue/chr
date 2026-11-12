@@ -31,12 +31,13 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   WebRTC); do not add a second, render-direct client stream. The server's roles
   are the control plane (args over JSON-RPC), the render pipeline and its clock,
   the SDI output, and the monitor that encodes the output for clients.
-- The runtime product still renders an RGB triangle with display rotation and a
-  simulated SDI port; monitor encoding uses software after CPU readback.
+- The default runtime renders an RGB triangle. `--synthetic-program` explicitly
+  connects retained scenes and synthetic images to the same simulated SDI port;
+  monitor encoding uses software after CPU readback. See `docs/program-output.md`.
   The renderer library separately supports retained meshes, cameras, PBR,
   shadows, IBL, diagnostics and native image composition. Its offscreen examples
-  do not establish live scene/frame control, capture, SDI hardware or encoder
-  interoperability. Keep that integration/acceptance boundary explicit.
+  do not establish capture, SDI hardware or hardware-encoder interoperability.
+  Keep synthetic integration separate from production-policy acceptance.
 - Outputs must not block each other or the render loop: hand frames to their
   own threads through bounded queues and drop instead of waiting.
 - The repository root's `reference/` (`../reference/` from `server/`) holds

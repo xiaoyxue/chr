@@ -3,8 +3,9 @@
 `chr_server::retained` implements the runtime-only bridge for the
 [approved initial synthetic contract](../../docs/scene-frame-contract.md).
 This is an **explicit native embedding opt-in**, not a new daemon default or a
-claim of live scene rendering. The shipped binary still drives the triangle,
-simulated SDI port, and SDI monitor encoder/WebRTC chain.
+claim of production scene rendering. The shipped binary defaults to the triangle;
+[`--synthetic-program`](program-output.md) installs this adapter and connects
+synthetic composition to the existing SDI monitor encoder/WebRTC chain.
 
 ## Installation and ownership
 
@@ -13,7 +14,8 @@ simulated SDI port, and SDI monitor encoder/WebRTC chain.
    installation; the admission port must additionally approve device/output
    support (or explicitly declared synthetic capabilities).
 2. Populate `Registrations` with immutable world versions, models returned by
-   `chr_renderer::glb::import_glb`, decoded environment maps from
+   `chr_renderer::glb::import_glb` (or trusted synthetic native -Z-up mesh assets),
+   decoded environment maps from
    `chr_renderer::exr::import_exr`, and optional immutable `CameraContext` values.
    These are trusted local native registrations, not a production authorization
    service. No RPC accepts file paths, URLs or asset bytes. Registrations freeze
@@ -24,8 +26,10 @@ simulated SDI port, and SDI monitor encoder/WebRTC chain.
 4. Call `SceneControl::spawn(adapter, explicit_queue_capacity)` inside Tokio and
    install the endpoint with `ControlHandler::with_scenes`. Give this **same**
    handler to `chr_common::server::IpcServer` for both listeners.
-5. Retain/await the worker handle during shutdown. Dropping all endpoints drains
-   admitted commands; disconnected replies do not undo effects.
+5. Retain/await the worker handle during shutdown. `SceneControl::shutdown`
+   closes native admission and drains accepted CPU commands even while transports
+   retain endpoint clones. Dropping all endpoints also drains admitted commands;
+   disconnected replies do not undo effects. Neither operation is a GPU fence.
 
 Both transports and `SceneControl::call_typed` use the shared strict parser and
 one bounded queue. A full queue rejects immediately with `capacity`; a stopped
@@ -103,8 +107,9 @@ the same scene queue and narrow admission-port methods. Their default returns
 `unsupported_profile`; `FrameSubmissions` enables them only with an explicitly
 installed producer capability. Possession of a ticket string alone does not
 authorize publication. The native join, deadlines and submission lifecycle are
-documented in [frame submissions](frame-submissions.md); live output integration
-is still #31, not a daemon behavior change.
+documented in [frame submissions](frame-submissions.md); the explicit
+[program-output opt-in](program-output.md) supplies the GPU/output driver without
+changing the default daemon.
 
 ## Acceptance evidence and limits
 

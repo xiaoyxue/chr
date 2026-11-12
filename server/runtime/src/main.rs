@@ -37,6 +37,7 @@ Options:
   --no-socket             Do not listen on a NativeSocket
   --size <WxH>            Render size; both even [default: 1280x720]
   --fps <n>               Frames per second, 1-120 [default: 50]
+  --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
   --webrtc-udp <addr>     Local UDP bind for WebRTC; a wildcard binds every non-loopback
                           interface; \"none\" disables UDP [default: 0.0.0.0:0]
   --webrtc-tcp <addr>     First ICE-TCP listen address; previews use 4 consecutive
@@ -55,6 +56,7 @@ struct Args {
     fps: u32,
     ice: IceConfig,
     allowed_origins: Vec<String>,
+    synthetic_program: bool,
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -69,6 +71,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             tcp_base: None,
         },
         allowed_origins: Vec::new(),
+        synthetic_program: false,
     };
     let mut use_socket = true;
     while let Some(flag) = raw.next() {
@@ -85,6 +88,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                 (args.width, args.height) = (width.parse()?, height.parse()?);
             }
             "--fps" => args.fps = value()?.parse()?,
+            "--synthetic-program" => args.synthetic_program = true,
             "--webrtc-udp" => {
                 let addr = value()?;
                 args.ice.udp = (addr != "none").then_some(addr);
@@ -162,15 +166,40 @@ fn run(args: Args) -> Result<()> {
         height: args.height,
         fps: args.fps,
     };
-    let (sdi, tap) = SdiOutput::spawn(mode)?;
+    let installation = if args.synthetic_program {
+        Some(chr_server::program::synthetic::Synthetic::install(
+            mode,
+            chr_server::program::synthetic::runtime_id()?,
+        )?)
+    } else {
+        None
+    };
+    let (sdi, tap) = if let Some((synthetic, _)) = &installation {
+        SdiOutput::spawn_program(
+            mode,
+            chr_server::program::synthetic::id(format!(
+                "{}-program",
+                synthetic.configuration.runtime_id.as_str()
+            ))?,
+        )?
+    } else {
+        SdiOutput::spawn(mode)?
+    };
     let monitor = Monitor::spawn(mode, tap, Arc::clone(&feed))?;
-    let worker = RenderWorker::spawn(
-        RenderConfig {
-            extent,
-            fps: args.fps,
-        },
-        sdi.input(),
-    )?;
+    let render_config = RenderConfig {
+        extent,
+        fps: args.fps,
+    };
+    let worker = if let Some((synthetic, _)) = &installation {
+        RenderWorker::spawn_program(
+            render_config,
+            sdi.input(),
+            synthetic.configuration.clone(),
+            synthetic.scheduler.clone(),
+        )?
+    } else {
+        RenderWorker::spawn(render_config, sdi.input())?
+    };
     log::info!(
         "rendering {} with simulated SDI output ({})",
         mode.name(),
@@ -182,8 +211,24 @@ fn run(args: Args) -> Result<()> {
         .build()?;
     let commands = worker.commands.clone();
     let served = runtime.block_on(async {
+        let installed = match installation {
+            Some((synthetic, adapter)) => {
+                let (control, owner) = chr_server::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
+                synthetic.create_scene(&control).await?;
+                log::info!("synthetic-program-v1 runtime_id={} scene_id={} configuration_id={}",
+                    synthetic.configuration.runtime_id.as_str(), synthetic.scene_id.as_str(), synthetic.configuration.configuration_id.as_str());
+                Some((synthetic, control, owner))
+            }
+            None => None,
+        };
+        let (synthetic, scenes, owner) = match installed {
+            Some((synthetic, control, owner)) => (Some(synthetic), Some(control), Some(owner)),
+            None => (None, None, None),
+        };
+        let result = {
         let hub = Arc::new(WebRtcHub::new(feed, args.fps, args.ice.clone()));
-        let handler = Arc::new(ControlHandler::new(commands, hub, sdi.stats()));
+        let handler = ControlHandler::new(commands, hub, sdi.stats());
+        let handler = Arc::new(match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler });
         let server = IpcServer::new(
             handler,
             ServerConfig {
@@ -199,16 +244,40 @@ fn run(args: Args) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         };
+        let injection = async {
+            let Some(mut synthetic) = synthetic else { return std::future::pending::<Result<()>>().await };
+            let control = scenes.as_ref().expect("synthetic scene endpoint");
+            let mut progress = tokio::time::interval(Duration::from_millis(5));
+            progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut frames = tokio::time::interval(mode.frame_duration());
+            frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = progress.tick() => synthetic.scheduler.tick().map_err(|e| e.to_string())?,
+                    _ = frames.tick() => {
+                        if let Err(error) = synthetic.inject(control).await {
+                            log::warn!("synthetic injection skipped: {error}");
+                        }
+                    }
+                }
+            }
+        };
         tokio::select! {
             result = server.serve_websocket(websocket) => result.map_err(Into::into),
             result = native => result,
             () = render_watch => Err("render loop stopped".into()),
+            result = injection => result,
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 log::info!("shutting down");
                 Ok(())
             }
         }
+        };
+        if let Some(control) = &scenes { control.shutdown().await; }
+        drop(scenes);
+        if let Some(owner) = owner { owner.await?; }
+        result
     });
     // Dropping the runtime closes listeners (removing the socket file) and connections.
     runtime.shutdown_timeout(Duration::from_secs(2));
@@ -293,6 +362,16 @@ mod tests {
             Some(std::path::Path::new("/tmp/x.sock"))
         );
         assert_eq!(args.allowed_origins, ["http://studio:1"]);
+        assert!(
+            !args.synthetic_program,
+            "legacy triangle remains the default"
+        );
+        assert!(
+            parse(&["--synthetic-program"])
+                .unwrap()
+                .unwrap()
+                .synthetic_program
+        );
 
         assert!(parse(&["--no-socket"]).unwrap().unwrap().socket.is_none());
         let ice = parse(&["--webrtc-udp", "none", "--webrtc-tcp", "127.0.0.1:8788"])

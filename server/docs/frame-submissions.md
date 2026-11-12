@@ -2,7 +2,9 @@
 
 `chr_server::frame_submissions` implements the approved native mechanics of #22.
 It is an explicit embedding opt-in, **not** the shipped daemon's renderer, GPU
-integration or hardware SDI acceptance. The triangle/signaling/status path and
+integration or hardware SDI acceptance by itself. The
+[program-output opt-in](program-output.md) supplies its real GPU/simulated SDI
+driver. The default triangle/signaling/status path and
 render -> SDI -> monitor topology are unchanged. The authoritative wire types
 remain `chr_common::scene_frame`; no registration RPC or second schema is added.
 

@@ -54,7 +54,7 @@ Existing triangle, SDI-status and WebRTC-signaling methods remain compatible.
 | #21 | Registered producers, published resources, readiness and physical release. Opaque refs never expose a slot, pointer or texture-array layer. |
 | #38 | [Opt-in retained control adapter](../server/docs/retained-control.md): asset/camera mapping, atomic scenes and immutable binding through an explicit admission port. Default daemon output is unchanged. |
 | #22 | Join input/geometry, serialize scene binding, schedule bounded work and preserve submission provenance. |
-| #31 | Connect the completed renderer result to the existing SDI port and its monitor; no render-direct second stream. |
+| #31 | [Explicit synthetic program output](../server/docs/program-output.md) connects completed renderer results to the existing simulated SDI port and monitor; no render-direct second stream or production-policy approval. |
 
 The initial profile excludes orthographic/lens wire extensions, area/atmosphere
 lights, animation, live hardware acquisition and recording/calibration services.

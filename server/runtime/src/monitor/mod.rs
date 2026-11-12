@@ -98,6 +98,7 @@ fn run(
                 frame: slot.slot,
                 keyframe,
                 data: Bytes::from(data),
+                program: slot.association,
             }),
             Ok(None) => {}
             Err(error) => {
@@ -195,6 +196,8 @@ mod tests {
             .send(SdiSlot {
                 slot: 7,
                 uyvy: Arc::new([128, 100, 128, 100].repeat(64 * 32 / 2)),
+                program: None,
+                association: None,
             })
             .unwrap();
         let first = viewer.blocking_recv().expect("an encoded slot");
