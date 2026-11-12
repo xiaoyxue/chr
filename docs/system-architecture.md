@@ -52,6 +52,7 @@ chr → 实时视频 → 实时追踪服务 → 逐帧 Ti → chr
 [Frame ingestion and rendering](render-frame-input.md)；畸变和外部遮挡/深度输入延后。
 
 以上是组件责任，不要求把采集、编码、追踪通信、渲染与输出放在同一线程或同一子进程中。
+实时渲染侧的进程划分（可重启渲染 worker、独立监看进程）见 [Live process architecture](live-process-architecture.md)。
 
 现有运行时通过 NativeSocket 和 WebSocket 接收控制，两者使用同一处理路径。
 客户端通过 WebRTC 接收 SDI 输出的监看画面；它不是另一个控制通道。
