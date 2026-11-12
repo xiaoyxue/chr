@@ -38,6 +38,8 @@
   for validation, never private references or runtime artifacts.
 - Keep `AGENTS.md`, `README.md`, and `docs/development.md` consistent when changing
   directory responsibilities, tool availability, or development commands.
+- `CLAUDE.md` and `server/CLAUDE.md` only import the adjacent `AGENTS.md` for
+  Claude Code. Edit `AGENTS.md`; do not add separate rules to `CLAUDE.md`.
 
 ## Implementation Style
 

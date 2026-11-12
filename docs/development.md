@@ -11,6 +11,7 @@ Module boundaries:
 flake.nix                 Shared development tools, renderer builds, and checks
 flake.lock                Pinned Nix inputs for the whole repository
 AGENTS.md                 Repository-wide contributor rules
+CLAUDE.md                 Imports AGENTS.md for Claude Code (also server/CLAUDE.md)
 README.md                 Project overview and quick start
 client/src/               TypeScript client sources (currently a placeholder)
 client/example/           Example clients and harnesses, each its own npm package
