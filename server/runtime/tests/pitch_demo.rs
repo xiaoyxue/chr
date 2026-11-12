@@ -21,6 +21,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+#[path = "../../viewer/examples/shadow_benchmark/timing.rs"]
+pub mod timing;
+
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/pitch-demo.json"
@@ -305,14 +309,44 @@ async fn frame(
     (Arc::clone(&slot.uyvy), wall_ms)
 }
 
-async fn hardware(prepared: Prepared) {
-    let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
+fn gpu_interval(timer: Option<&timing::Timer>, gpu: &Gpu) -> Option<f64> {
+    timer.map(|timer| {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        timer.resolve(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+        let elapsed = timer.read(gpu).unwrap();
+        assert!(elapsed.is_finite() && elapsed > 0.);
+        elapsed
+    })
+}
+
+async fn hardware(prepared: Prepared, timestamps: bool) {
+    let (gpu, timer) = if timestamps {
+        timing::request().await.unwrap()
+    } else {
+        (Gpu::request(&Gpu::instance(), None).await.unwrap(), None)
+    };
     let info = gpu.adapter.get_info();
     assert!(matches!(
         info.device_type,
         wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
     ));
     println!("pitch adapter: {} {:?}", info.name, info.backend);
+    if timestamps {
+        let required =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        println!(
+            "pitch timestamps: adapter_supported={} device_enabled={} period_ns={} status={}",
+            gpu.adapter.features().contains(required),
+            gpu.device.features().contains(required),
+            gpu.queue.get_timestamp_period(),
+            if timer.is_some() {
+                "GPU intervals available"
+            } else {
+                "unsupported; wall only"
+            }
+        );
+    }
     let Prepared {
         mut program,
         adapter,
@@ -325,6 +359,35 @@ async fn hardware(prepared: Prepared) {
     let mut port = sdi.input();
     let mut pictures = Vec::new();
     let mut sequence = 0_u64;
+    // The disabled-query path must produce exactly the same program pixels.
+    let (untimed, _) = frame(
+        &control,
+        &mut program,
+        &mut renderer,
+        &gpu,
+        &mut port,
+        &tap,
+        &mut sequence,
+    )
+    .await;
+    renderer
+        .set_timestamp_queries(&gpu, timer.as_ref().map(|t| t.queries().clone()))
+        .unwrap();
+    let (timed, _) = frame(
+        &control,
+        &mut program,
+        &mut renderer,
+        &gpu,
+        &mut port,
+        &tap,
+        &mut sequence,
+    )
+    .await;
+    assert_eq!(
+        *untimed, *timed,
+        "optional timestamp diagnostics must not alter pixels"
+    );
+    gpu_interval(timer.as_ref(), &gpu);
     let pitch = serde_json::from_value(controls["pitch"].clone()).unwrap();
     for rig in ["none", "points", "spots"] {
         for sun in [false, true] {
@@ -349,7 +412,9 @@ async fn hardware(prepared: Prepared) {
                     &mut sequence,
                 )
                 .await;
+                let cold_gpu = gpu_interval(timer.as_ref(), &gpu);
                 let mut warm = Vec::new();
+                let mut warm_gpu = Vec::new();
                 for _ in 0..5 {
                     let (stable, elapsed) = frame(
                         &control,
@@ -363,6 +428,9 @@ async fn hardware(prepared: Prepared) {
                     .await;
                     assert_eq!(*stable, *pixels, "stable scene changes actual pixels");
                     warm.push(elapsed);
+                    if let Some(elapsed) = gpu_interval(timer.as_ref(), &gpu) {
+                        warm_gpu.push(elapsed);
+                    }
                 }
                 warm.sort_by(f64::total_cmp);
                 println!(
@@ -372,6 +440,17 @@ async fn hardware(prepared: Prepared) {
                     warm[2],
                     warm[4],
                 );
+                if let Some(cold_gpu) = cold_gpu {
+                    warm_gpu.sort_by(f64::total_cmp);
+                    println!(
+                        "pitch_gpu native={}x{} output=640x360 shadow512 rig={rig} sun={sun} mode={shadow} cold_edit_ms={cold_gpu:.6} warm_median_ms={:.6} warm_max_ms={:.6} warm_samples={}",
+                        program.configuration.native_extent.width,
+                        program.configuration.native_extent.height,
+                        warm_gpu[2],
+                        warm_gpu[4],
+                        warm_gpu.len()
+                    );
+                }
                 pictures.push(pixels);
             }
         }
@@ -451,6 +530,9 @@ async fn hardware(prepared: Prepared) {
         "zoom changes real pixels"
     );
     println!("pitch camera edit worker_wall_queue_readback_ms={edit_ms:.3}");
+    if let Some(elapsed) = gpu_interval(timer.as_ref(), &gpu) {
+        println!("pitch_gpu camera_edit_ms={elapsed:.6}");
+    }
     mutate(
         &control,
         &program,
@@ -511,7 +593,7 @@ async fn hardware(prepared: Prepared) {
 #[tokio::test]
 #[ignore = "requires a native hardware GPU"]
 async fn gpu_pitch_program_rigs_shadows_and_reset() {
-    hardware(install()).await;
+    hardware(install(), true).await;
 }
 
 #[tokio::test]
@@ -523,6 +605,6 @@ async fn gpu_private_pitch_program() {
         prepared.controls["center_semantics"],
         "conditional_fixed_ti"
     );
-    hardware(prepared).await;
+    hardware(prepared, false).await;
     println!("owner-local fixture automated acceptance: PASS");
 }

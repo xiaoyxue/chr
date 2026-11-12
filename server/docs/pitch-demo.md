@@ -204,7 +204,53 @@ corner/target geometry, exclusive rigs, metadata rejection and immutable reset.
 The headless hardware test executes the real program-to-SDI path and compares
 independent rig/sun and shadow contributions. Its reported worker duration is
 **CPU preparation + GPU queue/work + conversion + readback wall time**, not
-isolated GPU timestamp time, encoder time or end-to-end latency.
+encoder time or end-to-end latency.
+
+### Optional native GPU timestamps
+
+The synthetic pitch test reuses the `shadow_benchmark` timestamp utility. It
+requests `TIMESTAMP_QUERY | TIMESTAMP_QUERY_INSIDE_ENCODERS` only when both adapter
+features exist and prints adapter support, device enablement and nanoseconds/tick.
+Without them it retains the ordinary device/path and reports **wall time only**,
+never a fabricated GPU duration. Daemon devices still request no timestamp
+features and allocate no queries by default. No wire field, dependency or service
+is added.
+
+`ProgramRenderer::set_timestamp_queries` accepts optional native query slots 0/1.
+The start is immediately before `FrameCompositor::encode`; the end is immediately
+after `UyvyConverter::encode`, in the **same command encoder**. This measures GPU
+elapsed time for shadow depth passes, PBR rasterization, image/tone/transfer
+composition and RGB-to-UYVY conversion. It excludes CPU preparation/driver shader
+compilation, prior uploads/queue wait, the pixel staging copy, CPU readback,
+timestamp resolve/readback, SDI waiting, encoding and network/decode. GPU
+contention/stalls within the bracket remain part of elapsed GPU time.
+The separate worker-wall measurement includes preparation, queue execution and
+pixel readback, but excludes the diagnostic query resolve/read. Two queries and
+two 16-byte buffers are reused; the test verifies identical pixels with queries
+disabled and enabled. The ordinary no-query device is also exercised by the
+original program and owner-local tests.
+
+One synthetic RTX 3090/Vulkan run on a shared Linux host (1 ns timestamp period,
+debug/unoptimized test build), native/output 640×360, 512² maps, one cascade,
+9-tap PCF, 16+16-tap capped PCSS, one raster sample, ACES/BT.709:
+
+| Rig + sun | Mode | GPU cold/edit ms | GPU warm median ms | Worker cold/edit ms | Worker warm median ms |
+|---|---|---:|---:|---:|---:|
+| Four points | Hard | 1.752 | 1.583 | 140.029 | 6.910 |
+| Four points | PCF | 3.346 | 3.149 | 140.591 | 11.057 |
+| Four points | PCSS | 4.196 | 3.850 | 143.981 | 10.724 |
+| Four spots | Hard | 10.634 | 10.582 | 136.939 | 16.038 |
+| Four spots | PCF | 11.082 | 11.002 | 143.850 | 18.457 |
+| Four spots | PCSS | 21.045 | 21.001 | 151.618 | 28.213 |
+
+Each row has one lighting/default-shadow-mode edit (native resources and depth
+maps rebuilt) followed by five unchanged frames (depth maps reusable). This is
+a bounded observation, not an isolated throughput benchmark or an FPS/latency
+SLA; do not generalize the relative rig costs to other assets/settings. The large
+cold worker/GPU difference includes CPU pipeline/resource rebuilding. Fresh
+final-SHA samples, warm maxima and camera-edit timing are in the local verification
+record. All published timing rows are synthetic; private fixture evidence stays
+pass/fail only.
 
 Keep exact tested SHA, command results, adapter, measured timing aggregates and
 private-fixture pass/fail in ignored `output/pitch-demo/verification.txt`. No

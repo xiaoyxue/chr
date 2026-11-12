@@ -143,6 +143,13 @@ impl UyvyConverter {
     /// Submit the frame's rendering first; queue order makes this pass see it.
     pub fn convert(&self, gpu: &Gpu, out: &mut Vec<u8>) -> Result<(), BoxError> {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        self.encode(&mut encoder);
+        self.submit_readback(gpu, encoder, out)
+    }
+
+    /// Records conversion only, after source rendering in the same encoder.
+    /// Does not submit, copy to staging, or wait. The source must stay alive.
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UYVY conversion"),
@@ -161,6 +168,16 @@ impl UyvyConverter {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    /// Appends the pixel copy, submits prior rendering/conversion, then waits for
+    /// CPU readback. Call `encode` first; finish before reusing this converter.
+    pub fn submit_readback(
+        &self,
+        gpu: &Gpu,
+        mut encoder: wgpu::CommandEncoder,
+        out: &mut Vec<u8>,
+    ) -> Result<(), BoxError> {
         self.readback.record_copy(&mut encoder, &self.texture);
         let submission = gpu.queue.submit([encoder.finish()]);
         self.readback.finish(gpu, submission, out)

@@ -22,6 +22,7 @@ pub struct ProgramRenderer {
     target: wgpu::Texture,
     converter: UyvyConverter,
     compositor: Option<(w::ShadowMode, FrameCompositor)>,
+    timestamps: Option<wgpu::QuerySet>,
 }
 
 impl ProgramRenderer {
@@ -52,7 +53,33 @@ impl ProgramRenderer {
             target,
             converter,
             compositor: None,
+            timestamps: None,
         })
+    }
+
+    /// Optional native diagnostics, disabled by default (no query allocation).
+    /// Supply two timestamp queries from this device with both TIMESTAMP_QUERY
+    /// and TIMESTAMP_QUERY_INSIDE_ENCODERS enabled, or None for the normal path.
+    /// Each executed frame overwrites slots 0/1 around composition (including
+    /// shadows) and UYVY conversion, before the pixel copy or CPU readback.
+    /// Resolve/read externally before the next execution; there is no wire metric.
+    pub fn set_timestamp_queries(
+        &mut self,
+        gpu: &Gpu,
+        queries: Option<wgpu::QuerySet>,
+    ) -> Result<(), Error> {
+        if let Some(queries) = &queries
+            && (!gpu.device.features().contains(
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+            ) || queries.count() < 2
+                || !matches!(queries.ty(), wgpu::QueryType::Timestamp))
+        {
+            return Err(
+                "program timestamps require two timestamp queries and enabled features".into(),
+            );
+        }
+        self.timestamps = queries;
+        Ok(())
     }
 
     /// A successful conversion fences the entire queue, including input upload and CG.
@@ -150,10 +177,16 @@ impl ProgramRenderer {
             &[ImageLayer::new(&view, settings.input_stage)],
         )?;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        if let Some(queries) = &self.timestamps {
+            encoder.write_timestamp(queries, 0);
+        }
         compositor.encode(&mut encoder, &self.target)?;
-        gpu.queue.submit([encoder.finish()]);
+        self.converter.encode(&mut encoder);
+        if let Some(queries) = &self.timestamps {
+            encoder.write_timestamp(queries, 1);
+        }
         let mut pixels = Vec::new();
-        self.converter.convert(gpu, &mut pixels)?;
+        self.converter.submit_readback(gpu, encoder, &mut pixels)?;
         Ok(pixels)
     }
 

@@ -71,11 +71,20 @@ impl Timer {
     }
 
     pub fn begin(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.queries, 0);
+        encoder.write_timestamp(self.queries(), 0);
     }
 
     pub fn end(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.queries, 1);
+        encoder.write_timestamp(self.queries(), 1);
+        self.resolve(encoder);
+    }
+
+    /// Native program diagnostics write the same slots inside their own encoder.
+    pub fn queries(&self) -> &wgpu::QuerySet {
+        &self.queries
+    }
+
+    pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.resolve_query_set(&self.queries, 0..2, &self.resolve, 0);
         encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.readback, 0, 16);
     }
