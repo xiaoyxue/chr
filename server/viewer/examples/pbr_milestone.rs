@@ -381,6 +381,7 @@ fn main() -> Result<()> {
             Light::Point { source_radius, .. } | Light::Spot { source_radius, .. } => {
                 *source_radius *= 4.0
             }
+            // This milestone authors no area lights; their source size is their shape.
             Light::Area { .. } => {}
         }
     }
