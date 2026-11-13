@@ -10,6 +10,7 @@ import {
   type SdiStatus,
   type SessionDescription,
   type StartRotationParams,
+  type WorkerStatus,
   type TriangleState,
   isTriangleState,
 } from "./protocol.ts";
@@ -99,6 +100,10 @@ export class RpcClient {
 
   async getSdiStatus(): Promise<SdiStatus> {
     return (await this.call(Methods.sdi.getStatus)) as SdiStatus;
+  }
+
+  async getWorkerStatus(): Promise<WorkerStatus> {
+    return (await this.call(Methods.renderWorker.getStatus)) as WorkerStatus;
   }
 
   /** chr-monitor only. */

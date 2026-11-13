@@ -3,10 +3,12 @@
 
 use crate::calibration::replay::VideoLens;
 use crate::frame_submissions::{Execution, FrameSubmissions};
+use crate::retained::BoundScene;
 use crate::sdi::SdiInput;
 use chr_common::scene_frame as w;
 use chr_renderer::{
     Gpu, TextureReadback, UyvyConverter,
+    camera::Camera,
     composition::{AlphaMode, FrameCompositor, ImageLayer, ImageView, Transfer},
     coordinates::ImageExtent,
 };
@@ -18,6 +20,29 @@ pub mod still;
 pub mod synthetic;
 pub mod video;
 type Error = Box<dyn std::error::Error + Send + Sync>;
+
+/// The parts of one program frame: a bound scene, its camera and the input image.
+pub struct Frame<'a> {
+    pub scene: &'a BoundScene,
+    pub camera: &'a Camera,
+    pub image: &'a w::ImageDescription,
+    /// Tightly packed pixels as `image` describes them.
+    pub pixels: &'a [u8],
+    /// Native frame identity; selects the lens model of a calibrated video scene.
+    pub key: &'a w::FrameKey,
+}
+
+impl<'a> Frame<'a> {
+    pub fn of(execution: &'a Execution) -> Result<Self, Error> {
+        Ok(Self {
+            scene: &execution.scene,
+            camera: &execution.camera,
+            image: &execution.input.metadata().image,
+            pixels: execution.input.pixels()?,
+            key: &execution.provenance.input.frame,
+        })
+    }
+}
 
 /// Reusable worker-local GPU storage, separate from immutable registered inputs.
 /// Completed UYVY allocations move into the bounded scheduler/SDI/program-tap chain.
@@ -115,7 +140,14 @@ impl ProgramRenderer {
     }
 
     fn render(&mut self, gpu: &Gpu, execution: &Execution) -> Result<Vec<u8>, Error> {
-        let _input = self.prepare(gpu, execution)?;
+        self.render_frame(gpu, &Frame::of(execution)?)
+    }
+
+    /// Composes one frame from explicit parts and returns its UYVY output, as
+    /// [`Self::execute`] does for an admitted execution. A render worker rebuilds
+    /// these parts from a request.
+    pub fn render_frame(&mut self, gpu: &Gpu, frame: &Frame) -> Result<Vec<u8>, Error> {
+        let _input = self.prepare(gpu, frame)?;
         let compositor = &mut self.compositor.as_mut().expect("installed compositor").1;
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         if let Some(queries) = &self.timestamps {
@@ -143,7 +175,7 @@ impl ProgramRenderer {
     }
 
     fn compose_rgba(&mut self, gpu: &Gpu, execution: &Execution) -> Result<Vec<u8>, Error> {
-        let _input = self.prepare(gpu, execution)?;
+        let _input = self.prepare(gpu, &Frame::of(execution)?)?;
         if self.rgba_readback.is_none() {
             let size = self.target.size();
             let extent = ImageExtent::new(size.width, size.height)?;
@@ -160,18 +192,18 @@ impl ProgramRenderer {
 
     /// Uploads the input and prepares the compositor; returns the input texture,
     /// which must outlive the submission.
-    fn prepare(&mut self, gpu: &Gpu, execution: &Execution) -> Result<wgpu::Texture, Error> {
-        let snapshot = execution.scene.snapshot();
+    fn prepare(&mut self, gpu: &Gpu, frame: &Frame) -> Result<wgpu::Texture, Error> {
+        let snapshot = frame.scene.snapshot();
         if snapshot.runtime_id != self.runtime_id
             || snapshot.state.configuration_id != self.configuration_id
         {
             return Err("program worker cannot switch immutable configurations".into());
         }
-        let settings = execution.scene.settings();
+        let settings = frame.scene.settings();
         // Configuration is immutable for this worker. Camera/light edits only
         // change the scene; MeshRenderer evicts stale resource IDs in prepare.
         // Recompiling the compositor on every effect made camera edits >100 ms.
-        let shadow_mode = execution.scene.snapshot().state.shadow_mode;
+        let shadow_mode = snapshot.state.shadow_mode;
         if self
             .compositor
             .as_ref()
@@ -181,7 +213,7 @@ impl ProgramRenderer {
             compositor.set_sample_count(gpu, settings.raster.sample_count)?;
             self.compositor = Some((shadow_mode, compositor));
         }
-        let image = &execution.input.metadata().image;
+        let image = frame.image;
         let format = match image.format {
             w::ImageFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             w::ImageFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
@@ -203,7 +235,7 @@ impl ProgramRenderer {
         });
         gpu.queue.write_texture(
             texture.as_image_copy(),
-            execution.input.pixels()?,
+            frame.pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(
@@ -234,12 +266,12 @@ impl ProgramRenderer {
         let camera_model = self
             .video_lens
             .as_ref()
-            .map(|lens| lens.model(&execution.provenance.input.frame))
+            .map(|lens| lens.model(frame.key))
             .transpose()?;
         compositor.prepare_model(
             gpu,
-            execution.scene.scene(),
-            &execution.camera,
+            frame.scene.scene(),
+            frame.camera,
             camera_model.unwrap_or(&chr_renderer::distortion::CameraModel::Pinhole),
             &[ImageLayer::new(&view, settings.input_stage)],
         )?;

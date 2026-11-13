@@ -26,7 +26,9 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   as hardware FFI.
 - Runtime ownership: `src/input/` acquires video; `src/calibration/` consumes
   calibration and associates it with frames; `src/program/` assembles demo
-  scenes and bridges admitted frames into rendering; `src/sdi.rs` owns the
+  scenes and bridges admitted frames into rendering; `src/worker/` supervises
+  the out-of-process renderer (`chr-renderer-cli worker`), which holds the GPU
+  device, while `chr-server` holds none; `src/sdi.rs` owns the
   simulated output port and writes every transmitted slot into the shared-memory
   program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
   encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer helpers

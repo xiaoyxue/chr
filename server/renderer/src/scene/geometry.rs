@@ -182,6 +182,16 @@ pub struct MeshAttributes {
 }
 
 impl MeshData {
+    /// Identity of the shared vertex and index data. Clones, and scenes rebuilt
+    /// from the same registered asset, share it, so GPU buffers can be reused.
+    pub(crate) fn content_key(&self) -> [usize; 3] {
+        [
+            Arc::as_ptr(&self.positions).cast::<()>() as usize,
+            Arc::as_ptr(&self.indices).cast::<()>() as usize,
+            Arc::as_ptr(&self.attributes).cast::<()>() as usize,
+        ]
+    }
+
     pub fn new(
         positions: Vec<[f32; 3]>,
         indices: Vec<u32>,

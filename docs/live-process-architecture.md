@@ -1,8 +1,10 @@
 # Live process architecture
 
-**Status:** `confirmed` — owner decision recorded in #94 (2026-11-13). Partly
-`implemented`: `chr-monitor` serves WebRTC/SRT from the program tap (#95), but
-`chr-server` still renders in process until the worker lands (#96, #97).
+**Status:** `confirmed` — owner decision recorded in #94 (2026-11-13).
+`implemented` on Linux: `chr-monitor` serves WebRTC/SRT from the program tap
+(#95), and `chr-server` renders every frame through a supervised
+`chr-renderer-cli worker` with clean feed on failure (#96, #97). Windows is not
+verified; physical SDI (#80) is not implemented.
 Implementation steps are in
 [Live process implementation plan](live-process-implementation.md).
 

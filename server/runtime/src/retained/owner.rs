@@ -266,6 +266,33 @@ impl SceneAdapter {
             .ok_or_else(|| reject(w::RejectionKind::NotFound, "scene is not live"))
     }
 
+    /// Rebinds a scene snapshot with this adapter's registrations, as a render
+    /// worker does for each request. The snapshot must belong to this runtime.
+    pub fn bind(&self, snapshot: w::SceneSnapshot) -> Result<BoundScene, ErrorObject> {
+        self.runtime(&snapshot.runtime_id)?;
+        self.prepare(
+            snapshot.scene_id,
+            snapshot.state,
+            snapshot.scene_revision,
+            snapshot.effect,
+            Arc::new(()),
+        )
+    }
+
+    /// The camera of one submitted frame of `scene`, as admission derives it.
+    pub fn frame_camera(
+        &self,
+        scene: &BoundScene,
+        geometry: &w::FrameGeometry,
+    ) -> Result<Camera, ErrorObject> {
+        self.registrations.frame_camera(
+            &self.config,
+            &scene.snapshot.state,
+            scene.camera.as_ref(),
+            geometry,
+        )
+    }
+
     fn prepare(
         &self,
         id: w::Id,

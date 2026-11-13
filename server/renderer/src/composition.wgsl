@@ -37,13 +37,34 @@ fn read_pixel(pixel:vec2<i32>,size:vec2<i32>)->vec4<f32> {
     return vec4(min(rgb,vec3(65504.0*value.a)),value.a);
 }
 
-@fragment fn fs_main(vertex:Vertex)->@location(0) vec4<f32> {
-    let size=vec2<i32>(textureDimensions(source));
-    let pixel=vertex.uv*vec2<f32>(size)-vec2(0.5);
+fn bilinear(pixel:vec2<f32>,size:vec2<i32>)->vec4<f32> {
     let base=vec2<i32>(floor(pixel));
     let f=fract(pixel);
-    let value=mix(mix(read_pixel(base,size),read_pixel(base+vec2(1,0),size),f.x),
-        mix(read_pixel(base+vec2(0,1),size),read_pixel(base+vec2(1,1),size),f.x),f.y)*params.canvas.w;
+    return mix(mix(read_pixel(base,size),read_pixel(base+vec2(1,0),size),f.x),
+        mix(read_pixel(base+vec2(0,1),size),read_pixel(base+vec2(1,1),size),f.x),f.y);
+}
+
+@fragment fn fs_main(vertex:Vertex)->@location(0) vec4<f32> {
+    let size=vec2<i32>(textureDimensions(source));
+    let centre=vertex.uv*vec2<f32>(size);
+    // Source texels per destination pixel. Plain bilinear skips texels when
+    // minifying, which aliases fine detail; average a 4x4 grid of bilinear taps
+    // over the destination pixel's footprint instead.
+    let footprint=vec2<f32>(size)/params.rect.zw;
+    var sampled=vec4(0.0);
+    if all(footprint<=vec2(1.0)) {
+        sampled=bilinear(centre-vec2(0.5),size);
+    } else {
+        let step=max(footprint,vec2(1.0))/4.0;
+        for(var y=0;y<4;y++) {
+            for(var x=0;x<4;x++) {
+                let offset=(vec2(f32(x),f32(y))-vec2(1.5))*step;
+                sampled+=bilinear(centre+offset-vec2(0.5),size);
+            }
+        }
+        sampled/=16.0;
+    }
+    let value=sampled*params.canvas.w;
     if params.options.x==1u {
         if value.a==0.0 {return vec4(0.0);}
         let linear=min(value.rgb/value.a*params.canvas.z,vec3(65504.0));

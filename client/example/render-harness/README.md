@@ -2,7 +2,8 @@
 
 Example TypeScript client for `chr-server` (`server/runtime/`) and `chr-monitor`
 (`monitor/`): a browser program monitor and two verification scripts. The server
-renders a rotating triangle and takes JSON-RPC 2.0 control over a WebSocket and a
+renders a rotating triangle through its supervised `chr-renderer-cli worker`
+process and takes JSON-RPC 2.0 control over a WebSocket and a
 NativeSocket (Unix Domain Socket); the separate monitor process streams its program
 output back to clients:
 
@@ -140,7 +141,8 @@ Requires Node.js 24 or newer, which runs the `.ts` scripts directly.
 
 ```sh
 # Terminal 1, from the repository root (see server/README.md for GPU access on
-# non-NixOS hosts)
+# non-NixOS hosts); the build also produces the render worker, chr-renderer-cli
+cargo build --locked --release -p chr-runtime
 cargo run --locked --release -p chr-runtime
 
 # Terminal 2, from the repository root (same --size/--fps as chr-server)
@@ -158,14 +160,16 @@ Instead of terminals 1 and 2, `server/scripts/run-live.sh --monitor-arg --webrtc
 listens on `ws://127.0.0.1:8787` and `$XDG_RUNTIME_DIR/chr/render.sock`, and the
 monitor on `ws://127.0.0.1:8789`. The page's two URL fields (or `?ws=` and
 `?monitor=`, default `ws://<page host>:8787` and `:8789`) select them; it shows the
-monitor's encoded/skipped/viewer/SRT-caller counts from `monitor.get_status`.
+render worker's state, restarts, clean-feed frames and deadline misses from
+`render.get_worker_status`, and the monitor's encoded/skipped/viewer/SRT-caller
+counts from `monitor.get_status`.
 
 ## Verify
 
 ```sh
 npm run typecheck
 npm test                          # depacketizer, framing and shared scene/frame fixtures
-npm run verify                    # IPC, SDI status, monitor status, and the WebRTC stream via werift + ffmpeg
+npm run verify                    # IPC, render worker and SDI status, monitor status, and the WebRTC stream via werift + ffmpeg
 npm run verify:browser            # the stream decoded by a headless Chrome
 npm run verify:browser -- --tcp-only   # same, with UDP forbidden (SSH forward case; needs chr-monitor --webrtc-tcp)
 npm run verify:browser -- --rotation-directions # exercise both signs through the actual UI
@@ -174,7 +178,9 @@ npm run verify:browser -- --mesh-rotation --url 'http://127.0.0.1:5173/?ws=ws://
 
 `verify` reaches `chr-server` at `--ws` (`CHR_WS_URL`, default `ws://127.0.0.1:8787`)
 and `chr-monitor` at `--monitor` (`CHR_MONITOR_URL`, default `ws://127.0.0.1:8789`).
-It checks that `chr-server` rejects `webrtc.offer` as method not found, negotiates
+It checks that the render worker is ready and renders every frame (no restart and
+no clean-feed or repeated frames over 0.5 s, from `render.get_worker_status`),
+that `chr-server` rejects `webrtc.offer` as method not found, negotiates
 WebRTC with the monitor and checks `monitor.get_status`; `--skip-webrtc` skips the
 WebRTC and monitor checks. It writes the captured streams to the repository's
 `output/render-harness/program.h264`, and `verify:browser` saves its

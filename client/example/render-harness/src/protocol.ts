@@ -53,6 +53,9 @@ export const Methods = {
   sdi: {
     getStatus: "sdi.get_status",
   },
+  renderWorker: {
+    getStatus: "render.get_worker_status",
+  },
   /** Served by chr-monitor. */
   monitor: {
     getStatus: "monitor.get_status",
@@ -104,6 +107,22 @@ export interface SdiStatus {
   /** Rendered frames discarded because the output queue was full. */
   dropped_frames: number;
   last_source_frame: number | null;
+}
+
+/** The render worker process supervised by chr-server. */
+export interface WorkerStatus {
+  state: "starting" | "ready" | "backoff";
+  /** Process ID of the current worker, if one is running. */
+  pid: number | null;
+  /** Workers started after the first. */
+  restarts: number;
+  /** Requests the worker did not finish within the render deadline. */
+  deadline_misses: number;
+  /** Frames transmitted as their input image without CG. */
+  clean_feed_frames: number;
+  /** Frames without CG whose input could not be converted, so the port repeated. */
+  repeated_for_unavailable_clean_feed: number;
+  last_error: string | null;
 }
 
 /** chr-monitor counters since the monitor started. */

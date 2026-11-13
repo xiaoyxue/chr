@@ -3,7 +3,8 @@
 **Status:** `proposed` — implementation plan for the `confirmed`
 [Live process architecture](live-process-architecture.md). Field names and
 defaults below are the intended first version; each step's pull request updates
-this document if they change. Steps 1 (#99), 2 (#95) and 3 (#96) are `implemented`; step 4 is not.
+this document if they change. Steps 1 (#99), 2 (#95), 3 (#96) and 4 (#97) are
+`implemented`; step 4 is verified on Linux only.
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
 ring layout, supervision and clean feed, the monitor process, and acceptance
@@ -174,17 +175,18 @@ SDI port in the same process; they are identical.
 
 ### Worker protocol
 
-`chr-server` starts `chr-renderer-cli worker` once (path from `--renderer-cli`,
-default: next to the `chr-server` executable). stdin/stdout carry one JSON
-object per line, at most 1 MiB; stderr is the worker's log. EOF on stdin makes
-the worker exit.
+`chr-server` starts one `chr-renderer-cli worker` (path from `--renderer-cli`,
+default: `chr-renderer-cli` next to the `chr-server` executable; the flake
+package installs both) and replaces it when it fails. stdin/stdout carry one
+JSON object per line, at most 1 MiB; stderr is the worker's log. EOF on stdin
+makes the worker exit.
 
 | Direction | `type` | Fields |
 | --- | --- | --- |
 | server → worker | `hello` | `version` (1), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `input_ring`, `output_ring` |
 | worker → server | `ready` | `adapter` (logged GPU adapter) |
 | worker → server | `fatal` | `message`; the worker then exits |
-| server → worker | `render` | `id`, `input_slot`, `output_slot`, `image` (`ImageDescription`), `frame` (`FrameInput`), `scene` (`SceneSnapshot`) |
+| server → worker | `render` | `id`, `input_slot`, `output_slot`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`) |
 | server → worker | `triangle` | `id`, `output_slot`, `frame`, `angle_rad` (default triangle mode) |
 | worker → server | `done` | `id` |
 | worker → server | `failed` | `id`, `message` |
@@ -192,13 +194,24 @@ the worker exit.
 - The program specification is one of `triangle`, `synthetic`,
   `software_video`, `video_scene { path }`, `pitch_demo { path }`. The worker
   builds registrations, configuration and lens replay from it with the given
-  runtime ID; it rejects a mismatch with the snapshot's configuration.
-- The worker handles requests in order. It caches the renderer scene for the
-  last `(scene_id, scene_revision)` and the compositor per shadow mode, as the
-  in-process bridge does today.
-- Input and output rings have 4 slots each, sized for the native input and the
-  output UYVY frame. A slot is reused only after its request completed, failed,
-  or the worker was reaped.
+  runtime ID, so registrations and IDs match `chr-server`'s; it rejects a
+  mismatch with the snapshot's configuration. It logs the GPU adapter and
+  rejects software adapters (`fatal`).
+- The worker handles requests in order and replies in order. It rebinds each
+  snapshot through `SceneAdapter::bind` and the frame geometry through
+  `SceneAdapter::frame_camera`, caching the bound scene for the last
+  `(scene_id, scene_revision)`, and composes with `ProgramRenderer::render_frame`
+  (explicit frame parts instead of an `Execution`), which keeps the compositor
+  per shadow mode as the in-process bridge does.
+- Input and output rings have 4 slots each, in a private 0700 directory
+  (`$XDG_RUNTIME_DIR/chr/worker-<pid>/`, otherwise the temp directory) that
+  `chr-server` removes on shutdown. `chr-server` creates the input ring (slot
+  capacity native width × height × 8 bytes, room for RGBA16F; none for the
+  triangle); the worker creates the output ring (one UYVY output frame per
+  slot). A slot is reused only after its request completed, failed, or the
+  worker was replaced.
+- Test-only: `CHR_WORKER_TEST_DELAY_MS` delays every worker reply by that many
+  milliseconds. The worker inherits it from `chr-server`'s environment.
 
 ### Supervision
 
@@ -206,27 +219,35 @@ the worker exit.
 Starting ──ready──► Ready ──exit / fatal / hang──► Backoff ──timer──► Starting
 ```
 
-- `--render-deadline-ms` (default: one frame period): after it, the frame is
-  clean feed. `--worker-hang-ms` (default 2000): if the oldest outstanding
-  request is older, the worker is killed. Backoff starts at 250 ms, doubles to
-  5 s and resets after 10 s in `Ready`.
+- `--render-deadline-ms` (default: 3/4 of the frame period, so the clean-feed
+  conversion still fits in the frame; the wait never passes the loop's next
+  frame boundary): after it, the frame is clean feed; a late completion only
+  frees its slot. A lost GPU device makes the worker exit, handled as a crash. `--worker-hang-ms`
+  (default 2000): if the oldest outstanding request is older, the worker is
+  killed (`SIGKILL`) and replaced. A worker that is not ready within 60 s is
+  replaced. Backoff starts at 250 ms, doubles to 5 s and resets after 10 s in
+  `Ready`.
 - `chr-server` creates no wgpu device in any mode, including the default
   triangle (its frames are rendered through `triangle` requests).
 - New JSON-RPC `render.get_worker_status` (Rust and TypeScript mirror):
-  `state`, `restarts`, `deadline_misses`, `clean_feed_frames`,
-  `repeated_for_unavailable_clean_feed`, `last_error`.
+  `state` (`starting`, `ready` or `backoff`), `pid`, `restarts`,
+  `deadline_misses`, `clean_feed_frames`, `repeated_for_unavailable_clean_feed`,
+  `last_error`.
 
 ### Clean feed
 
-- On a deadline miss, worker failure or no free slot, `chr-server` marks the
-  execution failed (its input was already copied into the ring, so no GPU access
-  remains) and submits the clean feed for that frame without a program
-  association.
-- Conversion uses a CPU BT.709 RGBA8/BGRA8 → UYVY limited-range function in
-  `chr-renderer`, matching the GPU converter's matrix and chroma averaging; colour
-  math stays in the renderer library. A GPU test compares the two.
+- On a deadline miss, worker failure, no ready worker or no free slot,
+  `chr-server` marks the execution failed (its input was already copied into
+  the ring or never sent, so no GPU access remains) and submits the clean feed
+  for that frame without a program association.
+- Conversion uses `chr_renderer::uyvy_from_bt709` on the CPU (BT.709
+  RGBA8/BGRA8 → UYVY limited range, pair-mean chroma, ties-to-even), bit-identical
+  to the GPU `UyvyConverter`; colour math stays in the renderer library. A GPU
+  test compares the two (0 of 262144 bytes differ).
 - Inputs that are not 8-bit BT.709 or whose extent differs from the output are
-  not converted; the port repeats its last frame and the case is counted.
+  not converted; the port repeats its last frame and the case is counted
+  (`repeated_for_unavailable_clean_feed`). The triangle has no input, so its
+  missed frames are repeats.
 
 ### Step 4 acceptance (no SDI hardware)
 
@@ -242,6 +263,22 @@ With the synthetic program and with the software video input:
 - Rendered program pixels match the current in-process output for the existing
   `program_output` scenarios.
 - Recorded measurements: ring copy cost per frame and restart-to-first-CG time.
+
+Recorded on a Linux NVIDIA host (nixGL). The ignored GPU tests in
+`server/runtime/tests/render_worker.rs` show worker output byte-identical to the
+in-process bridge for the same synthetic execution, and, with the synthetic
+program at 192x128p50: `kill -9` of the worker keeps the output at cadence with
+clean-feed frames, and CG returns after the restart (new worker ready in about
+1 s); `SIGSTOP` is detected after the test's 500 ms hang limit and the worker is
+replaced; a worker delayed to 60 ms per frame against a 20 ms deadline gives
+clean feed at cadence with no drops and no restart. Manual release-build runs:
+the default triangle with `chr-monitor` passed `npm run verify` (12/12, including
+the worker check); with software video input (640x360p30 generated clip),
+`kill -9` of the worker gave 16 clean-feed frames while the output stayed at
+cadence (65 slots in about 2.1 s, 1 repeat, 0 drops), and a new worker was ready
+within 2 s. Scene edits during a restart and the per-frame ring copy cost were
+not measured separately. Windows is not verified (the CLI and worker path is
+portable Rust, but the kill/stop tests use Unix signals), nor is physical SDI.
 
 ## Documentation to update with the code
 

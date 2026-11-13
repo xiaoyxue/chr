@@ -11,6 +11,7 @@ From the worktree root, inside the existing Nix environment:
 ```sh
 mkdir -p output/pitch-demo
 chmod 700 output/pitch-demo
+nix develop --command cargo build --locked -p chr-runtime  # also builds the render worker
 nix develop --command cargo run --locked -p chr-runtime -- \
   --pitch-demo server/runtime/tests/fixtures/pitch-demo.json \
   --pitch-controls output/pitch-demo/controls.json \
@@ -163,8 +164,10 @@ Composition intermediates are bounded to 128 MiB. Native input capacity is
 `8 * native_width * native_height * 8` bytes (14.06 MiB at 640×360; 126.56 MiB
 at 1920×1080); this budget includes physically draining inputs. Eight possible
 shared raw UYVY owners at 640×360 represent at most 3.52 MiB, plus the fixed
-eight-slot shared-memory program tap (3.52 MiB), GPU worker staging and four
-compressed frames in `chr-monitor`. Imported mesh/material/texture
+eight-slot shared-memory program tap (3.52 MiB), the render worker's two
+4-slot rings (input `4 * native_width * native_height * 8` bytes; output 1.76 MiB
+at 640×360), its GPU staging and four compressed frames in `chr-monitor`.
+Imported mesh/material/texture
 allocations depend on the selected assets and are **not included** in those
 frame/shadow bounds.
 
