@@ -21,8 +21,9 @@ Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
-server/runtime/           chr-runtime: chr-server (render server) and chr-renderer-cli (stills, render worker)
-  src/input/              Video acquisition adapters (currently software MP4)
+server/runtime/           chr-runtime: chr-server (render server), chr-renderer-cli (stills, render worker)
+                          and chr-tracking-sim (simulated tracked camera)
+  src/input/              Video acquisition adapters (software MP4, shared-memory input ring)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
   src/sdi.rs              Simulated SDI output port, output clock and program tap
@@ -50,9 +51,11 @@ technology stack is chosen by this environment setup.
 
 Algorithm estimation belongs in `algorithm/`; receiving and associating its
 results belongs in the runtime, not the renderer. The current `calibration/replay`
-module is only a startup-loaded lens replay for a validated clip. Online algorithm
-transport, the public distortion contract, and physical SDI adapters are not
-implemented by this layout.
+module is only a startup-loaded lens replay for a validated clip;
+`calibration/tracking` pairs per-frame cameras from the simulated tracking source
+(`server/docs/tracking-simulation.md`). Production algorithm transport, a general
+public distortion contract, and physical SDI adapters are not implemented by this
+layout.
 
 `chr-server` creates no GPU device. As decided in #94 and implemented in #97, it
 starts and supervises a `chr-renderer-cli worker` process that renders every

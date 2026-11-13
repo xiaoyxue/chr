@@ -62,7 +62,9 @@ chr-renderer-cli worker                               ▼
 | `chr-monitor` | Reading the tap, encoding, WebRTC/SRT fan-out, its own signalling endpoint | Feed anything back into program output |
 
 Algorithm/tracking processes are expected to be out of process as well, but
-their frame and result channels belong to #60 and are not defined here.
+their frame and result channels belong to #60 and are not defined here. The
+opt-in [tracked camera simulation](../server/docs/tracking-simulation.md) stands in
+for them with a shared-memory input ring and per-frame `tracking.frame` calls.
 
 ## Repository layout
 

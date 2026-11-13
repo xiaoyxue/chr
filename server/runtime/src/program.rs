@@ -1,7 +1,7 @@
 //! Explicit synthetic program bridge. Rendering and colour math stay in chr-renderer.
 //! One GPU worker executes at a time; the scene owner and SDI clock never wait on it.
 
-use crate::calibration::replay::VideoLens;
+use crate::calibration::{replay::VideoLens, tracking::rows3};
 use crate::frame_submissions::{Execution, FrameSubmissions};
 use crate::retained::BoundScene;
 use crate::sdi::SdiInput;
@@ -11,6 +11,7 @@ use chr_renderer::{
     camera::Camera,
     composition::{AlphaMode, FrameCompositor, ImageLayer, ImageView, Transfer},
     coordinates::ImageExtent,
+    distortion::{CameraModel, FrameWarp, LensDistortion, RadialDistortion},
 };
 use std::sync::Arc;
 
@@ -30,6 +31,8 @@ pub struct Frame<'a> {
     pub pixels: &'a [u8],
     /// Native frame identity; selects the lens model of a calibrated video scene.
     pub key: &'a w::FrameKey,
+    /// The frame's own warp of a tracked program (`frame_warp` of its `ti_c` geometry).
+    pub frame_warp: Option<[[f64; 3]; 3]>,
 }
 
 impl<'a> Frame<'a> {
@@ -40,7 +43,19 @@ impl<'a> Frame<'a> {
             image: &execution.input.metadata().image,
             pixels: execution.input.pixels()?,
             key: &execution.provenance.input.frame,
+            frame_warp: frame_warp(&execution.provenance.input.geometry),
         })
+    }
+}
+
+/// The warp a frame's geometry carries, if any.
+pub fn frame_warp(geometry: &w::FrameGeometry) -> Option<[[f64; 3]; 3]> {
+    match geometry {
+        w::FrameGeometry::TiC {
+            frame_warp: Some(rows),
+            ..
+        } => Some(rows3(rows)),
+        _ => None,
     }
 }
 
@@ -54,6 +69,7 @@ pub struct ProgramRenderer {
     compositor: Option<(w::ShadowMode, FrameCompositor)>,
     timestamps: Option<wgpu::QuerySet>,
     video_lens: Option<Arc<VideoLens>>,
+    tracked_lens: Option<RadialDistortion>,
     rgba_readback: Option<TextureReadback>,
 }
 
@@ -89,12 +105,24 @@ impl ProgramRenderer {
             compositor: None,
             timestamps: None,
             video_lens: None,
+            tracked_lens: None,
             rgba_readback: None,
         })
     }
 
     pub fn set_video_lens(&mut self, lens: Option<Arc<VideoLens>>) {
         self.video_lens = lens;
+    }
+
+    /// The startup lens of a tracked program; each frame supplies its own warp.
+    pub fn set_tracked_lens(&mut self, lens: Option<RadialDistortion>) {
+        self.tracked_lens = lens;
+    }
+
+    /// Both lens sources of a program, as its installation provides them.
+    pub fn set_lenses(&mut self, program: &synthetic::Synthetic) {
+        self.set_video_lens(program.video_lens.clone());
+        self.set_tracked_lens(program.tracking.as_ref().map(|tracked| tracked.lens));
     }
 
     /// Optional native diagnostics, disabled by default (no query allocation).
@@ -263,16 +291,27 @@ impl ProgramRenderer {
             },
         )?;
         let compositor = &mut self.compositor.as_mut().expect("installed compositor").1;
-        let camera_model = self
-            .video_lens
-            .as_ref()
-            .map(|lens| lens.model(frame.key))
-            .transpose()?;
+        let tracked;
+        let camera_model = match (&self.video_lens, self.tracked_lens) {
+            (Some(lens), _) => lens.model(frame.key)?,
+            (None, Some(radial)) => {
+                tracked = CameraModel::Distorted(Box::new(LensDistortion::new(
+                    ImageExtent::new(image.extent.width, image.extent.height)?,
+                    radial,
+                    frame.frame_warp.map(FrameWarp::new).transpose()?,
+                )));
+                &tracked
+            }
+            (None, None) if frame.frame_warp.is_some() => {
+                return Err("a frame warp needs a tracked program's lens".into());
+            }
+            (None, None) => &CameraModel::Pinhole,
+        };
         compositor.prepare_model(
             gpu,
             frame.scene.scene(),
             frame.camera,
-            camera_model.unwrap_or(&chr_renderer::distortion::CameraModel::Pinhole),
+            camera_model,
             &[ImageLayer::new(&view, settings.input_stage)],
         )?;
         Ok(texture)

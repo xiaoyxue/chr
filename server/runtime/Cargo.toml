@@ -4,7 +4,7 @@ default-run = "chr-server"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "chr runtime: the chr-server render server, the chr-renderer-cli renderer and their shared program logic"
+description = "chr runtime: the chr-server render server, the chr-renderer-cli renderer, the chr-tracking-sim simulator and their shared program logic"
 
 [lints]
 workspace = true
@@ -16,6 +16,10 @@ path = "src/main.rs"
 [[bin]]
 name = "chr-renderer-cli"
 path = "src/renderer_cli.rs"
+
+[[bin]]
+name = "chr-tracking-sim"
+path = "src/tracking_sim.rs"
 
 [features]
 gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]

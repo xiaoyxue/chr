@@ -4,13 +4,16 @@ use super::{
     synthetic::{Synthetic, id},
 };
 use crate::{
-    calibration::replay::{Radial, VideoLens},
+    calibration::{
+        replay::{Radial, VideoLens},
+        tracking::{Tracked, TrackingReplay},
+    },
     retained::{Registrations, SceneAdapter},
     sdi::VideoMode,
 };
 use chr_common::scene_frame as w;
 use chr_renderer::{
-    camera::Camera,
+    camera::Camera as RendererCamera,
     coordinates::{ImageExtent, Ti},
     glb::{GlbAsset, ImportedMaterial, import_glb},
     scene::{MeshData, ModelMatrix, PbrMaterial},
@@ -28,7 +31,10 @@ pub struct Manifest {
     pub ti: [[f64; 3]; 3],
     pub center: [f64; 3],
     pub radial: Radial,
-    /// Presentation-order reference-native-pixel -> frame-SNC matrices.
+    /// Presentation-order reference-native-pixel -> frame-SNC matrices. A tracked
+    /// program receives them per frame instead and ignores this list; only
+    /// `chr-tracking-sim` and still renders replay it.
+    #[serde(default)]
     pub frame_warps: Vec<[[f64; 3]; 3]>,
     pub model: PathBuf,
     pub height_m: f64,
@@ -37,10 +43,30 @@ pub struct Manifest {
     pub pitch_m: [f64; 2],
 }
 
+/// How a program built from the manifest obtains each frame's camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraSource {
+    /// `calibrated-video-v1`: the manifest's fixed `Ti`/`C` and its warp of
+    /// `sequence % frame_warps`.
+    Replay,
+    /// `tracked-video-v1`: every frame carries `Ti`, `C` and its warp; the
+    /// manifest's `Ti`/`C` only place the model.
+    Tracked,
+}
+
 pub fn load(
     path: &Path,
     mode: VideoMode,
     runtime: w::Id,
+) -> Result<(Synthetic, SceneAdapter), Error> {
+    load_with(path, mode, runtime, CameraSource::Replay)
+}
+
+pub fn load_with(
+    path: &Path,
+    mode: VideoMode,
+    runtime: w::Id,
+    camera: CameraSource,
 ) -> Result<(Synthetic, SceneAdapter), Error> {
     if fs::metadata(path)?.len() > 16 * 1024 * 1024 {
         return Err("video scene manifest exceeds 16 MiB".into());
@@ -54,7 +80,7 @@ pub fn load(
         return Err("video scene GLB exceeds 128 MiB".into());
     }
     let asset = import_glb(&fs::read(model)?)?;
-    prepare(manifest, asset, mode, runtime)
+    prepare_with(manifest, asset, mode, runtime, camera)
 }
 
 pub fn prepare(
@@ -62,6 +88,16 @@ pub fn prepare(
     asset: GlbAsset,
     mode: VideoMode,
     runtime: w::Id,
+) -> Result<(Synthetic, SceneAdapter), Error> {
+    prepare_with(manifest, asset, mode, runtime, CameraSource::Replay)
+}
+
+pub fn prepare_with(
+    manifest: Manifest,
+    asset: GlbAsset,
+    mode: VideoMode,
+    runtime: w::Id,
+    kind: CameraSource,
 ) -> Result<(Synthetic, SceneAdapter), Error> {
     let e = ImageExtent::new(manifest.width, manifest.height)?;
     if manifest.width > 4096
@@ -71,7 +107,7 @@ pub fn prepare(
         || manifest.fps != mode.fps
         || u64::from(manifest.width) * u64::from(mode.height)
             != u64::from(manifest.height) * u64::from(mode.width)
-        || manifest.frame_warps.is_empty()
+        || (kind == CameraSource::Replay && manifest.frame_warps.is_empty())
         || manifest.frame_warps.len() > 36_000
         || !manifest.height_m.is_finite()
         || !(0.05..=40.0).contains(&manifest.height_m)
@@ -82,8 +118,13 @@ pub fn prepare(
     {
         return Err("invalid calibrated video extent, rate, frames or scene dimensions".into());
     }
-    let camera = Camera::from_ti(e, Ti::new(manifest.ti)?, manifest.center, 0.1, 10000.0)?;
-    let models = manifest.radial.models(e, &manifest.frame_warps)?;
+    let camera = RendererCamera::from_ti(e, Ti::new(manifest.ti)?, manifest.center, 0.1, 10000.0)?;
+    let lens = manifest.radial.distortion()?;
+    let replay = TrackingReplay::new(manifest.ti, manifest.center, &manifest.frame_warps)?;
+    let models = match kind {
+        CameraSource::Replay => manifest.radial.models(e, &manifest.frame_warps)?,
+        CameraSource::Tracked => Vec::new(),
+    };
     let ray = camera.ray(manifest.anchor_pixel)?;
     let distance = -ray.origin[2] / ray.direction[2];
     if !distance.is_finite() || distance <= 0.0 {
@@ -100,7 +141,14 @@ pub fn prepare(
     ])?
     .grounded(bounds)?;
     let mut config = Synthetic::configuration(mode, &runtime)?;
-    config.configuration_id = id(format!("{}-calibrated-video-v1", runtime.as_str()))?;
+    config.configuration_id = id(format!(
+        "{}-{}",
+        runtime.as_str(),
+        match kind {
+            CameraSource::Replay => "calibrated-video-v1",
+            CameraSource::Tracked => "tracked-video-v1",
+        }
+    ))?;
     config.native_extent = w::Extent {
         width: manifest.width,
         height: manifest.height,
@@ -111,11 +159,15 @@ pub fn prepare(
     config.shadows.max_bytes = (128_u64 * 1024 * 1024).into();
     config.max_intermediate_bytes = (256_u64 * 1024 * 1024).into();
     let mut registrations = Registrations::default();
+    let world: w::Version = serde_json::from_value(json!({"id":"video-world","revision":"1"}))?;
     registrations
-        .register_world(serde_json::from_value(
-            json!({"id":"video-world","revision":"1"}),
-        )?)
+        .register_world(world.clone())
         .map_err(|e| e.to_string())?;
+    if kind == CameraSource::Tracked {
+        registrations
+            .register_lens(lens)
+            .map_err(|e| e.to_string())?;
+    }
     log::info!(
         "calibrated video model: vertices={} triangles={} parts={} import_warnings={}",
         asset.mesh.positions().len(),
@@ -168,11 +220,18 @@ pub fn prepare(
             light["direction"] = json!([0.5, 0.6, 1.0]);
         }
     }
-    let state = serde_json::from_value(json!({
-        "world":{"id":"video-world","revision":"1"},"configuration_id":config.configuration_id,
-        "camera":{"mode":"manual","camera":{"kind":"ti_c","extent":config.native_extent,
+    let scene_camera = match kind {
+        CameraSource::Replay => {
+            json!({"mode":"manual","camera":{"kind":"ti_c","extent":config.native_extent,
             "near_m":0.1,"far_m":10000.0,"ti":manifest.ti.into_iter().flatten().collect::<Vec<_>>(),
-            "camera_center":manifest.center}},
+            "camera_center":manifest.center}})
+        }
+        CameraSource::Tracked => json!({"mode":"tracked","near_m":0.1,"far_m":10000.0}),
+    };
+    let extent = config.native_extent;
+    let state = serde_json::from_value(json!({
+        "world":world,"configuration_id":config.configuration_id,
+        "camera":scene_camera,
         "instances":[
             {"instance_id":"mesh","asset_ref":"video-model","model":model.rows(),"visible":true,"material_overrides":[]},
             {"instance_id":"ground","asset_ref":"video-receiver","model":ModelMatrix::IDENTITY.rows(),"visible":true,"material_overrides":[]}
@@ -180,6 +239,18 @@ pub fn prepare(
         "lighting":lighting,"shadow_mode":"pcss"
     }))?;
     let (mut program, adapter) = Synthetic::install_registered(config, registrations, state)?;
-    program.video_lens = Some(Arc::new(VideoLens::new(program.stream_id.clone(), models)));
+    match kind {
+        CameraSource::Replay => {
+            program.video_lens = Some(Arc::new(VideoLens::new(program.stream_id.clone(), models)));
+        }
+        CameraSource::Tracked => {
+            program.tracking = Some(Tracked {
+                lens,
+                world,
+                extent,
+                replay,
+            });
+        }
+    }
     Ok((program, adapter))
 }

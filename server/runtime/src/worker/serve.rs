@@ -146,7 +146,7 @@ fn start(input: &mut impl BufRead) -> Result<Worker, Error> {
         Some(spec) => {
             let installed = spec.install(VideoMode { width, height, fps }, runtime_id)?;
             let mut renderer = ProgramRenderer::new(&gpu, &installed.program.configuration)?;
-            renderer.set_video_lens(installed.program.video_lens.clone());
+            renderer.set_lenses(&installed.program);
             Renderer::Program(Box::new(Program {
                 adapter: installed.adapter,
                 renderer,
@@ -275,6 +275,7 @@ impl Worker {
                 image,
                 pixels: &self.payload,
                 key: &frame.frame,
+                frame_warp: crate::program::frame_warp(&frame.geometry),
             },
         )?;
         Ok(())

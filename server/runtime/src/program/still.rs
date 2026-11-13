@@ -18,7 +18,8 @@ pub struct Still {
     pub state: Option<w::SceneState>,
     /// Native input image. Default: the program's synthetic input.
     pub background: Option<Background>,
-    /// Input frame sequence; it selects the lens model of a calibrated video scene.
+    /// Input frame sequence; it selects the lens model of a calibrated video scene
+    /// and the replayed camera of a tracked scene.
     pub frame: u64,
 }
 
@@ -85,8 +86,12 @@ async fn admit(
         }
         None => program.native_pixels().to_vec(),
     };
+    let geometry = match &program.tracking {
+        Some(tracked) => tracked.geometry(&tracked.replay.frame(still.frame)),
+        None => w::FrameGeometry::SceneCamera {},
+    };
     program
-        .inject_image(control, still.frame, &pixels)
+        .inject_with(control, still.frame, &pixels, geometry)
         .await?
         .ok_or("the input frame was not admitted")?;
     Ok(program
@@ -108,7 +113,7 @@ impl Prepared {
     pub async fn render(self, gpu: &Gpu) -> Result<Vec<u8>, Error> {
         let rendered =
             ProgramRenderer::new(gpu, &self.program.configuration).and_then(|mut renderer| {
-                renderer.set_video_lens(self.program.video_lens.clone());
+                renderer.set_lenses(&self.program);
                 renderer.render_rgba(gpu, self.execution)
             });
         self.control.shutdown().await;

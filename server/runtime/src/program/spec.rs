@@ -14,6 +14,8 @@ pub enum ProgramSpec {
     SoftwareVideo,
     /// A local `calibrated-video-v1` scene/lens manifest.
     VideoScene { path: PathBuf },
+    /// The same manifest as `tracked-video-v1`: each frame carries its own camera.
+    TrackedScene { path: PathBuf },
     /// An owner-local `pitch-demo-v1` manifest.
     PitchDemo { path: PathBuf },
 }
@@ -39,6 +41,11 @@ impl ProgramSpec {
             }
             Self::VideoScene { path } => {
                 let (program, adapter) = video::load(path, mode, runtime)?;
+                (program, adapter, None)
+            }
+            Self::TrackedScene { path } => {
+                let (program, adapter) =
+                    video::load_with(path, mode, runtime, video::CameraSource::Tracked)?;
                 (program, adapter, None)
             }
             Self::PitchDemo { path } => {

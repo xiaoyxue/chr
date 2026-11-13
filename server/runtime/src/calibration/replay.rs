@@ -19,17 +19,22 @@ pub struct Radial {
 }
 
 impl Radial {
+    /// The startup lens shared by every frame of a clip or a tracked input.
+    pub fn distortion(&self) -> Result<RadialDistortion, Error> {
+        Ok(RadialDistortion::new(
+            self.centre_px,
+            self.scale_px,
+            self.coefficients,
+            self.support.map(|[min, max]| SupportRect { min, max }),
+        )?)
+    }
+
     pub(crate) fn models(
         self,
         extent: ImageExtent,
         frame_warps: &[[[f64; 3]; 3]],
     ) -> Result<Vec<CameraModel>, Error> {
-        let radial = RadialDistortion::new(
-            self.centre_px,
-            self.scale_px,
-            self.coefficients,
-            self.support.map(|[min, max]| SupportRect { min, max }),
-        )?;
+        let radial = self.distortion()?;
         frame_warps
             .iter()
             .map(|rows| {

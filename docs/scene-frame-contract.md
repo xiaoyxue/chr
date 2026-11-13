@@ -526,6 +526,13 @@ must resolve to the immutable camera/world/C binding used by that frame;
 incompatible supplied C rejects. Null explicitly means caller-supplied synthetic
 Ti/C without a calibration service, not "use the current calibration".
 
+Opt-in extension (not part of `scene_frame_v1`): `ti_c` geometry may carry an
+optional `frame_warp` (row-major `RenderMatrix3`, reference native pixel to frame
+SNC), omitted when absent. Only a runtime that registered a
+`radial-poly-native-px-v1` lens at startup accepts it; otherwise admission
+rejects it with `unsupported_profile`. It serves the
+[tracked camera simulation](../server/docs/tracking-simulation.md).
+
 Images and geometry may arrive independently at the runtime's join adapter.
 The adapter joins them by FrameKey **before** calling this complete-input
 submission contract. Its bounded waiting/late-input policy is a separate #22
