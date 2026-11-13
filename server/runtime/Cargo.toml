@@ -34,4 +34,4 @@ gstreamer-video = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-tungstenite = "0.30"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std", "async-await-macro"] }
