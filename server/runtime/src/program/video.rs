@@ -107,8 +107,8 @@ pub fn prepare(
     };
     config.sample_count = 4;
     config.limits.lights_per_scene = 5;
-    config.shadows.resolution = 1024;
-    config.shadows.max_bytes = (64_u64 * 1024 * 1024).into();
+    config.shadows.resolution = 2048;
+    config.shadows.max_bytes = (128_u64 * 1024 * 1024).into();
     config.max_intermediate_bytes = (256_u64 * 1024 * 1024).into();
     let mut registrations = Registrations::default();
     registrations
@@ -155,6 +155,15 @@ pub fn prepare(
     for light in lighting["lights"].as_array_mut().expect("native lighting") {
         if light["kind"] == "spot" {
             light["intensity"] = json!([16000, 16800, 20000]);
+            // Aim each cone at the model instead of the pitch: the shadow map covers
+            // only the cone, so a tight cone puts its resolution on the model.
+            let position: [f64; 3] = serde_json::from_value(light["position"].clone())?;
+            let distance = ((position[0] - anchor[0]).powi(2)
+                + (position[1] - anchor[1]).powi(2)
+                + position[2].powi(2))
+            .sqrt();
+            light["inner_angle"] = json!((1.1 * manifest.height_m / distance).atan());
+            light["outer_angle"] = json!((1.5 * manifest.height_m / distance).atan());
         } else {
             light["direction"] = json!([0.5, 0.6, 1.0]);
         }
