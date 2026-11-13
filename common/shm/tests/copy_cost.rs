@@ -19,10 +19,21 @@ fn measure(name: &str, bytes: usize) {
     let (mut writes, mut reads) = (Vec::new(), Vec::new());
     for index in 0..200 {
         let start = Instant::now();
-        let slot = writer.push(SlotHeader { index, meta: [0; 4] }, &frame).unwrap();
+        let slot = writer
+            .push(
+                SlotHeader {
+                    index,
+                    meta: [0; 4],
+                },
+                &frame,
+            )
+            .unwrap();
         writes.push(start.elapsed());
         let start = Instant::now();
-        assert!(matches!(reader.read(slot, &mut payload).unwrap(), Read::Frame(_)));
+        assert!(matches!(
+            reader.read(slot, &mut payload).unwrap(),
+            Read::Frame(_)
+        ));
         reads.push(start.elapsed());
     }
     let median = |times: &mut Vec<Duration>| {
