@@ -13,7 +13,7 @@ use crate::{
     environment::{self, EnvironmentGpu, EnvironmentSettings},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
-    scene::{AreaShape, Light, MaterialId, MaterialMaps, MeshId, SceneView},
+    scene::{AreaShape, Light, MaterialId, MaterialMaps, MeshData, SceneView},
     shadow::{self, CascadeSettings, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
 };
 
@@ -115,13 +115,19 @@ struct DrawUniform {
 }
 
 struct MeshBuffers {
+    /// Keeps the keyed data alive, so its addresses cannot be reused by other data.
+    _source: MeshData,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     lines: Option<wgpu::Buffer>,
 }
 
+/// GPU mesh buffers are keyed by shared data, not by scene handle: a scene rebuilt
+/// for a new revision (for example a moved instance) reuses the uploaded mesh.
+type MeshKey = [usize; 3];
+
 struct Draw {
-    mesh: MeshId,
+    mesh: MeshKey,
     indices: Range<u32>,
     offset: u32,
     material: MaterialId,
@@ -244,7 +250,7 @@ pub struct MeshRenderer {
     stride: u64,
     capacity: u64,
     depth: Option<(ImageExtent, wgpu::TextureView)>,
-    meshes: HashMap<MeshId, MeshBuffers>,
+    meshes: HashMap<MeshKey, MeshBuffers>,
     draws: Vec<Draw>,
     maps: MaterialMapCache,
     lights: wgpu::Buffer,
@@ -615,8 +621,8 @@ impl MeshRenderer {
         let mut used_materials = HashSet::new();
         let unlit_maps = MaterialMaps::default();
         for (_, instance) in scene.instances().filter(|(_, i)| i.visible()) {
-            let id = instance.mesh();
-            let mesh = scene.mesh(id)?;
+            let mesh = scene.mesh(instance.mesh())?;
+            let id = mesh.content_key();
             let rows = instance.model().rows();
             let model: [[f32; 4]; 4] =
                 std::array::from_fn(|column| std::array::from_fn(|row| rows[row][column] as f32));
@@ -702,6 +708,7 @@ impl MeshRenderer {
                     })
                     .collect();
                 MeshBuffers {
+                    _source: mesh.clone(),
                     lines: None,
                     vertices: gpu
                         .device
