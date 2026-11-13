@@ -20,11 +20,12 @@ Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
-server/runtime/           chr-runtime: chr-server (render server) and chr-renderer-cli (stills)
+server/runtime/           chr-runtime: chr-server (render server) and chr-renderer-cli (stills, render worker)
   src/input/              Video acquisition adapters (currently software MP4)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
   src/sdi.rs              Simulated SDI output port, output clock and program tap
+  src/worker/             Render worker protocol, the worker side and its supervisor
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
@@ -52,9 +53,10 @@ module is only a startup-loaded lens replay for a validated clip. Online algorit
 transport, the public distortion contract, and physical SDI adapters are not
 implemented by this layout.
 
-`chr-server` currently calls `chr-renderer` in-process on its render worker
-thread. #94 decided to move production rendering into a restartable worker
-process; that change is tracked in #95-#97. #95 already moved video monitoring
+`chr-server` creates no GPU device. As decided in #94 and implemented in #97, it
+starts and supervises a `chr-renderer-cli worker` process that renders every
+frame, and transmits clean feed while that worker is late, failed or being
+replaced. #95 moved video monitoring
 into the separate `chr-monitor` process: `chr-server` writes every transmitted
 SDI slot into a shared-memory program tap that `chr-monitor` encodes for viewers.
 `monitor/` is a root crate, not a server crate, because it is an optional process

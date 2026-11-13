@@ -21,6 +21,10 @@ use chr_runtime::control::ControlHandler;
 use chr_runtime::pipeline::{RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
+use chr_runtime::worker::{
+    protocol::{Output, WorkerProgram},
+    supervisor::{WorkerConfig, status_handle},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -41,6 +45,11 @@ Options:
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
                           [default: $XDG_RUNTIME_DIR/chr/program.tap]
+  --renderer-cli <path>   chr-renderer-cli executable that runs the render worker
+                          [default: next to chr-server]
+  --render-deadline-ms <n> Worker time per frame before it is sent as clean feed
+                          [default: 3/4 of the frame period]
+  --worker-hang-ms <n>    Replace a worker whose oldest request is older [default: 2000]
   --allow-origin <origin> Extra browser origin for the WebSocket (repeatable); loopback
                           origins are always allowed
   -h, --help              Show this help";
@@ -53,6 +62,9 @@ struct Args {
     height: u32,
     fps: u32,
     monitor_tap: Option<PathBuf>,
+    renderer_cli: Option<PathBuf>,
+    render_deadline_ms: Option<u64>,
+    worker_hang_ms: u64,
     allowed_origins: Vec<String>,
     synthetic_program: bool,
     pitch_demo: Option<PathBuf>,
@@ -69,6 +81,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         height: 720,
         fps: 50,
         monitor_tap: None,
+        renderer_cli: None,
+        render_deadline_ms: None,
+        worker_hang_ms: 2000,
         allowed_origins: Vec::new(),
         synthetic_program: false,
         pitch_demo: None,
@@ -97,6 +112,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--video-scene" => args.video_scene = Some(value()?.into()),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
+            "--renderer-cli" => args.renderer_cli = Some(value()?.into()),
+            "--render-deadline-ms" => args.render_deadline_ms = Some(value()?.parse()?),
+            "--worker-hang-ms" => args.worker_hang_ms = value()?.parse()?,
             "--monitor-tap" => match value()?.as_str() {
                 "none" => use_tap = false,
                 path => (use_tap, args.monitor_tap) = (true, Some(path.into())),
@@ -120,6 +138,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if args.video_scene.is_some() && args.software_video.is_none() {
         return Err("--video-scene requires --software-video".into());
     }
+    if args.render_deadline_ms == Some(0) || args.worker_hang_ms == 0 {
+        return Err("--render-deadline-ms and --worker-hang-ms must be positive".into());
+    }
     if !(1..=120).contains(&args.fps) {
         return Err("--fps must be between 1 and 120".into());
     }
@@ -141,6 +162,15 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         }
     }
     Ok(Some(args))
+}
+
+/// A private directory for this server's worker rings.
+fn worker_ring_dir() -> PathBuf {
+    let name = format!("worker-{}", std::process::id());
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(runtime) => PathBuf::from(runtime).join("chr").join(name),
+        None => std::env::temp_dir().join(format!("chr-{name}")),
+    }
 }
 
 fn default_socket_path() -> Result<PathBuf> {
@@ -185,7 +215,7 @@ fn run(args: Args) -> Result<()> {
     if args.software_video.is_some() && !cfg!(all(unix, feature = "gstreamer-media")) {
         return Err("--software-video requires Linux/Unix and the gstreamer-media feature".into());
     }
-    let extent = ImageExtent::new(args.width, args.height)?;
+    ImageExtent::new(args.width, args.height)?;
     let mode = VideoMode {
         width: args.width,
         height: args.height,
@@ -202,7 +232,7 @@ fn run(args: Args) -> Result<()> {
     } else {
         None
     };
-    let installation = match spec {
+    let installation = match &spec {
         Some(spec) => {
             let installed = spec.install(mode, chr_runtime::program::synthetic::runtime_id()?)?;
             if let (Some(path), Some(controls)) = (&args.pitch_controls, &installed.controls) {
@@ -260,20 +290,54 @@ fn run(args: Args) -> Result<()> {
     } else {
         SdiOutput::spawn(mode, taps)?
     };
+    let status = status_handle();
+    let worker_config = WorkerConfig {
+        executable: match &args.renderer_cli {
+            Some(path) => path.clone(),
+            None => std::env::current_exe()?
+                .with_file_name(format!("chr-renderer-cli{}", std::env::consts::EXE_SUFFIX)),
+        },
+        program: WorkerProgram::new(spec.as_ref()),
+        runtime_id: match &installation {
+            Some((synthetic, _)) => synthetic.configuration.runtime_id.clone(),
+            None => chr_runtime::program::synthetic::runtime_id()?,
+        },
+        output: Output {
+            width: mode.width,
+            height: mode.height,
+            fps: mode.fps,
+        },
+        // Room for the widest input format, RGBA16F.
+        input_bytes: installation.as_ref().map_or(0, |(synthetic, _)| {
+            let native = synthetic.configuration.native_extent;
+            u64::from(native.width) * u64::from(native.height) * 8
+        }),
+        ring_dir: worker_ring_dir(),
+        hang: Duration::from_millis(args.worker_hang_ms),
+    };
+    log::info!("render worker: {}", worker_config.executable.display());
     let render_config = RenderConfig {
-        extent,
-        fps: args.fps,
+        mode,
+        render_deadline: args
+            .render_deadline_ms
+            // Leave a quarter of the frame for clean-feed conversion and hand-off.
+            .map_or(mode.frame_duration() * 3 / 4, Duration::from_millis),
     };
     let worker = if let Some((synthetic, _)) = &installation {
         RenderWorker::spawn_program(
             render_config,
             sdi.input(),
-            synthetic.configuration.clone(),
+            worker_config,
+            Arc::clone(&status),
             synthetic.scheduler.clone(),
-            synthetic.video_lens.clone(),
         )?
     } else {
-        RenderWorker::spawn(render_config, sdi.input())?
+        RenderWorker::spawn(
+            render_config,
+            sdi.input(),
+            worker_config,
+            Arc::clone(&status),
+        )?
     };
     log::info!(
         "rendering {} with simulated SDI output ({})",
@@ -302,7 +366,7 @@ fn run(args: Args) -> Result<()> {
             None => (None, None, None),
         };
         let result = {
-        let handler = ControlHandler::new(commands, sdi.stats());
+        let handler = ControlHandler::new(commands, sdi.stats()).with_worker(Arc::clone(&status));
         let handler = Arc::new(match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler });
         let server = IpcServer::new(
             handler,
@@ -510,8 +574,34 @@ mod tests {
             &["--ws", "nonsense"],
             &["--srt", "127.0.0.1:9001"],
             &["--webrtc-udp", "none"],
+            &["--render-deadline-ms", "0"],
+            &["--worker-hang-ms", "0"],
+            &["--worker-hang-ms", "soon"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+        let worker = parse(&[
+            "--renderer-cli",
+            "/opt/chr/chr-renderer-cli",
+            "--render-deadline-ms",
+            "15",
+            "--worker-hang-ms",
+            "500",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            worker.renderer_cli.as_deref(),
+            Some(std::path::Path::new("/opt/chr/chr-renderer-cli"))
+        );
+        assert_eq!(
+            (worker.render_deadline_ms, worker.worker_hang_ms),
+            (Some(15), 500)
+        );
+        let defaults = parse(&[]).unwrap().unwrap();
+        assert_eq!(
+            (defaults.render_deadline_ms, defaults.worker_hang_ms),
+            (None, 2000)
+        );
     }
 }

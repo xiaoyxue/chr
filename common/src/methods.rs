@@ -141,6 +141,42 @@ pub mod sdi {
     }
 }
 
+/// The out-of-process render worker that `chr-server` supervises.
+pub mod render_worker {
+    use super::*;
+
+    /// Reads worker supervision counters. No params. Result: [`WorkerStatus`].
+    pub const GET_STATUS: &str = "render.get_worker_status";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum WorkerState {
+        /// Started, waiting for the worker to report ready.
+        Starting,
+        Ready,
+        /// No worker; the next one starts when the backoff ends.
+        Backoff,
+    }
+
+    /// Counters since the server started.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct WorkerStatus {
+        pub state: WorkerState,
+        /// Process ID of the current worker, if one is running.
+        pub pid: Option<u32>,
+        /// Workers started after the first.
+        pub restarts: u64,
+        /// Requests the worker did not finish within the render deadline.
+        pub deadline_misses: u64,
+        /// Frames transmitted as their input image without CG.
+        pub clean_feed_frames: u64,
+        /// Frames without CG whose input could not be converted to the output, so
+        /// the port repeated its previous frame.
+        pub repeated_for_unavailable_clean_feed: u64,
+        pub last_error: Option<String>,
+    }
+}
+
 /// The `chr-monitor` process, which encodes the program tap for viewers.
 pub mod monitor {
     use super::*;

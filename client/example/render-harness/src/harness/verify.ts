@@ -194,6 +194,17 @@ interface Captured {
 // Simulated SDI output
 
 async function verifySdi(ws: RpcClient): Promise<void> {
+  await check("worker: the render worker is ready and renders every frame", async () => {
+    const before = await ws.getWorkerStatus();
+    assert(before.state === "ready", `worker ${before.state}: ${before.last_error ?? ""}`);
+    await sleep(500);
+    const after = await ws.getWorkerStatus();
+    assert(after.restarts === before.restarts, "the worker restarted");
+    const clean = after.clean_feed_frames + after.repeated_for_unavailable_clean_feed
+      - before.clean_feed_frames - before.repeated_for_unavailable_clean_feed;
+    assert(clean === 0, `${clean} frames without CG in 0.5 s`);
+    return `pid ${after.pid}, ${after.restarts} restarts, ${after.deadline_misses} deadline misses in total`;
+  });
   await check("sdi: output ticks at the video mode cadence", async () => {
     const before = await ws.getSdiStatus();
     assert(before.pixel_format.startsWith("UYVY"), `unexpected format ${before.pixel_format}`);

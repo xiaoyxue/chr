@@ -183,3 +183,98 @@ impl UyvyConverter {
         self.readback.finish(gpu, submission, out)
     }
 }
+
+/// Channel order of 8-bit BT.709-encoded input for [`uyvy_from_bt709`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelOrder {
+    Rgba,
+    Bgra,
+}
+
+/// CPU twin of [`UyvyConverter::from_bt709_texture`] for clean feed: converts tightly
+/// packed, top-down 8-bit BT.709-encoded pixels (alpha ignored) to UYVY 4:2:2 with
+/// the same BT.709 matrix, limited range, pair-mean chroma and ties-to-even
+/// rounding as `uyvy.wgsl`. `pixels` must hold `width * height * 4` bytes and
+/// `width` must be even; `out` receives `width * height * 2` bytes.
+pub fn uyvy_from_bt709(
+    pixels: &[u8],
+    extent: crate::coordinates::ImageExtent,
+    order: ChannelOrder,
+    out: &mut Vec<u8>,
+) -> Result<(), BoxError> {
+    let (width, height) = (extent.width() as usize, extent.height() as usize);
+    if !width.is_multiple_of(2) || pixels.len() != width * height * 4 {
+        return Err("UYVY conversion needs an even width and width * height * 4 bytes".into());
+    }
+    let (r, b) = match order {
+        ChannelOrder::Rgba => (0, 2),
+        ChannelOrder::Bgra => (2, 0),
+    };
+    let ypbpr = |pixel: &[u8]| {
+        let unorm = |byte: u8| f32::from(byte) / 255.0;
+        let (red, green, blue) = (unorm(pixel[r]), unorm(pixel[1]), unorm(pixel[b]));
+        let y = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        (y, (blue - y) / 1.8556, (red - y) / 1.5748)
+    };
+    let quantize = |value: f32| value.round_ties_even().clamp(0.0, 255.0) as u8;
+    out.clear();
+    out.reserve(width * height * 2);
+    for pair in pixels.as_chunks::<8>().0 {
+        let (y0, pb0, pr0) = ypbpr(&pair[..4]);
+        let (y1, pb1, pr1) = ypbpr(&pair[4..]);
+        out.extend_from_slice(&[
+            quantize(128.0 + 224.0 * ((pb0 + pb1) * 0.5)),
+            quantize(16.0 + 219.0 * y0),
+            quantize(128.0 + 224.0 * ((pr0 + pr1) * 0.5)),
+            quantize(16.0 + 219.0 * y1),
+        ]);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coordinates::ImageExtent;
+
+    #[test]
+    fn cpu_conversion_uses_bt709_limited_range_and_channel_order() {
+        // The same reference values as the GPU test of `UyvyConverter`.
+        for (rgb, [cb, y, cr]) in [
+            ([255, 255, 255], [128, 235, 128]),
+            ([0, 0, 0], [128, 16, 128]),
+            ([255, 0, 0], [102, 63, 240]),
+            ([0, 255, 0], [42, 173, 26]),
+            ([0, 0, 255], [240, 32, 118]),
+        ] {
+            let rgba = [rgb[0], rgb[1], rgb[2], 7].repeat(2);
+            let bgra = [rgb[2], rgb[1], rgb[0], 7].repeat(2);
+            let extent = ImageExtent::new(2, 1).unwrap();
+            let mut out = Vec::new();
+            uyvy_from_bt709(&rgba, extent, ChannelOrder::Rgba, &mut out).unwrap();
+            assert_eq!(out, [cb, y, cr, y], "{rgb:?}");
+            uyvy_from_bt709(&bgra, extent, ChannelOrder::Bgra, &mut out).unwrap();
+            assert_eq!(out, [cb, y, cr, y], "{rgb:?} as BGRA");
+        }
+        // Chroma is the mean of the pair; luma stays per pixel.
+        let pair = [255, 0, 0, 255, 0, 0, 255, 255];
+        let mut out = Vec::new();
+        uyvy_from_bt709(
+            &pair,
+            ImageExtent::new(2, 1).unwrap(),
+            ChannelOrder::Rgba,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out, [171, 63, 179, 32]);
+        assert!(
+            uyvy_from_bt709(
+                &[0; 12],
+                ImageExtent::new(3, 1).unwrap(),
+                ChannelOrder::Rgba,
+                &mut out
+            )
+            .is_err()
+        );
+    }
+}

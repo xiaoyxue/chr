@@ -4,7 +4,7 @@
 use chr_common::{
     jsonrpc::{ErrorObject, SERVER_BUSY, SERVER_UNAVAILABLE},
     methods::{
-        mesh, sdi,
+        mesh, render_worker, sdi,
         triangle::{self, StartRotationParams, TriangleState},
     },
     server::{ConnectionInfo, Handler},
@@ -13,11 +13,12 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{pipeline::Command, sdi::SdiStats};
+use crate::{pipeline::Command, sdi::SdiStats, worker::supervisor::StatusHandle};
 
 pub struct ControlHandler {
     commands: mpsc::Sender<Command>,
     sdi: SdiStats,
+    worker: Option<StatusHandle>,
     scenes: Option<crate::retained::SceneControl>,
 }
 
@@ -30,8 +31,15 @@ impl ControlHandler {
         Self {
             commands,
             sdi,
+            worker: None,
             scenes: None,
         }
+    }
+
+    /// Reports the supervised render worker through `render.get_worker_status`.
+    pub fn with_worker(mut self, status: StatusHandle) -> Self {
+        self.worker = Some(status);
+        self
     }
 
     /// Native opt-in only: the default daemon continues to render its triangle.
@@ -116,6 +124,18 @@ impl Handler for ControlHandler {
             triangle::GET_STATE => {
                 params::<NoParams>(raw_params)?;
                 to_value(self.render(|reply| Command::GetState { reply }).await?)
+            }
+            render_worker::GET_STATUS => {
+                params::<NoParams>(raw_params)?;
+                let status = self
+                    .worker
+                    .as_ref()
+                    .ok_or_else(|| ErrorObject::method_not_found(method))?
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                serde_json::to_value(status)
+                    .map_err(|error| ErrorObject::internal(error.to_string()))
             }
             sdi::GET_STATUS => {
                 params::<NoParams>(raw_params)?;
@@ -228,6 +248,35 @@ mod tests {
             let error = handler.handle(&CONNECTION, method, None).await.unwrap_err();
             assert_eq!(error.code, METHOD_NOT_FOUND, "{method}");
         }
+    }
+
+    #[tokio::test]
+    async fn reports_worker_status_only_with_a_worker() {
+        let (handler, _worker) = fake_worker();
+        let error = handler
+            .handle(&CONNECTION, render_worker::GET_STATUS, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, METHOD_NOT_FOUND);
+        let status = crate::worker::supervisor::status_handle();
+        status.lock().unwrap().clean_feed_frames = 3;
+        let handler = handler.with_worker(status);
+        let reported = handler
+            .handle(&CONNECTION, render_worker::GET_STATUS, None)
+            .await
+            .unwrap();
+        assert_eq!(reported["state"], json!("backoff"));
+        assert_eq!(reported["clean_feed_frames"], json!(3));
+        assert_eq!(reported["last_error"], Value::Null);
+        let error = handler
+            .handle(
+                &CONNECTION,
+                render_worker::GET_STATUS,
+                Some(json!({"x": 1})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, INVALID_PARAMS);
     }
 
     #[tokio::test]

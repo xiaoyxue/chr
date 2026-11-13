@@ -2,7 +2,8 @@
 //!
 //! `render` renders one program frame through the same installation, scene control
 //! and program bridge as `chr-server`, and writes the BT.709 RGBA composition as a
-//! PNG. The `worker` subcommand that `chr-server` will spawn follows in #97.
+//! PNG. `worker` is the render worker that `chr-server` starts and supervises; it
+//! speaks the protocol of `chr_runtime::worker` on stdin/stdout and logs to stderr.
 
 use std::{
     error::Error,
@@ -24,6 +25,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "\
 Usage: chr-renderer-cli render <program> --output <png> [options]
+       chr-renderer-cli worker      (started by chr-server; not for interactive use)
 
 Renders one frame of a chr-server program and writes the BT.709 RGBA program image
 as PNG code values, without further colour conversion.
@@ -57,9 +59,21 @@ struct RenderArgs {
     frame: u64,
 }
 
-fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<RenderArgs>> {
+#[derive(Debug, PartialEq)]
+enum Subcommand {
+    Render(RenderArgs),
+    Worker,
+}
+
+fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand>> {
     match raw.next().as_deref() {
         Some("render") => {}
+        Some("worker") => {
+            return match raw.next() {
+                None => Ok(Some(Subcommand::Worker)),
+                Some(other) => Err(format!("worker takes no arguments, got {other:?}").into()),
+            };
+        }
         Some("-h" | "--help") | None => return Ok(None),
         Some(other) => return Err(format!("unknown subcommand {other:?}\n\n{USAGE}").into()),
     }
@@ -125,13 +139,24 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<RenderArgs
     if !(1..=120).contains(&mode.fps) {
         return Err("--fps must be between 1 and 120".into());
     }
-    Ok(Some(args))
+    Ok(Some(Subcommand::Render(args)))
 }
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(Some(args)) => args,
+        Ok(Some(Subcommand::Worker)) => {
+            let result = chr_runtime::worker::serve::serve(
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            );
+            if let Err(error) = result {
+                log::error!("render worker: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Ok(Some(Subcommand::Render(args))) => args,
         Ok(None) => {
             println!("{USAGE}");
             return;
@@ -238,7 +263,12 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Option<RenderArgs>> {
-        parse_args(args.iter().map(|arg| (*arg).to_owned()))
+        parse_args(args.iter().map(|arg| (*arg).to_owned())).map(|parsed| {
+            parsed.map(|subcommand| match subcommand {
+                Subcommand::Render(args) => args,
+                Subcommand::Worker => panic!("not a render command"),
+            })
+        })
     }
 
     #[test]
@@ -291,8 +321,13 @@ mod tests {
         assert!(!defaults.overwrite);
         assert!(parse(&[]).unwrap().is_none());
         assert!(parse(&["render", "--help"]).unwrap().is_none());
+        assert_eq!(
+            parse_args(["worker".to_owned()].into_iter()).unwrap(),
+            Some(Subcommand::Worker)
+        );
+        assert!(parse_args(["worker", "--x"].map(str::to_owned).into_iter()).is_err());
         for bad in [
-            &["worker"][..],
+            &["paint"][..],
             &["render", "--output", "o.png"],
             &["render", "--synthetic-program"],
             &[

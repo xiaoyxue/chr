@@ -7,7 +7,7 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe and the `run-live.sh` launcher |
@@ -25,14 +25,15 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `input/software.rs` | FFmpeg/GStreamer MP4 acquisition and native input sequence assignment |
 | `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
-| `pipeline.rs` | In-process render worker and render-loop pacing |
+| `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
+| `worker/` | Render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
 | `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 
-`chr-server` currently calls the `chr-renderer` library in-process on its
-`chr-render` thread. #94 decided to move production rendering into a
-restartable worker process; that change is tracked in #95-#97. #95 moved video
-monitoring out of `chr-server` into `chr-monitor`; rendering is still in-process.
+`chr-server` creates no GPU device. As decided in #94, its `chr-render` thread
+sends every frame to a supervised `chr-renderer-cli worker` process (#97), which
+calls the `chr-renderer` library; see [Render worker](#render-worker). #95 moved
+video monitoring out of `chr-server` into `chr-monitor`.
 
 Algorithm estimation stays in repository-root `algorithm/`. Runtime calibration
 consumption does not implement that algorithm: the existing replay loads local
@@ -601,16 +602,17 @@ need no server and do not claim live protocol or physical SDI acceptance.
 
 ## Render server
 
-`chr-server` renders the triangle offscreen (1280x720p50 by default) and takes
-JSON-RPC 2.0 commands (`triangle.start_rotation`, `triangle.stop_rotation`,
-`triangle.get_state`, `sdi.get_status`) over a NativeSocket at
+`chr-server` has its render worker draw the triangle offscreen (1280x720p50 by
+default) and takes JSON-RPC 2.0 commands (`triangle.start_rotation`,
+`triangle.stop_rotation`, `triangle.get_state`, `sdi.get_status`,
+`render.get_worker_status`) over a NativeSocket at
 `$XDG_RUNTIME_DIR/chr/render.sock` and a loopback WebSocket at
 `ws://127.0.0.1:8787`. It does not encode or stream video (`webrtc.offer` returns
 `method not found`). The renderer's only product is the SDI program output;
 clients receive that output back as WebRTC from the separate `chr-monitor`:
 
 ```text
-args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY 4:2:2, BT.709 limited)
+args (JSON-RPC) -> control -> pipeline -> render worker -> SDI frame (UYVY 4:2:2, BT.709 limited)
                                  -> sdi: program output port (own clock, bounded queue,
                                          repeat on underrun)
                                       -> program tap (shared memory, never waits)
@@ -620,7 +622,8 @@ args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY 4:2:2, BT.709 
 | Module (`runtime/src/`) | Role |
 | --- | --- |
 | `control.rs` | Control plane: JSON-RPC methods (the args) onto the pipeline and status |
-| `pipeline.rs`, `scene.rs` | Render loop in logical frame time; produces SDI frames |
+| `pipeline.rs`, `scene.rs` | Render loop in logical frame time; produces SDI frames through the worker, or clean feed |
+| `worker/` | Starts, feeds and replaces the `chr-renderer-cli worker` process |
 | `sdi.rs` | SDI output port, simulated until hardware is chosen; writes the program tap |
 
 `sdi.get_status` reports `video_mode`, `pixel_format`, `frames_output`,
@@ -630,7 +633,50 @@ args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY 4:2:2, BT.709 
 
 ```sh
 cargo run --locked --release -p chr-runtime -- --help
+cargo build --locked --release -p chr-runtime   # also builds chr-renderer-cli, the render worker
 cargo run --locked --release -p chr-runtime
+```
+
+### Render worker
+
+`chr-server` never creates a GPU device, including for the default triangle. It
+starts `chr-renderer-cli worker` (`--renderer-cli <path>`, default:
+`chr-renderer-cli` next to the `chr-server` executable; the package build and
+the flake package provide both, while `cargo run` builds only `chr-server`) and
+sends it one request per frame as a JSON line on its stdin; replies come back on
+its stdout and its stderr is
+`chr-server`'s log. Input images and rendered UYVY frames travel through two
+4-slot `chr-shm` rings in a private 0700 directory,
+`$XDG_RUNTIME_DIR/chr/worker-<pid>/` (or the temp directory), removed on
+shutdown. The worker installs the same program with the server's runtime ID,
+logs its adapter and rejects software adapters. The protocol is in
+[Live process implementation plan](../docs/live-process-implementation.md#step-4-worker-supervision-and-clean-feed-97).
+
+- `--render-deadline-ms <n>` (default: 3/4 of the frame period, leaving time
+  for the clean-feed conversion): a frame the worker has not finished by then,
+  or by the render loop's next frame boundary, is sent as **clean feed**; a late
+  completion only frees its ring slot. A worker whose GPU device is lost exits
+  and is replaced like a crash.
+- `--worker-hang-ms <n>` (default 2000): a worker whose oldest outstanding
+  request is older is killed (`SIGKILL`) and replaced. Exits and fatal errors
+  are replaced too, after a backoff of 250 ms doubling to 5 s (reset after 10 s
+  of healthy running); a worker not ready within 60 s is replaced.
+
+Clean feed is the frame's input image converted to UYVY on the CPU
+(`chr_renderer::uyvy_from_bt709`, bit-identical to the GPU converter) and sent
+without CG or a program association; the submission is reported as failed. It
+is used on a deadline miss, a worker failure, when no worker is ready, or when
+no ring slot is free. Inputs that are not 8-bit BT.709 at the output extent, and
+the triangle, which has no input, repeat the last output frame instead.
+`render.get_worker_status` reports `state` (`starting`, `ready`, `backoff`),
+`pid`, `restarts`, `deadline_misses`, `clean_feed_frames`,
+`repeated_for_unavailable_clean_feed` and `last_error`.
+
+Hardware acceptance (`kill -9`, `SIGSTOP`, deadline misses and worker/in-process
+pixel parity) runs from the repository root:
+
+```sh
+cargo test --locked -p chr-runtime --test render_worker -- --ignored --nocapture
 ```
 
 ### Program monitor (chr-monitor)

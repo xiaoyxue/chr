@@ -12,3 +12,4 @@ pub mod program;
 pub mod retained;
 mod scene;
 pub mod sdi;
+pub mod worker;

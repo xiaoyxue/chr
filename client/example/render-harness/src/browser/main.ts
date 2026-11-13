@@ -4,7 +4,7 @@
 // `?auto=1` connects, opens the stream, rotates, and writes a JSON report to #result
 // for the headless browser check (src/harness/browser.ts).
 
-import type { MonitorStatus, SdiStatus, TriangleState } from "../protocol.ts";
+import type { MonitorStatus, SdiStatus, TriangleState, WorkerStatus } from "../protocol.ts";
 import { RpcClient, connectWebSocket } from "../rpc.ts";
 import { installScenePanel } from "./scene-panel.ts";
 import { programSelfTest } from "./program-self-test.ts";
@@ -87,6 +87,15 @@ function showSdi(status: SdiStatus): void {
     ["repeated", String(status.repeated_frames)],
     ["dropped", String(status.dropped_frames)],
     ["source frame", String(status.last_source_frame ?? "-")],
+  ]);
+}
+
+function showWorker(status: WorkerStatus): void {
+  renderList($("#worker"), [
+    ["worker", `${status.state}${status.pid === null ? "" : ` (pid ${status.pid})`}`],
+    ["restarts", String(status.restarts)],
+    ["clean feed", String(status.clean_feed_frames)],
+    ["deadline misses", String(status.deadline_misses)],
   ]);
 }
 
@@ -277,6 +286,7 @@ async function poll(): Promise<void> {
       showState(await rpc.getState());
     }
     showSdi(await rpc.getSdiStatus());
+    showWorker(await rpc.getWorkerStatus());
   } catch (error) {
     log(`poll failed: ${(error as Error).message}`);
     disconnect("connection lost");

@@ -112,7 +112,7 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 | Path | Implemented responsibility |
 | --- | --- |
 | `server/renderer/` | `chr-renderer`：共享坐标数学、GPU 初始化与 wgpu 渲染。 |
-| `server/runtime/` | `chr-runtime`（构建 `chr-server`）：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及共享内存节目 tap。 |
+| `server/runtime/` | `chr-runtime`（构建 `chr-server` 与 `chr-renderer-cli`）：无窗口控制服务、渲染管线与渲染 worker 监管、模拟 SDI 输出及共享内存节目 tap。 |
 | `monitor/` | `chr-monitor`：可选的独立监看进程，读取节目 tap，编码后以 WebRTC/SRT 发送；停止或卡住不影响节目输出。 |
 | `server/viewer/` | `chr-app`：原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
 | `common/` | `chr-common`：共享控制消息、方法和 NativeSocket/WebSocket IPC 实现。 |
@@ -123,7 +123,7 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 现有 [server](../server/README.md) 输出三角形的模拟 SDI 画面，并把每个实际发出的输出 slot
 写入共享内存节目 tap；`chr-monitor` 编码该 tap 并发送给浏览器或 SRT 接收端。
 当前编码使用 CPU readback 后的软件编码，是开发实现，不是已验证的硬件零拷贝链路。
-渲染仍在 `chr-server` 进程内执行，渲染 worker 进程尚未实现。
+`chr-server` 不创建 GPU 设备：每帧由它启动并监管的 `chr-renderer-cli worker` 进程渲染；worker 超时、失败或重启期间输出 clean feed（Linux 已验证，Windows 未验证）。
 实际 SDI 采集/输出硬件、视频输入、录制、实时追踪和 calibration 管线仍未实现。
 已有坐标契约见 [Coordinate contract](../server/docs/coordinates.md)。
 

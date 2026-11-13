@@ -1,9 +1,11 @@
-//! The render pipeline: owns the GPU and the scene, applies commands between frames,
-//! and paces frames with the monotonic clock.
+//! The render pipeline: owns the scene and the output clock, applies commands between
+//! frames, and paces frames with the monotonic clock. It holds no GPU: every frame is
+//! rendered by the supervised `chr-renderer-cli worker` (see [`crate::worker`]).
 //!
-//! Its only product is the program output in SDI form: every frame is rendered, converted
-//! to UYVY on the GPU, read back, and queued for the SDI port. Everything clients see is
-//! derived from what that port transmits (the program tap read by `chr-monitor`).
+//! Its only product is the program output in SDI form, queued for the SDI port.
+//! Everything clients see is derived from what that port transmits (the program tap
+//! read by `chr-monitor`). A frame the worker does not deliver in time is
+//! transmitted as its clean feed: the input image without CG.
 
 use std::{
     error::Error,
@@ -15,20 +17,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chr_common::methods::triangle::TriangleState;
-use chr_renderer::{
-    Gpu, OffscreenTarget, TriangleRenderer, UyvyConverter, coordinates::ImageExtent,
-};
+use chr_common::{methods::triangle::TriangleState, scene_frame as w};
+use chr_renderer::{ChannelOrder, coordinates::ImageExtent, uyvy_from_bt709};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    frame_submissions::{Execution, FrameSubmissions},
     scene::Scene,
-    sdi::{SdiFrame, SdiInput},
+    sdi::{SdiFrame, SdiInput, VideoMode},
+    worker::supervisor::{Miss, StatusHandle, Supervisor, WorkerConfig},
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-/// Commands queued for the render worker. Each carries its reply channel.
+/// Commands queued for the render loop. Each carries its reply channel.
 #[derive(Debug)]
 pub enum Command {
     StartRotation {
@@ -48,8 +50,10 @@ pub const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
-    pub extent: ImageExtent,
-    pub fps: u32,
+    pub mode: VideoMode,
+    /// How long a frame may take in the worker before it becomes clean feed; the
+    /// wait never extends past the loop's next frame boundary.
+    pub render_deadline: Duration,
 }
 
 pub struct RenderWorker {
@@ -59,67 +63,64 @@ pub struct RenderWorker {
 }
 
 impl RenderWorker {
-    /// Starts the worker and waits until the GPU, renderer, and encoder are ready.
-    pub fn spawn(config: RenderConfig, sdi: SdiInput) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, None, None)
+    /// Starts the render loop for the default triangle. The worker process starts
+    /// asynchronously; until it is ready the port repeats its last frame.
+    pub fn spawn(
+        config: RenderConfig,
+        sdi: SdiInput,
+        worker: WorkerConfig,
+        status: StatusHandle,
+    ) -> Result<Self, BoxError> {
+        Self::spawn_inner(config, sdi, worker, status, None)
     }
 
+    /// Starts the render loop for an installed program; until the worker is ready
+    /// its frames are clean feed.
     pub fn spawn_program(
         config: RenderConfig,
         sdi: SdiInput,
-        profile: chr_common::scene_frame::Configuration,
-        scheduler: crate::frame_submissions::FrameSubmissions,
-        lens: Option<Arc<crate::calibration::replay::VideoLens>>,
+        worker: WorkerConfig,
+        status: StatusHandle,
+        scheduler: FrameSubmissions,
     ) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, Some((profile, scheduler)), lens)
+        Self::spawn_inner(config, sdi, worker, status, Some(scheduler))
     }
 
     fn spawn_inner(
         config: RenderConfig,
         sdi: SdiInput,
-        program: Option<(
-            chr_common::scene_frame::Configuration,
-            crate::frame_submissions::FrameSubmissions,
-        )>,
-        lens: Option<Arc<crate::calibration::replay::VideoLens>>,
+        worker: WorkerConfig,
+        status: StatusHandle,
+        scheduler: Option<FrameSubmissions>,
     ) -> Result<Self, BoxError> {
+        let supervisor = Supervisor::new(worker, Arc::clone(&status))?;
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let thread_stop = Arc::clone(&stop);
+        let mut pipeline = Pipeline {
+            supervisor,
+            status,
+            sdi,
+            commands: receiver,
+            stop: Arc::clone(&stop),
+            scene: Scene::new(config.mode.fps),
+            config,
+            scheduler,
+        };
         let thread = std::thread::Builder::new()
             .name("chr-render".into())
-            .spawn(move || {
-                let mut worker =
-                    match Worker::new(config, sdi, receiver, thread_stop, program, lens) {
-                        Ok(worker) => {
-                            let _ = ready_tx.send(Ok(()));
-                            worker
-                        }
-                        Err(error) => {
-                            let message = error.to_string();
-                            let _ = ready_tx.send(Err(message.clone()));
-                            return Err(message);
-                        }
-                    };
-                worker.run().map_err(|error| error.to_string())
-            })?;
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                commands,
-                stop,
-                thread,
-            }),
-            Ok(Err(message)) => Err(message.into()),
-            Err(_) => Err("render thread exited during startup".into()),
-        }
+            .spawn(move || pipeline.run().map_err(|error| error.to_string()))?;
+        Ok(Self {
+            commands,
+            stop,
+            thread,
+        })
     }
 
     pub fn is_finished(&self) -> bool {
         self.thread.is_finished()
     }
 
-    /// Asks the worker to stop after the current frame and waits for it.
+    /// Asks the loop to stop after the current frame, waits for it and stops the worker.
     pub fn shutdown(self) -> Result<(), String> {
         self.stop.store(true, Ordering::Relaxed);
         self.thread
@@ -128,74 +129,32 @@ impl RenderWorker {
     }
 }
 
-struct Worker {
-    gpu: Gpu,
-    target: OffscreenTarget,
-    renderer: TriangleRenderer,
-    uyvy: UyvyConverter,
+struct Pipeline {
+    supervisor: Supervisor,
+    status: StatusHandle,
     sdi: SdiInput,
     commands: mpsc::Receiver<Command>,
     stop: Arc<AtomicBool>,
     scene: Scene,
-    fps: u32,
-    program: Option<(
-        crate::program::ProgramRenderer,
-        crate::frame_submissions::FrameSubmissions,
-    )>,
+    config: RenderConfig,
+    scheduler: Option<FrameSubmissions>,
 }
 
-impl Worker {
-    fn new(
-        config: RenderConfig,
-        sdi: SdiInput,
-        commands: mpsc::Receiver<Command>,
-        stop: Arc<AtomicBool>,
-        program: Option<(
-            chr_common::scene_frame::Configuration,
-            crate::frame_submissions::FrameSubmissions,
-        )>,
-        lens: Option<Arc<crate::calibration::replay::VideoLens>>,
-    ) -> Result<Self, BoxError> {
-        let instance = Gpu::instance();
-        let gpu =
-            pollster::block_on(Gpu::request(&instance, None)).map_err(|error| error.to_string())?;
-        let target = OffscreenTarget::new(&gpu, config.extent)?;
-        let renderer = TriangleRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
-        renderer.resize(&gpu.queue, config.extent);
-        let uyvy = UyvyConverter::new(&gpu, &target)?;
-        let program = program
-            .map(|(profile, scheduler)| {
-                crate::program::ProgramRenderer::new(&gpu, &profile).map(|mut renderer| {
-                    renderer.set_video_lens(lens);
-                    (renderer, scheduler)
-                })
-            })
-            .transpose()?;
-        Ok(Self {
-            gpu,
-            target,
-            renderer,
-            uyvy,
-            sdi,
-            commands,
-            stop,
-            scene: Scene::new(config.fps),
-            fps: config.fps,
-            program,
-        })
-    }
-
+impl Pipeline {
     fn run(&mut self) -> Result<(), BoxError> {
-        let frame_duration = Duration::from_secs_f64(1.0 / f64::from(self.fps));
+        let frame_duration = self.config.mode.frame_duration();
         let mut deadline = Instant::now();
         while !self.stop.load(Ordering::Relaxed) {
             if !self.apply_commands() {
                 break;
             }
-            self.render_frame()?;
+            deadline += frame_duration;
+            // The worker may use the frame's render deadline, but never the time the
+            // loop needs to reach the next frame.
+            let render_deadline = (Instant::now() + self.config.render_deadline).min(deadline);
+            self.render_frame(render_deadline)?;
             self.scene.advance();
 
-            deadline += frame_duration;
             let now = Instant::now();
             if let Some(wait) = deadline.checked_duration_since(now) {
                 std::thread::sleep(wait);
@@ -230,22 +189,105 @@ impl Worker {
         }
     }
 
-    fn render_frame(&mut self) -> Result<(), BoxError> {
-        if let Some((renderer, scheduler)) = &mut self.program {
-            return renderer.drive(&self.gpu, scheduler, &mut self.sdi);
+    fn render_frame(&mut self, deadline: Instant) -> Result<(), BoxError> {
+        self.supervisor.maintain();
+        let Some(scheduler) = self.scheduler.clone() else {
+            match self
+                .supervisor
+                .triangle(self.scene.frame(), self.scene.angle_rad(), deadline)
+            {
+                Ok(uyvy) => self.sdi.submit(SdiFrame {
+                    source_frame: self.scene.frame(),
+                    uyvy: Arc::new(uyvy),
+                    program: None,
+                }),
+                // The triangle has no input to fall back to: the port repeats.
+                Err(miss) => self.missed(&miss, false),
+            }
+            return Ok(());
+        };
+        scheduler
+            .handoff(&mut self.sdi)
+            .map_err(|e| e.to_string())?;
+        if let Some(execution) = scheduler.next_ready().map_err(|e| e.to_string())? {
+            self.render_program(execution, deadline);
         }
-        self.renderer
-            .set_rotation(&self.gpu.queue, self.scene.angle_rad());
-        let renderer = &self.renderer;
-        self.target
-            .render(&self.gpu, |encoder, view| renderer.encode(encoder, view))?;
-        let mut uyvy = Vec::new();
-        self.uyvy.convert(&self.gpu, &mut uyvy)?;
-        self.sdi.submit(SdiFrame {
-            source_frame: self.scene.frame(),
-            uyvy: Arc::new(uyvy),
-            program: None,
-        });
+        scheduler
+            .handoff(&mut self.sdi)
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    fn render_program(&mut self, execution: Execution, deadline: Instant) {
+        let result = match execution.input.pixels() {
+            Ok(pixels) => self.supervisor.render(
+                &execution.input.metadata().image,
+                pixels,
+                &execution.provenance.input,
+                execution.scene.snapshot(),
+                deadline,
+            ),
+            Err(error) => Err(Miss::Failed(error.to_string())),
+        };
+        let miss = match result {
+            Ok(uyvy) => match execution.rendered(Arc::new(uyvy)) {
+                Ok(()) => return,
+                Err(error) => {
+                    log::warn!("rendered frame was not accepted: {error:?}");
+                    return;
+                }
+            },
+            Err(miss) => miss,
+        };
+        // The input is in the ring or was never sent, so no GPU access to it remains.
+        let clean = clean_feed(&execution, self.config.mode);
+        let source_frame = execution.provenance.input.frame.sequence.get();
+        if let Err(error) = execution.failed() {
+            log::warn!("failed frame was not recorded: {error:?}");
+        }
+        match clean {
+            Some(uyvy) => {
+                self.sdi.submit(SdiFrame {
+                    source_frame,
+                    uyvy: Arc::new(uyvy),
+                    program: None,
+                });
+                self.missed(&miss, true);
+            }
+            None => self.missed(&miss, false),
+        }
+    }
+
+    fn missed(&self, miss: &Miss, clean_feed: bool) {
+        log::debug!("frame without CG: {miss:?}");
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if clean_feed {
+            status.clean_feed_frames += 1;
+        } else {
+            status.repeated_for_unavailable_clean_feed += 1;
+        }
+    }
+}
+
+/// The input image converted to the output format, when it is 8-bit BT.709 at the
+/// output extent; otherwise `None` and the port repeats its previous frame.
+fn clean_feed(execution: &Execution, mode: VideoMode) -> Option<Vec<u8>> {
+    let image = &execution.input.metadata().image;
+    let order = match image.format {
+        w::ImageFormat::Rgba8Unorm => ChannelOrder::Rgba,
+        w::ImageFormat::Bgra8Unorm => ChannelOrder::Bgra,
+        w::ImageFormat::Rgba16Float => return None,
+    };
+    if image.transfer != w::Transfer::Bt709
+        || (image.extent.width, image.extent.height) != (mode.width, mode.height)
+    {
+        return None;
+    }
+    let extent = ImageExtent::new(mode.width, mode.height).ok()?;
+    let mut uyvy = Vec::new();
+    uyvy_from_bt709(execution.input.pixels().ok()?, extent, order, &mut uyvy).ok()?;
+    Some(uyvy)
 }
