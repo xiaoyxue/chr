@@ -14,7 +14,8 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 ## Architecture and scope
 
 - Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `runtime/`
-  (`chr-runtime`) builds the `chr-server` render server; `viewer/` (`chr-app`) is the
+  (`chr-runtime`) builds the `chr-server` render server and the headless
+  `chr-renderer-cli`; `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
 - Keep all rendering in `renderer/`. It has no networking, video-device, or

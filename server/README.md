@@ -7,7 +7,7 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, shared-memory program tap |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe and the `run-live.sh` launcher |
@@ -685,6 +685,31 @@ server/scripts/run-live.sh --monitor-arg --webrtc-tcp --monitor-arg 127.0.0.1:87
 
 The browser viewer and verification scripts are in
 `client/example/render-harness/`.
+
+### Program stills (chr-renderer-cli)
+
+`chr-renderer-cli render` renders one frame of a `chr-server` program without a
+server. It installs the program with the same code, creates the scene through
+`scene.create`, admits one input frame and composes it with the program bridge;
+only the end differs: the BT.709 RGBA program image is written as PNG code values
+(no colour conversion and no sRGB tag) instead of being converted to UYVY for the
+port. A GPU test checks that the PNG, converted by the same UYVY converter, equals
+the frame `chr-server` transmits.
+
+```sh
+cargo run --locked --release -p chr-runtime --bin chr-renderer-cli -- \
+  render --synthetic-program --size 640x360 --output output/renderer-cli/synthetic.png
+```
+
+`--pitch-demo <json>` or `--video-scene <json>` select the other programs (a video
+scene also needs its clip rate in `--fps`). `--state <json>` replaces the initial
+scene with a `chr-common` `SceneState` (its `configuration_id` is replaced by the
+program's); `--background <png>` replaces the native input, read as BT.709 RGBA
+code values at the program's native extent; `--frame <n>` sets the input frame
+sequence, which selects the lens model of a video scene. All inputs are validated
+before a GPU is requested. The output is never replaced without `--overwrite`, and
+software GPU adapters are rejected. A general scene file with arbitrary model paths
+is not supported; it must not become a de facto asset or distortion schema.
 
 Every run also saves a 960x640 sRGB image to repository-root
 `output/renderer/triangle.png`, from any directory in the checkout. Outside a

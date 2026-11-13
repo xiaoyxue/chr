@@ -133,7 +133,11 @@
               cargoExtraArgs = "-p chr-runtime";
               doCheck = false;
               nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
-              postInstall = "wrapProgram $out/bin/chr-server --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
+              postInstall = ''
+                for program in chr-server chr-renderer-cli; do
+                  wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}
+                done
+              '';
             }
           );
           monitor = craneLib.buildPackage (

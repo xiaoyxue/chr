@@ -19,6 +19,7 @@ use chr_renderer::coordinates::ImageExtent;
 
 use chr_runtime::control::ControlHandler;
 use chr_runtime::pipeline::{RenderConfig, RenderWorker};
+use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -190,41 +191,33 @@ fn run(args: Args) -> Result<()> {
         height: args.height,
         fps: args.fps,
     };
-    let installation = if let Some(path) = &args.pitch_demo {
-        let prepared = chr_runtime::program::pitch::Prepared::load(
-            path,
-            mode,
-            chr_runtime::program::synthetic::runtime_id()?,
-        )?;
-        if let Some(path) = &args.pitch_controls {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            serde_json::to_writer_pretty(options.open(path)?, &prepared.controls)?;
-        }
-        Some((prepared.program, prepared.adapter))
+    let spec = if let Some(path) = &args.pitch_demo {
+        Some(ProgramSpec::PitchDemo { path: path.clone() })
     } else if let Some(path) = &args.video_scene {
-        Some(chr_runtime::program::video::load(
-            path,
-            mode,
-            chr_runtime::program::synthetic::runtime_id()?,
-        )?)
+        Some(ProgramSpec::VideoScene { path: path.clone() })
     } else if args.software_video.is_some() {
-        Some(chr_runtime::program::synthetic::Synthetic::install_video(
-            mode,
-            chr_runtime::program::synthetic::runtime_id()?,
-        )?)
+        Some(ProgramSpec::SoftwareVideo)
     } else if args.synthetic_program {
-        Some(chr_runtime::program::synthetic::Synthetic::install(
-            mode,
-            chr_runtime::program::synthetic::runtime_id()?,
-        )?)
+        Some(ProgramSpec::Synthetic)
     } else {
         None
+    };
+    let installation = match spec {
+        Some(spec) => {
+            let installed = spec.install(mode, chr_runtime::program::synthetic::runtime_id()?)?;
+            if let (Some(path), Some(controls)) = (&args.pitch_controls, &installed.controls) {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                serde_json::to_writer_pretty(options.open(path)?, controls)?;
+            }
+            Some((installed.program, installed.adapter))
+        }
+        None => None,
     };
     #[cfg(all(unix, feature = "gstreamer-media"))]
     let mut video_source = args
