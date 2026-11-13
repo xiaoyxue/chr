@@ -138,7 +138,8 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The unit image quad of `AssetKind::ImageQuad`: UV (0, 0) is the image's top-left
-/// texel at (-0.5, -0.5), so the image reads upright in a top view with +Y down.
+/// texel at (-0.5, -0.5), so the image reads upright in a top view with +Y down. It is
+/// an unlit ground decal blended by the image's alpha.
 fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
     let image = image::load_from_memory(bytes)?.into_rgba8();
     let extent = ImageExtent::new(image.width(), image.height())?;
@@ -170,7 +171,7 @@ fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
             factors: PbrMaterial {
                 unlit: true,
                 double_sided: true,
-                alpha_cutoff: Some(0.5),
+                decal: true,
                 ..Default::default()
             },
             maps: MaterialMaps {
@@ -234,7 +235,7 @@ mod tests {
             maps.base_color.as_ref().unwrap().pixels()[..4],
             [255, 0, 0, 255]
         );
-        assert!(quad.materials[0].factors.unlit);
+        assert!(quad.materials[0].factors.unlit && quad.materials[0].factors.decal);
         let mut masked = file.clone();
         masked.blend_as = Some(BlendAs::Mask);
         assert!(

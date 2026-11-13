@@ -21,6 +21,12 @@ pub struct PbrMaterial {
     /// composition, a background image) by its luminance ratio of shadowed to unshadowed
     /// light. It still occludes and casts shadows like the ground it stands in for.
     pub shadow_catcher: bool,
+    /// Ground decal, such as a painted or projected advertisement: in shaded PBR views
+    /// it is drawn unlit and blended over the opaque scene with premultiplied
+    /// alpha (base colour alpha times texture alpha), after all opaque geometry and
+    /// before shadow catchers, in instance order. It writes no depth and casts no
+    /// shadow, so shadow catchers drawn over it darken it like the ground beneath.
+    pub decal: bool,
 }
 
 impl Default for PbrMaterial {
@@ -36,6 +42,7 @@ impl Default for PbrMaterial {
             occlusion_strength: 1.0,
             unlit: false,
             shadow_catcher: false,
+            decal: false,
         }
     }
 }
@@ -50,6 +57,7 @@ impl PbrMaterial {
             .all(|v| (0.0..=1.0).contains(&v))
             || !nonnegative(self.emissive)
             || !self.normal_scale.is_finite()
+            || (self.decal && self.shadow_catcher)
         {
             return Err(SceneError::InvalidMaterial);
         }

@@ -179,7 +179,9 @@ impl Registrations {
                 let entry = materials
                     .get_mut(replacement.part as usize)
                     .ok_or_else(|| incompatible("material override part is absent"))?;
+                let decal = entry.factors.decal;
                 entry.factors = factors(&replacement.factors)?;
+                entry.factors.decal = decal;
             }
             let materials = materials
                 .into_iter()
@@ -501,6 +503,8 @@ fn factors(v: &w::PbrFactors) -> Result<scene::PbrMaterial, ErrorObject> {
         // The shared wire material has no shadow-catcher field yet; adding one is a
         // protocol change for the owning contracts.
         shadow_catcher: false,
+        // Decals are an asset's role, kept by the caller across factor overrides.
+        decal: false,
     })
 }
 fn shadow(mode: w::ShadowMode) -> ShadowMode {

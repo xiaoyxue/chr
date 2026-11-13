@@ -307,8 +307,9 @@ fn read_material(
         normal_scale: source.normal_texture().map_or(1.0, |v| v.scale()),
         occlusion_strength: source.occlusion_texture().map_or(1.0, |v| v.strength()),
         unlit: source.unlit(),
-        // glTF has no shadow-catcher concept; callers opt in explicitly.
+        // glTF has no shadow-catcher or decal concept; callers opt in explicitly.
         shadow_catcher: false,
+        decal: false,
     };
     factors.validate()?;
     let maps = MaterialMaps {

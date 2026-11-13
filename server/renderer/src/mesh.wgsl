@@ -570,6 +570,19 @@ fn fs_wire() -> @location(0) vec4<f32> {
     return vec4(1.0);
 }
 
+// Ground decals: unlit, premultiplied over the opaque scene (the pipeline blends
+// with ONE, ONE_MINUS_SRC_ALPHA). Sampling precedes discards for uniform control flow.
+@fragment
+fn fs_decal(surface:Surface,@builtin(front_facing) front_facing:bool) -> @location(0) vec4<f32> {
+    let base = textureSample(base_map,base_sampler,surface.uv)*object.color*surface.color;
+    let emissive = textureSample(emissive_map,emissive_sampler,surface.uv).rgb*object.emissive_cutoff.rgb;
+    let front = select(front_facing,!front_facing,object.flags.w!=0u);
+    if !front && object.flags.z==0u {discard;}
+    if object.emissive_cutoff.w>=0.0 && base.a<object.emissive_cutoff.w {discard;}
+    let alpha = clamp(base.a,0.0,1.0);
+    return vec4(min(base.rgb+emissive,vec3(65504.0))*alpha,alpha);
+}
+
 @fragment
 fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @location(0) vec4<f32> {
     if camera.options.w==2u {

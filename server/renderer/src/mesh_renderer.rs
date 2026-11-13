@@ -132,6 +132,7 @@ struct Draw {
     offset: u32,
     material: MaterialId,
     shadow_catcher: bool,
+    decal: bool,
 }
 
 #[derive(PartialEq)]
@@ -156,6 +157,7 @@ enum PipelineKind {
     Wire,
     Sky,
     ShadowCatcher,
+    Decal,
 }
 
 fn scene_pipeline(
@@ -169,6 +171,7 @@ fn scene_pipeline(
     let sky = matches!(kind, PipelineKind::Sky);
     let wire = matches!(kind, PipelineKind::Wire);
     let catcher = matches!(kind, PipelineKind::ShadowCatcher);
+    let decal = matches!(kind, PipelineKind::Decal);
     let buffers = [Some(vertex_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("shared scene raster"),
@@ -187,14 +190,17 @@ fn scene_pipeline(
                 "fs_wire"
             } else if catcher {
                 "fs_shadow_catcher"
+            } else if decal {
+                "fs_decal"
             } else {
                 "fs_main"
             }),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                // Premultiplied black over the destination multiplies it by 1 - alpha.
-                blend: catcher.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                // Premultiplied colour over the destination: a catcher's black
+                // multiplies it by 1 - alpha; a decal adds alpha * colour.
+                blend: (catcher || decal).then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -208,7 +214,7 @@ fn scene_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(!sky),
+            depth_write_enabled: Some(!sky && !decal),
             depth_compare: Some(if sky {
                 wgpu::CompareFunction::Always
             } else {
@@ -240,6 +246,7 @@ pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     pbr_pipeline: wgpu::RenderPipeline,
     catcher_pipeline: wgpu::RenderPipeline,
+    decal_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     environment: EnvironmentGpu,
     camera: wgpu::Buffer,
@@ -453,6 +460,14 @@ impl MeshRenderer {
             1,
             PipelineKind::ShadowCatcher,
         );
+        let decal_pipeline = scene_pipeline(
+            device,
+            &layout,
+            &shader,
+            wgpu::TextureFormat::Rgba16Float,
+            1,
+            PipelineKind::Decal,
+        );
         let wire_pipeline = scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Wire);
         let overlays = Overlays::new(device, format, &camera_layout);
         Self {
@@ -477,6 +492,7 @@ impl MeshRenderer {
             draws: Vec::new(),
             pbr_pipeline,
             catcher_pipeline,
+            decal_pipeline,
             sky_pipeline,
             environment,
             maps,
@@ -528,6 +544,7 @@ impl MeshRenderer {
                 wgpu::TextureFormat::Rgba16Float,
                 PipelineKind::ShadowCatcher,
             );
+            self.decal_pipeline = create(wgpu::TextureFormat::Rgba16Float, PipelineKind::Decal);
             self.wire_pipeline = create(self.format, PipelineKind::Wire);
             self.sky_pipeline = scene_pipeline(
                 &gpu.device,
@@ -657,6 +674,7 @@ impl MeshRenderer {
                     offset,
                     material: *material,
                     shadow_catcher: factors.shadow_catcher,
+                    decal: factors.decal,
                 });
                 uniforms.push(DrawUniform {
                     model,
@@ -1036,7 +1054,8 @@ impl MeshRenderer {
                     &self.shadow_pipeline
                 });
                 pass.set_bind_group(0, camera_group, &[]);
-                for draw in &self.draws {
+                // Decals lie on the ground they decorate and cast no shadow.
+                for draw in self.draws.iter().filter(|draw| !draw.decal) {
                     let mesh = &self.meshes[&draw.mesh];
                     pass.set_bind_group(1, &self.object_group, &[draw.offset]);
                     pass.set_bind_group(2, self.maps.group(draw.material), &[]);
@@ -1094,15 +1113,21 @@ impl MeshRenderer {
         });
         pass.set_bind_group(0, &self.camera_group, &[]);
         pass.set_bind_group(3, &self.light_group, &[]);
-        // Catchers blend over whatever lies behind them, so they follow opaque geometry;
-        // depth testing hides catcher pixels behind real objects.
-        let (opaque, deferred): (Vec<_>, Vec<_>) = self
+        // Decals and catchers blend over whatever lies behind them, so they follow
+        // opaque geometry; catchers come last so their shadows also darken decals.
+        // Depth testing hides both behind real objects.
+        let deferred = |draw: &&Draw| physical && (draw.shadow_catcher || draw.decal);
+        let opaque = self.draws.iter().filter(|draw| !deferred(draw));
+        let decals = self.draws.iter().filter(|draw| physical && draw.decal);
+        let catchers = self
             .draws
             .iter()
-            .partition(|draw| !(physical && draw.shadow_catcher));
-        for draw in opaque.into_iter().chain(deferred) {
+            .filter(|draw| physical && draw.shadow_catcher);
+        for draw in opaque.chain(decals).chain(catchers) {
             if physical && draw.shadow_catcher {
                 pass.set_pipeline(&self.catcher_pipeline);
+            } else if physical && draw.decal {
+                pass.set_pipeline(&self.decal_pipeline);
             }
             let mesh = &self.meshes[&draw.mesh];
             pass.set_bind_group(1, &self.object_group, &[draw.offset]);
