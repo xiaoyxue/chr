@@ -122,8 +122,10 @@ documented scripts inside each package (see
 `client/football-field-3d/` is a self-contained npm package. For development, run
 `npm ci` and `npm run dev` (127.0.0.1:5186), `npm run build` or
 `npm run test:offline` inside it. Without Fusion, a match can be imported from an
-offline Fusion ZIP (`manifest.json` plus `assets/`) in the browser. The root
-flake builds it from `package-lock.json` (see the next section).
+offline Fusion ZIP (`manifest.json` plus `assets/`) in the browser. Every import
+(match ZIP, videos, PLY, result folder, ad materials) can be picked locally or
+loaded by an absolute path on the onsite server. The root flake builds it from
+`package-lock.json` (see the next section).
 
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.
@@ -175,6 +177,11 @@ It listens on 127.0.0.1 (port 4173 by default). Without both variables the proxy
 answers 503. The key is read at runtime only; never put it in `VITE_*` variables
 or the Nix store. For a local HTTPS Fusion server, set `NODE_EXTRA_CA_CERTS` to
 its certificate first.
+
+Server paths are read by the same process under `/local-files/`, only for
+requests to a loopback host (use an SSH port forward from another machine), and
+only inside `LOCAL_FILES_ROOTS` (`:`-separated; the home directory by default),
+never hidden files or symlinks that leave those folders.
 To run Rust checks directly, enter `nix develop` at the root, then:
 
 ```sh

@@ -112,6 +112,13 @@
 .on-notice.amber { color:#efd58f; background:#3d392b; margin-bottom:20px; }
 .on-analysis-card { display:flex; justify-content:space-between; align-items:center; gap:22px; padding:24px; margin-top:22px; }
 .on-analysis-card .on-help { margin-top:8px; }
+.on-source-row { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+.on-source-row .on-button { flex-shrink:0; white-space:nowrap; }
+.onsite .on-path-input { flex:1 1 240px; min-width:0; margin:0; background:#12232e; color:var(--on-ink); border:1px solid #3a5261; padding:11px 12px; border-radius:6px; font:13px Consolas,monospace; }
+.on-analysis-import .on-source-row { flex-basis:100%; }
+.on-scan-source { margin:16px 0; }
+.on-local-editor .on-source-row { margin:7px 0 4px; }
+.on-local-editor .on-source-row .on-path-input { margin:0; }
 .on-file-row { display:flex; justify-content:space-between; gap:14px; align-items:center; margin-bottom:16px; }
 .on-file-row strong { overflow-wrap:anywhere; }
 .onsite #scan-preview { display:block; width:100%; max-height:430px; background:#0b141a; border-radius:7px; margin-bottom:14px; }

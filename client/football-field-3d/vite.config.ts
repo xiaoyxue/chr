@@ -1,12 +1,14 @@
 import { join } from 'node:path';
 import { defineConfig, loadEnv, type ConfigEnv, type UserConfig } from 'vite';
 import { fusionApi } from './scripts/fusion-api.ts';
+import { localFiles } from './scripts/local-files.ts';
 
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env };
   return {
     plugins: [
       fusionApi(env.FUSION_API_URL ?? '', env.FUSION_API_KEY ?? ''),
+      localFiles(env.LOCAL_FILES_ROOTS ?? ''),
       {
         name: 'isolated-dependency-cache',
         // CLI --port is available here, after Vite merges its inline configuration.

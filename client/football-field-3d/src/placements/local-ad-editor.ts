@@ -1,4 +1,5 @@
 import { LocalAdRepository } from './local-ad.ts';
+import { fetchServerFile } from '../shared/server-files.ts';
 import { planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
 import type { AdPlane, AdSpace, LocalAd, Vector3Tuple } from './local-ad.ts';
 
@@ -23,7 +24,11 @@ function editorMarkup(space: AdSpace, prefix: string) {
       ${fields.map(([name, label, bounds]) => `<label ${pitch && name === 'offset' ? 'hidden' : ''}>${label}<input name="${name}" type="number" step="any" ${bounds} required /></label>`).join('')}
       </div><label><input name="visible" type="checkbox" checked /> 显示此广告位</label>
       <label ${pitch ? 'hidden' : ''}><input name="flip" type="checkbox" /> 反转模型立起方向（平面法线）</label>
-      <label>上传此广告位的素材<input ${id('local-ad-material')} type="file" accept=".png,.jpg,.jpeg,.webp" /></label>
+      <label for="${prefix}local-ad-material-path">此广告位的素材（本地或服务器路径）</label>
+      <div class="on-source-row"><input ${id('local-ad-material-path')} class="on-path-input" placeholder="/home/…/logo.png 或 model.glb" autocomplete="off" />
+      <button ${id('load-local-ad-material')} class="on-button" type="button">按路径加载</button>
+      <button ${id('choose-local-ad-material')} class="on-button" type="button">选择本地素材</button>
+      <input ${id('local-ad-material')} type="file" accept=".png,.jpg,.jpeg,.webp" hidden /></div>
       <p ${id('local-ad-material-name')} class="on-help"></p><div class="on-action-row">
       <button class="on-button primary" type="submit">保存本地广告位</button>
       <button ${id('redraw-local-plane')} class="on-button" type="button">${pitch ? '重画底面' : '重选平面'}</button>
@@ -90,6 +95,19 @@ export class LocalAdEditor {
       const input = event.target as HTMLInputElement, file = input.files[0], selected = this.selected();
       input.value = '';
       if (file && selected && !this.busy) void this.setMaterial(selected, file);
+    });
+    this.element('choose-local-ad-material').addEventListener('click', () => this.element<HTMLInputElement>('local-ad-material').click());
+    const loadPath = async () => {
+      const path = this.element<HTMLInputElement>('local-ad-material-path').value, selected = this.selected();
+      if (!path.trim() || !selected || this.busy) return;
+      try { await this.setMaterial(selected, await fetchServerFile(path)); }
+      catch (error) { this.options.error(error); }
+    };
+    this.element('load-local-ad-material').addEventListener('click', () => { void loadPath(); });
+    this.element('local-ad-material-path').addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      void loadPath();
     });
     this.cancelDrawing();
   }

@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { importResultFolder } from './bundle-import.ts';
+import { fetchServerFolder } from '../shared/server-files.ts';
 import { LocalAdScene } from '../placements/local-ad-scene.ts';
 import { FusionCreatives } from '../placements/fusion-creatives.ts';
 import { applyResultCamera } from '../scene/cameras/result-camera.ts';
 import { RadialResultPass } from './radial-result-pass.ts';
-import type { ResultBundle, ResultFrame, ResultShot } from './bundle-result.ts';
+import type { BundleFile, ResultBundle, ResultFrame, ResultShot } from './bundle-result.ts';
 import type { LocalAd } from '../placements/local-ad.ts';
 import type { Placement } from '../shared/types.ts';
 
@@ -59,8 +60,14 @@ export class ResultReview {
     $<HTMLInputElement>('result-folder').addEventListener('change', (event) => {
       const input = event.target as HTMLInputElement, files = Array.from(input.files);
       input.value = '';
-      if (files.length) void this.import(files);
+      if (files.length) void this.import(files.map((file) => ({ path: file.webkitRelativePath || file.name, file })));
     });
+    const loadPath = () => {
+      const path = $<HTMLInputElement>('result-folder-path').value;
+      if (path.trim()) void this.import(path);
+    };
+    $('load-result-folder-path').addEventListener('click', loadPath);
+    $('result-folder-path').addEventListener('keydown', (event) => { if (event.key === 'Enter') loadPath(); });
     $('cancel-result-folder').addEventListener('click', () => {
       this.cancelImport();
       this.status('已取消导入，之前的结果未改变。');
@@ -192,21 +199,26 @@ export class ResultReview {
     this.importing?.abort();
     this.importing = undefined;
     $('cancel-result-folder').hidden = true;
-    $<HTMLButtonElement>('import-result-folder').disabled = !this.matchId;
+    $<HTMLButtonElement>('import-result-folder').disabled = $<HTMLButtonElement>('load-result-folder-path').disabled = !this.matchId;
     $<HTMLButtonElement>('remove-result-folder').disabled = false;
   }
   private status(text: string) { $('result-folder-status').textContent = text; }
-  private async import(files: File[]) {
+  private async import(source: BundleFile[] | string) {
     if (!this.matchId) return;
     this.cancelImport();
     this.clearError();
     const controller = new AbortController(), id = this.matchId;
     this.importing = controller;
     $('cancel-result-folder').hidden = false;
-    $<HTMLButtonElement>('import-result-folder').disabled = true;
+    $<HTMLButtonElement>('import-result-folder').disabled = $<HTMLButtonElement>('load-result-folder-path').disabled = true;
     $<HTMLButtonElement>('remove-result-folder').disabled = true;
-    this.status('正在本地校验文件并读取投影参数 / 帧映射，不会上传文件…');
     try {
+      let files = source;
+      if (typeof files === 'string') {
+        this.status('正在从现场服务器读取结果文件夹…');
+        files = await fetchServerFolder(files, controller.signal);
+      }
+      this.status('正在本地校验文件并读取投影参数 / 帧映射，不会上传文件…');
       const bundle = await importResultFolder(files, controller.signal);
       if (controller.signal.aborted || id !== this.matchId) return;
       this.bundles.set(id, bundle);
@@ -221,7 +233,7 @@ export class ResultReview {
   }
 
   private render() {
-    $<HTMLButtonElement>('import-result-folder').disabled = !this.matchId || Boolean(this.importing);
+    $<HTMLButtonElement>('import-result-folder').disabled = $<HTMLButtonElement>('load-result-folder-path').disabled = !this.matchId || Boolean(this.importing);
     $('remove-result-folder').hidden = !this.bundle;
     $('result-review').hidden = !this.bundle;
     const select = $<HTMLSelectElement>('result-shot');
