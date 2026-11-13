@@ -15,7 +15,7 @@ CLAUDE.md                 Imports AGENTS.md for Claude Code (also server/CLAUDE.
 README.md                 Project overview and quick start
 client/src/               TypeScript client sources (currently a placeholder)
 client/example/           Example clients and harnesses, each its own npm package
-Cargo.toml                Rust workspace definition (members under server/, common/)
+Cargo.toml                Rust workspace definition (members under server/, monitor/, common/)
 Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
@@ -24,11 +24,11 @@ server/runtime/           chr-runtime: the chr-server render server with IPC and
   src/input/              Video acquisition adapters (currently software MP4)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
-  src/sdi.rs              Simulated SDI output port and output clock
-  src/monitor/            Transmitted-slot encoding and WebRTC/SRT fan-out
+  src/sdi.rs              Simulated SDI output port, output clock and program tap
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
+monitor/                  chr-monitor: program-tap encoding and WebRTC/SRT fan-out
 common/                   chr-common: JSON-RPC 2.0 messages and local IPC (Rust)
 common/shm/               chr-shm: shared-memory frame rings; the only crate with unsafe
 algorithm/src/            Scene reconstruction algorithms (stack undecided)
@@ -54,7 +54,11 @@ implemented by this layout.
 
 `chr-server` currently calls `chr-renderer` in-process on its render worker
 thread. #94 decided to move production rendering into a restartable worker
-process; that change is tracked in #95-#97.
+process; that change is tracked in #95-#97. #95 already moved video monitoring
+into the separate `chr-monitor` process: `chr-server` writes every transmitted
+SDI slot into a shared-memory program tap that `chr-monitor` encodes for viewers.
+`monitor/` is a root crate, not a server crate, because it is an optional process
+that may run on another host from an SDI loop-out.
 
 ## Start a feature
 
@@ -84,9 +88,10 @@ The root development shell provides:
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
 GStreamer core/base/bad/ugly plugins, and Python GObject bindings. It runs the video-only
 software input helper under `server/scripts/` and builds the opt-in
-`chr-runtime` `gstreamer-media` feature; it does not install SDI drivers,
-provide a physical SDI device, or change the renderer protocol. The bad plugins
-provide H.264 parsing, MPEG-TS muxing and direct SRT output for the software simulation.
+`gstreamer-media` feature of `chr-runtime` and `chr-monitor`; it does not install
+SDI drivers, provide a physical SDI device, or change the renderer protocol. The
+bad plugins provide H.264 parsing, MPEG-TS muxing and the direct SRT output of
+`chr-monitor`.
 
 Use Nix for Linux development dependencies, not global npm tool installation.
 Node.js and TypeScript come from the existing pinned nixpkgs input. Keep
@@ -126,8 +131,9 @@ nix build --no-update-lock-file
 nix fmt -- --check flake.nix
 ```
 
-The default package and named `chr-app` package build the renderer viewer, and
-`chr-server` builds the headless render server. The default application runs the
+The default package and named `chr-app` package build the renderer viewer,
+`chr-server` builds the headless render server, and `chr-monitor` builds the
+video monitor process. The default application runs the
 viewer; no client package is advertised.
 `nix flake check` includes:
 
@@ -172,7 +178,7 @@ Keep client runtime artifacts in `output/client/` or `output/<harness>/`, such a
 `node_modules/`, and TypeScript `.tsbuildinfo` caches are ignored by Git.
 
 The Rust Nix build source includes only the root Cargo manifests and the
-filtered Rust sources and WGSL shaders under `server/` and `common/`, excluding
+filtered Rust sources and WGSL shaders under `server/`, `monitor/` and `common/`, excluding
 private references, worktrees, caches, and generated outputs. Client sources and
 their dependencies are not part of the Rust packages.
 

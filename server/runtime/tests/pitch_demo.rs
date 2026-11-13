@@ -12,7 +12,7 @@ use chr_runtime::{
         synthetic::{Synthetic, id, runtime_id},
     },
     retained::SceneControl,
-    sdi::{SdiInput, SdiOutput, SdiSlot, VideoMode},
+    sdi::{SdiInput, SdiOutput, SdiSlot, Taps, VideoMode},
 };
 use serde_json::{Value, json};
 use std::{
@@ -355,7 +355,8 @@ async fn hardware(prepared: Prepared, timestamps: bool) {
     let (control, owner) = SceneControl::spawn(adapter, 64).unwrap();
     program.create_scene(&control).await.unwrap();
     let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
-    let (sdi, tap) = SdiOutput::spawn_program(mode(), id("pitch-test-port").unwrap()).unwrap();
+    let (taps, tap) = Taps::observed();
+    let sdi = SdiOutput::spawn_program(mode(), id("pitch-test-port").unwrap(), taps).unwrap();
     let mut port = sdi.input();
     let mut pictures = Vec::new();
     let mut sequence = 0_u64;

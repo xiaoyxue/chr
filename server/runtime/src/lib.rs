@@ -7,7 +7,6 @@ pub mod frame_submissions;
 mod gstreamer_support;
 #[cfg(all(unix, feature = "gstreamer-media"))]
 pub mod input;
-pub mod monitor;
 pub mod pipeline;
 pub mod program;
 pub mod retained;

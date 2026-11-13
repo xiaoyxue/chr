@@ -25,7 +25,9 @@ nix develop --command bash -c \
 
 The startup line declares `runtime_id`, `scene_id` and `configuration_id`.
 Copy the first two into the example harness's **Local program scene** panel,
-connect its existing WebSocket and open its existing WebRTC stream. Alternatively
+connect its existing WebSocket and open its existing WebRTC stream (served by a
+`chr-monitor` started next to the server; see the [server README](../README.md)
+or use `server/scripts/run-live.sh --synthetic-program …`). Alternatively
 pass `?runtime=…&scene=…` to the page. `render.get_configuration` takes the printed
 runtime ID. NativeSocket clients use exactly the same JSON-RPC methods and IDs.
 No discovery RPC, DataChannel commands or arbitrary file/URL registration is added.
@@ -83,20 +85,23 @@ claims a fence, releases physical capacity early or keeps allocating in a retry 
 The synthetic path deliberately uses software readback, not a zero-copy/hardware
 encoder claim. Output bytes are a separate immutable `Arc<Vec<u8>>`. The scheduler
 hands them to `SdiInput` nonblockingly. SDI retains the full output owner for its
-three queued frames and one current frame; its two-slot monitor tap and one active
-encoder may retain those same allocations. Scheduler-owned outputs are bounded
-by its four inflight slots. Thus at most eleven raw UYVY allocations are retained
-across those stages (often fewer because holds share allocations), plus bounded
-GPU worker staging; there is no draining overflow pool. Encoded fan-out retains
-four compressed frames and only a native provenance sidecar, not raw output pixels.
+three queued frames and one current frame. The program tap copies every
+transmitted slot into its fixed eight-slot shared-memory ring and retains no
+allocation; the tests' in-process observer may hold two more. Scheduler-owned
+outputs are bounded by its four inflight slots. Thus at most eight raw UYVY
+allocations are retained across those stages (ten with the test observer, often
+fewer because holds share allocations), plus bounded GPU worker staging; there is
+no draining overflow pool. In the separate `chr-monitor`, encoded fan-out retains
+four compressed frames, not raw output pixels.
 
 Only the simulated SDI clock records actual transmission and first-slot
 association. Repeats keep that first slot and allocation. Public `render.release`
 does not free current output. Full handoff reports `queue_full`; a disconnected
-port or dropped untransmitted output reports `output_failed`. A slow/absent
-monitor never blocks SDI or rendering. The monitor encodes the exact transmitted
-slot, including repeats, and propagates its native provenance/slot to encoded
-frames. No second render-direct stream exists.
+port or dropped untransmitted output reports `output_failed`. A slow, absent or
+killed `chr-monitor` never blocks SDI or rendering: the tap writer never waits
+for readers. The tap carries the exact transmitted slot, including repeats, with
+its output slot index and source frame; the monitor encodes the newest slot and
+stamps encoded frames with that output slot. No second render-direct stream exists.
 
 Scene mutation currently rebuilds native resources and changes resource IDs.
 Camera/light edits reuse the compositor pipelines; the renderer evicts stale
@@ -107,7 +112,7 @@ or a guaranteed real-time performance claim.
 
 On shutdown, native admission is closed and queued CPU edits drain, even if
 transport connections retain endpoints. The render worker is joined before SDI
-and monitor owners are destroyed; logical cancellation is not a GPU fence.
+and its program tap are destroyed; logical cancellation is not a GPU fence.
 
 ## Self-tests and limits
 
@@ -120,7 +125,9 @@ nix develop --command bash -c \
 The ignored hardware test checks actual synthetic pixels, camera/light/shadow
 differences, frozen admission revisions, physical execution completion,
 first-transmitted-slot association, repeated output ownership after public
-release, bounded slow monitoring and software encoding of that transmitted slot.
+release, and that the program tap carries the transmitted pixels and slot
+metadata and keeps advancing while nobody reads it. `chr-monitor` tests cover
+software encoding of tap slots.
 CPU tests cover queue-full/drop-before-transmit, cancelled physical draining,
 repeated resource reuse, explicit port rejection and retained-control IPC parity.
 

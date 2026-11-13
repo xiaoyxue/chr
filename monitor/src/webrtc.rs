@@ -256,8 +256,8 @@ impl WebRtcHub {
             Instant::now(),
             MediaStreamTrack::new(
                 "chr-preview".to_owned(),
-                "chr-triangle".to_owned(),
-                "chr rotating triangle".to_owned(),
+                "chr-program".to_owned(),
+                "chr program output".to_owned(),
                 RtpCodecKind::Video,
                 vec![RTCRtpEncodingParameters {
                     rtp_coding_parameters: RTCRtpCodingParameters {
@@ -370,6 +370,11 @@ impl WebRtcHub {
                 }
             }
         }
+    }
+
+    /// Previews that hold a slot, from their offer until their stream ends.
+    pub fn viewers(&self) -> usize {
+        self.lock().slots.iter().filter(|used| **used).count()
     }
 
     fn release(&self, slot: usize) {

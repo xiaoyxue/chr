@@ -3,7 +3,7 @@
 **Status:** `proposed` — implementation plan for the `confirmed`
 [Live process architecture](live-process-architecture.md). Field names and
 defaults below are the intended first version; each step's pull request updates
-this document if they change. Step 1 (#99) and the `chr-shm` ring of step 2 are `implemented`; the rest is not.
+this document if they change. Steps 1 (#99) and 2 (#95) are `implemented`; steps 3 and 4 are not.
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
 ring layout, supervision and clean feed, the monitor process, and acceptance
@@ -79,28 +79,40 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
   `$XDG_RUNTIME_DIR/chr/program.tap`). The SDI output thread writes every
   transmitted slot, repeats included, into an 8-slot ring:
   `index` = output slot, `meta[0]` = source frame, `meta[1]` = 1 when the slot
-  carries a program frame.
-- The output thread's in-process tap channel and `monitor_dropped_frames` go
-  away; `sdi.get_status` drops that field (Rust and TypeScript mirror).
+  carries a program frame, `meta[2]` = `width << 32 | height`, `meta[3]` = fps
+  (`chr_shm::tap`, shared by both processes).
+- The output thread's monitor channel and `monitor_dropped_frames` are gone;
+  `sdi.get_status` dropped that field (Rust and TypeScript mirror). An optional
+  in-process observer remains for tests that check slot provenance.
+- `chr-server` no longer has `--srt`, `--webrtc-udp` or `--webrtc-tcp`.
 
 ### `chr-monitor`
 
 ```text
-chr-monitor --tap <path> [--ws <addr>] [--webrtc-udp <addr|none>]
-            [--webrtc-tcp <addr>] [--srt <ip:port>] [--encoder openh264|gstreamer]
+chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
+            [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--srt <ip:port>]
+            [--encoder openh264|gstreamer] [--allow-origin <origin>]
 ```
 
-- Reads the tap mode from the ring header and the first slot (`--size`/`--fps`
-  must match the server), polls at half the frame period and encodes the newest
-  slot; skipped indices are counted.
-- Serves JSON-RPC `webrtc.offer` (same params/result as today) and a new
-  `monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`) on its
-  own WebSocket, default `127.0.0.1:8789`, using the `chr-common` transport.
-  `chr-server` no longer answers `webrtc.offer`.
+- `--size`/`--fps` (defaults 1280x720, 50) must match the server: the ring
+  layout is checked on open and each slot's `meta` mode before encoding;
+  mismatches are skipped and logged once. The monitor polls at half the frame
+  period and encodes the newest slot while anyone watches; skipped indices are
+  counted. It waits for a missing tap and reopens an idle one, because a
+  restarted `chr-server` replaces the file; encoder and RTP time stay monotonic
+  across such restarts.
+- Serves JSON-RPC `webrtc.offer` (same params/result as before) and a new
+  `monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`,
+  `srt_callers`) on its own WebSocket, default `127.0.0.1:8789`, using the
+  `chr-common` transport. `chr-server` no longer answers `webrtc.offer`.
+- `--srt` works with any program and either encoder; it no longer requires
+  `--software-video`.
 - `--srt` and `--encoder gstreamer` need the `gstreamer-media` feature. The
   monitor's GStreamer helpers are its own; it does not depend on `chr-runtime`.
-- The render harness takes a separate monitor URL for video; control stays on
-  `chr-server`. A development launcher starts both processes together.
+- The render harness takes a separate monitor URL for video (`?monitor=`,
+  `npm run verify -- --monitor`); control stays on `chr-server`. The development
+  launcher `server/scripts/run-live.sh` starts both processes with matching
+  `--size`/`--fps`/tap and stops both when either exits.
 
 ### Step 2 acceptance
 
@@ -112,6 +124,14 @@ chr-monitor --tap <path> [--ws <addr>] [--webrtc-udp <addr|none>]
 - `kill -9` of `chr-monitor` and a deliberately slow reader leave
   `sdi.get_status` cadence counters unchanged.
 - Existing WebRTC and SRT regressions pass in `chr-monitor`.
+
+Recorded on a Linux NVIDIA host (640x360p50, triangle): the harness
+`verify` passed with WebRTC through `chr-monitor` (about 50 fps decoded, 0
+skipped); `kill -9` of the monitor left the port at 50 slots/s with 0 repeats
+and drops, and a restarted monitor streamed again from the live tap. SRT with
+both encoders was received by GStreamer `srtsrc` at about 50 fps. The ffmpeg SRT
+caller in the Nix shell does not complete a handshake with GStreamer `srtsink`,
+also outside chr, so ffmpeg is not used as an SRT receiver.
 
 ## Step 3: `chr-renderer-cli render` (#96)
 

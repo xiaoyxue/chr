@@ -1,9 +1,10 @@
-// Program monitor: controls the triangle over WebSocket and shows the SDI program output,
-// which the server encodes and streams back over WebRTC.
+// Program monitor: controls the triangle over chr-server's WebSocket and shows the SDI
+// program output, which the separate chr-monitor encodes and streams over WebRTC.
+// `?ws=` is the control endpoint and `?monitor=` the monitor's signaling endpoint.
 // `?auto=1` connects, opens the stream, rotates, and writes a JSON report to #result
 // for the headless browser check (src/harness/browser.ts).
 
-import type { SdiStatus, TriangleState } from "../protocol.ts";
+import type { MonitorStatus, SdiStatus, TriangleState } from "../protocol.ts";
 import { RpcClient, connectWebSocket } from "../rpc.ts";
 import { installScenePanel } from "./scene-panel.ts";
 import { programSelfTest } from "./program-self-test.ts";
@@ -19,6 +20,9 @@ const $ = <T extends HTMLElement>(selector: string) => {
 
 const wsInput = $<HTMLInputElement>("#ws-url");
 wsInput.value = params.get("ws") ?? `ws://${location.hostname || "127.0.0.1"}:8787`;
+const monitorInput = $<HTMLInputElement>("#monitor-url");
+monitorInput.value = params.get("monitor") ?? `ws://${location.hostname || "127.0.0.1"}:8789`;
+const monitorLabel = $("#monitor-connection");
 const connectButton = $<HTMLButtonElement>("#connect");
 const streamButton = $<HTMLButtonElement>("#stream");
 const startButton = $<HTMLButtonElement>("#start");
@@ -28,6 +32,8 @@ const video = $<HTMLVideoElement>("video");
 const overlay = $("#overlay");
 
 let rpc: RpcClient | null = null;
+/** chr-monitor; independent of control, so either can be down without the other. */
+let monitorRpc: RpcClient | null = null;
 const scenePanel = installScenePanel(() => rpc);
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -55,7 +61,13 @@ function setConnected(connected: boolean, label: string): void {
   connectButton.textContent = connected ? "Disconnect" : "Connect";
   startButton.disabled = !connected;
   stopButton.disabled = !connected;
-  streamButton.disabled = !connected;
+}
+
+function setMonitor(client: RpcClient | null, label: string): void {
+  monitorRpc = client;
+  monitorLabel.textContent = label;
+  monitorLabel.className = `status ${client ? "ok" : "bad"}`;
+  streamButton.disabled = client === null;
 }
 
 function showState(state: TriangleState): void {
@@ -74,8 +86,16 @@ function showSdi(status: SdiStatus): void {
     ["slots out", String(status.frames_output)],
     ["repeated", String(status.repeated_frames)],
     ["dropped", String(status.dropped_frames)],
-    ["monitor dropped", String(status.monitor_dropped_frames)],
     ["source frame", String(status.last_source_frame ?? "-")],
+  ]);
+}
+
+function showMonitor(status: MonitorStatus): void {
+  renderList($("#monitor"), [
+    ["encoded", String(status.frames_encoded)],
+    ["skipped", String(status.frames_skipped)],
+    ["viewers", String(status.viewers)],
+    ["SRT callers", String(status.srt_callers)],
   ]);
 }
 
@@ -119,7 +139,7 @@ function showStats(): void {
 }
 
 async function openStream(): Promise<void> {
-  if (rpc === null || pc !== null) return;
+  if (monitorRpc === null || pc !== null) return;
   const peer = new RTCPeerConnection();
   pc = peer;
   streamButton.textContent = "Close stream";
@@ -141,7 +161,7 @@ async function openStream(): Promise<void> {
     await iceGatheringComplete(peer);
     const offer = peer.localDescription;
     if (offer === null) throw new Error("no local description");
-    await peer.setRemoteDescription(await rpc.offer({ type: "offer", sdp: offer.sdp }));
+    await peer.setRemoteDescription(await monitorRpc.offer({ type: "offer", sdp: offer.sdp }));
   } catch (error) {
     log(`stream failed: ${(error as Error).message}`);
     closeStream();
@@ -200,15 +220,36 @@ function iceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
 // Control
 
 async function connect(): Promise<void> {
+  let client: RpcClient;
   try {
-    rpc = new RpcClient(await connectWebSocket(wsInput.value), { idPrefix: "ui" });
-    setConnected(true, "connected");
-    log(`connected to ${wsInput.value}`);
-    pollTimer = setInterval(() => void poll(), 500);
-    await poll();
+    client = new RpcClient(await connectWebSocket(wsInput.value), { idPrefix: "ui" });
   } catch (error) {
     setConnected(false, (error as Error).message);
+    return;
   }
+  rpc = client;
+  setConnected(true, "connected");
+  log(`connected to ${wsInput.value}`);
+  let monitor: RpcClient | null = null;
+  let monitorError = "";
+  try {
+    monitor = new RpcClient(await connectWebSocket(monitorInput.value), { idPrefix: "monitor" });
+  } catch (error) {
+    monitorError = (error as Error).message;
+  }
+  // Disconnected (or reconnected) while the monitor connection was pending.
+  if (rpc !== client) {
+    monitor?.close();
+    return;
+  }
+  if (monitor === null) {
+    setMonitor(null, `monitor: ${monitorError}`);
+  } else {
+    setMonitor(monitor, "monitor connected");
+    log(`monitor at ${monitorInput.value}`);
+  }
+  pollTimer = setInterval(() => void poll(), 500);
+  await poll();
 }
 
 function disconnect(reason: string): void {
@@ -216,6 +257,8 @@ function disconnect(reason: string): void {
   closeStream();
   rpc?.close();
   rpc = null;
+  monitorRpc?.close();
+  setMonitor(null, "monitor disconnected");
   setConnected(false, reason);
 }
 
@@ -234,10 +277,24 @@ async function poll(): Promise<void> {
       showState(await rpc.getState());
     }
     showSdi(await rpc.getSdiStatus());
-    await pollStream();
   } catch (error) {
     log(`poll failed: ${(error as Error).message}`);
     disconnect("connection lost");
+    return;
+  }
+  const monitor = monitorRpc;
+  if (monitor === null) return;
+  try {
+    showMonitor(await monitor.getMonitorStatus());
+    await pollStream();
+  } catch (error) {
+    // Already replaced or closed by a disconnect.
+    if (monitorRpc !== monitor) return;
+    // Losing the monitor never affects control or the program output.
+    log(`monitor lost: ${(error as Error).message}`);
+    closeStream();
+    monitor.close();
+    setMonitor(null, "monitor lost");
   }
 }
 
@@ -286,13 +343,14 @@ stopButton.onclick = () => liveProgram
   ? void meshCommand(() => scenePanel.stopRotation(), "mesh rotation stopped")
   : void command((client) => client.stopRotation(), "stop rotation");
 setConnected(false, "disconnected");
+setMonitor(null, "monitor disconnected");
 showStats();
 
 if (liveProgram) {
   document.title = "chr software SDI simulation";
   $("h1").textContent = "chr software SDI simulation";
   $(".pipeline").textContent =
-    "MP4 / FFmpeg / GStreamer → renderer → simulated SDI → GStreamer H.264 → WebRTC";
+    "MP4 / FFmpeg / GStreamer → renderer → simulated SDI → program tap → chr-monitor H.264 → WebRTC";
   const rotationPanel = startButton.closest<HTMLElement>(".panel")!;
   rotationPanel.querySelector("h2")!.textContent = calibrated ? "Calibrated model rotation" : "Orange mesh rotation";
   rotationPanel.querySelector(".pipeline")!.textContent =

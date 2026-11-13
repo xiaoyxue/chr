@@ -5,7 +5,7 @@
 [limited synthetic contract](../../docs/scene-frame-contract.md).
 The opt-in [synthetic submission owner](frame-submissions.md) connects it to
 publication RPCs and resource-backed admission through the retained adapter.
-The default daemon, SDI and monitor behavior remain unchanged.
+The default daemon, SDI and program-tap/`chr-monitor` behavior remain unchanged.
 
 ## Registration and identity
 

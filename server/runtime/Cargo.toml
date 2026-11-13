@@ -19,18 +19,13 @@ gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 [dependencies]
 chr-renderer.workspace = true
 chr-common.workspace = true
+chr-shm.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 log.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 env_logger = "0.11"
-webrtc = "0.21"
-# Sans-I/O core of `webrtc`; its media and codec types are not re-exported.
-rtc = "0.21"
-async-trait = "0.1"
 thiserror = "2"
-openh264 = "0.9"
-bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gstreamer = { workspace = true, optional = true }
@@ -39,4 +34,4 @@ gstreamer-video = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-tungstenite = "0.30"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std", "async-await-macro"] }

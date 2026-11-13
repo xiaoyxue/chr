@@ -1,14 +1,11 @@
 //! Control plane: maps JSON-RPC methods (the args clients send) onto the render
-//! pipeline, the SDI port's status, and WebRTC signaling for the program monitor.
-
-use std::sync::Arc;
+//! pipeline and the SDI port's status. WebRTC signaling belongs to `chr-monitor`.
 
 use chr_common::{
-    jsonrpc::{ErrorObject, INVALID_PARAMS, SERVER_BUSY, SERVER_UNAVAILABLE},
+    jsonrpc::{ErrorObject, SERVER_BUSY, SERVER_UNAVAILABLE},
     methods::{
         mesh, sdi,
         triangle::{self, StartRotationParams, TriangleState},
-        webrtc::{self, SdpType, SessionDescription},
     },
     server::{ConnectionInfo, Handler},
 };
@@ -16,15 +13,10 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{
-    monitor::webrtc::{WebRtcError, WebRtcHub},
-    pipeline::Command,
-    sdi::SdiStats,
-};
+use crate::{pipeline::Command, sdi::SdiStats};
 
 pub struct ControlHandler {
     commands: mpsc::Sender<Command>,
-    webrtc: Arc<WebRtcHub>,
     sdi: SdiStats,
     scenes: Option<crate::retained::SceneControl>,
 }
@@ -34,10 +26,9 @@ pub struct ControlHandler {
 struct NoParams {}
 
 impl ControlHandler {
-    pub fn new(commands: mpsc::Sender<Command>, webrtc: Arc<WebRtcHub>, sdi: SdiStats) -> Self {
+    pub fn new(commands: mpsc::Sender<Command>, sdi: SdiStats) -> Self {
         Self {
             commands,
-            webrtc,
             sdi,
             scenes: None,
         }
@@ -65,33 +56,6 @@ impl ControlHandler {
             })?;
         response.await.map_err(|_| render_stopped())
     }
-
-    async fn offer(
-        &self,
-        connection: &ConnectionInfo,
-        offer: SessionDescription,
-    ) -> Result<SessionDescription, ErrorObject> {
-        if offer.sdp_type != SdpType::Offer {
-            return Err(ErrorObject::invalid_params("type must be \"offer\""));
-        }
-        let sdp =
-            self.webrtc
-                .answer(connection.id, offer.sdp)
-                .await
-                .map_err(|error| match error {
-                    WebRtcError::TooManyPeers => ErrorObject::new(SERVER_BUSY, error.to_string()),
-                    WebRtcError::InvalidOffer(_) => {
-                        ErrorObject::new(INVALID_PARAMS, error.to_string())
-                    }
-                    WebRtcError::GatheringTimeout | WebRtcError::Stack(_) => {
-                        ErrorObject::internal(error.to_string())
-                    }
-                })?;
-        Ok(SessionDescription {
-            sdp_type: SdpType::Answer,
-            sdp,
-        })
-    }
 }
 
 fn render_stopped() -> ErrorObject {
@@ -105,11 +69,6 @@ fn params<T: DeserializeOwned + Default>(params: Option<Value>) -> Result<T, Err
         Some(value) => serde_json::from_value(value)
             .map_err(|error| ErrorObject::invalid_params(error.to_string())),
     }
-}
-
-fn required<T: DeserializeOwned>(params: Option<Value>) -> Result<T, ErrorObject> {
-    let value = params.ok_or_else(|| ErrorObject::invalid_params("params are required"))?;
-    serde_json::from_value(value).map_err(|error| ErrorObject::invalid_params(error.to_string()))
 }
 
 fn to_value(state: TriangleState) -> Result<Value, ErrorObject> {
@@ -163,47 +122,30 @@ impl Handler for ControlHandler {
                 serde_json::to_value(self.sdi.status())
                     .map_err(|error| ErrorObject::internal(error.to_string()))
             }
-            webrtc::OFFER => {
-                let answer = self.offer(connection, required(raw_params)?).await?;
-                serde_json::to_value(answer)
-                    .map_err(|error| ErrorObject::internal(error.to_string()))
-            }
             _ => Err(ErrorObject::method_not_found(method)),
         }
-    }
-
-    fn disconnected(&self, connection: &ConnectionInfo) {
-        self.webrtc.close_connection(connection.id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use chr_common::{
-        jsonrpc::METHOD_NOT_FOUND,
+        jsonrpc::{INVALID_PARAMS, METHOD_NOT_FOUND},
+        methods::webrtc,
         server::{ConnectionId, Transport},
     };
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        monitor::{encoder::VideoFeed, webrtc::IceConfig},
-        scene::Scene,
-        sdi::VideoMode,
-    };
+    use crate::{scene::Scene, sdi::VideoMode};
 
     fn test_handler(commands: mpsc::Sender<Command>) -> ControlHandler {
-        let hub = Arc::new(WebRtcHub::new(
-            Arc::new(VideoFeed::new()),
-            30,
-            IceConfig::default(),
-        ));
         let mode = VideoMode {
             width: 64,
             height: 36,
             fps: 30,
         };
-        ControlHandler::new(commands, hub, SdiStats::idle(mode))
+        ControlHandler::new(commands, SdiStats::idle(mode))
     }
 
     /// Stands in for the render worker: applies commands to a scene without a GPU.
@@ -274,8 +216,6 @@ mod tests {
             ),
             (triangle::START_ROTATION, json!({"unknown": 1})),
             (triangle::STOP_ROTATION, json!({"now": true})),
-            (webrtc::OFFER, json!({"type": "answer", "sdp": "v=0"})),
-            (webrtc::OFFER, json!({"type": "offer", "sdp": "not sdp"})),
         ] {
             let error = handler
                 .handle(&CONNECTION, method, Some(params.clone()))
@@ -283,16 +223,11 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, INVALID_PARAMS, "{method} {params}");
         }
-        let error = handler
-            .handle(&CONNECTION, webrtc::OFFER, None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, INVALID_PARAMS);
-        let error = handler
-            .handle(&CONNECTION, "triangle.spin", None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, METHOD_NOT_FOUND);
+        // WebRTC signaling moved to chr-monitor.
+        for method in ["triangle.spin", webrtc::OFFER] {
+            let error = handler.handle(&CONNECTION, method, None).await.unwrap_err();
+            assert_eq!(error.code, METHOD_NOT_FOUND, "{method}");
+        }
     }
 
     #[tokio::test]

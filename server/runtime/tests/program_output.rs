@@ -1,14 +1,13 @@
-//! Synthetic program acceptance, including the real GPU -> simulated SDI -> software monitor.
+//! Synthetic program acceptance, including the real GPU -> simulated SDI -> program tap.
 use chr_common::{methods::mesh, scene_frame as w};
 use chr_renderer::Gpu;
 use chr_runtime::{
-    monitor::{Monitor, encoder::VideoFeed},
     program::{
         ProgramRenderer,
         synthetic::{Synthetic, id, runtime_id},
     },
     retained::SceneControl,
-    sdi::{SdiOutput, SdiSlot, VideoMode},
+    sdi::{SdiOutput, SdiSlot, Taps, VideoMode},
 };
 use serde_json::{Value, json};
 use std::{
@@ -223,7 +222,13 @@ async fn gpu_server_rotation_changes_program_pixels_and_stop_freezes_them() {
         .await
         .unwrap();
     let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
-    let (sdi, tap) = SdiOutput::spawn_program(mode(), id("rotation-test-output").unwrap()).unwrap();
+    let (sdi, tap) = {
+        let (taps, tap) = Taps::observed();
+        (
+            SdiOutput::spawn_program(mode(), id("rotation-test-output").unwrap(), taps).unwrap(),
+            tap,
+        )
+    };
     let mut port = sdi.input();
     let mut pixels = Vec::new();
     for (sequence, frame) in [0, 25, 50, 75].into_iter().enumerate() {
@@ -365,8 +370,13 @@ async fn gpu_calibrated_video_warps_cg_not_plate_and_repeats_exact_loop() {
         height: 64,
         fps: 50,
     };
-    let (sdi, tap) =
-        SdiOutput::spawn_program(output, id("calibrated-test-output").unwrap()).unwrap();
+    let (sdi, tap) = {
+        let (taps, tap) = Taps::observed();
+        (
+            SdiOutput::spawn_program(output, id("calibrated-test-output").unwrap(), taps).unwrap(),
+            tap,
+        )
+    };
     let mut port = sdi.input();
     let mut pixels = Vec::new();
     for sequence in [0, 1, 4] {
@@ -537,7 +547,13 @@ async fn gpu_video_mesh_turns_independently_of_ground_and_restores_pixels() {
         [0, 0, 0, 1]
     ]);
     let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
-    let (sdi, tap) = SdiOutput::spawn_program(mode(), id("mesh-rotation-output").unwrap()).unwrap();
+    let (sdi, tap) = {
+        let (taps, tap) = Taps::observed();
+        (
+            SdiOutput::spawn_program(mode(), id("mesh-rotation-output").unwrap(), taps).unwrap(),
+            tap,
+        )
+    };
     let mut port = sdi.input();
     let mut images = Vec::new();
     for (sequence, instance) in [original.clone(), positive, negative, original]
@@ -574,7 +590,7 @@ async fn gpu_video_mesh_turns_independently_of_ground_and_restores_pixels() {
 
 #[tokio::test]
 #[ignore = "requires a native hardware GPU"]
-async fn gpu_program_pixels_controls_provenance_and_monitor() {
+async fn gpu_program_pixels_controls_provenance_and_tap() {
     let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
     let adapter = gpu.adapter.get_info();
     println!("program GPU adapter: {adapter:?}");
@@ -589,12 +605,13 @@ async fn gpu_program_pixels_controls_provenance_and_monitor() {
     let (control, owner) = SceneControl::spawn(adapter, 64).unwrap();
     synthetic.create_scene(&control).await.unwrap();
     let mut renderer = ProgramRenderer::new(&gpu, &synthetic.configuration).unwrap();
-    let (sdi, tap) = SdiOutput::spawn_program(mode(), id("test-output-stream").unwrap()).unwrap();
+    let tap_dir = std::env::temp_dir().join(format!("chr-program-tap-{}", std::process::id()));
+    let tap_path = tap_dir.join("program.tap");
+    let (mut taps, tap) = Taps::observed();
+    taps.ring = Taps::ring(mode(), &tap_path).unwrap().ring;
+    let sdi = SdiOutput::spawn_program(mode(), id("test-output-stream").unwrap(), taps).unwrap();
+    let program_tap = chr_shm::Reader::open(&tap_path).unwrap();
     let mut port = sdi.input();
-    let feed = Arc::new(VideoFeed::new());
-    let mut viewer = feed.subscribe();
-    let (monitor_tx, monitor_rx) = mpsc::sync_channel(2);
-    let monitor = Monitor::spawn(mode(), monitor_rx, feed).unwrap();
 
     let first_id = synthetic.inject(&control).await.unwrap().unwrap();
     renderer
@@ -616,23 +633,28 @@ async fn gpu_program_pixels_controls_provenance_and_monitor() {
         baseline[1]
     );
     let first_slot = first.slot;
-    monitor_tx.send(first).unwrap();
-    let encoded = tokio::time::timeout(Duration::from_secs(5), viewer.recv())
-        .await
-        .unwrap()
+    drop(first);
+    // Until the next injection every slot repeats source frame 0, so the newest
+    // tap slot is that frame however far the port has ticked.
+    let mut tapped = Vec::new();
+    let read = program_tap
+        .read(program_tap.latest_slot().unwrap(), &mut tapped)
         .unwrap();
-    assert_eq!(encoded.frame, first_slot);
+    let chr_shm::Read::Frame(header) = read else {
+        panic!("program tap slot not readable: {read:?}");
+    };
+    assert!(header.index >= first_slot);
     assert_eq!(
-        encoded
-            .program
-            .as_ref()
-            .unwrap()
-            .provenance
-            .receipt
-            .submission_id,
-        first_id
+        chr_shm::tap::SlotMeta::from_meta(header.meta),
+        chr_shm::tap::SlotMeta {
+            source_frame: 0,
+            program: true,
+            width: mode().width,
+            height: mode().height,
+            fps: mode().fps,
+        }
     );
-    assert!(!encoded.data.is_empty());
+    assert_eq!(tapped, *baseline, "the tap carries the transmitted pixels");
     let repeated = receive(&tap, 0);
     assert!(repeated.slot > first_slot);
     assert!(Arc::ptr_eq(&baseline, &repeated.uyvy));
@@ -755,15 +777,18 @@ async fn gpu_program_pixels_controls_provenance_and_monitor() {
         weak.upgrade().is_some(),
         "public release cannot free repeated-current output"
     );
-    // Stop consuming: the bounded monitor tap drops, but SDI keeps repeating.
-    let before = sdi.stats().status().frames_output;
+    // Stop consuming: the observer skips slots and nobody reads the tap, but SDI
+    // keeps repeating and the tap writer keeps advancing.
+    let (before, written) = (
+        sdi.stats().status().frames_output,
+        program_tap.write_count(),
+    );
     std::thread::sleep(Duration::from_millis(120));
     assert!(sdi.stats().status().frames_output > before);
-    assert!(sdi.stats().status().monitor_dropped_frames > 0);
+    assert!(program_tap.write_count() > written);
     drop(sdi);
     drop(tap);
-    drop(monitor_tx);
-    drop(monitor);
+    std::fs::remove_dir_all(&tap_dir).unwrap();
     assert!(
         weak.upgrade().is_none(),
         "shutdown frees current and queued tap allocations"

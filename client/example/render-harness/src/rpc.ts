@@ -6,6 +6,7 @@ import {
   type RpcErrorObject,
   type RpcRequest,
   type RpcResponse,
+  type MonitorStatus,
   type SdiStatus,
   type SessionDescription,
   type StartRotationParams,
@@ -100,7 +101,12 @@ export class RpcClient {
     return (await this.call(Methods.sdi.getStatus)) as SdiStatus;
   }
 
-  /** Negotiates a receive-only stream of the program (SDI) output. */
+  /** chr-monitor only. */
+  async getMonitorStatus(): Promise<MonitorStatus> {
+    return (await this.call(Methods.monitor.getStatus)) as MonitorStatus;
+  }
+
+  /** chr-monitor only: negotiates a receive-only stream of the program (SDI) output. */
   async offer(offer: SessionDescription): Promise<SessionDescription> {
     const answer = (await this.call(Methods.webrtc.offer, offer)) as SessionDescription;
     if (answer?.type !== "answer" || typeof answer.sdp !== "string") {

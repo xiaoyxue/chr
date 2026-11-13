@@ -1,8 +1,8 @@
 //! Software H.264 encoding of transmitted SDI slots, shared by WebRTC and SRT.
 
 use crate::{
+    VideoMode,
     gstreamer_support::{Error, check_bus, validate_mode},
-    sdi::VideoMode,
 };
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSrc};

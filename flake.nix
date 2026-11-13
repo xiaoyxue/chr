@@ -70,6 +70,7 @@
           rustRoots = [
             "server"
             "common"
+            "monitor"
           ];
           workspaceFiles = [
             "Cargo.toml"
@@ -135,6 +136,15 @@
               postInstall = "wrapProgram $out/bin/chr-server --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}";
             }
           );
+          monitor = craneLib.buildPackage (
+            common
+            // {
+              inherit cargoArtifacts;
+              pname = "chr-monitor";
+              cargoExtraArgs = "-p chr-monitor";
+              doCheck = false;
+            }
+          );
           shell = pkgs.mkShell {
             packages = [
               toolchain
@@ -151,7 +161,12 @@
           };
         in
         {
-          inherit app server shell;
+          inherit
+            app
+            server
+            monitor
+            shell
+            ;
           checks = {
             client-toolchain =
               pkgs.runCommand "chr-client-toolchain"
@@ -204,6 +219,7 @@
         default = (environment system).app;
         chr-app = (environment system).app;
         chr-server = (environment system).server;
+        chr-monitor = (environment system).monitor;
       });
       apps = perSystem (system: {
         default = {

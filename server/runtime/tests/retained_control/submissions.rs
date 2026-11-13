@@ -761,11 +761,7 @@ mod real_ipc {
     };
     use chr_runtime::{
         control::ControlHandler,
-        monitor::{
-            encoder::VideoFeed,
-            webrtc::{IceConfig, WebRtcHub},
-        },
-        sdi::{SdiOutput, VideoMode},
+        sdi::{SdiOutput, Taps, VideoMode},
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
@@ -805,19 +801,16 @@ mod real_ipc {
         let (control, worker) = SceneControl::spawn(adapter, 8).unwrap();
         let (commands, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
-        let hub = Arc::new(WebRtcHub::new(
-            Arc::new(VideoFeed::new()),
-            50,
-            IceConfig::default(),
-        ));
-        let (sdi, _tap) = SdiOutput::spawn(VideoMode {
-            width: 4,
-            height: 4,
-            fps: 50,
-        })
+        let sdi = SdiOutput::spawn(
+            VideoMode {
+                width: 4,
+                height: 4,
+                fps: 50,
+            },
+            Taps::default(),
+        )
         .unwrap();
-        let handler =
-            Arc::new(ControlHandler::new(commands, hub, sdi.stats()).with_scenes(control));
+        let handler = Arc::new(ControlHandler::new(commands, sdi.stats()).with_scenes(control));
         let server = IpcServer::new(Arc::clone(&handler), ServerConfig::default());
         let directory = std::path::PathBuf::from("../../output/frame-submissions");
         std::fs::create_dir_all(&directory).unwrap();

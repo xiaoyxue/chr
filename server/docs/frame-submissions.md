@@ -4,8 +4,8 @@
 It is an explicit embedding opt-in, **not** the shipped daemon's renderer, GPU
 integration or hardware SDI acceptance by itself. The
 [program-output opt-in](program-output.md) supplies its real GPU/simulated SDI
-driver. The default triangle/signaling/status path and
-render -> SDI -> monitor topology are unchanged. The authoritative wire types
+driver. The default triangle/status path and
+render -> SDI -> program tap -> `chr-monitor` topology are unchanged. The authoritative wire types
 remain `chr_common::scene_frame`; no registration RPC or second schema is added.
 
 ## Installation and progress

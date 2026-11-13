@@ -46,11 +46,16 @@ export const Methods = {
     stopRotation: "triangle.stop_rotation",
     getState: "triangle.get_state",
   },
+  /** Served by chr-monitor on its own WebSocket, not by chr-server. */
   webrtc: {
     offer: "webrtc.offer",
   },
   sdi: {
     getStatus: "sdi.get_status",
+  },
+  /** Served by chr-monitor. */
+  monitor: {
+    getStatus: "monitor.get_status",
   },
 } as const;
 
@@ -98,9 +103,19 @@ export interface SdiStatus {
   repeated_frames: number;
   /** Rendered frames discarded because the output queue was full. */
   dropped_frames: number;
-  /** Output slots the monitor (SDI -> WebRTC encoder) skipped because it fell behind. */
-  monitor_dropped_frames: number;
   last_source_frame: number | null;
+}
+
+/** chr-monitor counters since the monitor started. */
+export interface MonitorStatus {
+  /** Transmitted slots encoded for viewers. */
+  frames_encoded: number;
+  /** Transmitted slots not encoded while someone watched, because a newer slot was read first. */
+  frames_skipped: number;
+  /** Active WebRTC previews. */
+  viewers: number;
+  /** Connected SRT callers. */
+  srt_callers: number;
 }
 
 export function isTriangleState(value: unknown): value is TriangleState {

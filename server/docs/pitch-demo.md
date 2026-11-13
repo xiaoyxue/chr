@@ -25,6 +25,8 @@ with mode 0600 on Unix: choose a fresh filename for each server start. Never reu
 runtime handles across restarts.
 
 Run the existing harness (`npm --prefix client/example/render-harness run dev`).
+Start `chr-monitor` with the same `--size`/`--fps` (or launch both with
+`server/scripts/run-live.sh`; see the [server README](../README.md)).
 Connect its WebSocket, open its normal WebRTC stream, select the generated controls
 JSON in **Local program scene**, and click **Load / reconcile**. The browser only
 reads metadata; it never loads GLBs or native filesystem paths through RPC.
@@ -133,7 +135,8 @@ There is one `SceneAdapter`/`SceneControl` and one `FrameSubmissions` /
 `FrameResources` owner for both transports. The installer only registers
 trusted native assets and a starting scene. It reuses the existing native input
 producer, `ProgramRenderer`, renderer `FrameCompositor`, BT.709 UYVY converter,
-simulated SDI clock, software monitor encoder and WebRTC stream. There is no
+simulated SDI clock, program tap, and `chr-monitor`'s software encoder and WebRTC
+stream. There is no
 DataChannel renderer bypass, second scene/image registry or direct preview stream.
 
 The named configuration admits 5 lights and 8 instances per scene; model choices
@@ -158,9 +161,10 @@ or new area-light model is introduced.
 
 Composition intermediates are bounded to 128 MiB. Native input capacity is
 `8 * native_width * native_height * 8` bytes (14.06 MiB at 640×360; 126.56 MiB
-at 1920×1080); this budget includes physically draining inputs. Eleven possible
-shared raw UYVY owners at 640×360 represent at most 4.83 MiB, plus GPU worker
-staging and four compressed monitor frames. Imported mesh/material/texture
+at 1920×1080); this budget includes physically draining inputs. Eight possible
+shared raw UYVY owners at 640×360 represent at most 3.52 MiB, plus the fixed
+eight-slot shared-memory program tap (3.52 MiB), GPU worker staging and four
+compressed frames in `chr-monitor`. Imported mesh/material/texture
 allocations depend on the selected assets and are **not included** in those
 frame/shadow bounds.
 

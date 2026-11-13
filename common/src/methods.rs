@@ -84,18 +84,19 @@ pub mod mesh {
     }
 }
 
-/// WebRTC signaling. Media itself never travels over the control transports.
+/// WebRTC signaling, served by `chr-monitor` on its own WebSocket, not by
+/// `chr-server`. Media itself never travels over the JSON-RPC transports.
 pub mod webrtc {
     use super::*;
 
-    /// Sends a browser offer and receives the server's answer for a receive-only video
+    /// Sends a browser offer and receives the monitor's answer for a receive-only video
     /// stream of the program output: what the SDI port transmits, encoded as H.264.
-    /// Non-trickle: the answer already contains every server candidate, and the offer
+    /// Non-trickle: the answer already contains every monitor candidate, and the offer
     /// should contain the client's. Params: [`SessionDescription`] with `type: "offer"`.
     /// Result: [`SessionDescription`] with `type: "answer"`.
     ///
-    /// The peer connection lives until the client closes it or until the control
-    /// connection that created it disconnects.
+    /// The peer connection lives until the client closes it or until the connection
+    /// that created it disconnects.
     pub const OFFER: &str = "webrtc.offer";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,10 +136,30 @@ pub mod sdi {
         pub repeated_frames: u64,
         /// Rendered frames discarded because the output queue was full.
         pub dropped_frames: u64,
-        /// Output slots the monitor (SDI -> WebRTC encoder) skipped because it fell behind.
-        pub monitor_dropped_frames: u64,
         /// Render frame index of the most recent output slot.
         pub last_source_frame: Option<u64>,
+    }
+}
+
+/// The `chr-monitor` process, which encodes the program tap for viewers.
+pub mod monitor {
+    use super::*;
+
+    /// Reads monitor counters. No params. Result: [`MonitorStatus`].
+    pub const GET_STATUS: &str = "monitor.get_status";
+
+    /// Counters since the monitor started.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct MonitorStatus {
+        /// Transmitted slots encoded for viewers.
+        pub frames_encoded: u64,
+        /// Transmitted slots that were not encoded while someone was watching,
+        /// because the monitor read a newer slot first.
+        pub frames_skipped: u64,
+        /// Active WebRTC previews.
+        pub viewers: u64,
+        /// Connected SRT callers.
+        pub srt_callers: u64,
     }
 }
 

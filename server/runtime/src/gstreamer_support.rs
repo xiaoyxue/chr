@@ -1,4 +1,4 @@
-//! Shared support for the opt-in software input and monitor pipelines.
+//! Shared support for the opt-in software input pipeline.
 
 use crate::sdi::VideoMode;
 use gstreamer::{self as gst, prelude::*};

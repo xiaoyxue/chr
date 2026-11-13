@@ -38,8 +38,10 @@ TypeScript 客户端镜像其类型，不另造不相容的消息或 socket fram
 | `NativeSocket` | Unix Domain Socket；每条消息以 4 字节 big-endian 长度开头，随后是 UTF-8 JSON payload。 |
 | `WebSocket` | 每个 text message 承载一条消息；监听地址限制为 loopback。 |
 
-两者进入同一 handler，控制语义不因入口而变化。WebRTC 的 signaling 属于控制消息，
-媒体传输不属于 `chr-common`；运行时的监看行为以 [server contract](../server/README.md) 为准。
+两者进入同一 handler，控制语义不因入口而变化。WebRTC 的 signaling（`webrtc.offer`）
+和 `monitor.get_status` 使用同一 `chr-common` 传输，但由独立的 `chr-monitor` 进程在其自己的
+loopback WebSocket 上提供，`chr-server` 不再处理；媒体传输不属于 `chr-common`。
+监看行为以 [server contract](../server/README.md) 为准。
 这与本组尚待细化的录制、标定和帧输入方法是不同成熟度，不能把候选 payload 当作已支持方法。
 
 ## Schema notation
