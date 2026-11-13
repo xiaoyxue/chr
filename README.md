@@ -5,6 +5,7 @@
 | Directory | Purpose | Language |
 | --- | --- | --- |
 | `client/src/` | Client-side code | Primarily TypeScript |
+| `client/football-field-3d/` | Onsite football-field client: Three.js pitch preview and read-only Fusion match data | TypeScript (Vite) |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
 | `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server` and `chr-renderer-cli`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `monitor/` | `chr-monitor`: optional video monitor process that encodes the `chr-server` program tap for WebRTC/SRT viewers | Rust |
@@ -69,12 +70,16 @@ In a separate shell, from the repository root:
 nix build
 nix flake check
 nix run . -- --headless
+nix run .#football-field-3d
 ```
 
 The default package and `packages.<system>.chr-app` build the renderer;
 the default app runs it. Checks include Node.js/npm/TypeScript tool availability,
-Rust formatting, Clippy, and CPU tests. `client/src/` is currently a placeholder;
-the example harness in `client/example/render-harness/` has its own npm scripts.
+Rust formatting, Clippy, and CPU tests, plus the `football-field-3d` client
+typecheck and build. `nix run .#football-field-3d` serves that client; see
+`docs/development.md` for its Fusion settings. `client/src/` is currently a
+placeholder; the example harness in `client/example/render-harness/` has its own
+npm scripts.
 `nix fmt` formats Nix files. GPU runs need a working hardware driver; see
 `server/README.md` for non-NixOS host-driver wrappers.
 

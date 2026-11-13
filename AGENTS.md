@@ -2,7 +2,7 @@
 
 ## Project Structure
 
-- `client/`: Client-side code, primarily written in TypeScript. Source code belongs in `client/src/`; `client/example/` holds example clients and verification harnesses, each a self-contained npm package.
+- `client/`: Client-side code, primarily written in TypeScript. Source code belongs in `client/src/`; `client/football-field-3d/` is the onsite football-field client (Vite + Three.js), built by the root flake; `client/example/` holds example clients and verification harnesses, each a self-contained npm package.
 - `server/`: The live render server, primarily Rust. The renderer library lives in `server/renderer/` (`chr-renderer`), the render server runtime in `server/runtime/` (`chr-runtime`, which builds the `chr-server` and `chr-renderer-cli` executables), and the native window/headless shell in `server/viewer/` (`chr-app`); further server crates are added as `server/<name>/`. Follow `server/AGENTS.md`.
 - `monitor/`: The optional video monitor process, Rust crate `chr-monitor`. It reads the program tap written by `chr-server`, encodes it and streams it over WebRTC/SRT; it never controls the program. It sits at the root because it may run on another host from an SDI loop-out.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: The single Rust workspace at the repository root. Its members live under `server/`, `monitor/` (and Rust parts of `common/`); run Cargo commands from the root.
@@ -28,12 +28,14 @@
   `chr-monitor`.
   It does not provide physical SDI or change the renderer library.
 - Keep client sources in `client/src/`, which has no client framework or package
-  yet. Example packages under `client/example/` carry their own `package.json` and
-  scripts; the root toolchain smoke check does not build or test them.
+  yet. `client/football-field-3d/` is a self-contained npm package that the root
+  flake builds and checks from its `package-lock.json`. Example packages under
+  `client/example/` carry their own `package.json` and scripts; the flake does not
+  build or test them.
 - Run `nix develop`, `nix build`, `nix flake check`, and Cargo commands from the
   root inside the development shell.
-- `nix flake check` covers the Node.js/npm/TypeScript toolchain smoke check and
-  renderer formatting, Clippy, and CPU tests. The default package and app remain
+- `nix flake check` covers the Node.js/npm/TypeScript toolchain smoke check, the
+  `football-field-3d` typecheck, build and Node tests, and renderer formatting, Clippy, and CPU tests. The default package and app remain
   the renderer. GPU and interactive checks are separate; follow `server/AGENTS.md`.
 - Preserve locked dependency revisions unless an update is explicitly required.
 - The shell uses an absolute `target/linux` Cargo cache. Keep this cache,
