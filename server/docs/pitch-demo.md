@@ -25,15 +25,15 @@ inside `nix develop --command bash -c '…'`. The controls file is created exclu
 with mode 0600 on Unix: choose a fresh filename for each server start. Never reuse
 runtime handles across restarts.
 
-Run the existing harness (`npm --prefix client/example/render-harness run dev`).
 Start `chr-monitor` with the same `--size`/`--fps` (or launch both with
-`server/scripts/run-live.sh`; see the [server README](../README.md)).
-Connect its WebSocket, open its normal WebRTC stream, select the generated controls
-JSON in **Local program scene**, and click **Load / reconcile**. The browser only
-reads metadata; it never loads GLBs or native filesystem paths through RPC.
+`server/scripts/run-live.sh`; see the [server README](../README.md)) and watch the
+program in the harness's read-only monitor page
+(`npm --prefix client/example/render-harness run dev`). Edit the scene with the
+harness's `npm run scene` CLI below, which reads the generated controls JSON.
+It only reads metadata; it never loads GLBs or native filesystem paths through RPC.
 Metadata contains source-camera information: keep it and screenshots private.
 
-The panel provides zoom, dolly, origin-centred orbit, local yaw/pitch/roll, exact
+The CLI provides zoom, dolly, origin-centred orbit, local yaw/pitch/roll, exact
 original-pinhole reset, model selection/scale/yaw/mirror, four-point or four-spot
 rigs, sun-only and either rig plus sun, and Hard/PCF/PCSS. Heights are authored
 30–40 m; **35 m is a demo value, not a surveyed tower height**. Spot targets are
@@ -44,12 +44,12 @@ sun-only comparison.
 The simplified support poles stop one metre below their emitters, avoiding a
 solid support intersecting the punctual light source and blocking its own rig.
 
-All edits are serialized, bounded, revision-checked `scene.mutate` calls over the
-existing WebSocket. A conflict or uncertain reply reconciles without blind retry;
-click Load / reconcile to acknowledge it. Reset comes from immutable startup
-metadata, not a potentially modified scene loaded after reconnect.
+All edits are bounded, revision-checked `scene.mutate` calls. A conflict or
+uncertain reply is reported, never blindly retried; query again before the next
+edit. Reset comes from immutable startup metadata, not a potentially modified
+scene loaded after reconnect.
 
-The same scene is controlled by NativeSocket:
+Over NativeSocket:
 
 ```sh
 nix develop --command npm --prefix client/example/render-harness run scene -- \
@@ -194,19 +194,7 @@ nix develop --command npm --prefix client/example/render-harness test
 nix develop --command npm --prefix client/example/render-harness run build
 ```
 
-With server and harness running, use the actual Chrome self-test:
-
-```sh
-mkdir -p output/t
-TMPDIR="$PWD/output/t" nix develop --command env -u LD_LIBRARY_PATH \
-  npm --prefix client/example/render-harness run verify:browser -- \
-  --url 'http://127.0.0.1:5173/?ws=ws://127.0.0.1:8787' \
-  --pitch-controls "$PWD/output/pitch-demo/controls.json" \
-  --fps 25 --screenshot "$PWD/output/pitch-demo/browser.png"
-```
-
-It clicks the real panel, verifies revisioned camera/model/rig edits, reset,
-and changes in decoded SDI-derived WebRTC pixels. Unit tests cover grounding,
+Unit tests cover grounding,
 corner/target geometry, exclusive rigs, metadata rejection and immutable reset.
 The headless hardware test executes the real program-to-SDI path and compares
 independent rig/sun and shadow contributions. Its reported worker duration is

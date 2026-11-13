@@ -10,6 +10,7 @@ import {
   type SdiStatus,
   type SessionDescription,
   type StartRotationParams,
+  type TrackingStatus,
   type WorkerStatus,
   type TriangleState,
   isTriangleState,
@@ -104,6 +105,11 @@ export class RpcClient {
 
   async getWorkerStatus(): Promise<WorkerStatus> {
     return (await this.call(Methods.renderWorker.getStatus)) as WorkerStatus;
+  }
+
+  /** Tracked programs only; other servers answer method not found. */
+  async getTrackingStatus(): Promise<TrackingStatus> {
+    return (await this.call(Methods.tracking.getStatus)) as TrackingStatus;
   }
 
   /** chr-monitor only. */

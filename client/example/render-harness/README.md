@@ -1,7 +1,8 @@
 # chr render harness (example)
 
 Example TypeScript client for `chr-server` (`server/runtime/`) and `chr-monitor`
-(`monitor/`): a browser program monitor and two verification scripts. The server
+(`monitor/`): a read-only browser program monitor, a scene CLI and two verification
+scripts. The server
 renders a rotating triangle through its supervised `chr-renderer-cli worker`
 process and takes JSON-RPC 2.0 control over a WebSocket and a
 NativeSocket (Unix Domain Socket); the separate monitor process streams its program
@@ -27,91 +28,68 @@ payload validation, reexported as `SceneFrame`. It does not enable those methods
 in the triangle runtime. Keep its required-nullable fields, method/result maps
 and error codes synchronized with `common/src/scene_frame/`.
 
-## Triangle rotation
-
-The legacy **Triangle** panel provides Clockwise (+) and Counter-clockwise (-)
-direction choices. Select a direction, then click **Start rotation** to apply it;
-restarting changes velocity without resetting the angle. Signed speed entry is
-still supported and keeps the direction selector synchronized. Positive angles
-rotate clockwise because this triangle uses the Y-down SNC image coordinates.
-These legacy commands do not animate the retained-scene overlay in
-`--synthetic-program`, `--pitch-demo` or `--software-video`.
-
-With `live=1`, the top-right panel instead becomes **Orange mesh rotation**.
-It sends `mesh.start_rotation`, `mesh.stop_rotation` and `mesh.get_rotation`
-commands targeting the software-video scene's `mesh`; its separate `ground`
-is unchanged. Server advances the pose before each native input admission using
-the simulated SDI output-slot clock and configured time base, not browser timers
-or source identity. Changing signed speed preserves the pose; Stop holds it.
-Closing or disconnecting the page does not stop server animation. Polling only
-displays state and never drives motion. External instance edits stop animation
-instead of being overwritten. Stop before manual scene edits to avoid revision
-conflicts. This opt-in profile permits one animated instance at a time; it does
-not repurpose the legacy triangle methods or add a general animation timeline.
-
 ## Synthetic scene controls
 
 Start the server with `--synthetic-program --size 640x360 --fps 50` to opt into
 the [named synthetic integration profile](../../../server/docs/program-output.md).
-Enter its printed runtime and scene IDs in **Local program scene**, then
-**Load / reconcile**. The panel supports zoom, dolly, orbit around the synthetic
-world origin, local yaw/pitch/roll, reset to the loaded camera, and atomic sun/shadow edits. These are
-ordinary WebSocket JSON-RPC `scene.get`/`scene.mutate` calls shared with NativeSocket
-clients, not renderer bypasses. The video stays the decoded SDI monitor from `chr-monitor`.
-
-NativeSocket CLI/agent example (omit edit flags to query; `--ws URL` selects the
-same methods over WebSocket):
+Edit its camera, sun and shadows with the scene CLI over NativeSocket (or `--ws URL`
+for the same methods over WebSocket); omit edit flags to query:
 
 ```sh
 npm run scene -- --socket /path/to/render.sock --runtime PRINTED_RUNTIME --scene PRINTED_SCENE --camera orbit-up --sun 3 --shadow pcf
 ```
 
-Edits are serialized and query the current revision. An uncertain reply triggers
-reconciliation and requires an explicit reload; it is never blindly retried.
-Camera controls require a manual `intrinsics_pose` camera. World up is -Z and poses
-are forward row-major matrices with no half-pixel offset. Reset does not create a
-new timeline or change input frame identity.
-
-For a real-browser control and decoded-video self-test, while this opt-in server
-and the harness are running:
-
-```sh
-npm run verify:browser -- --url 'http://127.0.0.1:5173/?program=1&runtime=PRINTED_RUNTIME&scene=PRINTED_SCENE'
-```
-
-This clicks every camera action and the lighting/shadow panel, verifies revision
-progress and camera reset, and measures changed pixels in decoded monitor video.
-On deep Linux worktrees, Chrome may exceed Unix socket path limits with an absolute
-profile directory. Create root `output/render-harness/chrome`, then use
-`TMPDIR=../../../output/render-harness/chrome` from this package. If a distribution
-launcher exits silently, pass `--chrome` with the actual installed Chrome binary.
-The legacy `verify` rotation-content check is for the default triangle only;
-do not interpret it as synthetic scene acceptance. Unit geometry tests are not
-browser/WebRTC evidence.
+Edits are ordinary `scene.get`/`scene.mutate` calls, not renderer bypasses. Each
+edit queries the current revision; an uncertain reply is reported and never
+blindly retried. Camera edits require a manual `intrinsics_pose` camera. World up
+is -Z and poses are forward row-major matrices with no half-pixel offset. Reset
+does not create a new timeline or change input frame identity. Watch the result in
+the program monitor page.
 
 ## Owner-local pitch demo
 
 The separate [pitch-demo-v1 guide](../../../server/docs/pitch-demo.md) describes
 `--pitch-demo <local-manifest.json> --pitch-controls <new-local-controls.json>`.
-Load that native-written controls file in the panel before Load / reconcile.
-It supplies opaque model IDs and the renderer-derived editable pose; no GLB path
-is sent through RPC. The original source-frame identity, Ti/C, native extent and
-dimension status remain local and immutable, including after reconnects.
-
-The pitch panel adds grounded model selection/scale/yaw/mirror, authored tower
-heights, independent sun, four-point/four-spot rig comparisons and
-radius/cone/target/emission controls. NativeSocket uses the same helpers:
+Pass that native-written controls file to the scene CLI. It supplies opaque model
+IDs and the renderer-derived editable pose; no GLB path is sent through RPC. The
+original source-frame identity, Ti/C, native extent and dimension status remain
+local and immutable, including after reconnects:
 
 ```sh
 npm run scene -- --socket /path/to/control.sock --pitch-controls /path/to/controls.json --camera reset --rig spots+sun --shadow pcss --summary
-npm run verify:browser -- --url 'http://127.0.0.1:5173/?ws=ws://127.0.0.1:8787' --pitch-controls /path/to/controls.json --fps 25
 ```
 
-The real Chrome check uploads metadata through the local file picker, clicks the
-actual panel and inspects decoded SDI video. Keep metadata, full CLI snapshots
-and screenshots private. `--summary` emits only revision/effect/count aggregates.
-No measured pose/calibration, source-video decoding or production-policy approval
-is implied.
+Keep metadata, full CLI snapshots and screenshots private. `--summary` emits only
+revision/effect/count aggregates. No measured pose/calibration, source-video
+decoding or production-policy approval is implied.
+
+## Program monitor page
+
+The page shows the program output and diagnostics only; it sends no control
+commands. **Connect** opens two independent connections, to `chr-server` (`?ws=`,
+default `ws://<page host>:8787`) and to `chr-monitor` (`?monitor=`, default `:8789`).
+Each reconnects by itself every 2 s while connected: losing `chr-server` keeps the
+video playing, and losing `chr-monitor` closes the stream, keeps the server panels
+updating and reopens the stream when the monitor returns. Pasted URLs lose
+surrounding whitespace and quotes.
+
+Panels poll once a second; counters show their rate since the last poll and turn
+amber while a problem counter rises:
+
+- **SDI output**: video mode, slots out, repeated and dropped slots, source frame.
+- **Render worker**: state and PID, restarts, deadline misses, clean-feed frames,
+  last error. Worker state, PID and error changes are logged.
+- **Tracking**: `tracking.get_status` join counters of a tracked program;
+  other programs show "not a tracked program".
+- **chr-monitor**: encoded and skipped slots, WebRTC viewers, SRT callers.
+- **WebRTC stream**: connection and ICE state, the selected candidate path
+  (`tcp`/`udp`, candidate types and remote address), RTT, bitrate, resolution,
+  fps, codec, decoder, decoded/dropped/key frames, decode time, jitter buffer,
+  network jitter, packets lost, NACK/PLI and freezes.
+
+`?transport=tcp` keeps only the monitor's ICE-TCP candidates, so a viewer behind an
+SSH port forward skips UDP attempts that cannot succeed. `?auto=1` connects, opens
+the stream and writes a JSON report for `verify:browser`.
 
 ## Run
 
@@ -121,21 +99,8 @@ environment. It composites the local MP4 with the retained sample scene,
 passes frames through the existing simulated SDI clock, and uses GStreamer
 for source conversion. Start `chr-monitor --fps 30 --encoder gstreamer` (or use
 `server/scripts/run-live.sh --media … --monitor-arg --encoder --monitor-arg gstreamer`)
-for the same GStreamer H.264 encoding. WebRTC signaling and ICE-TCP remain
-the existing implementation, now in `chr-monitor`, so the documented SSH
-forwarding path is retained.
-This is not a physical SDI device, a camera-calibration replay, or a full
-GStreamer WebRTC backend.
-
-Open the page with `?live=1&runtime=PRINTED_RUNTIME&scene=PRINTED_SCENE&ws=WS_URL&monitor=MONITOR_URL`
-to connect, load the scene controls and open the program stream automatically.
-Without `live=1`, existing manual and self-test behavior is unchanged.
-
-For the owner's `--software-video ... --video-scene ...` calibrated replay,
-also pass `calibrated=1`. The rotation panel then controls the registered GLB,
-the fixed ground is a transparent shadow catcher, and camera buttons are disabled
-to preserve alignment. The label is a UI hint, not calibration discovery or an
-RPC extension. Per-frame lens/warp data and asset paths stay server-local.
+for the same GStreamer H.264 encoding. This is not a physical SDI device, a
+camera-calibration replay, or a full GStreamer WebRTC backend.
 
 Requires Node.js 24 or newer, which runs the `.ts` scripts directly.
 
@@ -158,11 +123,8 @@ Instead of terminals 1 and 2, `server/scripts/run-live.sh --monitor-arg --webrtc
 
 `chr-server --help` and `chr-monitor --help` list the options. By default the server
 listens on `ws://127.0.0.1:8787` and `$XDG_RUNTIME_DIR/chr/render.sock`, and the
-monitor on `ws://127.0.0.1:8789`. The page's two URL fields (or `?ws=` and
-`?monitor=`, default `ws://<page host>:8787` and `:8789`) select them; it shows the
-render worker's state, restarts, clean-feed frames and deadline misses from
-`render.get_worker_status`, and the monitor's encoded/skipped/viewer/SRT-caller
-counts from `monitor.get_status`.
+monitor on `ws://127.0.0.1:8789`; the page's two URL fields select them (see
+[Program monitor page](#program-monitor-page)).
 
 ## Verify
 
@@ -171,9 +133,7 @@ npm run typecheck
 npm test                          # depacketizer, framing and shared scene/frame fixtures
 npm run verify                    # IPC, render worker and SDI status, monitor status, and the WebRTC stream via werift + ffmpeg
 npm run verify:browser            # the stream decoded by a headless Chrome
-npm run verify:browser -- --tcp-only   # same, with UDP forbidden (SSH forward case; needs chr-monitor --webrtc-tcp)
-npm run verify:browser -- --rotation-directions # exercise both signs through the actual UI
-npm run verify:browser -- --mesh-rotation --url 'http://127.0.0.1:5173/?ws=ws://127.0.0.1:8787&runtime=PRINTED_RUNTIME&scene=PRINTED_SCENE'
+npm run verify:browser -- --tcp-only   # same over ?transport=tcp, requiring an ICE-TCP path (SSH forward case; needs chr-monitor --webrtc-tcp)
 ```
 
 `verify` reaches `chr-server` at `--ws` (`CHR_WS_URL`, default `ws://127.0.0.1:8787`)
@@ -204,5 +164,6 @@ ssh -N -L 5173:127.0.0.1:5173 -L 8787:127.0.0.1:8787 -L 8789:127.0.0.1:8789 \
 ```
 
 Forward 8791–8793 as well to keep more streams open at the same time.
-Then open `http://127.0.0.1:5173/` on the local machine. If the local machine can reach
-the server's network directly, the browser may use UDP host candidates instead.
+Then open `http://127.0.0.1:5173/?transport=tcp` on the local machine. Without
+`transport=tcp`, a local machine that can reach the server's network directly may use
+UDP host candidates instead.

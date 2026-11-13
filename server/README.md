@@ -179,10 +179,10 @@ GStreamer's WebRTC backend. JSON-RPC and the default triangle/synthetic/pitch
 scene/frame methods remain unchanged. The separate input probe above still performs no
 rendering. Physical SDI, tracking, recording and production policy are not implied.
 
-Use `client/example/render-harness` for the WebUI. Its `live=1` query flag connects
-the program monitor and opens scene controls; supply the runtime/scene IDs printed
-by the server, its WebSocket URL (`ws=ws://127.0.0.1:18771`) and the monitor's
-(`monitor=ws://127.0.0.1:18776`). Browser traffic can remain TCP-only through
+Use `client/example/render-harness` as the program monitor. It is read-only:
+pass the server's WebSocket URL (`ws=ws://127.0.0.1:18771`) and the monitor's
+(`monitor=ws://127.0.0.1:18776`); scene edits go through `npm run scene` or another
+JSON-RPC client. Browser traffic can remain TCP-only through
 SSH: forward the UI HTTP port, WebSocket ports 18771 and 18776 and ICE-TCP ports
 18772-18775. Monitor disconnection, or stopping `chr-monitor`, never blocks
 program output.
@@ -246,9 +246,9 @@ timecode, arbitrary VFR or tracking.
 Only CG and its shadows are distorted; the display-referred BT.709 footage is
 not warped or tone-mapped. Composition uses 4x MSAA, PCSS, an authored sun and
 four corner spots. Lighting is not estimated from the footage. The existing
-`mesh`/`ground` IDs let the page rotate the GLB without moving its shadow catcher.
-Use `live=1&calibrated=1` in the harness URL to label this mode and disable camera
-buttons that would invalidate the clip alignment. This is diagnostic replay:
+`mesh`/`ground` IDs let a JSON-RPC client (`mesh.start_rotation`) rotate the GLB
+without moving its shadow catcher. Leave the camera alone: edits would invalidate
+the clip alignment. This is diagnostic replay:
 no scene occlusion, audio, physical SDI, hardware encoding or real-time estimator.
 
 ### Tracked camera simulation
@@ -743,18 +743,22 @@ here) so a browser on another machine can connect through an SSH port forward
 `--ws` port; the monitor refuses to start otherwise. `--srt` and `--encoder gstreamer` need
 `--features gstreamer-media` inside `nix develop .#media`.
 
-`server/scripts/run-live.sh [--media] [--monitor-arg <arg>]... [chr-server options]`
+`server/scripts/run-live.sh [--media] [--no-monitor] [--monitor-arg <arg>]... [chr-server options]`
 builds and starts both from the repository root inside the development shell.
 `--media` enables `gstreamer-media` for both; `--size`, `--fps` and
 `--monitor-tap` (as `--tap`) go to both; `--monitor-arg X` passes `X` to
-`chr-monitor`; every other option goes to `chr-server`. Stopping either process
-stops both:
+`chr-monitor`; every other option goes to `chr-server`. The processes are
+independent: one that exits is restarted after a short backoff (1 s, doubling up
+to 10 s while it keeps failing) and the other keeps running; Ctrl-C stops both.
+`--no-monitor` starts only `chr-server`, so `chr-monitor` can be started, stopped
+or moved on its own with the same `--size`, `--fps` and tap:
 
 ```sh
 server/scripts/run-live.sh --monitor-arg --webrtc-tcp --monitor-arg 127.0.0.1:8790
 ```
 
-The browser viewer and verification scripts are in
+The browser program monitor (read-only: video plus server, worker, tracking,
+monitor and WebRTC diagnostics) and verification scripts are in
 `client/example/render-harness/`.
 
 ### Program stills (chr-renderer-cli)

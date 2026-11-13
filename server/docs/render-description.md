@@ -104,8 +104,13 @@ GLB), frames go out as clean feed or repeats, as during any worker restart.
   page lists those materials after sending.
 - **Asset sources:** assets are entries of the offline ZIP, read by the server
   from the ZIP's onsite path. The path is remembered when the ZIP was imported
-  by path; otherwise type it. Matches from the Fusion API are not supported yet.
+  by path or last sent; otherwise type it. Matches from the Fusion API are not
+  supported yet.
 
+The renderer bar sits on both the **广告位预览** and **导入结果与微调** tabs; both
+share one path and state. Its buttons are enabled only for an offline-ZIP match
+whose preview has loaded its materials and that has a server path, and stay
+disabled while an action runs, so repeated clicks do not queue repeated loads.
 **发送到渲染器** calls `description.load` through the page's `/chr-render`
 WebSocket proxy (`CHR_RENDER_URL`, default `ws://127.0.0.1:8787`), so one tunnel
 to the page is enough. **导出渲染描述** downloads `{"scene": …}`; add a `camera`

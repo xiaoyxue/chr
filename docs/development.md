@@ -127,8 +127,10 @@ documented scripts inside each package (see
 `npm run test:offline` inside it. Without Fusion, a match can be imported from an
 offline Fusion ZIP (`manifest.json` plus `assets/`) in the browser. Every import
 (match ZIP, videos, PLY, result folder, ad materials) can be picked locally or
-loaded by an absolute path on the onsite server. The root flake builds it from
-`package-lock.json` (see the next section). Its 发送到渲染器 action converts the
+loaded by an absolute path on the onsite server; surrounding whitespace and quotes
+(as pasted by "Copy as path") are dropped. The root flake builds it from
+`package-lock.json` (see the next section). Its 发送到渲染器 action (on the 广告位预览
+and 导入结果与微调 tabs) converts the
 placement draft into a render description and loads it into `chr-server` through
 the page's `/chr-render` WebSocket proxy (`CHR_RENDER_URL`); see
 `server/docs/render-description.md`.

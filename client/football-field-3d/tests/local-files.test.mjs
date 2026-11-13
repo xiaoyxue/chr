@@ -71,3 +71,11 @@ test('answers only GET requests addressed to a loopback host', async () => {
   });
   assert.equal(status, 403);
 });
+
+test('pasted server paths drop surrounding whitespace and quotes', async () => {
+  const { isServerPath, serverPath } = await vite.ssrLoadModule('/src/shared/server-files.ts');
+  assert.equal(serverPath('  "/home/user/match.fusion.zip" \n'), '/home/user/match.fusion.zip');
+  assert.equal(serverPath("'/home/user/my match.zip'"), '/home/user/my match.zip');
+  assert.ok(isServerPath(' "/home/user/match.zip"'));
+  assert.ok(!isServerPath('"match.zip"'));
+});

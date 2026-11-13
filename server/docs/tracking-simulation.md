@@ -128,7 +128,14 @@ server/scripts/run-tracked.sh --scene scene.json --video clip.mp4 --srt 127.0.0.
 ```
 
 It builds the release binaries and starts the three processes on a private
-socket, input ring and program tap; stopping any of them stops all. The output
+socket, input ring and program tap. They run independently: a process that
+exits is restarted after a short backoff while the others keep running (the
+server replaces a stale socket, the simulator reconnects, and the server and
+monitor reopen a replaced ring or tap); Ctrl-C stops all. A restarted
+`chr-server` starts again from its startup scene, so a scene loaded at runtime
+must be sent again. `--dir <path>` uses a fixed directory for the socket, ring
+and tap, kept on exit, and `--no-monitor` skips `chr-monitor` so it can run on
+its own with `--tap <dir>/program.tap` and the same `--size`/`--fps`. The output
 rate is the manifest's `fps`. `--size` sets the output (default 1280x720),
 `--sim-arg`/`--monitor-arg` pass options through, and every other option goes to
 `chr-server`. `--description <json>` draws a
