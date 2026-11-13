@@ -26,6 +26,7 @@ not frame-rate promises.
 | Rectangle/disk/sphere area lights | Extension, labelled approximation | `ltc-plausible-v1`: per-emitter error <= 0.02 Le + 30%, area-only Lambert x (1 - F0) diffuse |
 | Area-light shadows | Extension, labelled approximation | `area-shadow-pcss-v1`: centre cubemap + PCSS; penumbra ignores emitter outline and glossy weighting |
 | Shadow catcher | Extension | Luminance ratio of shadowed/unshadowed light over footage; no wire field |
+| Ground decal (#113) | Extension | Unlit, premultiplied-alpha blend over opaque CG in instance order, before shadow catchers so CG shadows darken it; no depth write, no cast shadow; exact in linear light before the scene tone map; no wire field |
 | Point/spot PCSS source radius | Preview approximation | Soft-shadow source size, not finite-emitter shading |
 | Physical atmosphere (#28), sky visibility (#29) | Optional (owner decision) | Not required for this acceptance |
 | Brown-Conrady tangential distortion | Deferred | Native-pixel radial model selected instead |
@@ -40,7 +41,7 @@ not frame-rate promises.
 | Coordinate preservation, camera equivalence | `camera`, `mesh_gpu`, `orthographic_gpu` |
 | Model transforms, GLB | `scene`, `glb`, `mesh_gpu` |
 | Distortion | `distortion_gpu` (identity, sub-0.3 px markers for both models, unwarped footage, non-invertible pixels, guard-band budget, output resizing), unit tests in `distortion`, CPU reference `distortion_reference` |
-| Depth and composition | `composition_gpu`, `distortion_gpu`, `shadow_catcher_gpu` |
+| Depth and composition | `composition_gpu`, `distortion_gpu`, `shadow_catcher_gpu`, `decal_gpu` |
 | Direct lights, PBR | `pbr_gpu` |
 | Area emitters | `area_light_gpu` (pinned candidate values, reference within profile, sidedness, size/power, trajectory continuity); evaluation in `area-light-evaluation.md` |
 | Shadows, PCF, PCSS, cascades, cubemaps | `shadow_gpu`, `area_shadow_gpu`, `shadow_catcher_gpu` (spot near-plane regression) |

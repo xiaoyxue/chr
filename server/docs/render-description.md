@@ -55,7 +55,7 @@ are shared.
 | `kind` | Asset coordinates | Material |
 | --- | --- | --- |
 | `glb` | The importer's basis: glTF +Y-up turned to -Z-up, `(x, y, z) -> (x, z, -y)`, node transforms baked | As authored. `alphaMode: BLEND` is rejected unless `blend_as: "mask"`, which imports it as an alpha mask (cutoff 0.5) and logs a warning. The renderer has no translucent pass. |
-| `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit, double-sided; texels with alpha below 0.5 are cut out. Alpha-blended ground decals are tracked in #113 |
+| `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended by the image's alpha over the opaque CG (`alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
 
 `source` is either `{"path": …}` or `{"package": <zip>, "entry": <name>}`, such
 as a Fusion offline package. `sha256` (lowercase hex of the source bytes) is
