@@ -220,26 +220,36 @@ function iceGatheringComplete(peer: RTCPeerConnection): Promise<void> {
 // Control
 
 async function connect(): Promise<void> {
+  let client: RpcClient;
   try {
-    rpc = new RpcClient(await connectWebSocket(wsInput.value), { idPrefix: "ui" });
-    setConnected(true, "connected");
-    log(`connected to ${wsInput.value}`);
+    client = new RpcClient(await connectWebSocket(wsInput.value), { idPrefix: "ui" });
   } catch (error) {
     setConnected(false, (error as Error).message);
     return;
   }
-  await connectMonitor();
+  rpc = client;
+  setConnected(true, "connected");
+  log(`connected to ${wsInput.value}`);
+  let monitor: RpcClient | null = null;
+  let monitorError = "";
+  try {
+    monitor = new RpcClient(await connectWebSocket(monitorInput.value), { idPrefix: "monitor" });
+  } catch (error) {
+    monitorError = (error as Error).message;
+  }
+  // Disconnected (or reconnected) while the monitor connection was pending.
+  if (rpc !== client) {
+    monitor?.close();
+    return;
+  }
+  if (monitor === null) {
+    setMonitor(null, `monitor: ${monitorError}`);
+  } else {
+    setMonitor(monitor, "monitor connected");
+    log(`monitor at ${monitorInput.value}`);
+  }
   pollTimer = setInterval(() => void poll(), 500);
   await poll();
-}
-
-async function connectMonitor(): Promise<void> {
-  try {
-    setMonitor(new RpcClient(await connectWebSocket(monitorInput.value), { idPrefix: "monitor" }), "monitor connected");
-    log(`monitor at ${monitorInput.value}`);
-  } catch (error) {
-    setMonitor(null, `monitor: ${(error as Error).message}`);
-  }
 }
 
 function disconnect(reason: string): void {
@@ -272,15 +282,18 @@ async function poll(): Promise<void> {
     disconnect("connection lost");
     return;
   }
-  if (monitorRpc === null) return;
+  const monitor = monitorRpc;
+  if (monitor === null) return;
   try {
-    showMonitor(await monitorRpc.getMonitorStatus());
+    showMonitor(await monitor.getMonitorStatus());
     await pollStream();
   } catch (error) {
+    // Already replaced or closed by a disconnect.
+    if (monitorRpc !== monitor) return;
     // Losing the monitor never affects control or the program output.
     log(`monitor lost: ${(error as Error).message}`);
     closeStream();
-    monitorRpc.close();
+    monitor.close();
     setMonitor(null, "monitor lost");
   }
 }

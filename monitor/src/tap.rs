@@ -6,7 +6,7 @@
 //! server restarts it replaces the tap file, so an idle tap is reopened.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -24,7 +24,7 @@ use crate::{
     encoder::{EncodedFrame, H264Encoder, VideoFeed},
 };
 
-/// How long a tap may stay idle before the monitor looks for a replaced file.
+/// How long a tap may stay idle before the monitor checks whether it was replaced.
 const REOPEN_AFTER: Duration = Duration::from_secs(1);
 
 /// The H.264 encoder used for transmitted slots.
@@ -188,11 +188,13 @@ fn run(
     }
 }
 
-/// Reads the newest slot of the tap at `path`, reopening it when it goes idle.
+/// Reads the newest slot of the tap at `path`, reopening it when it was replaced.
 struct Follower {
     path: PathBuf,
     mode: VideoMode,
     reader: Option<Reader>,
+    /// Identity of the file `reader` maps, if the platform reports one.
+    file: Option<FileId>,
     /// Write count of the last slot handed out.
     seen: u64,
     idle_since: Instant,
@@ -206,6 +208,7 @@ impl Follower {
             path,
             mode,
             reader: None,
+            file: None,
             seen: 0,
             idle_since: Instant::now(),
             problem: None,
@@ -253,6 +256,12 @@ impl Follower {
 
     fn reopen(&mut self) {
         self.idle_since = Instant::now();
+        // An idle but unchanged tap keeps its reader and read position, so a slow
+        // or stalled server loses no slot to the check.
+        let file = file_id(&self.path);
+        if self.reader.is_some() && file.is_some() && file == self.file {
+            return;
+        }
         let reader = match Reader::open(&self.path) {
             Ok(reader) => reader,
             Err(error) => {
@@ -274,13 +283,14 @@ impl Follower {
             ));
             return;
         }
-        // Reopening an unchanged tap must not replay its newest slot.
+        // A newly opened tap is followed from its next slot.
         self.seen = reader.write_count();
         if self.reader.is_none() || self.problem.is_some() {
             log::info!("reading program tap at {}", self.path.display());
         }
         self.problem = None;
         self.reader = Some(reader);
+        self.file = file;
     }
 
     fn report(&mut self, problem: String) {
@@ -289,6 +299,23 @@ impl Follower {
             self.problem = Some(problem);
         }
     }
+}
+
+type FileId = (u64, u64);
+
+/// Device and inode of `path`: a restarted server replaces the tap with a new file.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Without file identity every idle check reopens the tap.
+#[cfg(not(unix))]
+fn file_id(_path: &Path) -> Option<FileId> {
+    None
 }
 
 /// Output slot indices restart with `chr-server`; encoders and RTP need monotonic time.
@@ -429,6 +456,23 @@ mod tests {
                 Err(error) => panic!("no encoded slot: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn a_slot_after_an_idle_period_is_not_lost() {
+        let dir = std::env::temp_dir().join(format!("chr-monitor-idle-{}", std::process::id()));
+        let path = dir.join("program.tap");
+        let mut tap = Writer::create(&path, chr_shm::tap::layout(MODE.width, MODE.height)).unwrap();
+        let mut follower = Follower::new(path, MODE);
+        let mut payload = Vec::new();
+        assert!(follower.newest(&mut payload).is_none());
+        push(&mut tap, 1, MODE);
+        assert_eq!(follower.newest(&mut payload).unwrap().index, 1);
+        // A 1 fps server: the next slot arrives just as the tap counts as idle.
+        std::thread::sleep(REOPEN_AFTER + Duration::from_millis(50));
+        push(&mut tap, 2, MODE);
+        assert_eq!(follower.newest(&mut payload).unwrap().index, 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

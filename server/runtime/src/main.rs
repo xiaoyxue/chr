@@ -131,9 +131,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if !use_tap {
         args.monitor_tap = None;
     } else if args.monitor_tap.is_none() {
-        args.monitor_tap = Some(chr_shm::tap::default_path().ok_or(
-            "XDG_RUNTIME_DIR is not set; pass --monitor-tap <path> or --monitor-tap none",
-        )?);
+        // The program never needs the monitor, so a missing default only disables it.
+        args.monitor_tap = chr_shm::tap::default_path();
+        if args.monitor_tap.is_none() {
+            log::warn!(
+                "XDG_RUNTIME_DIR is not set: no program tap for chr-monitor; pass --monitor-tap <path>"
+            );
+        }
     }
     Ok(Some(args))
 }
