@@ -181,6 +181,43 @@ impl OffscreenTarget {
     }
 }
 
+/// CPU readback of an existing 4-byte-per-texel texture, such as a composition
+/// target. Blocks until completion with a bounded GPU wait; not a streaming path.
+pub struct TextureReadback {
+    readback: Readback,
+    extent: ImageExtent,
+}
+
+impl TextureReadback {
+    pub fn new(gpu: &Gpu, extent: ImageExtent) -> Result<Self, BoxError> {
+        let row_bytes = extent.width().checked_mul(4).ok_or("row size overflow")?;
+        Ok(Self {
+            readback: Readback::new(gpu, row_bytes, extent.height())?,
+            extent,
+        })
+    }
+
+    /// Appends a copy of `texture` (which needs `COPY_SRC` and this extent) to
+    /// `encoder`, submits it and returns tightly packed, top-down rows in `pixels`.
+    pub fn submit(
+        &self,
+        gpu: &Gpu,
+        mut encoder: wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        pixels: &mut Vec<u8>,
+    ) -> Result<(), BoxError> {
+        let size = texture.size();
+        if (size.width, size.height) != (self.extent.width(), self.extent.height())
+            || texture.format().block_copy_size(None) != Some(4)
+        {
+            return Err("readback texture must match the 4-byte-per-texel extent".into());
+        }
+        self.readback.record_copy(&mut encoder, texture);
+        let submission = gpu.queue.submit([encoder.finish()]);
+        self.readback.finish(gpu, submission, pixels)
+    }
+}
+
 /// Render through the shared pipeline and return tightly packed, top-down sRGB RGBA8.
 /// This native readback blocks until completion, with a bounded GPU wait.
 pub fn render_triangle_rgba(gpu: &Gpu, extent: ImageExtent) -> Result<Vec<u8>, Box<dyn Error>> {

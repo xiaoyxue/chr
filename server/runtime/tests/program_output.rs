@@ -590,6 +590,82 @@ async fn gpu_video_mesh_turns_independently_of_ground_and_restores_pixels() {
 
 #[tokio::test]
 #[ignore = "requires a native hardware GPU"]
+async fn gpu_renderer_cli_matches_the_program_bridge() {
+    let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
+    // The in-process bridge, as chr-server runs it: frame 0 through the SDI port.
+    let (mut synthetic, adapter) = Synthetic::install(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 64).unwrap();
+    synthetic.create_scene(&control).await.unwrap();
+    let mut renderer = ProgramRenderer::new(&gpu, &synthetic.configuration).unwrap();
+    let (taps, tap) = Taps::observed();
+    let sdi = SdiOutput::spawn_program(mode(), id("cli-parity-output").unwrap(), taps).unwrap();
+    let mut port = sdi.input();
+    synthetic.inject(&control).await.unwrap().unwrap();
+    renderer
+        .drive(&gpu, &synthetic.scheduler, &mut port)
+        .unwrap();
+    let bridge = receive(&tap, 0).uyvy;
+    drop(sdi);
+    control.shutdown().await;
+    owner.await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("chr-renderer-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("still.png");
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_chr-renderer-cli"))
+        .args([
+            "render",
+            "--synthetic-program",
+            "--size",
+            "192x128",
+            "--output",
+        ])
+        .arg(&png)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let rgba = image::open(&png).unwrap().into_rgba8();
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // The PNG holds BT.709 code values; the bridge's own converter must turn them
+    // into exactly the UYVY it transmitted.
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("renderer-cli still"),
+        size: wgpu::Extent3d {
+            width: rgba.width(),
+            height: rgba.height(),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        rgba.as_raw(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(rgba.width() * 4),
+            rows_per_image: Some(rgba.height()),
+        },
+        texture.size(),
+    );
+    let converter = chr_renderer::UyvyConverter::from_bt709_texture(&gpu, &texture).unwrap();
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    converter.encode(&mut encoder);
+    let mut cli = Vec::new();
+    converter.submit_readback(&gpu, encoder, &mut cli).unwrap();
+    assert_eq!(
+        cli, *bridge,
+        "chr-renderer-cli matches the transmitted program frame"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a native hardware GPU"]
 async fn gpu_program_pixels_controls_provenance_and_tap() {
     let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
     let adapter = gpu.adapter.get_info();

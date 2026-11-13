@@ -3,7 +3,7 @@
 **Status:** `proposed` — implementation plan for the `confirmed`
 [Live process architecture](live-process-architecture.md). Field names and
 defaults below are the intended first version; each step's pull request updates
-this document if they change. Steps 1 (#99) and 2 (#95) are `implemented`; steps 3 and 4 are not.
+this document if they change. Steps 1 (#99), 2 (#95) and 3 (#96) are `implemented`; step 4 is not.
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
 ring layout, supervision and clean feed, the monitor process, and acceptance
@@ -137,17 +137,25 @@ also outside chr, so ffmpeg is not used as an SRT receiver.
 
 ```text
 chr-renderer-cli render (--synthetic-program | --pitch-demo <json> | --video-scene <json>)
-    [--size <WxH>] [--state <scene-state.json>] [--background <png>]
-    [--frame <n>] [--samples 1|4] --output <png> [--overwrite]
+    [--size <WxH>] [--fps <n>] [--state <scene-state.json>] [--background <png>]
+    [--frame <n>] --output <png> [--overwrite]
 ```
 
-- Uses the same program specifications and registration code as `chr-server`,
-  so the output matches what the worker would render for the same snapshot.
+- Uses the same program specifications (`program::spec::ProgramSpec`) and
+  registration code as `chr-server`, so the output matches what the worker would
+  render for the same snapshot. The frame takes the live path (`scene.create`,
+  frame publish and submit, the scheduler's execution, `ProgramRenderer`); only
+  the RGBA readback replaces the UYVY hand-off.
+- `--fps` exists because a video scene validates its clip rate. There is no
+  `--samples`: the program profiles fix their sample count, and the CLI must
+  match the server.
+- All inputs are validated before a GPU is requested.
 - `--state` takes a `chr-common` `SceneState`; without it the program's initial
-  scene is used. `--frame` selects the frame identity (lens model for
+  scene is used. Its `configuration_id` is replaced by the program's, which
+  derives from the run's random runtime ID. `--frame` selects the frame identity (lens model for
   `--video-scene`). `--background` replaces the program's input image.
 - Writes the BT.709 RGBA composition as PNG code values without further colour
-  conversion. Refuses to overwrite unless `--overwrite`. Logs the adapter and
+  conversion (no sRGB chunk). Refuses to overwrite unless `--overwrite`. Logs the adapter and
   rejects software adapters.
 - A general scene file with arbitrary model paths is a follow-up; it must not
   become a de facto public distortion or asset schema.
@@ -157,6 +165,10 @@ chr-renderer-cli render (--synthetic-program | --pitch-demo <json> | --video-sce
 CPU tests for argument and input validation; an ignored GPU test that a
 synthetic program rendered by the CLI matches the in-process program bridge
 pixel for pixel on the same device.
+
+Recorded: the GPU test runs the CLI executable, converts its PNG with the
+bridge's UYVY converter and compares it with the UYVY frame transmitted by the
+SDI port in the same process; they are identical.
 
 ## Step 4: worker, supervision and clean feed (#97)
 

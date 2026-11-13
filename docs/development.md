@@ -20,7 +20,7 @@ Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
-server/runtime/           chr-runtime: the chr-server render server with IPC and video outputs
+server/runtime/           chr-runtime: chr-server (render server) and chr-renderer-cli (stills)
   src/input/              Video acquisition adapters (currently software MP4)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
@@ -132,7 +132,7 @@ nix fmt -- --check flake.nix
 ```
 
 The default package and named `chr-app` package build the renderer viewer,
-`chr-server` builds the headless render server, and `chr-monitor` builds the
+`chr-server` builds the headless render server and `chr-renderer-cli`, and `chr-monitor` builds the
 video monitor process. The default application runs the
 viewer; no client package is advertised.
 `nix flake check` includes:

@@ -247,10 +247,31 @@ impl Synthetic {
     }
 
     pub async fn create_scene(&self, control: &SceneControl) -> Result<(), Error> {
+        self.create_scene_with(control, &self.initial_state).await
+    }
+
+    /// Creates the program scene from `state` instead of the initial one, through
+    /// the same validating `scene.create` as both IPCs.
+    pub async fn create_scene_with(
+        &self,
+        control: &SceneControl,
+        state: &w::SceneState,
+    ) -> Result<(), Error> {
         control.call(w::SCENE_CREATE, Some(json!({
-            "runtime_id":self.configuration.runtime_id,"scene_id":self.scene_id,"state":self.initial_state,
+            "runtime_id":self.configuration.runtime_id,"scene_id":self.scene_id,"state":state,
         }))).await.map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// The scene [`Self::create_scene`] creates.
+    pub fn initial_state(&self) -> &w::SceneState {
+        &self.initial_state
+    }
+
+    /// The synthetic native input image (RGBA8, BT.709 code values) that
+    /// [`Self::inject`] submits.
+    pub fn native_pixels(&self) -> &[u8] {
+        &self.pixels
     }
 
     /// One native frame, submitted through the same strict control queue as both IPCs.

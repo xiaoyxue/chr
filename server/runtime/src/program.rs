@@ -6,12 +6,15 @@ use crate::frame_submissions::{Execution, FrameSubmissions};
 use crate::sdi::SdiInput;
 use chr_common::scene_frame as w;
 use chr_renderer::{
-    Gpu, UyvyConverter,
+    Gpu, TextureReadback, UyvyConverter,
     composition::{AlphaMode, FrameCompositor, ImageLayer, ImageView, Transfer},
+    coordinates::ImageExtent,
 };
 use std::sync::Arc;
 
 pub mod pitch;
+pub mod spec;
+pub mod still;
 pub mod synthetic;
 pub mod video;
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -26,6 +29,7 @@ pub struct ProgramRenderer {
     compositor: Option<(w::ShadowMode, FrameCompositor)>,
     timestamps: Option<wgpu::QuerySet>,
     video_lens: Option<Arc<VideoLens>>,
+    rgba_readback: Option<TextureReadback>,
 }
 
 impl ProgramRenderer {
@@ -46,7 +50,9 @@ impl ProgramRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let converter = UyvyConverter::from_bt709_texture(gpu, &target)?;
@@ -58,6 +64,7 @@ impl ProgramRenderer {
             compositor: None,
             timestamps: None,
             video_lens: None,
+            rgba_readback: None,
         })
     }
 
@@ -108,6 +115,52 @@ impl ProgramRenderer {
     }
 
     fn render(&mut self, gpu: &Gpu, execution: &Execution) -> Result<Vec<u8>, Error> {
+        let _input = self.prepare(gpu, execution)?;
+        let compositor = &mut self.compositor.as_mut().expect("installed compositor").1;
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        if let Some(queries) = &self.timestamps {
+            encoder.write_timestamp(queries, 0);
+        }
+        compositor.encode(&mut encoder, &self.target)?;
+        self.converter.encode(&mut encoder);
+        if let Some(queries) = &self.timestamps {
+            encoder.write_timestamp(queries, 1);
+        }
+        let mut pixels = Vec::new();
+        self.converter.submit_readback(gpu, encoder, &mut pixels)?;
+        Ok(pixels)
+    }
+
+    /// Composes `execution` like [`Self::execute`] but returns the BT.709 RGBA8
+    /// program image (tightly packed, top-down) instead of handing UYVY to the port.
+    /// The execution is reported failed: nothing of it is transmitted.
+    pub fn render_rgba(&mut self, gpu: &Gpu, execution: Execution) -> Result<Vec<u8>, Error> {
+        let rendered = self.compose_rgba(gpu, &execution);
+        if rendered.is_ok() {
+            execution.failed().map_err(|e| e.to_string())?;
+        }
+        rendered
+    }
+
+    fn compose_rgba(&mut self, gpu: &Gpu, execution: &Execution) -> Result<Vec<u8>, Error> {
+        let _input = self.prepare(gpu, execution)?;
+        if self.rgba_readback.is_none() {
+            let size = self.target.size();
+            let extent = ImageExtent::new(size.width, size.height)?;
+            self.rgba_readback = Some(TextureReadback::new(gpu, extent)?);
+        }
+        let readback = self.rgba_readback.as_ref().expect("created above");
+        let compositor = &mut self.compositor.as_mut().expect("installed compositor").1;
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        compositor.encode(&mut encoder, &self.target)?;
+        let mut pixels = Vec::new();
+        readback.submit(gpu, encoder, &self.target, &mut pixels)?;
+        Ok(pixels)
+    }
+
+    /// Uploads the input and prepares the compositor; returns the input texture,
+    /// which must outlive the submission.
+    fn prepare(&mut self, gpu: &Gpu, execution: &Execution) -> Result<wgpu::Texture, Error> {
         let snapshot = execution.scene.snapshot();
         if snapshot.runtime_id != self.runtime_id
             || snapshot.state.configuration_id != self.configuration_id
@@ -190,18 +243,7 @@ impl ProgramRenderer {
             camera_model.unwrap_or(&chr_renderer::distortion::CameraModel::Pinhole),
             &[ImageLayer::new(&view, settings.input_stage)],
         )?;
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        if let Some(queries) = &self.timestamps {
-            encoder.write_timestamp(queries, 0);
-        }
-        compositor.encode(&mut encoder, &self.target)?;
-        self.converter.encode(&mut encoder);
-        if let Some(queries) = &self.timestamps {
-            encoder.write_timestamp(queries, 1);
-        }
-        let mut pixels = Vec::new();
-        self.converter.submit_readback(gpu, encoder, &mut pixels)?;
-        Ok(pixels)
+        Ok(texture)
     }
 
     pub fn drive(
