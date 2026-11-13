@@ -26,21 +26,25 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 - Runtime ownership: `src/input/` acquires video; `src/calibration/` consumes
   calibration and associates it with frames; `src/program/` assembles demo
   scenes and bridges admitted frames into rendering; `src/sdi.rs` owns the
-  simulated output port; `src/monitor/` encodes transmitted slots and fans them
-  out to WebRTC/SRT. Shared GStreamer helpers remain private to the runtime.
+  simulated output port and writes every transmitted slot into the shared-memory
+  program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
+  encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer helpers
+  serve only the software input and remain private to it.
   Keep algorithm estimation in `algorithm/`; replay calibration is not a live
   tracking service or a public distortion protocol.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
 - Keep generated PNGs in repository-root `output/renderer/`, ignored by Git but retained locally.
   PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in `renderer/`.
-- The renderer's only product is the SDI program output. `runtime/` streams to
-  clients exactly what the SDI port transmits (render -> SDI -> encoder ->
-  WebRTC); do not add a second, render-direct client stream. The server's roles
-  are the control plane (args over JSON-RPC), the render pipeline and its clock,
-  the SDI output, and the monitor that encodes the output for clients.
+- The renderer's only product is the SDI program output. Clients see exactly
+  what the SDI port transmits: `runtime/` copies it into the program tap and
+  `chr-monitor` encodes that (render -> SDI -> program tap -> chr-monitor ->
+  WebRTC/SRT); do not add a second, render-direct client stream. The server's
+  roles are the control plane (args over JSON-RPC), the render pipeline and its
+  clock, and the SDI output with its program tap; the monitor never controls the
+  program, and its absence or failure must not affect output.
 - The default runtime renders an RGB triangle. `--synthetic-program` explicitly
   connects retained scenes and synthetic images to the same simulated SDI port;
-  monitor encoding uses software after CPU readback. See `docs/program-output.md`.
+  `chr-monitor` encoding uses software after CPU readback. See `docs/program-output.md`.
   The renderer library separately supports retained meshes, cameras, PBR,
   shadows, IBL, diagnostics and native image composition. Its offscreen examples
   do not establish capture, SDI hardware or hardware-encoder interoperability.

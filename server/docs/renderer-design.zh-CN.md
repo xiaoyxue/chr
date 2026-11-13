@@ -209,9 +209,9 @@ CPU/GPU 测试覆盖原生拟合、预乘 alpha、颜色域分离、BT.709、虚
 从而区分相机投影造成的视觉倾斜和模型本身的朝向。
 
 当前 Cargo 工作区位于仓库根，包括 `server/renderer`（`chr-renderer`）、
-`server/runtime`（`chr-runtime`）、`server/viewer`（`chr-app`）和
-`common`（`chr-common`）。当前服务已将旋转三角形送入模拟 SDI 端口，
-并通过 WebRTC 监看端口实际发出的画面。
+`server/runtime`（`chr-runtime`）、`server/viewer`（`chr-app`）、
+`monitor`（`chr-monitor`）和 `common`（`chr-common`）。当前服务已将旋转三角形送入模拟 SDI 端口，
+并把端口实际发出的画面复制到共享内存节目 tap；独立的 `chr-monitor` 进程通过 WebRTC 监看该画面。
 
 [帧输入契约](../../docs/render-frame-input.md) 已确认持久 scene 和
 **首期仅 pinhole、无畸变**的输入范围。本路线图保留正交与畸变镜头作为后续扩展，
@@ -346,7 +346,7 @@ FrameKey + image_ref + logical_time + Ti/C -> frame assembly <-----------+
                                                    |
                                   one Renderer in chr-renderer
                                       |
-                                      +--> runtime -> SDI output -> monitor -> WebRTC
+                                      +--> runtime -> SDI output -> program tap -> chr-monitor -> WebRTC
                                       +--> viewer/test target -> presentation/readback
 ```
 
@@ -425,7 +425,7 @@ submit 回执不代表已经输出。候选的提交时 scene 快照记录 `scen
 不承诺跨 GPU 像素逐位一致。
 
 本任务不实现录制/标定服务、tracking 算法、codec、新 SDI 硬件或旁路的
-render-direct WebRTC 流。保留 `render -> SDI -> monitor encoder -> WebRTC`；
+render-direct WebRTC 流。保留 `render -> SDI -> program tap -> chr-monitor encoder -> WebRTC`；
 基础设施演进仍由已有 tracker 负责。
 
 ### 静态模型与 model matrix

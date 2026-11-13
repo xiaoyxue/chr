@@ -681,16 +681,12 @@ mod ipc {
     use super::*;
     use chr_common::{
         client::NativeSocketClient,
-        methods::{sdi, triangle, webrtc},
+        methods::{sdi, triangle},
         server::{IpcServer, NativeSocketListener, ServerConfig, WebSocketListener},
     };
     use chr_runtime::{
         control::ControlHandler,
-        monitor::{
-            encoder::VideoFeed,
-            webrtc::{IceConfig, WebRtcHub},
-        },
-        sdi::{SdiOutput, VideoMode},
+        sdi::{SdiOutput, Taps, VideoMode},
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -706,19 +702,17 @@ mod ipc {
         let (control, worker, port) = setup(config(), 8);
         let (commands, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
-        let hub = Arc::new(WebRtcHub::new(
-            Arc::new(VideoFeed::new()),
-            50,
-            IceConfig::default(),
-        ));
-        let (sdi_port, _tap) = SdiOutput::spawn(VideoMode {
-            width: 1280,
-            height: 720,
-            fps: 50,
-        })
+        let sdi_port = SdiOutput::spawn(
+            VideoMode {
+                width: 1280,
+                height: 720,
+                fps: 50,
+            },
+            Taps::default(),
+        )
         .unwrap();
         let handler =
-            Arc::new(ControlHandler::new(commands, hub, sdi_port.stats()).with_scenes(control));
+            Arc::new(ControlHandler::new(commands, sdi_port.stats()).with_scenes(control));
         let server = IpcServer::new(Arc::clone(&handler), ServerConfig::default());
         // Relative addresses avoid Unix sun_path limits in deep feature worktrees.
         let directory = std::path::PathBuf::from("../../output/runtime-scene-adapter");
@@ -758,7 +752,6 @@ mod ipc {
                 json!({"runtime_id":"old","scene_id":"scene-demo"}),
             ),
             (sdi::GET_STATUS, json!({})),
-            (webrtc::OFFER, json!({"type":"answer","sdp":"v=0"})),
             (triangle::GET_STATE, json!({})),
             (w::FRAME_PUBLISH, fixture("publish", "params")),
         ];

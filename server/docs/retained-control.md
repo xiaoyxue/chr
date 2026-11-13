@@ -5,7 +5,8 @@
 This is an **explicit native embedding opt-in**, not a new daemon default or a
 claim of production scene rendering. The shipped binary defaults to the triangle;
 [`--synthetic-program`](program-output.md) installs this adapter and connects
-synthetic composition to the existing SDI monitor encoder/WebRTC chain.
+synthetic composition to the existing SDI port, whose program tap feeds the
+`chr-monitor` encoder/WebRTC chain.
 
 ## Installation and ownership
 

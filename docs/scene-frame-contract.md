@@ -45,7 +45,9 @@ explicit native/configuration validation.
 JSON-RPC 2.0, NativeSocket framing and WebSocket text messages remain unchanged.
 Every public method below uses the same handler and semantics over both control
 transports. Image/model bytes and GPU dependencies are not embedded in JSON.
-Existing triangle, SDI-status and WebRTC-signaling methods remain compatible.
+Existing triangle and SDI-status methods remain compatible. WebRTC signaling
+moved to the separate `chr-monitor` process, and `sdi.get_status` no longer
+reports monitor drops.
 
 | Owner | Existing implementation / future responsibility |
 | --- | --- |
@@ -566,7 +568,8 @@ exposes only its opaque identity. SDI handoff uses a bounded nonblocking queue.
 If full, that rendered frame becomes `delivery: dropped`. The port's actual
 transmission records its output stream and first slot. Repeating the same frame
 does not append an unbounded list to the receipt; detailed port counters/logs
-are separate. The monitor consumes what the port transmitted; monitor skips
+are separate. The monitor consumes what the port transmitted through the
+program tap; monitor skips
 never manufacture a render-direct output or change a transmitted result.
 
 The output port retains its current/repeated frame until replacement or

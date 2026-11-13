@@ -3,7 +3,7 @@
 //!
 //! Its only product is the program output in SDI form: every frame is rendered, converted
 //! to UYVY on the GPU, read back, and queued for the SDI port. Everything clients see is
-//! derived from what that port transmits (see `monitor`).
+//! derived from what that port transmits (the program tap read by `chr-monitor`).
 
 use std::{
     error::Error,

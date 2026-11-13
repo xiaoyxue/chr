@@ -17,7 +17,7 @@ pub mod video;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Reusable worker-local GPU storage, separate from immutable registered inputs.
-/// Completed UYVY allocations move into the bounded scheduler/SDI/monitor chain.
+/// Completed UYVY allocations move into the bounded scheduler/SDI/program-tap chain.
 pub struct ProgramRenderer {
     configuration_id: w::Id,
     runtime_id: w::Id,

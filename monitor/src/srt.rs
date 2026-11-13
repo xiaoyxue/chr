@@ -1,9 +1,12 @@
-//! Direct MPEG-TS/SRT fan-out of the SDI monitor's existing H.264 access units.
-use super::{BoxError, encoder::VideoFeed};
-use crate::sdi::VideoMode;
+//! Direct MPEG-TS/SRT fan-out of the monitor's H.264 access units.
+use crate::{BoxError, Counters, VideoMode, encoder::VideoFeed};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::AppSrc;
-use std::{net::SocketAddr, sync::Arc, thread::JoinHandle};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, atomic::Ordering},
+    thread::JoinHandle,
+};
 use tokio::sync::{broadcast::error::RecvError, watch};
 
 pub struct SrtOutput {
@@ -17,6 +20,7 @@ impl SrtOutput {
         mode: VideoMode,
         bind: SocketAddr,
         feed: Arc<VideoFeed>,
+        counters: Arc<Counters>,
     ) -> Result<Self, BoxError> {
         gst::init()?;
         let pipeline = gst::parse::launch(
@@ -41,12 +45,15 @@ impl SrtOutput {
         let sink = pipeline.by_name("output").ok_or("missing SRT sink")?;
         sink.set_property("uri", format!("srt://{bind}?mode=listener"));
         let caller_feed = feed.clone();
+        let callers = Arc::clone(&counters);
         sink.connect("caller-added", false, move |_| {
             caller_feed.request_keyframe();
+            callers.srt_callers.fetch_add(1, Ordering::Relaxed);
             log::info!("SRT caller connected");
             None
         });
         sink.connect("caller-removed", false, move |_| {
+            counters.srt_callers.fetch_sub(1, Ordering::Relaxed);
             log::info!("SRT caller disconnected");
             None
         });
@@ -108,7 +115,7 @@ impl SrtOutput {
                 return Err(error.into());
             }
         };
-        log::info!("direct SDI H.264 -> MPEG-TS/SRT listening at srt://{bind}");
+        log::info!("program H.264 -> MPEG-TS/SRT listening at srt://{bind}");
         Ok(Self {
             pipeline,
             stop,
@@ -131,7 +138,7 @@ impl Drop for SrtOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::{encoder::EncodedFrame, gstreamer::Encoder};
+    use crate::{encoder::EncodedFrame, gstreamer::Encoder};
     use bytes::Bytes;
     use gstreamer_app::AppSink;
     use std::{
@@ -150,7 +157,8 @@ mod tests {
             fps: 30,
         };
         let feed = Arc::new(VideoFeed::new());
-        let output = SrtOutput::spawn(mode, address, feed.clone()).unwrap();
+        let counters = Arc::new(Counters::default());
+        let output = SrtOutput::spawn(mode, address, feed.clone(), Arc::clone(&counters)).unwrap();
         let mut encoder = Encoder::new(mode).unwrap();
         let mut slot = 0;
         let pixels = [128, 80, 128, 80].repeat(64 * 48 / 2);
@@ -176,7 +184,6 @@ mod tests {
                     frame: slot,
                     keyframe,
                     data: Bytes::from(data),
-                    program: None,
                 });
                 slot += 1;
                 if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(30)) {
@@ -187,6 +194,7 @@ mod tests {
             receiver.set_state(gst::State::Null).unwrap();
             let sample =
                 received.expect("direct SRT receiver must get H.264 without a WebRTC peer");
+            assert!(counters.srt_callers.load(Ordering::Relaxed) >= 1);
             let caps = sample.caps().unwrap().structure(0).unwrap();
             assert_eq!(caps.get::<i32>("width").unwrap(), 64);
             assert_eq!(caps.get::<i32>("height").unwrap(), 48);

@@ -7,7 +7,8 @@
 | `client/src/` | Client-side code | Primarily TypeScript |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
 | `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
-| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/` and `common/` | Rust |
+| `monitor/` | `chr-monitor`: optional video monitor process that encodes the `chr-server` program tap for WebRTC/SRT viewers | Rust |
+| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/`, `monitor/` and `common/` | Rust |
 | `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |
 | `common/shm/` | `chr-shm`: shared-memory frame rings between processes | Rust |
 | `algorithm/src/` | Scene reconstruction algorithms | To be decided |
@@ -45,9 +46,11 @@ They also retain the renderer package and checks. Tool versions come from the
 existing locked inputs; the Cargo workspace and Rust toolchain file are at the
 repository root. No client framework or algorithm stack is selected.
 
-For the video-only FFmpeg-to-GStreamer software input helper and optional
-`chr-server --software-video` simulation (`--features gstreamer-media`), use
-`nix develop .#media`; see `server/README.md`. This optional shell adds media
+For the video-only FFmpeg-to-GStreamer software input helper, optional
+`chr-server --software-video` simulation and the `chr-monitor` SRT/GStreamer
+encoder (`--features gstreamer-media`), use `nix develop .#media`; see
+`server/README.md`, which also shows how to run `chr-server` and `chr-monitor`
+together with `server/scripts/run-live.sh`. This optional shell adds media
 tools without changing the default renderer environment or providing SDI hardware.
 
 From the repository root:
@@ -81,6 +84,6 @@ switching directories. Root `result` / `result-*` links, `target/`, and
 from any directory in the checkout. Outside a checkout, the packaged app writes to
 `output/renderer/triangle.png` under its working directory. Build sources include
 only the root Cargo manifests and the filtered Rust sources and shaders under
-`server/` and `common/`, excluding private references, worktrees,
+`server/`, `monitor/` and `common/`, excluding private references, worktrees,
 caches, and generated outputs. `node_modules/` and TypeScript incremental caches
 are also ignored. Never stage private files.

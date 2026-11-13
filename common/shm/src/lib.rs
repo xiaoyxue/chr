@@ -25,6 +25,7 @@
 
 #[allow(unsafe_code)]
 mod mapping;
+pub mod tap;
 
 use std::{
     fs::{self, File, OpenOptions},

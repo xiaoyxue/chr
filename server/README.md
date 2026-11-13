@@ -7,10 +7,16 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, SDI-to-WebRTC monitor |
+| `runtime/` | `chr-runtime` | Headless render server: JSON-RPC control, render pipeline, simulated SDI output, shared-memory program tap |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
-| `scripts/` | | Windows development helpers and a Linux software video-input probe |
+| `scripts/` | | Windows development helpers, a Linux software video-input probe and the `run-live.sh` launcher |
+
+The video monitor is a separate process, `chr-monitor`, in the repository-root
+`monitor/` crate (not under `server/`: it is optional and may run on another host
+from an SDI loop-out). It reads the program tap that `chr-server` writes, encodes
+it and streams it over WebRTC/SRT; it never controls the program. See
+[Program monitor](#program-monitor-chr-monitor).
 
 ### Runtime module ownership
 
@@ -20,14 +26,13 @@ repository root; its server crates live here:
 | `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
 | `pipeline.rs` | In-process render worker and render-loop pacing |
-| `sdi.rs` | Simulated SDI output clock, bounded output queue, and transmitted-slot tap |
-| `monitor/gstreamer.rs` | GStreamer H.264 encoding of transmitted SDI slots |
-| `monitor/encoder.rs`, `monitor/webrtc.rs`, `monitor/srt.rs` | Encoded fan-out and client monitoring transports |
-| `gstreamer_support.rs` | Private shared mode validation and pipeline-error handling |
+| `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
+| `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 
 `chr-server` currently calls the `chr-renderer` library in-process on its
 `chr-render` thread. #94 decided to move production rendering into a
-restartable worker process; that change is tracked in #95-#97.
+restartable worker process; that change is tracked in #95-#97. #95 moved video
+monitoring out of `chr-server` into `chr-monitor`; rendering is still in-process.
 
 Algorithm estimation stays in repository-root `algorithm/`. Runtime calibration
 consumption does not implement that algorithm: the existing replay loads local
@@ -39,7 +44,7 @@ remain separate work; the current general frame contract is still pinhole-only.
 The default draws an RGB triangle using the same pipeline in a native window,
 an offscreen hardware test, and the render server. The explicit
 [`--synthetic-program` opt-in](docs/program-output.md) connects retained scene/image
-composition to the existing simulated SDI and WebRTC monitor. Physical video
+composition to the existing simulated SDI and `chr-monitor` WebRTC monitor. Physical video
 input, output cards and calibration are not included.
 
 The runtime library now provides an explicitly installed
@@ -118,16 +123,19 @@ retained renderer, simulated SDI clock and browser controls:
 
 ```text
 MP4 -> FFmpeg -> GStreamer UYVY/RGBA -> retained renderer
-    -> simulated SDI output -> GStreamer H.264 -> existing WebRTC -> WebUI
-WebUI -> existing WebSocket JSON-RPC -> retained scene/camera state
+    -> simulated SDI output -> program tap -> chr-monitor: GStreamer H.264 -> WebRTC -> WebUI
+WebUI -> chr-server WebSocket JSON-RPC -> retained scene/camera state
 ```
 
 ```sh
 nix develop .#media
-cargo run --locked -p chr-runtime --features gstreamer-media -- \
+server/scripts/run-live.sh --media \
   --software-video /path/to/video.mp4 --size 1280x720 --fps 30 \
   --no-socket --ws 127.0.0.1:18771 \
-  --webrtc-udp none --webrtc-tcp 127.0.0.1:18772
+  --monitor-arg --encoder --monitor-arg gstreamer \
+  --monitor-arg --ws --monitor-arg 127.0.0.1:18776 \
+  --monitor-arg --webrtc-udp --monitor-arg none \
+  --monitor-arg --webrtc-tcp --monitor-arg 127.0.0.1:18772
 ```
 
 Use the existing host-driver wrapper below if Vulkan cannot access the hardware.
@@ -152,29 +160,36 @@ No private model, camera calibration or source file is bundled.
 The input adapter assigns a new software stream sequence before its two-buffer
 queue drops old frames; those identities and gaps survive native admission.
 Frame resources and scene snapshots use the existing owner/scheduler. Output
-still ticks independently, repeating the previous frame on underrun. Only its
-transmitted slots enter the bounded monitor tap. GStreamer encodes those slots
-with software x264; this is not zero-copy or hardware encoding.
+still ticks independently, repeating the previous frame on underrun. Every
+transmitted slot, repeats included, enters the program tap. With
+`--encoder gstreamer`, `chr-monitor` encodes those slots with software x264 (the
+old `chr-server` chose this encoder automatically for `--software-video`); this
+is not zero-copy or hardware encoding.
 
-WebRTC still uses the existing implementation and ICE-TCP forwarding, not
+WebRTC in `chr-monitor` uses the existing implementation and ICE-TCP forwarding, not
 GStreamer's WebRTC backend. JSON-RPC and the default triangle/synthetic/pitch
 scene/frame methods remain unchanged. The separate input probe above still performs no
 rendering. Physical SDI, tracking, recording and production policy are not implied.
 
 Use `client/example/render-harness` for the WebUI. Its `live=1` query flag connects
 the program monitor and opens scene controls; supply the runtime/scene IDs printed
-by the server and its WebSocket URL. Browser traffic can remain TCP-only through
-SSH: forward the UI HTTP port, WebSocket port 18771 and ICE-TCP ports 18772-18775.
-Monitor disconnection never blocks program output.
+by the server, its WebSocket URL (`ws=ws://127.0.0.1:18771`) and the monitor's
+(`monitor=ws://127.0.0.1:18776`). Browser traffic can remain TCP-only through
+SSH: forward the UI HTTP port, WebSocket ports 18771 and 18776 and ICE-TCP ports
+18772-18775. Monitor disconnection, or stopping `chr-monitor`, never blocks
+program output.
 
-Add `--srt 127.0.0.1:9001` (or an explicitly reachable interface address) to expose
-a direct MPEG-TS/SRT listener. Open `srt://SERVER_IP:9001` in VLC. Remote callers
-need UDP reachability and a source-restricted firewall rule; SSH `-L` forwards
-TCP only. The native path is:
+Pass `--srt 127.0.0.1:9001` to `chr-monitor` (`--monitor-arg --srt --monitor-arg
+127.0.0.1:9001`, or an explicitly reachable interface address) to expose a direct
+MPEG-TS/SRT listener. It needs the `gstreamer-media` feature but works with any
+program and either encoder, not only `--software-video`. Open
+`srt://SERVER_IP:9001` in VLC or a GStreamer `srtsrc`. Remote callers need UDP
+reachability and a source-restricted firewall rule; SSH `-L` forwards TCP only.
+The native path is:
 
 ```text
-simulated SDI -> GStreamer H.264 -> bounded encoded fan-out -> WebRTC
-                                                        -> h264parse -> mpegtsmux -> srtsink
+simulated SDI -> program tap -> chr-monitor: H.264 -> bounded encoded fan-out -> WebRTC
+                                                                     -> h264parse -> mpegtsmux -> srtsink
 ```
 
 Both outputs share the same encoded SDI access units; SRT never receives or
@@ -189,8 +204,8 @@ Focused checks inside the media shell:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --locked -p chr-runtime --all-targets --features gstreamer-media -- -D warnings
-cargo test --locked -p chr-runtime --features gstreamer-media
+cargo clippy --locked -p chr-runtime -p chr-monitor --all-targets --features chr-runtime/gstreamer-media,chr-monitor/gstreamer-media -- -D warnings
+cargo test --locked -p chr-runtime -p chr-monitor --features chr-runtime/gstreamer-media,chr-monitor/gstreamer-media
 ```
 
 ### Calibrated local clip replay
@@ -588,37 +603,88 @@ need no server and do not claim live protocol or physical SDI acceptance.
 
 `chr-server` renders the triangle offscreen (1280x720p50 by default) and takes
 JSON-RPC 2.0 commands (`triangle.start_rotation`, `triangle.stop_rotation`,
-`triangle.get_state`, `sdi.get_status`, `webrtc.offer`) over a NativeSocket at
+`triangle.get_state`, `sdi.get_status`) over a NativeSocket at
 `$XDG_RUNTIME_DIR/chr/render.sock` and a loopback WebSocket at
-`ws://127.0.0.1:8787`. The renderer's only product is the SDI program output;
-clients receive that output back as WebRTC:
+`ws://127.0.0.1:8787`. It does not encode or stream video (`webrtc.offer` returns
+`method not found`). The renderer's only product is the SDI program output;
+clients receive that output back as WebRTC from the separate `chr-monitor`:
 
 ```text
 args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY 4:2:2, BT.709 limited)
                                  -> sdi: program output port (own clock, bounded queue,
                                          repeat on underrun)
-                                      -> monitor: SDI -> H.264 -> WebRTC -> clients
+                                      -> program tap (shared memory, never waits)
+                                           -> chr-monitor: H.264 -> WebRTC/SRT -> clients
 ```
 
 | Module (`runtime/src/`) | Role |
 | --- | --- |
 | `control.rs` | Control plane: JSON-RPC methods (the args) onto the pipeline and status |
 | `pipeline.rs`, `scene.rs` | Render loop in logical frame time; produces SDI frames |
-| `sdi.rs` | SDI output port, simulated until hardware is chosen |
-| `monitor/` | Encodes what the port transmitted and streams it over WebRTC |
+| `sdi.rs` | SDI output port, simulated until hardware is chosen; writes the program tap |
 
-The monitor encodes in software (openh264) after a CPU readback; this is a
-development shortcut, not the intended GPU-to-hardware-encoder path. From the
-repository root:
+`sdi.get_status` reports `video_mode`, `pixel_format`, `frames_output`,
+`repeated_frames`, `dropped_frames` and `last_source_frame`; it no longer has
+`monitor_dropped_frames` (monitor counters are in `chr-monitor`'s
+`monitor.get_status`). From the repository root:
 
 ```sh
 cargo run --locked --release -p chr-runtime -- --help
-cargo run --locked --release -p chr-runtime -- --webrtc-tcp 127.0.0.1:8788
+cargo run --locked --release -p chr-runtime
 ```
 
-`--webrtc-tcp` adds ICE-TCP candidates on four consecutive loopback ports so a
-browser on another machine can connect through an SSH port forward. The browser
-viewer and verification scripts are in `client/example/render-harness/`.
+### Program monitor (chr-monitor)
+
+The SDI output thread copies every transmitted output slot, repeats included,
+into the **program tap**: a `chr-shm` ring of 8 slots at `--monitor-tap <path>`
+(default `$XDG_RUNTIME_DIR/chr/program.tap`, created mode 0600 in a 0700
+directory; `none` disables it). Each slot carries the UYVY 4:2:2 frame plus its
+output slot index, source frame, program flag, size and rate. The writer never
+waits for readers, so killing, stalling or not running `chr-monitor` has no
+effect on program output or `sdi.get_status` cadence.
+
+`chr-monitor` polls the tap at half the frame period and, while anyone watches
+(WebRTC viewers or an SRT listener), encodes the newest slot and counts skipped
+ones. It waits for the tap if it does not exist yet and reopens it when
+`chr-server` restarts. Its loopback WebSocket (default `ws://127.0.0.1:8789`)
+serves `webrtc.offer` (previews close with that connection) and
+`monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`,
+`srt_callers`); it has no program control. `--size` and `--fps` must match
+`chr-server`; slots in another mode are skipped and logged. Encoding is software
+after a CPU readback (openh264 by default, or GStreamer x264 with
+`--encoder gstreamer`); this is a development shortcut, not the intended
+GPU-to-hardware-encoder path or physical SDI loop-out (#80).
+
+```text
+chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>] [--encoder openh264|gstreamer]
+            [--srt <ip:port>] [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--allow-origin <origin>]
+```
+
+Run it next to `chr-server` with the same `--size`/`--fps`:
+
+```sh
+cargo run --locked --release -p chr-monitor -- --webrtc-tcp 127.0.0.1:8790
+```
+
+`--webrtc-tcp` adds ICE-TCP candidates on four consecutive ports (8790-8793
+here) so a browser on another machine can connect through an SSH port forward
+(also forward the monitor WebSocket, 8789). The range must not include the
+`--ws` port; the monitor refuses to start otherwise. `--srt` and `--encoder gstreamer` need
+`--features gstreamer-media` inside `nix develop .#media`.
+
+`server/scripts/run-live.sh [--media] [--monitor-arg <arg>]... [chr-server options]`
+builds and starts both from the repository root inside the development shell.
+`--media` enables `gstreamer-media` for both; `--size`, `--fps` and
+`--monitor-tap` (as `--tap`) go to both; `--monitor-arg X` passes `X` to
+`chr-monitor`; every other option goes to `chr-server`. Stopping either process
+stops both:
+
+```sh
+server/scripts/run-live.sh --monitor-arg --webrtc-tcp --monitor-arg 127.0.0.1:8790
+```
+
+The browser viewer and verification scripts are in
+`client/example/render-harness/`.
 
 Every run also saves a 960x640 sRGB image to repository-root
 `output/renderer/triangle.png`, from any directory in the checkout. Outside a
@@ -679,7 +745,7 @@ checks remain available.
 Nix flakes in Git only include tracked files. Add new project files explicitly
 before a build; never add the private root `reference/` directory. The build
 source is restricted to the root Cargo manifests and the Cargo sources and `.wgsl`
-shaders under `server/` and `common/`; private references, generated outputs,
+shaders under `server/`, `monitor/` and `common/`; private references, generated outputs,
 caches, and worktrees are excluded. The shell sets an absolute `CARGO_TARGET_DIR`
 pointing to `target/linux`, so changing directories does not create another
 cache. Cargo outside this shell uses `target/` by default. Root Nix `result` /

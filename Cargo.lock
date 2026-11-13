@@ -567,6 +567,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "chr-monitor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chr-common",
+ "chr-shm",
+ "env_logger",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+ "log",
+ "openh264",
+ "rtc",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "webrtc",
+]
+
+[[package]]
 name = "chr-renderer"
 version = "0.1.0"
 dependencies = [
@@ -584,25 +605,21 @@ dependencies = [
 name = "chr-runtime"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "bytes",
  "chr-common",
  "chr-renderer",
+ "chr-shm",
  "env_logger",
  "futures-util",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
  "log",
- "openh264",
  "pollster",
- "rtc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
- "webrtc",
  "wgpu",
 ]
 

@@ -5,12 +5,12 @@
 //! ```text
 //! args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY)
 //!                                  -> sdi: program output port (own clock)
-//!                                       -> monitor: SDI -> H.264 -> WebRTC -> clients
+//!                                       -> program tap (shared memory) -> chr-monitor
 //! ```
 //!
 //! Control arrives over a NativeSocket (Unix Domain Socket) and a loopback WebSocket.
-//! The renderer's only product is the SDI program output; clients receive that output
-//! back as WebRTC.
+//! The renderer's only product is the SDI program output. Viewers watch it through the
+//! separate `chr-monitor` process, which reads the program tap and never feeds back.
 
 use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
@@ -18,13 +18,8 @@ use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
 use chr_renderer::coordinates::ImageExtent;
 
 use chr_runtime::control::ControlHandler;
-use chr_runtime::monitor::{
-    Monitor,
-    encoder::VideoFeed,
-    webrtc::{IceConfig, WebRtcHub},
-};
 use chr_runtime::pipeline::{RenderConfig, RenderWorker};
-use chr_runtime::sdi::{self, SdiOutput, VideoMode};
+use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -41,14 +36,10 @@ Options:
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
   --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
-  --srt <ip:port>        Direct MPEG-TS/SRT listener (requires --software-video)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
-  --webrtc-udp <addr>     Local UDP bind for WebRTC; a wildcard binds every non-loopback
-                          interface; \"none\" disables UDP [default: 0.0.0.0:0]
-  --webrtc-tcp <addr>     First ICE-TCP listen address; previews use 4 consecutive
-                          ports from it. Use 127.0.0.1:8788 to reach the server
-                          through an SSH port forward [default: off]
+  --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
+                          [default: $XDG_RUNTIME_DIR/chr/program.tap]
   --allow-origin <origin> Extra browser origin for the WebSocket (repeatable); loopback
                           origins are always allowed
   -h, --help              Show this help";
@@ -60,14 +51,13 @@ struct Args {
     width: u32,
     height: u32,
     fps: u32,
-    ice: IceConfig,
+    monitor_tap: Option<PathBuf>,
     allowed_origins: Vec<String>,
     synthetic_program: bool,
     pitch_demo: Option<PathBuf>,
     pitch_controls: Option<PathBuf>,
     software_video: Option<PathBuf>,
     video_scene: Option<PathBuf>,
-    srt: Option<SocketAddr>,
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -77,19 +67,16 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         width: 1280,
         height: 720,
         fps: 50,
-        ice: IceConfig {
-            udp: Some("0.0.0.0:0".into()),
-            tcp_base: None,
-        },
+        monitor_tap: None,
         allowed_origins: Vec::new(),
         synthetic_program: false,
         pitch_demo: None,
         pitch_controls: None,
         software_video: None,
         video_scene: None,
-        srt: None,
     };
     let mut use_socket = true;
+    let mut use_tap = true;
     while let Some(flag) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
@@ -107,21 +94,19 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--synthetic-program" => args.synthetic_program = true,
             "--software-video" => args.software_video = Some(value()?.into()),
             "--video-scene" => args.video_scene = Some(value()?.into()),
-            "--srt" => args.srt = Some(value()?.parse()?),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
-            "--webrtc-udp" => {
-                let addr = value()?;
-                args.ice.udp = (addr != "none").then_some(addr);
-            }
-            "--webrtc-tcp" => args.ice.tcp_base = Some(value()?.parse()?),
+            "--monitor-tap" => match value()?.as_str() {
+                "none" => use_tap = false,
+                path => (use_tap, args.monitor_tap) = (true, Some(path.into())),
+            },
             "--allow-origin" => args.allowed_origins.push(value()?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
     }
     if !args.width.is_multiple_of(2) || !args.height.is_multiple_of(2) {
-        return Err("H.264 4:2:0 needs an even width and height".into());
+        return Err("UYVY output and 4:2:0 monitoring need an even width and height".into());
     }
     if usize::from(args.synthetic_program)
         + usize::from(args.pitch_demo.is_some())
@@ -131,17 +116,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     {
         return Err("select one program profile; --pitch-controls requires --pitch-demo".into());
     }
-    if args.ice.udp.is_none() && args.ice.tcp_base.is_none() {
-        return Err("WebRTC needs UDP or TCP; do not disable both".into());
-    }
     if args.video_scene.is_some() && args.software_video.is_none() {
         return Err("--video-scene requires --software-video".into());
-    }
-    if args.srt.is_some() && args.software_video.is_none() {
-        return Err("--srt requires --software-video".into());
-    }
-    if args.srt.is_some_and(|address| address.port() == 0) {
-        return Err("--srt requires a nonzero listen port".into());
     }
     if !(1..=120).contains(&args.fps) {
         return Err("--fps must be between 1 and 120".into());
@@ -151,6 +127,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if !use_socket {
         args.socket = None;
+    }
+    if !use_tap {
+        args.monitor_tap = None;
+    } else if args.monitor_tap.is_none() {
+        args.monitor_tap = Some(chr_shm::tap::default_path().ok_or(
+            "XDG_RUNTIME_DIR is not set; pass --monitor-tap <path> or --monitor-tap none",
+        )?);
     }
     Ok(Some(args))
 }
@@ -175,10 +158,7 @@ fn prepare_socket_dir(path: &std::path::Path) -> Result<()> {
 }
 
 fn main() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,webrtc=warn,rtc=warn"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(Some(args)) => args,
         Ok(None) => {
@@ -201,7 +181,6 @@ fn run(args: Args) -> Result<()> {
         return Err("--software-video requires Linux/Unix and the gstreamer-media feature".into());
     }
     let extent = ImageExtent::new(args.width, args.height)?;
-    let feed = Arc::new(VideoFeed::new());
     let mode = VideoMode {
         width: args.width,
         height: args.height,
@@ -264,30 +243,26 @@ fn run(args: Args) -> Result<()> {
             )
         })
         .transpose()?;
-    let (sdi, tap) = if let Some((synthetic, _)) = &installation {
+    let taps = match &args.monitor_tap {
+        Some(path) => {
+            let taps = Taps::ring(mode, path)?;
+            log::info!("program tap for chr-monitor at {}", path.display());
+            taps
+        }
+        None => Taps::default(),
+    };
+    let sdi = if let Some((synthetic, _)) = &installation {
         SdiOutput::spawn_program(
             mode,
             chr_runtime::program::synthetic::id(format!(
                 "{}-program",
                 synthetic.configuration.runtime_id.as_str()
             ))?,
+            taps,
         )?
     } else {
-        SdiOutput::spawn(mode)?
+        SdiOutput::spawn(mode, taps)?
     };
-    #[cfg(all(unix, feature = "gstreamer-media"))]
-    let srt = args
-        .srt
-        .map(|bind| chr_runtime::monitor::srt::SrtOutput::spawn(mode, bind, Arc::clone(&feed)))
-        .transpose()?;
-    #[cfg(all(unix, feature = "gstreamer-media"))]
-    let monitor = if args.software_video.is_some() {
-        Monitor::spawn_gstreamer(mode, tap, Arc::clone(&feed))?
-    } else {
-        Monitor::spawn(mode, tap, Arc::clone(&feed))?
-    };
-    #[cfg(not(all(unix, feature = "gstreamer-media")))]
-    let monitor = Monitor::spawn(mode, tap, Arc::clone(&feed))?;
     let render_config = RenderConfig {
         extent,
         fps: args.fps,
@@ -330,8 +305,7 @@ fn run(args: Args) -> Result<()> {
             None => (None, None, None),
         };
         let result = {
-        let hub = Arc::new(WebRtcHub::new(feed, args.fps, args.ice.clone()));
-        let handler = ControlHandler::new(commands, hub, sdi.stats());
+        let handler = ControlHandler::new(commands, sdi.stats());
         let handler = Arc::new(match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler });
         let server = IpcServer::new(
             handler,
@@ -398,9 +372,10 @@ fn run(args: Args) -> Result<()> {
     runtime.shutdown_timeout(Duration::from_secs(2));
     let stopped = worker.shutdown();
     drop(sdi);
-    #[cfg(all(unix, feature = "gstreamer-media"))]
-    drop(srt);
-    drop(monitor);
+    if let Some(path) = &args.monitor_tap {
+        // A monitor that still maps the tap keeps its pages until it lets go.
+        let _ = std::fs::remove_file(path);
+    }
     served?;
     stopped.map_err(Into::into)
 }
@@ -447,12 +422,17 @@ async fn serve_native(
 mod tests {
     use super::*;
 
-    /// Parses with an explicit socket path first, so results never depend on
-    /// `XDG_RUNTIME_DIR`; later arguments still override it.
+    /// Parses with explicit socket and tap paths first, so results never depend on
+    /// `XDG_RUNTIME_DIR`; later arguments still override them.
     fn parse(args: &[&str]) -> Result<Option<Args>> {
-        let explicit_socket = ["--socket", "/tmp/chr-test.sock"];
+        let explicit_paths = [
+            "--socket",
+            "/tmp/chr-test.sock",
+            "--monitor-tap",
+            "/tmp/chr-test.tap",
+        ];
         parse_args(
-            explicit_socket
+            explicit_paths
                 .iter()
                 .chain(args)
                 .map(|arg| (*arg).to_owned()),
@@ -494,16 +474,16 @@ mod tests {
         assert!(parse(&["--software-video", "video.mp4", "--synthetic-program"]).is_err());
         assert!(parse(&["--software-video", "video.mp4", "--pitch-demo", "demo.json"]).is_err());
         assert!(parse(&["--video-scene", "scene.json"]).is_err());
-        assert!(parse(&["--srt", "127.0.0.1:9001"]).is_err());
-        assert!(parse(&["--software-video", "video.mp4", "--srt", "127.0.0.1:0"]).is_err());
         assert_eq!(
-            parse(&["--software-video", "video.mp4", "--srt", "127.0.0.1:9001"])
+            parse(&[]).unwrap().unwrap().monitor_tap,
+            Some(PathBuf::from("/tmp/chr-test.tap"))
+        );
+        assert!(
+            parse(&["--monitor-tap", "none"])
                 .unwrap()
                 .unwrap()
-                .srt
-                .unwrap()
-                .port(),
-            9001
+                .monitor_tap
+                .is_none()
         );
         assert_eq!(
             parse(&[
@@ -524,12 +504,6 @@ mod tests {
                 .software_video,
             Some(PathBuf::from("video.mp4"))
         );
-        let ice = parse(&["--webrtc-udp", "none", "--webrtc-tcp", "127.0.0.1:8788"])
-            .unwrap()
-            .unwrap()
-            .ice;
-        assert_eq!(ice.udp, None);
-        assert_eq!(ice.tcp_base, Some("127.0.0.1:8788".parse().unwrap()));
         assert!(parse(&["--help"]).unwrap().is_none());
         for bad in [
             &["--size", "641x360"][..],
@@ -537,8 +511,8 @@ mod tests {
             &["--fps"],
             &["--bogus"],
             &["--ws", "nonsense"],
+            &["--srt", "127.0.0.1:9001"],
             &["--webrtc-udp", "none"],
-            &["--webrtc-tcp", "localhost"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }

@@ -1,8 +1,9 @@
 # Live process architecture
 
-**Status:** `confirmed` — owner decision recorded in #94 (2026-11-13). Not yet
-`implemented`; the current code still renders inside `chr-server` and serves
-WebRTC/SRT from it. Implementation steps are in
+**Status:** `confirmed` — owner decision recorded in #94 (2026-11-13). Partly
+`implemented`: `chr-monitor` serves WebRTC/SRT from the program tap (#95), but
+`chr-server` still renders in process until the worker lands (#96, #97).
+Implementation steps are in
 [Live process implementation plan](live-process-implementation.md).
 
 **Scope:** which processes make up the live render path, what each one owns,

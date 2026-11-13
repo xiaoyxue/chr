@@ -4,8 +4,9 @@
 //! queue. An output thread sends one frame per slot at the video mode's cadence from its
 //! own monotonic clock, like an SDI card: when no new frame is ready it repeats the
 //! previous one, and when the queue is full the newest render is dropped. Every slot that
-//! leaves the port is also offered on a tap, which is what the monitor encodes for
-//! clients, so they see exactly the program output, repeats included.
+//! leaves the port, repeats included, is also copied into the shared-memory program tap
+//! that the separate `chr-monitor` process encodes for viewers. Neither the tap nor an
+//! in-process observer can delay the port.
 //!
 //! This is a simulation for development without SDI hardware; a real output adapter
 //! (for example a DeckLink card) replaces the output thread.
@@ -27,8 +28,8 @@ use chr_common::scene_frame as w;
 pub const PIXEL_FORMAT: &str = "UYVY 4:2:2 8-bit, BT.709 limited range";
 /// Rendered frames buffered ahead of the output clock.
 const OUTPUT_QUEUE: usize = 3;
-/// Transmitted slots buffered ahead of the monitor encoder.
-const TAP_QUEUE: usize = 2;
+/// Transmitted slots buffered ahead of an in-process observer.
+const OBSERVER_QUEUE: usize = 2;
 /// How often blocked threads check for shutdown.
 pub const POLL: Duration = Duration::from_millis(100);
 
@@ -79,7 +80,6 @@ struct Counters {
     frames_output: AtomicU64,
     repeated: AtomicU64,
     dropped: AtomicU64,
-    monitor_dropped: AtomicU64,
     last_source_frame: AtomicU64,
     has_source_frame: AtomicBool,
 }
@@ -162,12 +162,41 @@ impl SdiStats {
             frames_output: counters.frames_output.load(Ordering::Relaxed),
             repeated_frames: counters.repeated.load(Ordering::Relaxed),
             dropped_frames: counters.dropped.load(Ordering::Relaxed),
-            monitor_dropped_frames: counters.monitor_dropped.load(Ordering::Relaxed),
             last_source_frame: counters
                 .has_source_frame
                 .load(Ordering::Acquire)
                 .then(|| counters.last_source_frame.load(Ordering::Relaxed)),
         }
+    }
+}
+
+/// Where transmitted slots are copied besides the port itself.
+#[derive(Default)]
+pub struct Taps {
+    /// Shared-memory program tap for `chr-monitor`; written for every slot.
+    pub ring: Option<chr_shm::Writer>,
+    /// In-process observer (tests); slots it cannot take are skipped for it.
+    pub observer: Option<SyncSender<SdiSlot>>,
+}
+
+impl Taps {
+    /// Creates the program tap ring for `mode` at `path`.
+    pub fn ring(mode: VideoMode, path: &std::path::Path) -> Result<Self, chr_shm::Error> {
+        let ring = chr_shm::Writer::create(path, chr_shm::tap::layout(mode.width, mode.height))?;
+        Ok(Self {
+            ring: Some(ring),
+            observer: None,
+        })
+    }
+
+    /// Only an in-process observer, whose receiver yields transmitted slots in order.
+    pub fn observed() -> (Self, Receiver<SdiSlot>) {
+        let (observer, slots) = mpsc::sync_channel(OBSERVER_QUEUE);
+        let taps = Self {
+            ring: None,
+            observer: Some(observer),
+        };
+        (taps, slots)
     }
 }
 
@@ -179,38 +208,30 @@ pub struct SdiOutput {
 }
 
 impl SdiOutput {
-    /// Starts the output clock. The returned receiver yields every transmitted slot; when
-    /// its consumer falls behind, slots are skipped for it, never for the port.
-    pub fn spawn(mode: VideoMode) -> std::io::Result<(Self, Receiver<SdiSlot>)> {
-        Self::spawn_inner(mode, None)
+    /// Starts the output clock.
+    pub fn spawn(mode: VideoMode, taps: Taps) -> std::io::Result<Self> {
+        Self::spawn_inner(mode, None, taps)
     }
 
     /// A new stream ID is required whenever this clock is restarted.
-    pub fn spawn_program(
-        mode: VideoMode,
-        stream: w::Id,
-    ) -> std::io::Result<(Self, Receiver<SdiSlot>)> {
-        Self::spawn_inner(mode, Some(stream))
+    pub fn spawn_program(mode: VideoMode, stream: w::Id, taps: Taps) -> std::io::Result<Self> {
+        Self::spawn_inner(mode, Some(stream), taps)
     }
 
-    fn spawn_inner(
-        mode: VideoMode,
-        stream: Option<w::Id>,
-    ) -> std::io::Result<(Self, Receiver<SdiSlot>)> {
+    fn spawn_inner(mode: VideoMode, stream: Option<w::Id>, taps: Taps) -> std::io::Result<Self> {
         let program_enabled = stream.is_some();
         let counters = Arc::new(Counters::default());
         let stop = Arc::new(AtomicBool::new(false));
         let (frames_tx, frames_rx) = mpsc::sync_channel(OUTPUT_QUEUE);
-        let (tap_tx, tap_rx) = mpsc::sync_channel(TAP_QUEUE);
         let thread = {
             let (counters, stop) = (Arc::clone(&counters), Arc::clone(&stop));
             std::thread::Builder::new()
                 .name("chr-sdi-out".into())
                 .spawn(move || {
-                    run_output(mode, stream.as_ref(), &frames_rx, &tap_tx, &counters, &stop)
+                    run_output(mode, stream.as_ref(), &frames_rx, taps, &counters, &stop)
                 })?
         };
-        let output = Self {
+        Ok(Self {
             input: SdiInput {
                 frames: frames_tx,
                 counters: Arc::clone(&counters),
@@ -220,8 +241,7 @@ impl SdiOutput {
             stats: SdiStats { mode, counters },
             stop,
             thread: Some(thread),
-        };
-        Ok((output, tap_rx))
+        })
     }
 
     pub fn input(&self) -> SdiInput {
@@ -246,7 +266,7 @@ fn run_output(
     mode: VideoMode,
     stream: Option<&w::Id>,
     frames: &Receiver<SdiFrame>,
-    tap: &SyncSender<SdiSlot>,
+    mut taps: Taps,
     counters: &Counters,
     stop: &AtomicBool,
 ) {
@@ -291,18 +311,33 @@ fn run_output(
                 output_stream_id: stream.clone(),
             }
         });
-        match tap.try_send(SdiSlot {
-            slot,
-            uyvy: Arc::clone(&current.uyvy),
-            program: current.program.clone(),
-            association,
-        }) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                counters.monitor_dropped.fetch_add(1, Ordering::Relaxed);
+        if let Some(ring) = &mut taps.ring {
+            let meta = chr_shm::tap::SlotMeta {
+                source_frame: current.source_frame,
+                program: current.program.is_some(),
+                width: mode.width,
+                height: mode.height,
+                fps: mode.fps,
+            };
+            let header = chr_shm::SlotHeader {
+                index: slot,
+                meta: meta.to_meta(),
+            };
+            // The ring never waits for its readers; it can only fail on a frame size
+            // it was not created for, and then the port continues without it.
+            if let Err(error) = ring.push(header, &current.uyvy) {
+                log::error!("program tap disabled: {error}");
+                taps.ring = None;
             }
-            // The program output must not depend on the monitor: keep ticking without it.
-            Err(TrySendError::Disconnected(_)) => {}
+        }
+        if let Some(observer) = &taps.observer {
+            // A full or closed observer only misses slots; the port keeps ticking.
+            let _ = observer.try_send(SdiSlot {
+                slot,
+                uyvy: Arc::clone(&current.uyvy),
+                program: current.program.clone(),
+                association,
+            });
         }
         let Some(next) = slot.checked_add(1) else {
             return;
@@ -417,7 +452,8 @@ mod tests {
             height: 32,
             fps: 100,
         };
-        let (output, tap) = SdiOutput::spawn(mode).unwrap();
+        let (taps, observer) = Taps::observed();
+        let output = SdiOutput::spawn(mode, taps).unwrap();
         let input = output.input();
         let stats = output.stats();
         assert_eq!(stats.status().last_source_frame, None);
@@ -443,31 +479,61 @@ mod tests {
         assert!(status.last_source_frame.is_some_and(|frame| frame < 10));
         assert!(status.frames_output > 10, "{status:?}");
         assert!(status.repeated_frames > 5, "{status:?}");
-        // Nobody drains the tap, so the port skipped slots for it but kept going.
-        assert!(status.monitor_dropped_frames > 0, "{status:?}");
 
-        // The tap carries slots in order, starting at the first.
-        let first = tap.try_recv().expect("a transmitted slot");
+        // Nobody drained the observer: it kept the first slots, in order, and the
+        // port skipped the rest for it but kept going.
+        let first = observer.try_recv().expect("a transmitted slot");
         assert_eq!(first.slot, 0);
-        let second = tap.try_recv().expect("a second slot");
+        let second = observer.try_recv().expect("a second slot");
         assert_eq!(second.slot, 1);
     }
 
     #[test]
-    fn output_keeps_ticking_without_a_monitor() {
+    fn program_tap_receives_every_slot_without_a_reader() {
         let mode = VideoMode {
             width: 16,
             height: 16,
             fps: 200,
         };
-        let (output, tap) = SdiOutput::spawn(mode).unwrap();
-        drop(tap);
+        let dir = std::env::temp_dir().join(format!("chr-sdi-tap-{}", std::process::id()));
+        let path = dir.join("program.tap");
+        let output = SdiOutput::spawn(mode, Taps::ring(mode, &path).unwrap()).unwrap();
+        let stats = output.stats();
+        let frame = uyvy_frame(mode, 16);
         output.input().submit(SdiFrame {
-            source_frame: 0,
-            uyvy: uyvy_frame(mode, 16),
+            source_frame: 3,
+            uyvy: Arc::clone(&frame),
             program: None,
         });
         std::thread::sleep(Duration::from_millis(100));
-        assert!(output.stats().status().frames_output > 5);
+        let tap = chr_shm::Reader::open(&path).unwrap();
+        drop(output);
+
+        let written = tap.write_count();
+        assert!(written > 5, "{written}");
+        assert_eq!(written, stats.status().frames_output);
+        let mut payload = Vec::new();
+        let chr_shm::Read::Frame(header) =
+            tap.read(tap.latest_slot().unwrap(), &mut payload).unwrap()
+        else {
+            panic!("the newest tap slot is not readable");
+        };
+        assert_eq!(
+            header.index,
+            written - 1,
+            "repeats are written as their own slots"
+        );
+        assert_eq!(
+            chr_shm::tap::SlotMeta::from_meta(header.meta),
+            chr_shm::tap::SlotMeta {
+                source_frame: 3,
+                program: false,
+                width: 16,
+                height: 16,
+                fps: 200
+            }
+        );
+        assert_eq!(payload, *frame);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

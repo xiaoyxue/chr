@@ -265,8 +265,9 @@ This separates camera-induced apparent tilt from actual model orientation.
 
 The current workspace is rooted at the repository root: `server/renderer`
 (`chr-renderer`), `server/runtime` (`chr-runtime`), `server/viewer` (`chr-app`),
-and `common` (`chr-common`). The current server renders a rotating triangle to
-a simulated SDI port and monitors that transmitted output over WebRTC.
+`monitor` (`chr-monitor`) and `common` (`chr-common`). The current server renders
+a rotating triangle to a simulated SDI port and copies the transmitted output into
+a shared-memory program tap; the separate `chr-monitor` process streams it over WebRTC.
 
 The [frame-input contract](../../docs/render-frame-input.md) confirms a persistent
 scene and an initial **pinhole-only, no-distortion** input profile. This broader
@@ -431,7 +432,7 @@ FrameKey + image_ref + logical_time + Ti/C -> frame assembly <-----------+
                                                    |
                                   one Renderer in chr-renderer
                                       |
-                                      +--> runtime -> SDI output -> monitor -> WebRTC
+                                      +--> runtime -> SDI output -> program tap -> chr-monitor -> WebRTC
                                       +--> viewer/test target -> presentation/readback
 ```
 
@@ -526,7 +527,7 @@ boundaries without promising cross-GPU bitwise identity.
 
 This work does not implement recording/calibration services, tracking algorithms,
 codecs, new SDI hardware, or a parallel render-direct WebRTC stream. Preserve
-`render -> SDI -> monitor encoder -> WebRTC`; infrastructure evolution remains
+`render -> SDI -> program tap -> chr-monitor encoder -> WebRTC`; infrastructure evolution remains
 with its existing tracker.
 
 ### Static models and model matrices

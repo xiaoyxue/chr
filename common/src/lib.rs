@@ -11,8 +11,8 @@
 //!
 //! Both transports feed the same [`server::Handler`], so commands share validation and
 //! execution regardless of where they come from. WebRTC media is not part of this crate:
-//! only its signaling messages ([`methods::webrtc`]) are, so control clients do not pull in
-//! a media stack.
+//! only its signaling messages ([`methods::webrtc`], served by `chr-monitor`) are, so
+//! control clients do not pull in a media stack.
 
 pub mod client;
 pub mod framing;

@@ -110,7 +110,8 @@
         padding: 6px 8px;
         min-width: 0;
       }
-      #ws-url {
+      #ws-url,
+      #monitor-url {
         flex: 1;
       }
       #speed {
@@ -172,7 +173,7 @@
   <body>
     <header>
       <h1>chr program monitor</h1>
-      <span class="pipeline">render → SDI (UYVY 4:2:2) → encoder (H.264) → WebRTC</span>
+      <span class="pipeline">render → SDI (UYVY 4:2:2) → program tap → chr-monitor (H.264) → WebRTC</span>
     </header>
 
     <div class="layout">
@@ -216,11 +217,15 @@
         <section class="panel">
           <h2>Server</h2>
           <div class="row">
-            <input id="ws-url" aria-label="WebSocket URL" />
+            <input id="ws-url" aria-label="chr-server WebSocket URL" title="chr-server control" />
             <button id="connect">Connect</button>
           </div>
           <div class="row">
+            <input id="monitor-url" aria-label="chr-monitor WebSocket URL" title="chr-monitor video" />
+          </div>
+          <div class="row">
             <span id="connection" class="status">disconnected</span>
+            <span id="monitor-connection" class="status">monitor disconnected</span>
           </div>
           <div class="row">
             <button id="stream" disabled>Open stream</button>
@@ -256,6 +261,7 @@
         <section class="panel">
           <h2>WebRTC stream</h2>
           <dl id="stats"></dl>
+          <dl id="monitor"></dl>
         </section>
       </aside>
     </div>

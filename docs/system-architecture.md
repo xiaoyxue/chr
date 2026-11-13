@@ -55,7 +55,8 @@ chr → 实时视频 → 实时追踪服务 → 逐帧 Ti → chr
 实时渲染侧的进程划分（可重启渲染 worker、独立监看进程）见 [Live process architecture](live-process-architecture.md)。
 
 现有运行时通过 NativeSocket 和 WebSocket 接收控制，两者使用同一处理路径。
-客户端通过 WebRTC 接收 SDI 输出的监看画面；它不是另一个控制通道。
+客户端通过独立的 `chr-monitor` 进程以 WebRTC 接收 SDI 输出的监看画面；它不是另一个控制通道，
+`chr-monitor` 也不控制节目输出。
 已实现的 IPC profile 由通用协议文档指向权威实现。未来素材、视频输入等数据通道仍需各自定义，
 不能默认它们全部复用控制通道。
 
@@ -111,15 +112,18 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 | Path | Implemented responsibility |
 | --- | --- |
 | `server/renderer/` | `chr-renderer`：共享坐标数学、GPU 初始化与 wgpu 渲染。 |
-| `server/runtime/` | `chr-runtime`（构建 `chr-server`）：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及其 WebRTC 监看。 |
+| `server/runtime/` | `chr-runtime`（构建 `chr-server`）：无窗口控制服务、三角形渲染管线、模拟 SDI 输出及共享内存节目 tap。 |
+| `monitor/` | `chr-monitor`：可选的独立监看进程，读取节目 tap，编码后以 WebRTC/SRT 发送；停止或卡住不影响节目输出。 |
 | `server/viewer/` | `chr-app`：原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
 | `common/` | `chr-common`：共享控制消息、方法和 NativeSocket/WebSocket IPC 实现。 |
 | `common/shm/` | `chr-shm`：进程间共享内存帧环；唯一允许 `unsafe` 的 crate（仅限其映射模块）。 |
 | `client/example/render-harness/` | 浏览器示例客户端和验证 harness，不等同于完整业务 WebUI。 |
 
 遵守 [server/AGENTS.md](../server/AGENTS.md)：渲染算法留在 renderer，交付壳不维护另一套渲染实现。
-现有 [server](../server/README.md) 输出三角形的模拟 SDI 画面，监看链路编码该输出并发送给浏览器。
+现有 [server](../server/README.md) 输出三角形的模拟 SDI 画面，并把每个实际发出的输出 slot
+写入共享内存节目 tap；`chr-monitor` 编码该 tap 并发送给浏览器或 SRT 接收端。
 当前编码使用 CPU readback 后的软件编码，是开发实现，不是已验证的硬件零拷贝链路。
+渲染仍在 `chr-server` 进程内执行，渲染 worker 进程尚未实现。
 实际 SDI 采集/输出硬件、视频输入、录制、实时追踪和 calibration 管线仍未实现。
 已有坐标契约见 [Coordinate contract](../server/docs/coordinates.md)。
 

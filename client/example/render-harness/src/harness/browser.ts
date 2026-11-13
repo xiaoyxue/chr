@@ -1,6 +1,7 @@
 // Real-browser check: drives a local headless Chrome over the DevTools protocol, opens the
 // program monitor in auto mode, and checks that Chrome decoded the WebRTC stream.
-// Needs the viewer (`npm run dev`) and chr-server running. `npm run verify:browser -- --help`.
+// Needs the viewer (`npm run dev`), chr-server and chr-monitor running.
+// `npm run verify:browser -- --help`.
 
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -13,12 +14,13 @@ import { parseSceneFrameResult } from "../scene-frame.ts";
 
 const HELP = `Usage: npm run verify:browser -- [options]
 
-  --url <url>         Viewer URL               [default http://localhost:5173/]
+  --url <url>         Viewer URL; ?ws= and ?monitor= select the server and monitor
+                      [default http://localhost:5173/]
   --chrome <path>     Chrome binary            [env CHROME, default google-chrome]
   --seconds <n>       Rotation time to observe [default 4]
   --fps <n>           Server frame rate        [default 50]
   --tcp-only          Forbid UDP in Chrome, as through an SSH port forward
-                      (needs chr-server --webrtc-tcp)
+                      (needs chr-monitor --webrtc-tcp)
   --rotation-directions Check both triangle directions and manual signed-speed input
   --mesh-rotation     Check actual program-mesh rotation, reversal, stop and fixed ground
   --pitch-controls <json> Load owner-local native-written pitch metadata through the file picker

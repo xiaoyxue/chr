@@ -1,6 +1,7 @@
-// End-to-end verification of a running chr-server: JSON-RPC over WebSocket and
-// NativeSocket, the simulated SDI output, and the WebRTC stream of that output
-// (render -> SDI (UYVY) -> encoder (H.264) -> WebRTC). Run with `npm run verify -- --help`.
+// End-to-end verification of a running chr-server and chr-monitor: JSON-RPC over
+// WebSocket and NativeSocket, the simulated SDI output, and the WebRTC stream of that
+// output (render -> SDI (UYVY) -> program tap -> chr-monitor (H.264) -> WebRTC).
+// Run with `npm run verify -- --help`.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -15,17 +16,19 @@ import { RpcClient, RpcError, connectWebSocket } from "../rpc.ts";
 
 const HELP = `Usage: npm run verify -- [options]
 
-  --ws <url>          WebSocket endpoint      [env CHR_WS_URL, default ws://127.0.0.1:8787]
+  --ws <url>          chr-server WebSocket    [env CHR_WS_URL, default ws://127.0.0.1:8787]
+  --monitor <url>     chr-monitor WebSocket   [env CHR_MONITOR_URL, default ws://127.0.0.1:8789]
   --socket <path>     NativeSocket path       [env CHR_SOCKET, default $XDG_RUNTIME_DIR/chr/render.sock]
   --fps <n>           Server frame rate       [default 50]
   --seconds <n>       Capture time per phase  [default 2]
   --out <dir>         Captured H.264 output   [default <repo>/output/render-harness]
   --skip-native       Skip NativeSocket checks
-  --skip-webrtc       Skip WebRTC checks`;
+  --skip-webrtc       Skip WebRTC and chr-monitor checks`;
 
 const { values: args } = parseArgs({
   options: {
     ws: { type: "string", default: process.env.CHR_WS_URL ?? "ws://127.0.0.1:8787" },
+    monitor: { type: "string", default: process.env.CHR_MONITOR_URL ?? "ws://127.0.0.1:8789" },
     socket: { type: "string", default: process.env.CHR_SOCKET ?? defaultSocketPath() },
     fps: { type: "string", default: "50" },
     seconds: { type: "string", default: "2" },
@@ -130,7 +133,8 @@ async function verifyWebSocket(ws: RpcClient): Promise<void> {
       ErrorCode.InvalidParams,
     );
     await expectRpcError(ws.call(Methods.triangle.stopRotation, { now: true }), ErrorCode.InvalidParams);
-    await expectRpcError(ws.call(Methods.webrtc.offer, { type: "answer", sdp: "" }), ErrorCode.InvalidParams);
+    // WebRTC signaling belongs to chr-monitor, not the control server.
+    await expectRpcError(ws.call(Methods.webrtc.offer, { type: "offer", sdp: "" }), ErrorCode.MethodNotFound);
     const reply = await rawWebSocketExchange(args.ws, "{oops");
     assert(reply.error?.code === ErrorCode.ParseError, `expected parse error, got ${JSON.stringify(reply)}`);
     assert(reply.id === null, "parse errors must carry a null id");
@@ -211,14 +215,37 @@ async function verifySdi(ws: RpcClient): Promise<void> {
 
 async function verifyWebRtc(ws: RpcClient): Promise<void> {
   const names = {
-    connect: "webrtc: offer/answer over WebSocket and ICE connects",
+    connect: "webrtc: offer/answer with chr-monitor and ICE connects",
     stream: "webrtc: H.264 starts with an IDR frame and arrives at the frame rate",
     content: "webrtc: decoded video changes only while rotating",
+    status: "monitor: status counts encoded slots and the viewer",
   };
   if (args["skip-webrtc"]) {
     for (const name of Object.values(names)) skip(name, "--skip-webrtc");
     return;
   }
+  let monitor: RpcClient;
+  try {
+    monitor = new RpcClient(await connectWebSocket(args.monitor), { idPrefix: "monitor" });
+  } catch (error) {
+    await check(names.connect, async () => {
+      throw new Error(`${(error as Error).message}. Is chr-monitor running?`);
+    });
+    for (const name of [names.stream, names.content, names.status]) skip(name, "no chr-monitor");
+    return;
+  }
+  try {
+    await verifyStream(ws, monitor, names);
+  } finally {
+    monitor.close();
+  }
+}
+
+async function verifyStream(
+  ws: RpcClient,
+  monitor: RpcClient,
+  names: { connect: string; stream: string; content: string; status: string },
+): Promise<void> {
 
   const fps = Number(args.fps);
   const phaseMs = Number(args.seconds) * 1000;
@@ -254,13 +281,14 @@ async function verifyWebRtc(ws: RpcClient): Promise<void> {
   try {
     const connected = await check(names.connect, async () => {
       await ws.stopRotation();
+      await expectRpcError(monitor.call(Methods.webrtc.offer, { type: "answer", sdp: "" }), ErrorCode.InvalidParams);
       await pc.setLocalDescription(await pc.createOffer());
       if (pc.iceGatheringState !== "complete") {
         await pc.iceGatheringStateChange.watch((state) => state === "complete", 5000);
       }
       const offer = pc.localDescription;
       assert(offer, "no local description");
-      const answer = await ws.offer({ type: "offer", sdp: offer.sdp });
+      const answer = await monitor.offer({ type: "offer", sdp: offer.sdp });
       await pc.setRemoteDescription(answer);
       if (pc.connectionState !== "connected") {
         await pc.connectionStateChange.watch((state) => state === "connected", 10_000);
@@ -269,8 +297,7 @@ async function verifyWebRtc(ws: RpcClient): Promise<void> {
       return `${candidates} server candidates`;
     });
     if (!connected) {
-      skip(names.stream, "not connected");
-      skip(names.content, "not connected");
+      for (const name of [names.stream, names.content, names.status]) skip(name, "not connected");
       return;
     }
 
@@ -300,6 +327,12 @@ async function verifyWebRtc(ws: RpcClient): Promise<void> {
       const rate = (rotatingStats.frames * 1000) / rotatingStats.ms;
       assert(rate > fps * 0.75, `received ${rate.toFixed(1)} fps, expected about ${fps}`);
       return `${captured.length} access units, ${rate.toFixed(1)} fps, ${depacketizer.dropped} dropped`;
+    });
+    await check(names.status, async () => {
+      const status = await monitor.getMonitorStatus();
+      assert(status.frames_encoded >= captured.length, `${status.frames_encoded} encoded < ${captured.length} received`);
+      assert(status.viewers >= 1, "the open preview is not counted");
+      return `${status.frames_encoded} encoded, ${status.frames_skipped} skipped, ${status.viewers} viewer(s)`;
     });
     if (!streaming) {
       skip(names.content, "stream check failed");
@@ -358,7 +391,7 @@ async function main(): Promise<number> {
     console.log(HELP);
     return 0;
   }
-  console.log(`chr render harness: ${args.ws}${args.socket ? `, ${args.socket}` : ""}\n`);
+  console.log(`chr render harness: ${args.ws}${args.socket ? `, ${args.socket}` : ""}, monitor ${args.monitor}\n`);
   let ws: RpcClient;
   try {
     ws = new RpcClient(await connectWebSocket(args.ws), { idPrefix: "ws" });
