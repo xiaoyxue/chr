@@ -1,6 +1,6 @@
-import type { BundleMessage, ResultBundle } from './bundle-result.ts';
+import type { BundleFile, BundleMessage, ResultBundle } from './bundle-result.ts';
 
-export function importResultFolder(files: File[], signal: AbortSignal): Promise<ResultBundle> {
+export function importResultFolder(files: BundleFile[], signal: AbortSignal): Promise<ResultBundle> {
   if (!files.length || files.length > 20000) throw new Error('请选择完整 Ti 或 MANIFEST 诊断结果文件夹（包含原视频，最多 20000 个文件）。');
   if (signal.aborted) throw new DOMException('已取消结果导入。', 'AbortError');
   return new Promise((resolve, reject) => {
@@ -22,6 +22,6 @@ export function importResultFolder(files: File[], signal: AbortSignal): Promise<
       finish(undefined, new Error(`结果解析失败：${detail}`));
     }, { once: true });
     worker.addEventListener('messageerror', () => finish(undefined, new Error('无法读取解析后的结果。')), { once: true });
-    worker.postMessage(files.map((file) => ({ path: file.webkitRelativePath || file.name, file })));
+    worker.postMessage(files);
   });
 }

@@ -6,6 +6,7 @@ import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
 import { LocalAdRepository, validatePitchAd } from '../placements/local-ad.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
+import { fetchServerFile, isServerPath } from '../shared/server-files.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
@@ -89,7 +90,7 @@ function renderMatches() {
       <div class="on-match-foot"><span class="on-help">${draft.length} 个广告位 · ${analysisResults.has(match.id) ? '已导入本地点云' : '等待场地分析'}</span>
         <div class="on-match-actions"><button type="button" class="on-button on-delete-match" data-delete-match="${escapeHTML(match.id)}" aria-label="删除比赛 ${escapeHTML(match.name)}（仅本机）" ${libraryBusy ? 'disabled' : ''}>${deletingMatchId === match.id ? '删除中…' : '删除'}</button>
         <a class="on-button primary" href="#match/${encodeURIComponent(match.id)}/preview">进入场次 →</a></div></div>
-    </article>`).join('') : `<div class="on-card on-empty"><h2>${records ? '还没有添加比赛' : '本地记录读取失败'}</h2><p>${records ? '输入 Fusion 提供的比赛 ID 获取场次配置。' : '为避免覆盖原记录，已停止写入。请查看页面上方错误信息。'}</p></div>`;
+    </article>`).join('') : `<div class="on-card on-empty"><h2>${records ? '还没有添加比赛' : '本地记录读取失败'}</h2><p>${records ? '输入 Fusion 比赛 ID，或导入离线 ZIP（本地或服务器路径）。' : '为避免覆盖原记录，已停止写入。请查看页面上方错误信息。'}</p></div>`;
 }
 
 function setLibraryBusy(busy: boolean) {
@@ -229,7 +230,7 @@ function renderAnalysis() {
   const ready = Boolean(current() && !enginePending && engineReadyMatchId === currentId);
   const busy = Boolean(analysisImport && analysisImport.matchId === currentId);
   $('#analysis-import').setAttribute('aria-busy', String(busy));
-  $<HTMLButtonElement>('#import-analysis').disabled = !current() || busy;
+  $<HTMLButtonElement>('#import-analysis').disabled = $<HTMLButtonElement>('#load-analysis-path').disabled = !current() || busy;
   $<HTMLButtonElement>('#import-analysis').textContent = result ? '替换 PLY 点云' : '选择 PLY 点云';
   $('#cancel-analysis').hidden = !busy;
   $('#remove-analysis').hidden = !result;
@@ -240,7 +241,7 @@ function renderAnalysis() {
   $('#analysis-empty-title').textContent = '尚未导入点云';
   $('#analysis-empty-description').textContent = '导入 PLY 后在下方绘制独立点云广告；上方球场 2D / 3D 广告不需要点云。';
   const notice = analysisNotice?.matchId === currentId ? analysisNotice : undefined;
-  $('#analysis-import-status').textContent = busy ? '正在本地解析点云，请稍候…'
+  $('#analysis-import-status').textContent = busy ? '正在读取并在本地解析点云，请稍候…'
     : notice?.text ?? (result ? `${result.cloud.fileName} · ${(result.cloud.positions.length / 3).toLocaleString('zh-CN')} 点 · ${(result.cloud.byteLength / 1024 / 1024).toFixed(1)} MB · 未上传`
       : current() ? '点云广告绑定当前场次；导入不会替换上方球场预览。' : '请先选择比赛场次。');
   $('#analysis-import-status').classList.toggle('on-form-error', Boolean(!busy && notice?.failed));
@@ -267,7 +268,7 @@ function renderAnalysis() {
   void resultReview.setLocalAds(localEditor.ads, result?.aligned ?? false).catch(showError);
 }
 
-async function selectAnalysisFile(file: File) {
+async function selectAnalysisFile(source: File | string) {
   if (!current()) {
     showError(new Error('请先选择比赛场次。'));
     return;
@@ -279,6 +280,7 @@ async function selectAnalysisFile(file: File) {
   clearError();
   renderAnalysis();
   try {
+    const file = typeof source === 'string' ? await fetchServerFile(source, job.controller.signal) : source;
     const cloud = await importPlyFile(file, job.controller.signal);
     if (job.controller.signal.aborted || currentId !== job.matchId) return;
     if (!cloudEngine) {
@@ -567,13 +569,18 @@ async function selectScanFile(file: File) {
   }
 }
 
-async function importOfflinePackage(file: File) {
+async function importOfflinePackage(source: File | string) {
   if (!records || libraryBusy) return;
   setLibraryBusy(true);
   clearError();
   const startingRoute = location.hash;
-  $('#offline-package-status').textContent = 'Verifying the complete match package and material checksums...';
   try {
+    let file = source;
+    if (typeof file === 'string') {
+      $('#offline-package-status').textContent = 'Reading the offline package from the onsite server...';
+      file = await fetchServerFile(file);
+    }
+    $('#offline-package-status').textContent = 'Verifying the complete match package and material checksums...';
     const packageData = await parseOfflinePackage(file);
     const previous = records.find((item) => item.match.id === packageData.match.id);
     if (previous && !window.confirm('Replace this match configuration and its local placement adjustments with the imported offline package?')) {
@@ -622,11 +629,13 @@ $<HTMLInputElement>('#offline-package-file').addEventListener('change', (event) 
 $<HTMLFormElement>('#match-lookup-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!records || libraryBusy) return;
+  const lookup = $<HTMLInputElement>('#match-lookup-id').value;
+  if (isServerPath(lookup)) { void importOfflinePackage(lookup); return; }
   setLibraryBusy(true);
   clearError();
   $('#lookup-status').textContent = 'Requesting saved match configuration from Fusion...';
   try {
-    const match = await gateway.lookupMatch($<HTMLInputElement>('#match-lookup-id').value);
+    const match = await gateway.lookupMatch(lookup);
     const previous = records.find((record) => record.match.id === match.id);
     const next = [...records.filter((record) => record.match.id !== match.id),
       { match, draft: structuredClone(match.placements),
@@ -688,6 +697,23 @@ $<HTMLButtonElement>('#reset-business-view').addEventListener('click', () => {
   engine?.resetView();
 });
 $<HTMLButtonElement>('#choose-cloud-video').addEventListener('click', () => $<HTMLInputElement>('#scan-file').click());
+$<HTMLButtonElement>('#choose-scan-file').addEventListener('click', () => $<HTMLInputElement>('#scan-file').click());
+function bindServerPath(input: string, button: string, load: (path: string) => Promise<void>) {
+  const run = () => {
+    const path = $<HTMLInputElement>(input).value;
+    if (path.trim()) void load(path).catch(showError);
+  };
+  $(button).addEventListener('click', run);
+  $(input).addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') run(); });
+}
+const loadScanPath = async (path: string) => {
+  $('#scan-status').textContent = '正在从现场服务器读取视频…';
+  try { await selectScanFile(await fetchServerFile(path)); }
+  catch (error) { $('#scan-status').textContent = error.message; throw error; }
+};
+bindServerPath('#scan-path', '#load-scan-path', loadScanPath);
+bindServerPath('#cloud-video-path', '#load-cloud-video-path', loadScanPath);
+bindServerPath('#analysis-path', '#load-analysis-path', selectAnalysisFile);
 $('#viewport').addEventListener('rectangledrawcancel', () => pitchEditor.cancelDrawing());
 $('#viewport').addEventListener('rectangledrawmiss', () => { $('#pitch-local-draw-status').textContent = '请从草坪内拖出矩形，长宽至少 0.1 米。'; });
 $('#cloud-viewport').addEventListener('pointpickcancel', () => localEditor.cancelDrawing());
@@ -748,7 +774,6 @@ for (const type of ['dragleave', 'drop']) $('#analysis-import').addEventListener
     else void selectAnalysisFile(files[0]);
   }
 });
-$<HTMLButtonElement>('#replace-scan').addEventListener('click', () => $<HTMLInputElement>('#scan-file').click());
 $('#scan-dropzone').addEventListener('keydown', (event) => {
   if (['Enter', ' '].includes(event.key)) { event.preventDefault(); $<HTMLInputElement>('#scan-file').click(); }
 });
