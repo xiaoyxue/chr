@@ -71,8 +71,8 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
 - The writer stages the file and renames it into place, so a reader never maps
   a partial header. `push` writes slots round-robin; readers of such rings (the
   program tap) find the newest slot from `write_count`.
-- Linux first. A Windows file-mapping backend is required before Windows
-  acceptance of steps 2 and 4.
+- Linux only. The live service does not run on Windows; Windows machines only
+  preview its SRT output (for example in VLC).
 
 ### Program tap
 
@@ -262,7 +262,7 @@ With the synthetic program and with the software video input:
   a mixed snapshot.
 - Rendered program pixels match the current in-process output for the existing
   `program_output` scenarios.
-- Recorded measurements: ring copy cost per frame and restart-to-first-CG time.
+- Recorded measurements: ring copy cost per frame and restart-to-first-CG time (below).
 
 Recorded on a Linux NVIDIA host (nixGL). The ignored GPU tests in
 `server/runtime/tests/render_worker.rs` show worker output byte-identical to the
@@ -276,9 +276,29 @@ the default triangle with `chr-monitor` passed `npm run verify` (12/12, includin
 the worker check); with software video input (640x360p30 generated clip),
 `kill -9` of the worker gave 16 clean-feed frames while the output stayed at
 cadence (65 slots in about 2.1 s, 1 repeat, 0 drops), and a new worker was ready
-within 2 s. Scene edits during a restart and the per-frame ring copy cost were
-not measured separately. Windows is not verified (the CLI and worker path is
-portable Rust, but the kill/stop tests use Unix signals), nor is physical SDI.
+within 2 s.
+
+Measurements (release builds, same host):
+
+| Measurement | Result |
+| --- | --- |
+| Ring write / read, 1920x1080 RGBA8 input (8.3 MB) | 1.3 ms / 1.1 ms |
+| Ring write / read, 1280x720 RGBA8 input (3.7 MB) | 0.39 ms / 0.38 ms |
+| Ring write / read, 1920x1080 UYVY output (4.1 MB) | 0.46 ms / 0.46 ms |
+| Ring write / read, 1280x720 UYVY output (1.8 MB) | 0.15 ms / 0.16 ms |
+| `kill -9` to new worker ready, calibrated video scene with a 1.35M-triangle, 47 MB GLB (includes the 250 ms backoff) | 1.03 s |
+| `kill -9` to first CG frame, same scene at 1280x720p30 | 1.24 s (35 frames without CG) |
+
+Ring costs are medians of 200 frames from `cargo test --release -p chr-shm
+--test copy_cost -- --ignored --nocapture`, so a 1080p-input, 720p-output frame
+adds about 2.7 ms of copies, split between the two processes. In the restart
+measurement the input (1920x1080) differs from the output extent, so the frames
+without CG repeated the last frame instead of carrying clean feed. A rotating
+1.35M-triangle model rendered at 30 fps with 0 deadline misses after GPU mesh
+buffers were reused across scene revisions (#106). Scene edits during a restart
+were not measured separately. Physical SDI is not verified (#80). The live
+service is Linux-only; SRT preview from a Windows PC in VLC was checked against
+this stack (the Linux host must allow the SRT UDP port through its firewall).
 
 ## Documentation to update with the code
 
