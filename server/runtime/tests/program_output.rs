@@ -449,7 +449,7 @@ async fn tracked_frames_carry_their_own_camera_and_warp() {
     let plate = [20, 100, 40, 255].repeat(192 * 128);
     let mut cameras = Vec::new();
     for sequence in [0, 1, 2] {
-        let geometry = tracked.geometry(&tracked.replay.frame(sequence));
+        let geometry = tracked.geometry(&tracked.replay.as_ref().unwrap().frame(sequence));
         program
             .inject_with(&control, sequence, &plate, geometry)
             .await
@@ -555,7 +555,7 @@ async fn gpu_tracked_frames_match_the_calibrated_replay() {
         for sequence in [0, 1] {
             match &program.tracking {
                 Some(lens) => {
-                    let geometry = lens.geometry(&lens.replay.frame(sequence));
+                    let geometry = lens.geometry(&lens.replay.as_ref().unwrap().frame(sequence));
                     program
                         .inject_with(&control, sequence, &plate, geometry)
                         .await

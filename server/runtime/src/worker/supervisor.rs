@@ -7,6 +7,9 @@
 //!
 //! Nothing here blocks longer than the caller's deadline: a request that misses it
 //! stays outstanding in the worker and its late completion only frees its slot.
+//!
+//! Assets registered at runtime ([`WorkerAssets`]) reach a worker in its `hello`;
+//! when they change, the current worker is replaced at once, without backoff.
 
 use std::{
     collections::VecDeque,
@@ -18,6 +21,7 @@ use std::{
 };
 
 use chr_common::{
+    description::Asset,
     methods::render_worker::{WorkerState, WorkerStatus},
     scene_frame as w,
 };
@@ -46,6 +50,33 @@ pub struct WorkerConfig {
     pub ring_dir: PathBuf,
     /// The oldest outstanding request may be this old before the worker is killed.
     pub hang: Duration,
+    /// Assets every worker registers after installing its program.
+    pub assets: WorkerAssets,
+}
+
+/// Assets registered after startup, shared by the control plane and the supervisor.
+#[derive(Clone, Default)]
+pub struct WorkerAssets(Arc<Mutex<Vec<Asset>>>);
+
+impl WorkerAssets {
+    pub fn push(&self, asset: Asset) {
+        self.lock().push(asset);
+    }
+
+    /// The assets registered so far, in registration order.
+    pub fn snapshot(&self) -> Vec<Asset> {
+        self.lock().clone()
+    }
+
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Asset>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// Shared with the control plane for `render.get_worker_status`.
@@ -90,6 +121,8 @@ pub struct Supervisor {
     next_id: u64,
     backoff: Duration,
     started: bool,
+    /// Runtime assets the current worker received.
+    assets_sent: usize,
 }
 
 enum State {
@@ -153,6 +186,7 @@ impl Supervisor {
             next_id: 0,
             backoff: FIRST_BACKOFF,
             started: false,
+            assets_sent: 0,
         })
     }
 
@@ -189,7 +223,19 @@ impl Supervisor {
             self.reap(reason);
         } else if spawn {
             self.spawn();
+        } else if matches!(self.state, State::Starting { .. } | State::Ready { .. })
+            && self.config.assets.len() != self.assets_sent
+        {
+            self.replace();
         }
+    }
+
+    /// Replaces a running worker so that its successor registers new assets.
+    fn replace(&mut self) {
+        log::info!("render worker: new scene assets; replacing the worker");
+        self.kill();
+        self.backoff = FIRST_BACKOFF;
+        self.spawn();
     }
 
     /// Renders one program frame; `pixels` is copied into the input ring before the
@@ -444,6 +490,8 @@ impl Supervisor {
                     }
                 }
             })?;
+        let assets = self.config.assets.snapshot();
+        self.assets_sent = assets.len();
         let hello = Request::Hello {
             version: VERSION,
             program: self.config.program.clone(),
@@ -451,6 +499,7 @@ impl Supervisor {
             output: self.config.output,
             input_ring: self.input.as_ref().map(|_| self.input_path.clone()),
             output_ring: self.output_path.clone(),
+            assets,
         };
         if let Err(error) = protocol::write_line(&mut stdin, &hello) {
             let _ = child.kill();
@@ -466,6 +515,11 @@ impl Supervisor {
 
     /// Kills the current worker, if any, and starts the backoff.
     fn reap(&mut self, reason: String) {
+        self.kill();
+        self.backoff(reason);
+    }
+
+    fn kill(&mut self) {
         if let State::Starting { worker, .. } | State::Ready { worker, .. } = std::mem::replace(
             &mut self.state,
             State::Backoff {
@@ -479,7 +533,6 @@ impl Supervisor {
         // The worker is gone, so every slot is free again.
         self.slots = [None; RING_SLOTS as usize];
         self.outstanding.clear();
-        self.backoff(reason);
     }
 
     fn backoff(&mut self, reason: String) {
@@ -543,6 +596,7 @@ mod tests {
             input_bytes: 0,
             ring_dir: dir.join("rings"),
             hang: Duration::from_millis(200),
+            assets: Default::default(),
         }
     }
 

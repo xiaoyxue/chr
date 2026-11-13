@@ -36,6 +36,8 @@ Program (exactly one):
   --video-scene <json>    Local calibrated-video-v1 scene/lens manifest
   --tracked-scene <json>  The same manifest as tracked-video-v1; the frame carries the
                           manifest's Ti/C and the warp of --frame as its tracked camera
+  --description <json>    A chr-render-description-v1 file; the frame carries its
+                          camera.reference and the warp of --frame
 
 Options:
   --output <png>          Output file; refuses to replace it without --overwrite
@@ -107,6 +109,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
             "--tracked-scene" => specs.push(ProgramSpec::TrackedScene {
                 path: value()?.into(),
             }),
+            "--description" => specs.push(ProgramSpec::Description {
+                path: value()?.into(),
+            }),
             "--output" => output = Some(PathBuf::from(value()?)),
             "--overwrite" => args.overwrite = true,
             "--size" => {
@@ -128,7 +133,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         Ok([spec]) => spec,
         Err(_) => {
             return Err(
-                "select exactly one of --synthetic-program, --pitch-demo, --video-scene, --tracked-scene"
+                "select exactly one of --synthetic-program, --pitch-demo, --video-scene, --tracked-scene, --description"
                     .into(),
             );
         }

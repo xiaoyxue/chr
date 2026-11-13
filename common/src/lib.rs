@@ -15,6 +15,7 @@
 //! control clients do not pull in a media stack.
 
 pub mod client;
+pub mod description;
 pub mod framing;
 pub mod jsonrpc;
 pub mod methods;

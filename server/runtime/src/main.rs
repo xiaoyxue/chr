@@ -27,7 +27,7 @@ use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
 use chr_runtime::worker::{
     protocol::{Output, WorkerProgram},
-    supervisor::{WorkerConfig, status_handle},
+    supervisor::{WorkerAssets, WorkerConfig, status_handle},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -50,7 +50,11 @@ Options:
   --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
   --tracked-scene <json> The same manifest as tracked-video-v1: frames come from the input
                           ring and each frame's Ti/C/warp from tracking.frame (chr-tracking-sim)
-  --input-ring <path>     Shared-memory input ring for --tracked-scene
+  --description <json>    A chr-render-description-v1 scene and lens, with the same tracked
+                          input as --tracked-scene
+  --asset-root <dir>      Folder that description.load may read assets from (repeatable;
+                          requires --description)
+  --input-ring <path>     Shared-memory input ring for --tracked-scene or --description
                           [default: $XDG_RUNTIME_DIR/chr/input.ring]
   --tracking-wait-ms <n>  How long a captured frame waits for its camera before it is
                           skipped, at most 500 [default: 3 frame periods]
@@ -85,6 +89,8 @@ struct Args {
     software_video: Option<PathBuf>,
     video_scene: Option<PathBuf>,
     tracked_scene: Option<PathBuf>,
+    description: Option<PathBuf>,
+    asset_roots: Vec<PathBuf>,
     input_ring: Option<PathBuf>,
     tracking_wait_ms: Option<u64>,
 }
@@ -107,6 +113,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         software_video: None,
         video_scene: None,
         tracked_scene: None,
+        description: None,
+        asset_roots: Vec::new(),
         input_ring: None,
         tracking_wait_ms: None,
     };
@@ -130,6 +138,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--software-video" => args.software_video = Some(value()?.into()),
             "--video-scene" => args.video_scene = Some(value()?.into()),
             "--tracked-scene" => args.tracked_scene = Some(value()?.into()),
+            "--description" => args.description = Some(value()?.into()),
+            "--asset-root" => args.asset_roots.push(value()?.into()),
             "--input-ring" => args.input_ring = Some(value()?.into()),
             "--tracking-wait-ms" => args.tracking_wait_ms = Some(value()?.parse()?),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
@@ -153,6 +163,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         + usize::from(args.pitch_demo.is_some())
         + usize::from(args.software_video.is_some())
         + usize::from(args.tracked_scene.is_some())
+        + usize::from(args.description.is_some())
         > 1
         || (args.pitch_controls.is_some() && args.pitch_demo.is_none())
     {
@@ -161,10 +172,14 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if args.video_scene.is_some() && args.software_video.is_none() {
         return Err("--video-scene requires --software-video".into());
     }
-    if (args.input_ring.is_some() || args.tracking_wait_ms.is_some())
-        && args.tracked_scene.is_none()
-    {
-        return Err("--input-ring and --tracking-wait-ms require --tracked-scene".into());
+    let tracked = args.tracked_scene.is_some() || args.description.is_some();
+    if (args.input_ring.is_some() || args.tracking_wait_ms.is_some()) && !tracked {
+        return Err(
+            "--input-ring and --tracking-wait-ms require --tracked-scene or --description".into(),
+        );
+    }
+    if !args.asset_roots.is_empty() && args.description.is_none() {
+        return Err("--asset-root requires --description".into());
     }
     if args
         .tracking_wait_ms
@@ -176,7 +191,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         )
         .into());
     }
-    if args.tracked_scene.is_some() && args.input_ring.is_none() {
+    if tracked && args.input_ring.is_none() {
         args.input_ring = Some(
             chr_shm::input::default_path()
                 .ok_or("XDG_RUNTIME_DIR is not set; pass --input-ring <path>")?,
@@ -271,6 +286,8 @@ fn run(args: Args) -> Result<()> {
         Some(ProgramSpec::VideoScene { path: path.clone() })
     } else if let Some(path) = &args.tracked_scene {
         Some(ProgramSpec::TrackedScene { path: path.clone() })
+    } else if let Some(path) = &args.description {
+        Some(ProgramSpec::Description { path: path.clone() })
     } else if args.software_video.is_some() {
         Some(ProgramSpec::SoftwareVideo)
     } else if args.synthetic_program {
@@ -368,6 +385,13 @@ fn run(args: Args) -> Result<()> {
         SdiOutput::spawn(mode, taps)?
     };
     let status = status_handle();
+    let worker_assets = WorkerAssets::default();
+    // Asset roots are compared as canonical paths, like the asset paths themselves.
+    let asset_roots = args
+        .asset_roots
+        .iter()
+        .map(|root| root.canonicalize())
+        .collect::<std::io::Result<Vec<_>>>()?;
     let worker_config = WorkerConfig {
         executable: match &args.renderer_cli {
             Some(path) => path.clone(),
@@ -391,6 +415,7 @@ fn run(args: Args) -> Result<()> {
         }),
         ring_dir: worker_ring_dir(),
         hang: Duration::from_millis(args.worker_hang_ms),
+        assets: worker_assets.clone(),
     };
     log::info!("render worker: {}", worker_config.executable.display());
     let render_config = RenderConfig {
@@ -429,7 +454,7 @@ fn run(args: Args) -> Result<()> {
     let served = runtime.block_on(async {
         let installed = match installation {
             Some((synthetic, adapter)) => {
-                let adapter = if args.software_video.is_some() || args.tracked_scene.is_some() { adapter.with_rotation() } else { adapter };
+                let adapter = if args.software_video.is_some() || args.tracked_scene.is_some() || args.description.is_some() { adapter.with_rotation() } else { adapter };
                 let (control, owner) = chr_runtime::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
                 synthetic.create_scene(&control).await?;
                 log::info!("local program runtime_id={} scene_id={} configuration_id={}",
@@ -442,10 +467,17 @@ fn run(args: Args) -> Result<()> {
             Some((synthetic, control, owner)) => (Some(synthetic), Some(control), Some(owner)),
             None => (None, None, None),
         };
+        let loader = match (&synthetic, &scenes) {
+            (Some(program), Some(control)) if program.described.is_some() => Some(Arc::new(
+                chr_runtime::program::description::Loader::new(program, control.clone(), asset_roots.clone(), worker_assets.clone(), worker_ring_dir().join("assets"))?,
+            )),
+            _ => None,
+        };
         let result = {
         let handler = ControlHandler::new(commands, sdi.stats()).with_worker(Arc::clone(&status));
         let handler = match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler };
-        let handler = Arc::new(match feed { Some(feed) => handler.with_tracking(feed), None => handler });
+        let handler = match feed { Some(feed) => handler.with_tracking(feed), None => handler };
+        let handler = Arc::new(match loader { Some(loader) => handler.with_description(loader), None => handler });
         let server = IpcServer::new(
             handler,
             ServerConfig {

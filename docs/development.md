@@ -128,7 +128,10 @@ documented scripts inside each package (see
 offline Fusion ZIP (`manifest.json` plus `assets/`) in the browser. Every import
 (match ZIP, videos, PLY, result folder, ad materials) can be picked locally or
 loaded by an absolute path on the onsite server. The root flake builds it from
-`package-lock.json` (see the next section).
+`package-lock.json` (see the next section). Its 发送到渲染器 action converts the
+placement draft into a render description and loads it into `chr-server` through
+the page's `/chr-render` WebSocket proxy (`CHR_RENDER_URL`); see
+`server/docs/render-description.md`.
 
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.

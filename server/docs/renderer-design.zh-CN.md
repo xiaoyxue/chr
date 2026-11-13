@@ -21,7 +21,9 @@
 tangent、顶点颜色及 sampler 元数据。缺少法线时采用三角形平面法线，
 解码后的 RGBA8 图像在贴图/材质间共享。
 骨骼、Morph、alpha blending、外部资源和未支持扩展会明确报错；
-动画片段忽略并给出诊断。贴图数据由下述共享 PBR 路径使用。
+动画片段忽略并给出诊断。显式选项 `glb::ImportOptions::blend_as_mask`
+会把 alpha blending 材质按 alpha mask（阈值 0.5）导入，并把每个材质列入资源警告；
+渲染描述按资源用 `blend_as: "mask"` 请求该选项。贴图数据由下述共享 PBR 路径使用。
 
 `chr_renderer::camera` 已实现经过校验的 K/pose、FOV/look-at 和 Ti+C 针孔相机，
 提供原生像素投影、像素到世界射线，以及包含度量 near/far 深度的列主序 WGSL clip 矩阵。

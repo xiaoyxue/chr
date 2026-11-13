@@ -26,7 +26,10 @@ axis rotation are baked once; material parts, normals, UV0, tangents, vertex
 colours and sampler metadata are retained. Missing normals use flat triangle
 normals. Decoded RGBA8 images are shared across maps/materials.
 Skins, morphs, alpha blending, external resources and unsupported extensions are
-reported as unsupported; animation clips are ignored with a diagnostic.
+reported as unsupported; animation clips are ignored with a diagnostic. The
+explicit `glb::ImportOptions::blend_as_mask` opt-in imports alpha-blended
+materials as alpha masks (cutoff 0.5) and lists each one in the asset's
+warnings; render descriptions request it per asset with `blend_as: "mask"`.
 Texture data is consumed by the shared PBR path described below.
 
 `chr_renderer::camera` implements validated pinhole cameras from K/pose,

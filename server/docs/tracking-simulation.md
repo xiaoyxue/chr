@@ -131,7 +131,9 @@ It builds the release binaries and starts the three processes on a private
 socket, input ring and program tap; stopping any of them stops all. The output
 rate is the manifest's `fps`. `--size` sets the output (default 1280x720),
 `--sim-arg`/`--monitor-arg` pass options through, and every other option goes to
-`chr-server`. View the stream with an SRT caller, for example VLC on
+`chr-server`. `--description <json>` draws a
+[render description](render-description.md) instead of the manifest's scene; the
+simulator still replays the manifest's cameras. View the stream with an SRT caller, for example VLC on
 `srt://<host>:9001`; the host must allow that UDP port.
 
 `chr-tracking-sim` options: `--tracking-delay-ms <n>` sends every camera that

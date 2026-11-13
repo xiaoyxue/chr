@@ -39,6 +39,9 @@ pub enum WorkerProgram {
     TrackedScene {
         path: PathBuf,
     },
+    Description {
+        path: PathBuf,
+    },
     PitchDemo {
         path: PathBuf,
     },
@@ -52,6 +55,7 @@ impl WorkerProgram {
             Some(ProgramSpec::SoftwareVideo) => Self::SoftwareVideo,
             Some(ProgramSpec::VideoScene { path }) => Self::VideoScene { path: path.clone() },
             Some(ProgramSpec::TrackedScene { path }) => Self::TrackedScene { path: path.clone() },
+            Some(ProgramSpec::Description { path }) => Self::Description { path: path.clone() },
             Some(ProgramSpec::PitchDemo { path }) => Self::PitchDemo { path: path.clone() },
         }
     }
@@ -64,6 +68,7 @@ impl WorkerProgram {
             Self::SoftwareVideo => Some(ProgramSpec::SoftwareVideo),
             Self::VideoScene { path } => Some(ProgramSpec::VideoScene { path: path.clone() }),
             Self::TrackedScene { path } => Some(ProgramSpec::TrackedScene { path: path.clone() }),
+            Self::Description { path } => Some(ProgramSpec::Description { path: path.clone() }),
             Self::PitchDemo { path } => Some(ProgramSpec::PitchDemo { path: path.clone() }),
         }
     }
@@ -88,6 +93,10 @@ pub enum Request {
         input_ring: Option<PathBuf>,
         /// Created by the worker; UYVY output frames.
         output_ring: PathBuf,
+        /// Assets registered after startup, as the server's private verified copies;
+        /// the worker imports and registers them after installing its program.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        assets: Vec<chr_common::description::Asset>,
     },
     Render {
         id: u64,

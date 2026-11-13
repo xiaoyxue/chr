@@ -50,9 +50,9 @@ pub struct Tracked {
     pub lens: RadialDistortion,
     pub world: w::Version,
     pub extent: w::Extent,
-    /// The manifest's reference camera and warps, replayed by `chr-tracking-sim`
-    /// and by `chr-renderer-cli render --frame`.
-    pub replay: TrackingReplay,
+    /// A fixed reference camera and warps, replayed by `chr-renderer-cli render
+    /// --frame`; a render description may omit it.
+    pub replay: Option<TrackingReplay>,
 }
 
 impl Tracked {

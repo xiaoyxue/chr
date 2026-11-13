@@ -28,6 +28,7 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `input/ring.rs` | Frames from a capture process through the shared-memory input ring (`--tracked-scene`) |
 | `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
 | `calibration/tracking.rs` | Per-frame tracked cameras (`tracking.frame`) paired with captured frames by capture sequence |
+| `program/description.rs`, `program/assets.rs` | Render descriptions: startup program, `description.load`, asset reading, verification and import |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
 | `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
 | `worker/` | Render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
@@ -258,6 +259,15 @@ each frame into a shared-memory input ring and sends its `Ti`/`C`/frame warp as
 `tracking.frame`; `chr-server --tracked-scene` pairs them by capture sequence and
 renders through the worker to the SDI port, which `chr-monitor` streams. See
 [Tracked camera simulation](docs/tracking-simulation.md).
+
+### Render description
+
+`chr-server --description <json>` draws a `chr-render-description-v1` scene
+(GLB and image-quad assets placed by 4×4 matrices, one asset shared by many
+instances) through the same tracked camera. With `--asset-root <dir>`, clients
+replace the scene at runtime with `description.load`; the football client sends
+its Fusion match this way. Add `--description <json> --asset-root <dir>` to
+`run-tracked.sh`. See [Render description](docs/render-description.md).
 
 ## M1: camera, indexed meshes and depth
 

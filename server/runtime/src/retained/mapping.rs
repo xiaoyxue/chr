@@ -24,9 +24,10 @@ pub struct CameraContext {
     pub camera_center: w::Vec3,
 }
 
-/// Startup registration only; moving this into the owner freezes the registry.
-/// Models are imported GLB assets (already basis-converted) or trusted synthetic
-/// meshes constructed directly in native -Z-up coordinates.
+/// Startup registration; afterwards only models may be added, through the owner
+/// (`SceneAdapter::register_model`), never removed or replaced. Models are imported
+/// GLB assets (already basis-converted) or trusted synthetic meshes constructed
+/// directly in native -Z-up coordinates.
 #[derive(Default)]
 pub struct Registrations {
     models: HashMap<w::Id, GlbAsset>,

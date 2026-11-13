@@ -107,6 +107,7 @@ fn start(input: &mut impl BufRead) -> Result<Worker, Error> {
         output,
         input_ring,
         output_ring,
+        assets,
     }) = protocol::read_line(input)?
     else {
         return Err("the first message must be hello".into());
@@ -144,7 +145,13 @@ fn start(input: &mut impl BufRead) -> Result<Worker, Error> {
             }))
         }
         Some(spec) => {
-            let installed = spec.install(VideoMode { width, height, fps }, runtime_id)?;
+            let mut installed = spec.install(VideoMode { width, height, fps }, runtime_id)?;
+            for (id, asset) in crate::program::description::import_for_worker(&assets)? {
+                installed
+                    .adapter
+                    .register_model(id, asset)
+                    .map_err(|e| e.to_string())?;
+            }
             let mut renderer = ProgramRenderer::new(&gpu, &installed.program.configuration)?;
             renderer.set_lenses(&installed.program);
             Renderer::Program(Box::new(Program {

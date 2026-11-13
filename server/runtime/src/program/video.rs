@@ -248,7 +248,7 @@ pub fn prepare_with(
                 lens,
                 world,
                 extent,
-                replay,
+                replay: Some(replay),
             });
         }
     }
