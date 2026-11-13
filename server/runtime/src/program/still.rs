@@ -87,7 +87,13 @@ async fn admit(
         None => program.native_pixels().to_vec(),
     };
     let geometry = match &program.tracking {
-        Some(tracked) => tracked.geometry(&tracked.replay.frame(still.frame)),
+        Some(tracked) => tracked.geometry(
+            &tracked
+                .replay
+                .as_ref()
+                .ok_or("a still of a tracked program needs a reference camera")?
+                .frame(still.frame),
+        ),
         None => w::FrameGeometry::SceneCamera {},
     };
     program

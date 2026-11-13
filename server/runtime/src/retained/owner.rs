@@ -266,6 +266,16 @@ impl SceneAdapter {
             .ok_or_else(|| reject(w::RejectionKind::NotFound, "scene is not live"))
     }
 
+    /// Registers a model after startup, for scenes created afterwards. Existing
+    /// scenes and their snapshots are unaffected; registrations are never removed.
+    pub fn register_model(
+        &mut self,
+        id: w::Id,
+        asset: chr_renderer::glb::GlbAsset,
+    ) -> Result<(), ErrorObject> {
+        self.registrations.register_model(id, asset)
+    }
+
     /// Rebinds a scene snapshot with this adapter's registrations, as a render
     /// worker does for each request. The snapshot must belong to this runtime.
     pub fn bind(&self, snapshot: w::SceneSnapshot) -> Result<BoundScene, ErrorObject> {

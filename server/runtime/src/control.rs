@@ -24,6 +24,7 @@ pub struct ControlHandler {
     worker: Option<StatusHandle>,
     scenes: Option<crate::retained::SceneControl>,
     tracking: Option<TrackingFeed>,
+    description: Option<std::sync::Arc<crate::program::description::Loader>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -38,7 +39,17 @@ impl ControlHandler {
             worker: None,
             scenes: None,
             tracking: None,
+            description: None,
         }
+    }
+
+    /// Accepts `description.load` for a render description program.
+    pub fn with_description(
+        mut self,
+        loader: std::sync::Arc<crate::program::description::Loader>,
+    ) -> Self {
+        self.description = Some(loader);
+        self
     }
 
     /// Accepts `tracking.frame` for a tracked program.
@@ -151,6 +162,26 @@ impl Handler for ControlHandler {
                     })?;
                 self.tracking(method)?.push(frame)?;
                 Ok(Value::Null)
+            }
+            chr_common::description::LOAD => {
+                let loader = self
+                    .description
+                    .as_ref()
+                    .ok_or_else(|| ErrorObject::method_not_found(method))?;
+                let request = raw_params
+                    .ok_or_else(|| ErrorObject::invalid_params("description.load needs params"))
+                    .and_then(|value| {
+                        serde_json::from_value(value)
+                            .map_err(|error| ErrorObject::invalid_params(error.to_string()))
+                    })?;
+                let loaded = loader.load(request).await?;
+                log::info!(
+                    "{} {method}: scene revision {}",
+                    connection.id,
+                    loaded.scene_revision.get()
+                );
+                serde_json::to_value(loaded)
+                    .map_err(|error| ErrorObject::internal(error.to_string()))
             }
             tracking::GET_STATUS => {
                 params::<NoParams>(raw_params)?;

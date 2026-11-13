@@ -1,5 +1,5 @@
 use chr_renderer::{
-    glb::{GlbError, import_glb},
+    glb::{GlbError, ImportOptions, import_glb, import_glb_with},
     scene::{ModelMatrix, Scene},
 };
 use std::{io::Cursor, sync::Arc};
@@ -136,6 +136,39 @@ fn omitted_normals_are_flat_and_unsupported_inputs_fail() {
         ));
     }
     assert!(import_glb(b"invalid").is_err());
+}
+
+#[test]
+fn blended_materials_import_as_masks_only_on_request() {
+    let (json, bin) = fixture();
+    let blended = pack(
+        &json.replace(
+            "\"materials\":[{",
+            "\"materials\":[{\"name\":\"badge\",\"alphaMode\":\"BLEND\",",
+        ),
+        &bin,
+    );
+    assert!(matches!(
+        import_glb(&blended),
+        Err(GlbError::Unsupported(feature)) if feature == "alpha blending"
+    ));
+    let masked = import_glb_with(
+        &blended,
+        ImportOptions {
+            blend_as_mask: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(masked.materials[0].factors.alpha_cutoff, Some(0.5));
+    assert_eq!(masked.materials[1].factors.alpha_cutoff, None);
+    assert!(
+        masked
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("\"badge\"") && warning.contains("alpha mask")),
+        "{:?}",
+        masked.warnings
+    );
 }
 
 #[test]

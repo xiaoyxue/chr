@@ -101,6 +101,7 @@
             </div>
             <section class="on-card on-editor"><div class="on-card-head"><h2>Fusion 场次广告位微调</h2><button class="on-button" type="button" data-go-tab="preview">返回球场 / 点云广告编辑</button></div><div id="adjust-placement-list"></div><form id="placement-form" class="on-card-body"><h3 id="editor-name"></h3><p id="editor-info" class="on-help"></p><fieldset id="placement-edit-controls" disabled><div id="placement-fields" class="on-field-grid"></div><p id="placement-error" class="on-form-error" role="alert"></p><button class="on-button primary" type="submit">应用并保存本地草稿</button><button id="reset-placement" class="on-text-button" type="button">恢复此点位的场次配置</button></fieldset></form></section>
             <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿仅保存在本机，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
+            <div class="on-save-bar on-renderer-bar"><input id="renderer-package-path" class="on-path-input" placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button id="export-description" class="on-button" type="button">导出渲染描述</button><button id="send-to-renderer" class="on-button primary" type="button">发送到渲染器</button><p id="renderer-status" class="on-help" role="status">把当前广告位草稿（含显示设置）发送给 chr-server，替换其场景。</p></div>
           </div>
           <p id="engine-status" class="on-help" role="status"></p>
         </section>

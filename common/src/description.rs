@@ -1,0 +1,222 @@
+//! `chr-render-description-v1`: a renderer-neutral description of what to draw and
+//! with which lens, independent of any client's own scene model (for example a
+//! Fusion match). Clients convert their placements into it; `chr-server` loads it at
+//! startup (`--description <json>`) or replaces its scene at runtime
+//! ([`LOAD`]). See `server/docs/render-description.md`.
+//!
+//! Coordinates follow `server/docs/coordinates.md`: pitch-centred metres, X along
+//! the pitch length, Y along its width, ground Z = 0 and up is negative Z. Matrices
+//! are forward row-major and act on column vectors.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::scene_frame::{Id, Lighting, Matrix4, ShadowMode, U64};
+
+pub const PROFILE: &str = "chr-render-description-v1";
+
+/// Replaces the scene of a running description program. Params: [`LoadParams`].
+/// Result: [`Loaded`]. The lens and native extent stay as started.
+pub const LOAD: &str = "description.load";
+
+/// A complete startup description: the lens is fixed for the server's lifetime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderDescription {
+    /// Always [`PROFILE`].
+    pub profile: String,
+    pub camera: Camera,
+    pub scene: Scene,
+}
+
+/// The native image and its lens. Each frame's `Ti`, `C` and warp arrive with the
+/// frame (`tracking.frame`); only the radial term is fixed here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Camera {
+    /// Native pixels.
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub radial: Radial,
+    /// A fixed camera for still renders (`chr-renderer-cli render --frame <n>`); the
+    /// live server ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ReferenceCamera>,
+}
+
+/// `radial-poly-native-px-v1`: `r = centre + (a - centre) * (1 + k1 p^2 + k2 p^4 + k3 p^6)`
+/// with `p = |a - centre| / scale_px`, in native pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Radial {
+    pub centre_px: [f64; 2],
+    pub scale_px: f64,
+    pub coefficients: [f64; 3],
+    /// Validated ideal-pixel rectangle `[min_xy, max_xy]`; outside is extrapolation.
+    pub support: Option<[[f64; 2]; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceCamera {
+    /// Forward row-major ground XY to ideal SNC.
+    pub ti: [[f64; 3]; 3],
+    /// Optical centre, world metres.
+    pub center: [f64; 3],
+    /// Row-major reference-native-pixel to frame-SNC warps; frame `n` uses
+    /// `n % len`. Empty means `W = S`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_warps: Vec<[[f64; 3]; 3]>,
+}
+
+/// What is drawn. A loaded scene replaces the previous one completely.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scene {
+    pub ground: Ground,
+    /// `null` selects the default stadium rig: four corner spots and a sun.
+    #[serde(default)]
+    pub lighting: Option<Lighting>,
+    /// Default shadow mode of the scene's lights; `null` selects PCSS.
+    #[serde(default)]
+    pub shadow_mode: Option<ShadowMode>,
+    pub assets: Vec<Asset>,
+    pub instances: Vec<Instance>,
+}
+
+/// The ground plane: an invisible shadow catcher under the CG.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ground {
+    /// Pitch length (X) and width (Y) in metres; the catcher extends 1.5 times past it.
+    pub pitch_m: [f64; 2],
+}
+
+/// One drawable resource. Several instances may share it; its geometry and
+/// textures are imported once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Asset {
+    pub id: Id,
+    pub kind: AssetKind,
+    pub source: AssetSource,
+    /// Lowercase hex SHA-256 of the source bytes.
+    pub sha256: String,
+    /// `"mask"` imports a `glb`'s `alphaMode: BLEND` materials as alpha masks
+    /// (cutoff 0.5) instead of rejecting the asset; the renderer has no translucent
+    /// pass. Not allowed for `image_quad`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_as: Option<BlendAs>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendAs {
+    Mask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    /// A static binary glTF, in its own Y-up basis; the importer turns it to -Z up.
+    Glb,
+    /// A PNG/JPEG image on the unit quad `[-0.5, 0.5]^2` at Z = 0: the image's top
+    /// edge at -Y, its left edge at -X, facing up (-Z). Unlit; texels with
+    /// alpha below 0.5 are cut out. Scale, rotation and position are the instance's.
+    ImageQuad,
+}
+
+/// Where the server reads an asset: a file, or an entry of a ZIP package such as
+/// a Fusion offline package. Paths are absolute, or relative to a startup file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AssetSource {
+    Package(PackageEntry),
+    File(FilePath),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageEntry {
+    /// ZIP file.
+    pub package: PathBuf,
+    /// Entry name inside it, such as `assets/ASSET-1.glb`.
+    pub entry: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilePath {
+    pub path: PathBuf,
+}
+
+/// One placement of an asset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Instance {
+    pub id: Id,
+    pub asset: Id,
+    /// Asset coordinates (the `glb` importer's -Z-up basis, or the image quad) to
+    /// world metres, forward row-major.
+    pub model: Matrix4,
+    #[serde(default = "visible")]
+    pub visible: bool,
+}
+
+fn visible() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoadParams {
+    pub scene: Scene,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Loaded {
+    pub scene_id: Id,
+    pub scene_revision: U64,
+    /// Assets read and imported by this call.
+    pub assets_imported: u32,
+    /// Assets already registered with the same ID and SHA-256.
+    pub assets_reused: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn sources_and_defaults_parse_strictly() {
+        let scene: Scene = serde_json::from_value(json!({
+            "ground": {"pitch_m": [105, 68]},
+            "assets": [
+                {"id": "car", "kind": "glb", "sha256": "00",
+                 "source": {"package": "/m.zip", "entry": "assets/car.glb"}},
+                {"id": "ad", "kind": "image_quad", "sha256": "11", "source": {"path": "ad.png"}}
+            ],
+            "instances": [{"id": "p1", "asset": "car",
+                "model": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]
+        }))
+        .unwrap();
+        assert!(matches!(scene.assets[0].source, AssetSource::Package(_)));
+        assert!(matches!(scene.assets[1].source, AssetSource::File(_)));
+        assert!(scene.instances[0].visible);
+        assert_eq!((scene.lighting, scene.shadow_mode), (None, None));
+        for bad in [
+            json!({"path": "a.png", "entry": "x"}),
+            json!({"package": "/m.zip"}),
+            json!({"url": "http://x"}),
+        ] {
+            assert!(
+                serde_json::from_value::<AssetSource>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+}

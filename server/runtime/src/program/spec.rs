@@ -16,6 +16,8 @@ pub enum ProgramSpec {
     VideoScene { path: PathBuf },
     /// The same manifest as `tracked-video-v1`: each frame carries its own camera.
     TrackedScene { path: PathBuf },
+    /// A `chr-render-description-v1` file: a described scene with a tracked camera.
+    Description { path: PathBuf },
     /// An owner-local `pitch-demo-v1` manifest.
     PitchDemo { path: PathBuf },
 }
@@ -46,6 +48,10 @@ impl ProgramSpec {
             Self::TrackedScene { path } => {
                 let (program, adapter) =
                     video::load_with(path, mode, runtime, video::CameraSource::Tracked)?;
+                (program, adapter, None)
+            }
+            Self::Description { path } => {
+                let (program, adapter) = super::description::load(path, mode, runtime)?;
                 (program, adapter, None)
             }
             Self::PitchDemo { path } => {

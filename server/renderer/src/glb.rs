@@ -42,9 +42,25 @@ pub struct GlbAsset {
     pub warnings: Vec<String>,
 }
 
+/// Explicit importer choices for features the renderer does not implement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    /// Import `alphaMode: BLEND` materials as alpha masks with a 0.5 cutoff instead
+    /// of rejecting them. Suits decals whose transparency comes from their texture;
+    /// translucent surfaces such as glass are cut out. Each such material is listed
+    /// in the asset's warnings.
+    pub blend_as_mask: bool,
+}
+
 /// glTF +Y-up is rotated to chr -Z-up: (x, y, z) -> (x, z, -y).
 /// Default node transforms are baked once; callers apply only the instance model afterward.
+/// Rejects alpha blending; see [`import_glb_with`].
 pub fn import_glb(bytes: &[u8]) -> Result<GlbAsset, GlbError> {
+    import_glb_with(bytes, ImportOptions::default())
+}
+
+/// [`import_glb`] with explicit [`ImportOptions`].
+pub fn import_glb_with(bytes: &[u8], options: ImportOptions) -> Result<GlbAsset, GlbError> {
     if bytes.get(..4) != Some(b"glTF") {
         return Err(GlbError::MissingData);
     }
@@ -70,6 +86,7 @@ pub fn import_glb(bytes: &[u8]) -> Result<GlbAsset, GlbError> {
         [0.0, 0.0, 0.0, 1.0],
     ];
     let mut primitives = Vec::new();
+    let mut masked: Vec<String> = Vec::new();
     if let Some(scene) = file.default_scene().or_else(|| file.scenes().next()) {
         let mut stack: Vec<_> = scene.nodes().map(|node| (node, basis)).collect();
         stack.reverse();
@@ -145,7 +162,17 @@ pub fn import_glb(bytes: &[u8]) -> Result<GlbAsset, GlbError> {
                 return Err(GlbError::InvalidData);
             }
         }
-        let material = read_material(primitive.material(), blob, &mut images, &mut textures)?;
+        let material_source = primitive.material();
+        if material_source.alpha_mode() == gltf::material::AlphaMode::Blend {
+            if !options.blend_as_mask {
+                return Err(GlbError::Unsupported("alpha blending".into()));
+            }
+            let name = material_source.name().unwrap_or("unnamed").to_owned();
+            if !masked.contains(&name) {
+                masked.push(name);
+            }
+        }
+        let material = read_material(material_source, blob, &mut images, &mut textures)?;
         if uvs.is_none()
             && [
                 &material.maps.base_color,
@@ -240,11 +267,14 @@ pub fn import_glb(bytes: &[u8]) -> Result<GlbAsset, GlbError> {
         materials.push(material);
     }
     let mesh = MeshData::new(positions, indices, parts)?.with_attributes(attributes)?;
-    let warnings = if file.animations().next().is_some() {
+    let mut warnings = if file.animations().next().is_some() {
         vec!["Animation clips ignored; authored default node transforms are used.".into()]
     } else {
         Vec::new()
     };
+    warnings.extend(masked.into_iter().map(|name| {
+        format!("Material {name:?}: alpha blending imported as an alpha mask (cutoff 0.5).")
+    }));
     Ok(GlbAsset {
         mesh,
         materials,
@@ -262,9 +292,8 @@ fn read_material(
     let alpha_cutoff = match source.alpha_mode() {
         gltf::material::AlphaMode::Opaque => None,
         gltf::material::AlphaMode::Mask => Some(source.alpha_cutoff().unwrap_or(0.5)),
-        gltf::material::AlphaMode::Blend => {
-            return Err(GlbError::Unsupported("alpha blending".into()));
-        }
+        // Only reached with ImportOptions::blend_as_mask; see import_glb_with.
+        gltf::material::AlphaMode::Blend => Some(0.5),
     };
     let factors = PbrMaterial {
         base_color: pbr.base_color_factor(),

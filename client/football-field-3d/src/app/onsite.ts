@@ -7,6 +7,7 @@ import { LocalAdEditor } from '../placements/local-ad-editor.ts';
 import { LocalAdRepository, validatePitchAd } from '../placements/local-ad.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import { fetchServerFile, isServerPath } from '../shared/server-files.ts';
+import { blendedMaterials, describeScene, loadDescription, sha256, type DescribedAsset } from '../render/render-description.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
@@ -72,6 +73,12 @@ resultReview.onChange = () => renderAnalysis();
 const htmlEscapes: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHTML = (value: unknown) => String(value).replace(/[&<>"']/g, (char) => htmlEscapes[char]);
 const current = () => records?.find((record) => record.match.id === currentId);
+// Onsite-server paths of offline packages imported by path, which chr-server reads assets from.
+const PACKAGE_PATHS_KEY = 'liveshow.onsite.package-paths.v1';
+const packagePaths = (): Record<string, string> => {
+  try { return JSON.parse(localStorage.getItem(PACKAGE_PATHS_KEY) ?? '{}') as Record<string, string>; }
+  catch { return {}; }
+};
 const selected = () => current()?.draft.find((slot) => slot.id === selectedId);
 
 function showError(error: unknown) {
@@ -588,6 +595,8 @@ async function importOfflinePackage(source: File | string) {
       return;
     }
     await offlinePackages.write(packageData);
+    if (typeof source === 'string')
+      localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [packageData.id]: source.trim() }));
     const next = [...records.filter((item) => item.match.id !== packageData.match.id),
       { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [] }];
     try { repository.write(next); }
@@ -807,6 +816,66 @@ $<HTMLButtonElement>('#export-placements').addEventListener('click', () => {
   link.download = `placements-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+const MATERIAL_ENTRY: Record<string, { kind: DescribedAsset['kind']; extension: string }> = {
+  'model/gltf-binary': { kind: 'glb', extension: '.glb' },
+  'image/png': { kind: 'image_quad', extension: '.png' },
+  'image/jpeg': { kind: 'image_quad', extension: '.jpg' },
+};
+
+/** The current draft as a render description scene, with assets read from the offline package. */
+async function renderScene() {
+  const record = current();
+  if (!record || record.match.mode !== 'offline' || !record.match.offlinePackageId)
+    throw new Error('Only matches imported from an offline ZIP can be sent to the renderer.');
+  const input = $<HTMLInputElement>('#renderer-package-path');
+  const packagePath = input.value.trim() || packagePaths()[record.match.offlinePackageId] || '';
+  if (!isServerPath(packagePath)) throw new Error('Enter the ZIP path on the onsite server that chr-server may read (--asset-root).');
+  input.value = packagePath;
+  if (!engine || engineReadyMatchId !== record.match.id) throw new Error('Open the pitch preview and wait for the materials to load.');
+  const assets = new Map<string, DescribedAsset>();
+  const masked: string[] = [];
+  for (const slot of record.draft) {
+    if (!slot.asset || assets.has(slot.asset.id)) continue;
+    const entry = MATERIAL_ENTRY[slot.asset.contentType];
+    if (!entry) throw new Error(`The renderer cannot draw ${slot.asset.contentType} material ${slot.asset.name}.`);
+    const blob = await offlinePackages.asset(slot.asset);
+    const blended = entry.kind === 'glb' ? blendedMaterials(new Uint8Array(await blob.arrayBuffer())) : [];
+    if (blended.length) masked.push(`${slot.asset.name}（${blended.join('、')}）`);
+    assets.set(slot.asset.id, { kind: entry.kind, entry: `assets/${slot.asset.id}${entry.extension}`, sha256: await sha256(blob),
+      ...(blended.length ? { blendAs: 'mask' as const } : {}) });
+  }
+  return { masked, scene: describeScene({ field: record.match.field, slots: record.draft, hidden: new Set(record.hiddenPlacementIds),
+    geometry: engine.renderGeometry(), assets, packagePath }) };
+}
+
+$<HTMLButtonElement>('#send-to-renderer').addEventListener('click', async () => {
+  const status = $('#renderer-status');
+  try {
+    status.textContent = 'Sending the scene to chr-server...';
+    const { scene, masked } = await renderScene();
+    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
+    const loaded = await loadDescription(url, scene) as { scene_revision: string; assets_imported: number; assets_reused: number };
+    status.textContent = `已发送 ${scene.instances.length} 个广告位：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
+      + (masked.length ? ` 渲染器不支持半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '');
+  } catch (error) {
+    status.textContent = `发送失败：${error instanceof Error ? error.message : String(error)}`;
+  }
+});
+$<HTMLButtonElement>('#export-description').addEventListener('click', async () => {
+  const status = $('#renderer-status');
+  try {
+    const record = current();
+    const url = URL.createObjectURL(new Blob([JSON.stringify({ scene: (await renderScene()).scene }, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `render-scene-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    status.textContent = '已导出渲染描述的 scene 部分；启动文件还需要 camera 部分。';
+  } catch (error) {
+    status.textContent = `导出失败：${error instanceof Error ? error.message : String(error)}`;
+  }
 });
 window.addEventListener('hashchange', () => { void renderRoute(); });
 window.addEventListener('beforeunload', () => { cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); cloudEngine?.dispose(); resultReview.dispose(); });

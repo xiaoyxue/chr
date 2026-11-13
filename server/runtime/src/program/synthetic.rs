@@ -52,6 +52,8 @@ pub struct Synthetic {
     pub video_lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     /// Startup lens and world of a tracked program; its frames carry their camera.
     pub tracking: Option<crate::calibration::tracking::Tracked>,
+    /// SHA-256 of each asset a render description registered at startup.
+    pub described: Option<std::collections::HashMap<w::Id, String>>,
     pixels: Vec<u8>,
     next: u64,
     pending: Vec<w::Id>,
@@ -242,6 +244,7 @@ impl Synthetic {
                 stream_id,
                 video_lens: None,
                 tracking: None,
+                described: None,
                 pixels: [32, 64, 96, 255].repeat(e.width as usize * e.height as usize),
                 next: 0,
                 pending: Vec::new(),

@@ -30,6 +30,11 @@ enum Command {
         frame: u64,
         reply: oneshot::Sender<Result<(), ErrorObject>>,
     },
+    Register {
+        id: wire::Id,
+        asset: Box<chr_renderer::glb::GlbAsset>,
+        reply: oneshot::Sender<Result<(), ErrorObject>>,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -71,6 +76,9 @@ impl SceneControl {
                     Command::Advance { frame, reply } => {
                         let _ = reply.send(adapter.advance_rotation(frame));
                     }
+                    Command::Register { id, asset, reply } => {
+                        let _ = reply.send(adapter.register_model(id, *asset));
+                    }
                     Command::Shutdown(reply) => {
                         receiver.close();
                         stopped = Some(reply);
@@ -111,6 +119,24 @@ impl SceneControl {
     pub async fn advance_rotation(&self, frame: u64) -> Result<(), ErrorObject> {
         let (reply, response) = oneshot::channel();
         self.send(Command::Advance { frame, reply })?;
+        response
+            .await
+            .map_err(|_| reject(wire::RejectionKind::InvalidState, "scene control stopped"))?
+    }
+
+    /// Registers one more model after startup, serialized with scene edits. Scenes
+    /// created later may reference it; it is never removed.
+    pub async fn register_model(
+        &self,
+        id: wire::Id,
+        asset: chr_renderer::glb::GlbAsset,
+    ) -> Result<(), ErrorObject> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::Register {
+            id,
+            asset: Box::new(asset),
+            reply,
+        })?;
         response
             .await
             .map_err(|_| reject(wire::RejectionKind::InvalidState, "scene control stopped"))?

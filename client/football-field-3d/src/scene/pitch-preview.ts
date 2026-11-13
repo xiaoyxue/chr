@@ -144,6 +144,11 @@ export class PitchPreview {
     this.refresh();
   }
 
+  /** Loaded material geometry of each placement; empty until the materials load. */
+  renderGeometry() {
+    return this.creatives?.geometry() ?? new Map();
+  }
+
   resetView() {
     this.resetDrag();
     this.lens = defaultPreviewLens(DEFAULT_CAMERA_POSITION);

@@ -15,6 +15,8 @@ use chr_renderer::{
 };
 use std::sync::Arc;
 
+pub mod assets;
+pub mod description;
 pub mod pitch;
 pub mod spec;
 pub mod still;

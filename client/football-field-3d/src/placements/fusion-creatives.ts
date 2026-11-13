@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import type { Placement, ModelPlacement } from '../shared/types.ts';
 import { resolveFusionAsset } from '../matches/offline-package.ts';
+import type { GlbBounds, SlotGeometry } from '../render/render-description.ts';
 
 export function fitFusionModel(width: number, depth: number, slot: ModelPlacement) {
   const { region, modelPose: pose } = slot;
@@ -33,7 +34,7 @@ function dispose(root: THREE.Object3D, environment?: THREE.Texture) {
 
 export class FusionCreatives {
   readonly group = new THREE.Group();
-  private readonly models = new Map<string, { group: THREE.Group; width: number; depth: number }>();
+  private readonly models = new Map<string, { group: THREE.Group; width: number; depth: number; bounds: GlbBounds }>();
   private readonly planes = new Map<string, THREE.Group>();
   private active = true;
   private slots: Placement[] = [];
@@ -119,7 +120,8 @@ export class FusionCreatives {
               for (const material of Array.isArray(object.material) ? object.material : [object.material])
                 if (material instanceof THREE.MeshStandardMaterial) material.envMap = this.environment.texture;
             });
-            this.models.set(slot.id, { group: holder, width: size.x, depth: size.z });
+            this.models.set(slot.id, { group: holder, width: size.x, depth: size.z,
+              bounds: { min: [bounds.min.x, bounds.min.y, bounds.min.z], max: [bounds.max.x, bounds.max.y, bounds.max.z] } });
             this.group.add(holder);
           }
         } finally { resource.release(); }
@@ -160,6 +162,16 @@ export class FusionCreatives {
         model.group.scale.setScalar(fit.scale);
       }
     }
+  }
+  /** Loaded material geometry of each placement, for the render description. */
+  geometry(): Map<string, SlotGeometry> {
+    const result = new Map<string, SlotGeometry>();
+    for (const [id, model] of this.models) result.set(id, { kind: 'glb', bounds: model.bounds });
+    for (const [id, plane] of this.planes) {
+      const size = plane.userData.imageSize as { width: number; height: number } | undefined;
+      if (size) result.set(id, { kind: 'image', width: size.width, height: size.height });
+    }
+    return result;
   }
   dispose() {
     if (!this.active) return;

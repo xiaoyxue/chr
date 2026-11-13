@@ -40,6 +40,8 @@ image.workspace = true
 gstreamer = { workspace = true, optional = true }
 gstreamer-app = { workspace = true, optional = true }
 gstreamer-video = { workspace = true, optional = true }
+sha2 = "0.10"
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.30"

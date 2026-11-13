@@ -154,6 +154,9 @@
 .on-editor .on-button { width:100%; }
 .onsite #reset-placement { display:block; margin-top:12px; }
 .on-save-bar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:22px; padding-top:22px; border-top:1px solid var(--on-line); }
+.on-renderer-bar { flex-wrap:wrap; justify-content:flex-start; }
+.on-renderer-bar .on-path-input { flex:1 1 320px; }
+.on-renderer-bar #renderer-status { flex-basis:100%; margin:0; }
 .onsite .on-alert { padding:14px 18px; margin-bottom:20px; font-size:12px; line-height:1.9; border-radius:8px; }
 .on-alert.error { background:#442f36; color:#ffb1bb; border:1px solid #754553; }
 .onsite #engine-status { margin-top:20px; }

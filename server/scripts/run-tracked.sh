@@ -2,13 +2,16 @@
 # Starts a tracked-camera simulation: chr-tracking-sim (capture and tracking),
 # chr-server --tracked-scene and chr-monitor; stopping any of them stops all three.
 #
-# Usage: server/scripts/run-tracked.sh --scene <json> --video <mp4> [--size <WxH>]
-#            [--srt <ip:port>] [--sim-arg <arg>]... [--monitor-arg <arg>]...
+# Usage: server/scripts/run-tracked.sh --scene <json> --video <mp4> [--description <json>]
+#            [--size <WxH>] [--srt <ip:port>] [--sim-arg <arg>]... [--monitor-arg <arg>]...
 #            [chr-server options]
 #
 #   --scene <json>    calibrated-video-v1 manifest: the server's scene and lens, the
 #                     simulator's per-frame Ti/C/warp
 #   --video <mp4>     The manifest's clip, played in a loop as the camera
+#   --description <json>  Run chr-server with this render description instead of the
+#                     manifest's scene; the simulator still replays the manifest's cameras.
+#                     Add --asset-root <dir> to let clients load scenes (description.load)
 #   --size <WxH>      Program output size [default: 1280x720]
 #   --srt <ip:port>   chr-monitor SRT listener [default: 127.0.0.1:9001]
 #   --sim-arg <arg>   Pass one argument to chr-tracking-sim (repeatable), for example
@@ -22,6 +25,7 @@ set -euo pipefail
 
 scene=
 video=
+description=
 size=1280x720
 srt=127.0.0.1:9001
 sim_args=()
@@ -31,6 +35,7 @@ while (($#)); do
   case $1 in
     --scene) scene=$2; shift 2 ;;
     --video) video=$2; shift 2 ;;
+    --description) description=$2; shift 2 ;;
     --size) size=$2; shift 2 ;;
     --srt) srt=$2; shift 2 ;;
     --sim-arg) sim_args+=("$2"); shift 2 ;;
@@ -50,7 +55,11 @@ target=$(cargo metadata --locked --format-version 1 --no-deps |
   sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
 dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/chr-tracked.XXXXXX")
-"$target/release/chr-server" --tracked-scene "$scene" --size "$size" --fps "$fps" \
+program=(--tracked-scene "$scene")
+if [[ -n $description ]]; then
+  program=(--description "$description")
+fi
+"$target/release/chr-server" "${program[@]}" --size "$size" --fps "$fps" \
   --socket "$dir/render.sock" --input-ring "$dir/input.ring" --monitor-tap "$dir/program.tap" \
   "${server_args[@]}" &
 pids=$!
