@@ -17,6 +17,7 @@
 | Business methods | [Cam1 input recording](recording-control.md) | 录制 params、result、state、errors、产物及业务验证场景。 |
 | Business methods | [Calibration records](calibration-control.md) | atlas/Ti/C 记录及 create/get/load 的核心职责。 |
 | Frame pipeline | [Frame ingestion and rendering](render-frame-input.md) | 首期 pinhole 范围、scene 上下文、帧发布/渲染提交与资源生命周期。 |
+| Live processes | [Live process overview](live-process-overview.md) | 三个进程及其通道的总览图（英文 / 中文）。 |
 | Live processes | [Live process architecture](live-process-architecture.md) / [implementation plan](live-process-implementation.md) | chr-server、渲染 worker 与监看进程的职责、通道、状态归属与故障处理（#94 决定），以及分步实现计划。 |
 | Discussion | [Open decisions](open-decisions.md) | 尚未解决的问题索引，不复制各文档已确认的决定。 |
 | Renderer contract | [Coordinate contract](../server/docs/coordinates.md) | 已实现的坐标与投影契约。 |
