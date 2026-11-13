@@ -36,6 +36,9 @@ pub enum WorkerProgram {
     VideoScene {
         path: PathBuf,
     },
+    TrackedScene {
+        path: PathBuf,
+    },
     PitchDemo {
         path: PathBuf,
     },
@@ -48,6 +51,7 @@ impl WorkerProgram {
             Some(ProgramSpec::Synthetic) => Self::Synthetic,
             Some(ProgramSpec::SoftwareVideo) => Self::SoftwareVideo,
             Some(ProgramSpec::VideoScene { path }) => Self::VideoScene { path: path.clone() },
+            Some(ProgramSpec::TrackedScene { path }) => Self::TrackedScene { path: path.clone() },
             Some(ProgramSpec::PitchDemo { path }) => Self::PitchDemo { path: path.clone() },
         }
     }
@@ -59,6 +63,7 @@ impl WorkerProgram {
             Self::Synthetic => Some(ProgramSpec::Synthetic),
             Self::SoftwareVideo => Some(ProgramSpec::SoftwareVideo),
             Self::VideoScene { path } => Some(ProgramSpec::VideoScene { path: path.clone() }),
+            Self::TrackedScene { path } => Some(ProgramSpec::TrackedScene { path: path.clone() }),
             Self::PitchDemo { path } => Some(ProgramSpec::PitchDemo { path: path.clone() }),
         }
     }

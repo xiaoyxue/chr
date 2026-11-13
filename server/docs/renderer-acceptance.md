@@ -29,7 +29,7 @@ not frame-rate promises.
 | Point/spot PCSS source radius | Preview approximation | Soft-shadow source size, not finite-emitter shading |
 | Physical atmosphere (#28), sky visibility (#29) | Optional (owner decision) | Not required for this acceptance |
 | Brown-Conrady tangential distortion | Deferred | Native-pixel radial model selected instead |
-| Wire mapping for area lights, distortion, catchers | Deferred | Requires approved protocol/calibration contracts |
+| Wire mapping for area lights, distortion, catchers | Deferred | Requires approved protocol/calibration contracts; the opt-in [tracked camera simulation](tracking-simulation.md) carries only a per-frame `frame_warp` with a startup lens |
 | GLB animation/skinning, physical SDI, hardware encoder | Deferred | Outside this renderer roadmap |
 
 ## Acceptance evidence

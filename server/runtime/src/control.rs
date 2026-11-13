@@ -4,7 +4,7 @@
 use chr_common::{
     jsonrpc::{ErrorObject, SERVER_BUSY, SERVER_UNAVAILABLE},
     methods::{
-        mesh, render_worker, sdi,
+        mesh, render_worker, sdi, tracking,
         triangle::{self, StartRotationParams, TriangleState},
     },
     server::{ConnectionInfo, Handler},
@@ -13,13 +13,17 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{pipeline::Command, sdi::SdiStats, worker::supervisor::StatusHandle};
+use crate::{
+    calibration::tracking::TrackingFeed, pipeline::Command, sdi::SdiStats,
+    worker::supervisor::StatusHandle,
+};
 
 pub struct ControlHandler {
     commands: mpsc::Sender<Command>,
     sdi: SdiStats,
     worker: Option<StatusHandle>,
     scenes: Option<crate::retained::SceneControl>,
+    tracking: Option<TrackingFeed>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -33,7 +37,20 @@ impl ControlHandler {
             sdi,
             worker: None,
             scenes: None,
+            tracking: None,
         }
+    }
+
+    /// Accepts `tracking.frame` for a tracked program.
+    pub fn with_tracking(mut self, feed: TrackingFeed) -> Self {
+        self.tracking = Some(feed);
+        self
+    }
+
+    fn tracking(&self, method: &str) -> Result<&TrackingFeed, ErrorObject> {
+        self.tracking
+            .as_ref()
+            .ok_or_else(|| ErrorObject::method_not_found(method))
     }
 
     /// Reports the supervised render worker through `render.get_worker_status`.
@@ -124,6 +141,21 @@ impl Handler for ControlHandler {
             triangle::GET_STATE => {
                 params::<NoParams>(raw_params)?;
                 to_value(self.render(|reply| Command::GetState { reply }).await?)
+            }
+            tracking::FRAME => {
+                let frame: tracking::TrackingFrame = raw_params
+                    .ok_or_else(|| ErrorObject::invalid_params("tracking.frame needs params"))
+                    .and_then(|value| {
+                        serde_json::from_value(value)
+                            .map_err(|error| ErrorObject::invalid_params(error.to_string()))
+                    })?;
+                self.tracking(method)?.push(frame)?;
+                Ok(Value::Null)
+            }
+            tracking::GET_STATUS => {
+                params::<NoParams>(raw_params)?;
+                serde_json::to_value(self.tracking(method)?.status())
+                    .map_err(|error| ErrorObject::internal(error.to_string()))
             }
             render_worker::GET_STATUS => {
                 params::<NoParams>(raw_params)?;

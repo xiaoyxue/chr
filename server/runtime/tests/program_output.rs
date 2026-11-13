@@ -429,6 +429,158 @@ async fn gpu_calibrated_video_warps_cg_not_plate_and_repeats_exact_loop() {
     owner.await.unwrap();
 }
 
+fn tracked_program(mode: VideoMode) -> (Synthetic, chr_runtime::retained::SceneAdapter) {
+    chr_runtime::program::video::prepare_with(
+        video_manifest(),
+        chr_runtime::program::pitch::block().unwrap(),
+        mode,
+        runtime_id().unwrap(),
+        chr_runtime::program::video::CameraSource::Tracked,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn tracked_frames_carry_their_own_camera_and_warp() {
+    let (mut program, adapter) = tracked_program(mode());
+    let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let tracked = program.tracking.clone().unwrap();
+    let plate = [20, 100, 40, 255].repeat(192 * 128);
+    let mut cameras = Vec::new();
+    for sequence in [0, 1, 2] {
+        let geometry = tracked.geometry(&tracked.replay.frame(sequence));
+        program
+            .inject_with(&control, sequence, &plate, geometry)
+            .await
+            .unwrap()
+            .unwrap();
+        let execution = program.scheduler.next_ready().unwrap().unwrap();
+        cameras.push(chr_runtime::program::frame_warp(
+            &execution.provenance.input.geometry,
+        ));
+        execution.failed().unwrap();
+    }
+    assert!(cameras[0].is_some());
+    assert_ne!(cameras[0], cameras[1], "each frame carries its own warp");
+    assert_eq!(cameras[0], cameras[2], "the replay loops the clip's warps");
+    assert!(
+        program
+            .inject_with(&control, 3, &plate, w::FrameGeometry::SceneCamera {})
+            .await
+            .is_err(),
+        "a tracked scene never falls back to a scene camera"
+    );
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+async fn frame_warps_need_a_registered_lens() {
+    let (mut program, adapter) = Synthetic::install(mode(), runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+    let mut state = program.initial_state().clone();
+    state.camera =
+        serde_json::from_value(json!({"mode":"tracked","near_m":0.1,"far_m":100})).unwrap();
+    program.create_scene_with(&control, &state).await.unwrap();
+    let s = (192_f64 * 128.).sqrt();
+    let geometry = |warp: Option<Value>| {
+        let mut geometry = json!({"kind":"ti_c","world":state.world,"context_id":null,
+            "extent":{"width":192,"height":128},"ti":[0.12,0,0,0,0.12,0,0,0,1],"camera_center":[0,0,-8]});
+        if let Some(warp) = warp {
+            geometry["frame_warp"] = warp;
+        }
+        serde_json::from_value::<w::FrameGeometry>(geometry).unwrap()
+    };
+    let plate = [20, 100, 40, 255].repeat(192 * 128);
+    program
+        .inject_with(&control, 0, &plate, geometry(None))
+        .await
+        .unwrap()
+        .unwrap();
+    program
+        .scheduler
+        .next_ready()
+        .unwrap()
+        .unwrap()
+        .failed()
+        .unwrap();
+    let warp = json!([2. / s, 0, -192. / s, 0, 2. / s, -128. / s, 0, 0, 1]);
+    let error = program
+        .inject_with(&control, 1, &plate, geometry(Some(warp)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("requires a lens"), "{error}");
+    drop(control);
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a native hardware GPU"]
+async fn gpu_tracked_frames_match_the_calibrated_replay() {
+    let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();
+    assert!(matches!(
+        gpu.adapter.get_info().device_type,
+        wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+    ));
+    let output = VideoMode {
+        width: 96,
+        height: 64,
+        fps: 50,
+    };
+    let plate = [20, 100, 40, 255].repeat(192 * 128);
+    let mut frames = Vec::new();
+    for tracked in [false, true] {
+        let (mut program, adapter) = if tracked {
+            tracked_program(output)
+        } else {
+            chr_runtime::program::video::prepare(
+                video_manifest(),
+                chr_runtime::program::pitch::block().unwrap(),
+                output,
+                runtime_id().unwrap(),
+            )
+            .unwrap()
+        };
+        let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
+        program.create_scene(&control).await.unwrap();
+        let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
+        renderer.set_lenses(&program);
+        let (taps, tap) = Taps::observed();
+        let sdi =
+            SdiOutput::spawn_program(output, id("tracked-test-output").unwrap(), taps).unwrap();
+        let mut port = sdi.input();
+        let mut pixels = Vec::new();
+        for sequence in [0, 1] {
+            match &program.tracking {
+                Some(lens) => {
+                    let geometry = lens.geometry(&lens.replay.frame(sequence));
+                    program
+                        .inject_with(&control, sequence, &plate, geometry)
+                        .await
+                }
+                None => program.inject_image(&control, sequence, &plate).await,
+            }
+            .unwrap()
+            .unwrap();
+            renderer.drive(&gpu, &program.scheduler, &mut port).unwrap();
+            pixels.push(receive(&tap, sequence).uyvy);
+        }
+        frames.push(pixels);
+        drop(control);
+        owner.await.unwrap();
+    }
+    assert_ne!(
+        frames[1][0], frames[1][1],
+        "the per-frame warp moves the CG"
+    );
+    assert_eq!(
+        frames[0], frames[1],
+        "a tracked frame with the replay's camera renders the replay's pixels"
+    );
+}
+
 #[tokio::test]
 async fn software_images_keep_capture_sequence_gaps_and_pixel_ownership() {
     let (mut program, adapter) = Synthetic::install_video(mode(), runtime_id().unwrap()).unwrap();

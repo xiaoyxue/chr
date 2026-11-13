@@ -7,12 +7,14 @@ use chr_renderer::{
     camera::{Camera, Intrinsics},
     composition::{AlphaMode, CompositionOutput, ImageFit, ImageStage, Transfer},
     coordinates::{ImageExtent, Ti},
+    distortion::{FrameWarp, RadialDistortion},
     glb::GlbAsset,
     scene::{self, EnvironmentMap, ModelMatrix, Scene, SceneView},
 };
 use w::Validate;
 
 use super::{incompatible, reject};
+use crate::calibration::tracking::rows3;
 
 /// Immutable native binding for a declared calibration context. No calibration is inferred.
 #[derive(Clone, Debug)]
@@ -31,6 +33,7 @@ pub struct Registrations {
     environments: HashMap<w::Id, Arc<EnvironmentMap>>,
     worlds: Vec<w::Version>,
     contexts: HashMap<w::Id, CameraContext>,
+    lens: Option<RadialDistortion>,
 }
 
 impl Registrations {
@@ -75,6 +78,18 @@ impl Registrations {
             return Err(reject(
                 w::RejectionKind::Conflict,
                 "asset already registered",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The startup lens of a tracked input. Only with it may frames carry a
+    /// `frame_warp`; the radial term itself never travels per frame.
+    pub fn register_lens(&mut self, lens: RadialDistortion) -> Result<(), ErrorObject> {
+        if self.lens.replace(lens).is_some() {
+            return Err(reject(
+                w::RejectionKind::Conflict,
+                "lens already registered",
             ));
         }
         Ok(())
@@ -244,8 +259,18 @@ impl Registrations {
                     extent,
                     ti,
                     camera_center,
+                    frame_warp,
                 },
             ) => {
+                if let Some(rows) = frame_warp {
+                    if self.lens.is_none() {
+                        return Err(reject(
+                            w::RejectionKind::UnsupportedProfile,
+                            "frame_warp requires a lens registered at startup",
+                        ));
+                    }
+                    FrameWarp::new(rows3(rows)).map_err(incompatible)?;
+                }
                 if world != &state.world {
                     return Err(incompatible("frame world differs from bound scene"));
                 }
@@ -413,10 +438,7 @@ fn pinhole(config: &w::Configuration, input: &w::Pinhole) -> Result<Camera, Erro
             if e != &config.native_extent {
                 return Err(incompatible("camera extent differs from configuration"));
             }
-            let ti = Ti::new(std::array::from_fn(|row| {
-                std::array::from_fn(|col| ti[row * 3 + col].get())
-            }))
-            .map_err(incompatible)?;
+            let ti = Ti::new(rows3(ti)).map_err(incompatible)?;
             Camera::from_ti(
                 extent(e)?,
                 ti,

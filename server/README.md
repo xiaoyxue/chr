@@ -25,7 +25,9 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | Path under `runtime/src/` | Responsibility |
 | --- | --- |
 | `input/software.rs` | FFmpeg/GStreamer MP4 acquisition and native input sequence assignment |
+| `input/ring.rs` | Frames from a capture process through the shared-memory input ring (`--tracked-scene`) |
 | `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
+| `calibration/tracking.rs` | Per-frame tracked cameras (`tracking.frame`) paired with captured frames by capture sequence |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
 | `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
 | `worker/` | Render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
@@ -40,9 +42,11 @@ video monitoring out of `chr-server` into `chr-monitor`.
 Algorithm estimation stays in repository-root `algorithm/`. Runtime calibration
 consumption does not implement that algorithm: the existing replay loads local
 lens data at startup and associates it by native stream/frame identity.
-`program/video.rs` retains the demo-specific GLB and scene setup. Physical SDI
-adapters, online tracking-result ingestion, and a public distortion protocol
-remain separate work; the current general frame contract is still pinhole-only.
+`program/video.rs` retains the demo-specific GLB and scene setup. The opt-in
+[tracked camera simulation](docs/tracking-simulation.md) receives `Ti`, `C` and a
+frame warp per frame from `chr-tracking-sim`; it is a simulation, not a production
+tracking service. Physical SDI adapters and a general public distortion protocol
+remain separate work; the initial frame contract is still pinhole-only.
 
 The default draws an RGB triangle using the same pipeline in a native window,
 an offscreen hardware test, and the render server. The explicit
@@ -245,6 +249,15 @@ four corner spots. Lighting is not estimated from the footage. The existing
 Use `live=1&calibrated=1` in the harness URL to label this mode and disable camera
 buttons that would invalidate the clip alignment. This is diagnostic replay:
 no scene occlusion, audio, physical SDI, hardware encoding or real-time estimator.
+
+### Tracked camera simulation
+
+`server/scripts/run-tracked.sh --scene scene.json --video clip.mp4 --srt <ip:port>`
+replays the same manifest and clip as a tracked camera: `chr-tracking-sim` writes
+each frame into a shared-memory input ring and sends its `Ti`/`C`/frame warp as
+`tracking.frame`; `chr-server --tracked-scene` pairs them by capture sequence and
+renders through the worker to the SDI port, which `chr-monitor` streams. See
+[Tracked camera simulation](docs/tracking-simulation.md).
 
 ## M1: camera, indexed meshes and depth
 
@@ -749,12 +762,13 @@ cargo run --locked --release -p chr-runtime --bin chr-renderer-cli -- \
   render --synthetic-program --size 640x360 --output output/renderer-cli/synthetic.png
 ```
 
-`--pitch-demo <json>` or `--video-scene <json>` select the other programs (a video
-scene also needs its clip rate in `--fps`). `--state <json>` replaces the initial
+`--pitch-demo <json>`, `--video-scene <json>` or `--tracked-scene <json>` select the
+other programs (a video or tracked scene also needs its clip rate in `--fps`). `--state <json>` replaces the initial
 scene with a `chr-common` `SceneState` (its `configuration_id` is replaced by the
 program's); `--background <png>` replaces the native input, read as BT.709 RGBA
 code values at the program's native extent; `--frame <n>` sets the input frame
-sequence, which selects the lens model of a video scene. All inputs are validated
+sequence, which selects the lens model of a video scene or the replayed camera
+of a tracked scene. All inputs are validated
 before a GPU is requested. The output is never replaced without `--overwrite`, and
 software GPU adapters are rejected. A general scene file with arbitrary model paths
 is not supported; it must not become a de facto asset or distortion schema.

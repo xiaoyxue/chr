@@ -23,6 +23,7 @@
 //!
 //! Integers use the host byte order: rings connect processes on one host.
 
+pub mod input;
 #[allow(unsafe_code)]
 mod mapping;
 pub mod tap;

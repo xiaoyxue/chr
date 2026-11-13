@@ -84,6 +84,56 @@ pub mod mesh {
     }
 }
 
+/// Per-frame camera of a tracked program (`--tracked-scene`), sent by a tracking
+/// source such as `chr-tracking-sim`. Only `chr-server` running a tracked program
+/// answers these methods. See `server/docs/tracking-simulation.md`.
+pub mod tracking {
+    use super::*;
+    use crate::scene_frame::{Matrix3, U64, Vec3};
+
+    /// Delivers the camera of one input frame. Params: [`TrackingFrame`]. Result: `null`.
+    /// Rejected when the frame was already rendered or skipped, when it is a duplicate,
+    /// or when the bounded backlog is full.
+    pub const FRAME: &str = "tracking.frame";
+    /// Reads join counters. No params. Result: [`TrackingStatus`].
+    pub const GET_STATUS: &str = "tracking.get_status";
+
+    /// Camera of the input frame whose capture sequence is `sequence`: the same
+    /// number the capture process writes into the input ring slot. The runtime
+    /// pairs both by this number only, never by arrival order.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct TrackingFrame {
+        pub sequence: U64,
+        /// Forward row-major ground-to-SNC matrix of the ideal (undistorted) image.
+        pub ti: Matrix3,
+        /// Optical centre in world metres; negative Z is up.
+        pub camera_center: Vec3,
+        /// Row-major reference-native-pixel to frame-SNC warp applied after the
+        /// startup lens's radial term; `null` means `W = S`.
+        pub frame_warp: Option<Matrix3>,
+    }
+
+    /// Counters since the server started.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct TrackingStatus {
+        /// `tracking.frame` calls accepted into the backlog.
+        pub samples_received: u64,
+        /// Calls rejected because their frame was already rendered or skipped.
+        pub samples_late: u64,
+        /// Input frames submitted for rendering with their camera.
+        pub frames_joined: u64,
+        /// Input frames whose camera did not arrive within the wait; not rendered.
+        pub frames_without_tracking: u64,
+        /// Input frames not rendered because the bounded input backlog was full, or
+        /// because a newer frame resolved in the same output period (the output
+        /// stays live instead of falling behind).
+        pub frames_dropped: u64,
+        /// Captured frames the input ring overwrote before the server read them.
+        pub frames_overwritten: u64,
+    }
+}
+
 /// WebRTC signaling, served by `chr-monitor` on its own WebSocket, not by
 /// `chr-server`. Media itself never travels over the JSON-RPC transports.
 pub mod webrtc {

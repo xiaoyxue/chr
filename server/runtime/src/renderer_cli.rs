@@ -34,6 +34,8 @@ Program (exactly one):
   --synthetic-program     synthetic-program-v1 (max 1280x720)
   --pitch-demo <json>     Owner-local pitch-demo-v1 manifest (max 1280x720)
   --video-scene <json>    Local calibrated-video-v1 scene/lens manifest
+  --tracked-scene <json>  The same manifest as tracked-video-v1; the frame carries the
+                          manifest's Ti/C and the warp of --frame as its tracked camera
 
 Options:
   --output <png>          Output file; refuses to replace it without --overwrite
@@ -45,7 +47,7 @@ Options:
   --background <png>      Native input image, read as BT.709 RGBA code values
                           [default: the program's synthetic input]
   --frame <n>             Input frame sequence; selects the lens model of a video
-                          scene [default: 0]
+                          scene or the replayed camera of a tracked scene [default: 0]
   -h, --help              Show this help";
 
 #[derive(Debug, PartialEq)]
@@ -102,6 +104,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
             "--video-scene" => specs.push(ProgramSpec::VideoScene {
                 path: value()?.into(),
             }),
+            "--tracked-scene" => specs.push(ProgramSpec::TrackedScene {
+                path: value()?.into(),
+            }),
             "--output" => output = Some(PathBuf::from(value()?)),
             "--overwrite" => args.overwrite = true,
             "--size" => {
@@ -123,7 +128,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         Ok([spec]) => spec,
         Err(_) => {
             return Err(
-                "select exactly one of --synthetic-program, --pitch-demo, --video-scene".into(),
+                "select exactly one of --synthetic-program, --pitch-demo, --video-scene, --tracked-scene"
+                    .into(),
             );
         }
     };

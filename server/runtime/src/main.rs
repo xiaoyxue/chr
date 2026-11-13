@@ -17,7 +17,11 @@ use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duratio
 use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
 use chr_renderer::coordinates::ImageExtent;
 
+use chr_runtime::calibration::tracking::{
+    CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog,
+};
 use chr_runtime::control::ControlHandler;
+use chr_runtime::input::ring::RingInput;
 use chr_runtime::pipeline::{RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
@@ -27,6 +31,9 @@ use chr_runtime::worker::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+/// Tracking samples held ahead of their frames.
+const TRACKING_BACKLOG: usize = 64;
 
 const USAGE: &str = "\
 Usage: chr-server [options]
@@ -41,6 +48,12 @@ Options:
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
   --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
+  --tracked-scene <json> The same manifest as tracked-video-v1: frames come from the input
+                          ring and each frame's Ti/C/warp from tracking.frame (chr-tracking-sim)
+  --input-ring <path>     Shared-memory input ring for --tracked-scene
+                          [default: $XDG_RUNTIME_DIR/chr/input.ring]
+  --tracking-wait-ms <n>  How long a captured frame waits for its camera before it is
+                          skipped, at most 500 [default: 3 frame periods]
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
@@ -71,6 +84,9 @@ struct Args {
     pitch_controls: Option<PathBuf>,
     software_video: Option<PathBuf>,
     video_scene: Option<PathBuf>,
+    tracked_scene: Option<PathBuf>,
+    input_ring: Option<PathBuf>,
+    tracking_wait_ms: Option<u64>,
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -90,6 +106,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         pitch_controls: None,
         software_video: None,
         video_scene: None,
+        tracked_scene: None,
+        input_ring: None,
+        tracking_wait_ms: None,
     };
     let mut use_socket = true;
     let mut use_tap = true;
@@ -110,6 +129,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--synthetic-program" => args.synthetic_program = true,
             "--software-video" => args.software_video = Some(value()?.into()),
             "--video-scene" => args.video_scene = Some(value()?.into()),
+            "--tracked-scene" => args.tracked_scene = Some(value()?.into()),
+            "--input-ring" => args.input_ring = Some(value()?.into()),
+            "--tracking-wait-ms" => args.tracking_wait_ms = Some(value()?.parse()?),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--renderer-cli" => args.renderer_cli = Some(value()?.into()),
@@ -130,6 +152,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if usize::from(args.synthetic_program)
         + usize::from(args.pitch_demo.is_some())
         + usize::from(args.software_video.is_some())
+        + usize::from(args.tracked_scene.is_some())
         > 1
         || (args.pitch_controls.is_some() && args.pitch_demo.is_none())
     {
@@ -137,6 +160,27 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if args.video_scene.is_some() && args.software_video.is_none() {
         return Err("--video-scene requires --software-video".into());
+    }
+    if (args.input_ring.is_some() || args.tracking_wait_ms.is_some())
+        && args.tracked_scene.is_none()
+    {
+        return Err("--input-ring and --tracking-wait-ms require --tracked-scene".into());
+    }
+    if args
+        .tracking_wait_ms
+        .is_some_and(|ms| Duration::from_millis(ms) > MAX_WAIT)
+    {
+        return Err(format!(
+            "--tracking-wait-ms must be at most {} ms",
+            MAX_WAIT.as_millis()
+        )
+        .into());
+    }
+    if args.tracked_scene.is_some() && args.input_ring.is_none() {
+        args.input_ring = Some(
+            chr_shm::input::default_path()
+                .ok_or("XDG_RUNTIME_DIR is not set; pass --input-ring <path>")?,
+        );
     }
     if args.render_deadline_ms == Some(0) || args.worker_hang_ms == 0 {
         return Err("--render-deadline-ms and --worker-hang-ms must be positive".into());
@@ -225,6 +269,8 @@ fn run(args: Args) -> Result<()> {
         Some(ProgramSpec::PitchDemo { path: path.clone() })
     } else if let Some(path) = &args.video_scene {
         Some(ProgramSpec::VideoScene { path: path.clone() })
+    } else if let Some(path) = &args.tracked_scene {
+        Some(ProgramSpec::TrackedScene { path: path.clone() })
     } else if args.software_video.is_some() {
         Some(ProgramSpec::SoftwareVideo)
     } else if args.synthetic_program {
@@ -270,6 +316,37 @@ fn run(args: Args) -> Result<()> {
             )
         })
         .transpose()?;
+    // The capture side of a tracked program: frames from the input ring wait in the
+    // join for the camera that tracking.frame delivers.
+    let tracking = match (&installation, &args.input_ring) {
+        (Some((program, _)), Some(path)) => {
+            let native = program.configuration.native_extent;
+            let wait = args
+                .tracking_wait_ms
+                .map_or(mode.frame_duration() * 3, Duration::from_millis);
+            let feed = TrackingFeed::new(TRACKING_BACKLOG);
+            let join = TrackingJoin::new(
+                feed.clone(),
+                wait,
+                capture_backlog(wait, mode.frame_duration()),
+            );
+            let input = RingInput::new(
+                path.clone(),
+                VideoMode {
+                    width: native.width,
+                    height: native.height,
+                    fps: mode.fps,
+                },
+            );
+            log::info!(
+                "tracked input: frames from {}, cameras from tracking.frame, wait {wait:?}",
+                path.display()
+            );
+            Some((feed, join, input))
+        }
+        _ => None,
+    };
+    let feed = tracking.as_ref().map(|(feed, _, _)| feed.clone());
     let taps = match &args.monitor_tap {
         Some(path) => {
             let taps = Taps::ring(mode, path)?;
@@ -352,7 +429,7 @@ fn run(args: Args) -> Result<()> {
     let served = runtime.block_on(async {
         let installed = match installation {
             Some((synthetic, adapter)) => {
-                let adapter = if args.software_video.is_some() { adapter.with_rotation() } else { adapter };
+                let adapter = if args.software_video.is_some() || args.tracked_scene.is_some() { adapter.with_rotation() } else { adapter };
                 let (control, owner) = chr_runtime::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
                 synthetic.create_scene(&control).await?;
                 log::info!("local program runtime_id={} scene_id={} configuration_id={}",
@@ -367,7 +444,8 @@ fn run(args: Args) -> Result<()> {
         };
         let result = {
         let handler = ControlHandler::new(commands, sdi.stats()).with_worker(Arc::clone(&status));
-        let handler = Arc::new(match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler });
+        let handler = match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler };
+        let handler = Arc::new(match feed { Some(feed) => handler.with_tracking(feed), None => handler });
         let server = IpcServer::new(
             handler,
             ServerConfig {
@@ -386,6 +464,9 @@ fn run(args: Args) -> Result<()> {
         let injection = async {
             let Some(mut synthetic) = synthetic else { return std::future::pending::<Result<()>>().await };
             let control = scenes.as_ref().expect("synthetic scene endpoint");
+            let mut tracking = tracking;
+            // Capture sequences restart with the capture process; input sequences may not.
+            let mut capture_offset = 0;
             let mut progress = tokio::time::interval(Duration::from_millis(5));
             progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut frames = tokio::time::interval(mode.frame_duration());
@@ -394,6 +475,27 @@ fn run(args: Args) -> Result<()> {
                 tokio::select! {
                     _ = progress.tick() => synthetic.scheduler.tick().map_err(|e| e.to_string())?,
                     _ = frames.tick() => {
+                        if let Some((feed, join, input)) = &mut tracking {
+                            control.advance_rotation(sdi.stats().status().frames_output).await.map_err(|e| e.to_string())?;
+                            let polled = input.poll();
+                            if polled.restarted {
+                                log::info!("input ring at {} was replaced; capture sequences restart", input.path().display());
+                                join.reset();
+                                capture_offset = synthetic.next_sequence();
+                            }
+                            feed.count_overwritten(polled.overwritten);
+                            let arrived = std::time::Instant::now();
+                            for (sequence, rgba) in polled.frames {
+                                join.frame(CapturedFrame { sequence, rgba, arrived });
+                            }
+                            if let Some((frame, sample)) = join.next(std::time::Instant::now()) {
+                                let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
+                                if let Err(error) = synthetic.inject_with(control, capture_offset + frame.sequence, &frame.rgba, geometry).await {
+                                    log::warn!("tracked frame {} skipped: {error}", frame.sequence);
+                                }
+                            }
+                            continue;
+                        }
                         #[cfg(all(unix, feature = "gstreamer-media"))]
                         if let Some(source) = &mut video_source {
                             control.advance_rotation(sdi.stats().status().frames_output).await.map_err(|e| e.to_string())?;
@@ -535,6 +637,24 @@ mod tests {
         assert!(parse(&["--software-video", "video.mp4", "--synthetic-program"]).is_err());
         assert!(parse(&["--software-video", "video.mp4", "--pitch-demo", "demo.json"]).is_err());
         assert!(parse(&["--video-scene", "scene.json"]).is_err());
+        let tracked = parse(&[
+            "--tracked-scene",
+            "scene.json",
+            "--input-ring",
+            "/tmp/in.ring",
+            "--tracking-wait-ms",
+            "60",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (tracked.input_ring, tracked.tracking_wait_ms),
+            (Some(PathBuf::from("/tmp/in.ring")), Some(60))
+        );
+        assert!(parse(&["--tracked-scene", "scene.json", "--synthetic-program"]).is_err());
+        assert!(parse(&["--input-ring", "/tmp/in.ring"]).is_err());
+        assert!(parse(&["--tracking-wait-ms", "60"]).is_err());
+        assert!(parse(&["--tracked-scene", "scene.json", "--tracking-wait-ms", "501"]).is_err());
         assert_eq!(
             parse(&[]).unwrap().unwrap().monitor_tap,
             Some(PathBuf::from("/tmp/chr-test.tap"))

@@ -288,6 +288,12 @@ pub enum FrameGeometry {
         extent: Extent,
         ti: Matrix3,
         camera_center: Vec3,
+        /// Opt-in `radial-poly-native-px-v1` frame warp: row-major, reference native
+        /// pixel to this frame's SNC. Only a runtime that registered a lens at
+        /// startup accepts it; absent means `W = S`. Omitted when absent, so the
+        /// pinhole profile's messages are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_warp: Option<Box<Matrix3>>,
     },
 }
 

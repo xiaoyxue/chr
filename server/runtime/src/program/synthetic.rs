@@ -17,6 +17,8 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+const SCENE_CAMERA: w::FrameGeometry = w::FrameGeometry::SceneCamera {};
+
 struct Clock(Instant);
 impl MonotonicClock for Clock {
     fn now_ms(&self) -> u64 {
@@ -48,6 +50,8 @@ pub struct Synthetic {
     pub scene_id: w::Id,
     pub stream_id: w::Id,
     pub video_lens: Option<Arc<crate::calibration::replay::VideoLens>>,
+    /// Startup lens and world of a tracked program; its frames carry their camera.
+    pub tracking: Option<crate::calibration::tracking::Tracked>,
     pixels: Vec<u8>,
     next: u64,
     pending: Vec<w::Id>,
@@ -237,6 +241,7 @@ impl Synthetic {
                 scene_id,
                 stream_id,
                 video_lens: None,
+                tracking: None,
                 pixels: [32, 64, 96, 255].repeat(e.width as usize * e.height as usize),
                 next: 0,
                 pending: Vec::new(),
@@ -263,6 +268,11 @@ impl Synthetic {
         Ok(())
     }
 
+    /// The lowest input sequence the next injected frame may use.
+    pub fn next_sequence(&self) -> u64 {
+        self.next
+    }
+
     /// The scene [`Self::create_scene`] creates.
     pub fn initial_state(&self) -> &w::SceneState {
         &self.initial_state
@@ -277,7 +287,7 @@ impl Synthetic {
     /// One native frame, submitted through the same strict control queue as both IPCs.
     /// Terminal native-generated receipts are explicitly released; external receipts are not touched.
     pub async fn inject(&mut self, control: &SceneControl) -> Result<Option<w::Id>, Error> {
-        self.inject_inner(control, None).await
+        self.inject_inner(control, None, SCENE_CAMERA).await
     }
 
     /// Software capture assigns sequence before its bounded queue can drop a frame.
@@ -287,16 +297,30 @@ impl Synthetic {
         sequence: u64,
         pixels: &[u8],
     ) -> Result<Option<w::Id>, Error> {
+        self.inject_with(control, sequence, pixels, SCENE_CAMERA)
+            .await
+    }
+
+    /// A captured frame with its own geometry, such as a tracked `ti_c` camera.
+    pub async fn inject_with(
+        &mut self,
+        control: &SceneControl,
+        sequence: u64,
+        pixels: &[u8],
+        geometry: w::FrameGeometry,
+    ) -> Result<Option<w::Id>, Error> {
         if sequence < self.next {
             return Err("software input frame sequence went backwards".into());
         }
-        self.inject_inner(control, Some((sequence, pixels))).await
+        self.inject_inner(control, Some((sequence, pixels)), geometry)
+            .await
     }
 
     async fn inject_inner(
         &mut self,
         control: &SceneControl,
         input: Option<(u64, &[u8])>,
+        geometry: w::FrameGeometry,
     ) -> Result<Option<w::Id>, Error> {
         let runtime = &self.configuration.runtime_id;
         let mut retained = Vec::new();
@@ -380,7 +404,7 @@ impl Synthetic {
         let submission = id(format!("{}-submission-{sequence}", runtime.as_str()))?;
         let submitted = control.call(w::RENDER_SUBMIT, Some(json!({
             "runtime_id":runtime,"scene_id":self.scene_id,"submission_id":submission,"expected_scene_revision":null,
-            "frames":[{"frame":published.frame,"image_ref":published.image_ref,"position":published.position,"geometry":{"kind":"scene_camera"}}],
+            "frames":[{"frame":published.frame,"image_ref":published.image_ref,"position":published.position,"geometry":geometry}],
         }))).await;
         control
             .call(
