@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FusionCreatives } from '../placements/fusion-creatives.ts';
 import { validateDimensions } from './pitch/dimensions.ts';
 import { containsGroundPlacement, isPlacementInside } from './pitch/pitch-layout.ts';
@@ -7,8 +6,9 @@ import { CAMERA_PRESETS, fitTopCamera } from './pitch/pitch-cameras.ts';
 import { createPitch, disposeSceneObject } from './pitch/pitch-scene.ts';
 import { DEFAULT_CAMERA_POSITION, applyPreviewCamera, clampPreviewLens, defaultPreviewLens } from './cameras/preview-camera.ts';
 import { createPreviewLighting } from './lighting/preview-lighting.ts';
+import { LocalAdScene, disposeLocalObject } from '../placements/local-ad-scene.ts';
+import type { AdPlane, LocalAd } from '../placements/local-ad.ts';
 import type { FieldDimensions, Placement, PreviewLens } from '../shared/types.ts';
-import type { PlyCloud } from '../analysis/ply-result.ts';
 
 type CameraId = typeof CAMERA_PRESETS[number]['id'];
 type Drag = { id: number } & (
@@ -20,8 +20,6 @@ export class PitchPreview {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(45, 16 / 9, 1, 2000);
-  private readonly cloudCamera = new THREE.PerspectiveCamera(45, 16 / 9, 0.01, 10000);
-  private readonly cloudControls: OrbitControls;
   private readonly lighting = createPreviewLighting();
   private readonly raycaster = new THREE.Raycaster();
   private readonly ground = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -35,17 +33,16 @@ export class PitchPreview {
   private hiddenIds: ReadonlySet<string> = new Set();
   private selectedId?: string;
   private cameraId: CameraId = 'top';
-  private pitchCameraId: CameraId = 'top';
-  private analysis?: PlyCloud;
-  private points?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
-  private analysisMode = false;
-  private aligned = false;
   private lens = defaultPreviewLens(DEFAULT_CAMERA_POSITION);
   private drag?: Drag;
   private onSelect: (id: string) => void;
   private onMove: (slot: Placement) => void;
   private available = true;
   private renderRequest = 0;
+  private readonly localAds = new LocalAdScene(true);
+  private draw?: (plane: AdPlane) => void;
+  private rectangle?: { id: number; start: THREE.Vector3; plane?: AdPlane };
+  private draft?: THREE.LineLoop;
 
   constructor(private readonly viewport: HTMLElement, cameraList: HTMLElement, onError: (error: Error) => void) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -56,15 +53,11 @@ export class PitchPreview {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.scene.background = new THREE.Color('#1a2821');
     this.scene.add(this.lighting.group);
+    this.scene.add(this.localAds.group);
     const canvas = this.renderer.domElement;
     canvas.tabIndex = 0;
     canvas.setAttribute('role', 'img');
     this.viewport.append(canvas);
-    this.cloudCamera.up.set(0, 0, -1);
-    this.cloudControls = new OrbitControls(this.cloudCamera, canvas);
-    this.cloudControls.enabled = false;
-    this.cloudControls.listenToKeyEvents(canvas);
-    this.cloudControls.addEventListener('change', () => this.requestRefresh());
     for (const preset of CAMERA_PRESETS) {
       const button = document.createElement('button');
       button.type = 'button';
@@ -88,8 +81,11 @@ export class PitchPreview {
       button.prepend(wrap);
       button.addEventListener('click', () => {
         this.resetDrag();
+        if (this.draw) {
+          this.cancelGroundRectangle();
+          this.viewport.dispatchEvent(new CustomEvent('rectangledrawcancel'));
+        }
         this.cameraId = preset.id;
-        this.cloudControls.enabled = this.analysisMode && this.cameraId === 'main';
         this.refresh();
       });
       cameraList.append(button);
@@ -110,6 +106,7 @@ export class PitchPreview {
   async activate(slots: Placement[], selectedId: string, onSelect: (id: string) => void, onMove: (slot: Placement) => void, field: FieldDimensions, hiddenIds: readonly string[] = []) {
     if (!this.available) throw new Error('三维预览不可用，请刷新页面并开启浏览器硬件加速。');
     const dimensions = validateDimensions(field.length, field.width);
+    this.cancelGroundRectangle();
     this.resetDrag();
     this.creatives?.dispose();
     this.creatives = undefined;
@@ -125,7 +122,6 @@ export class PitchPreview {
     loading.textContent = '正在加载场次广告素材…';
     this.creatives = new FusionCreatives(this.renderer);
     this.scene.add(this.creatives.group);
-    this.applyVisibility();
     try {
       await this.creatives.load(this.slots, this.hiddenIds);
     } catch (error) {
@@ -150,54 +146,38 @@ export class PitchPreview {
 
   resetView() {
     this.resetDrag();
-    if (this.analysisMode) this.fitCloudView();
-    else this.lens = defaultPreviewLens(DEFAULT_CAMERA_POSITION);
+    this.lens = defaultPreviewLens(DEFAULT_CAMERA_POSITION);
     this.refresh();
   }
 
-  setAnalysis(cloud: PlyCloud | undefined, aligned: boolean, pointSize = 0.15) {
-    if (this.analysis !== cloud) {
-      this.resetDrag();
-      this.disposeCloud();
-      this.analysis = cloud;
-      if (cloud) {
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(cloud.positions, 3));
-        if (cloud.colors) geometry.setAttribute('color', new THREE.BufferAttribute(cloud.colors, 3));
-        geometry.computeBoundingSphere();
-        this.points = new THREE.Points(geometry, new THREE.PointsMaterial({ size: pointSize, vertexColors: Boolean(cloud.colors), color: '#ffffff', toneMapped: false }));
-        this.points.name = 'analysis-point-cloud';
-        this.scene.add(this.points);
-        this.fitCloudView();
-      }
-    }
-    if (this.aligned !== aligned) this.resetDrag();
-    this.aligned = aligned;
-    this.setPointSize(pointSize);
-    this.applyVisibility();
+  async setLocalAds(ads: LocalAd[], selectedId?: string) {
+    try { await this.localAds.update(ads, selectedId); }
+    finally { this.refresh(); }
   }
 
-  setAnalysisMode(enabled: boolean) {
-    const next = enabled && Boolean(this.analysis);
-    if (next !== this.analysisMode) {
-      this.resetDrag();
-      if (next) { this.pitchCameraId = this.cameraId; this.cameraId = 'main'; }
-      else this.cameraId = this.pitchCameraId;
-      this.analysisMode = next;
-    }
-    this.cloudControls.enabled = next && this.cameraId === 'main';
-    this.applyVisibility();
+  startGroundRectangle(complete: (plane: AdPlane) => void) {
+    if (!this.available || !this.dimensions) throw new Error('球场预览尚未就绪。');
+    this.resetDrag();
+    this.cancelGroundRectangle();
+    this.draw = complete;
+    this.cameraId = 'top';
+    this.viewport.dataset.drawingRectangle = 'true';
     this.refresh();
   }
 
-  setPointSize(size: number) {
-    if (!Number.isFinite(size) || size < 0.02 || size > 1) throw new Error('点大小应介于 0.02–1 米。');
-    if (this.points) this.points.material.size = size;
+  cancelGroundRectangle() {
+    const pointerId = this.rectangle?.id;
+    this.draw = undefined;
+    this.rectangle = undefined;
+    if (pointerId !== undefined && this.renderer.domElement.hasPointerCapture(pointerId)) this.renderer.domElement.releasePointerCapture(pointerId);
+    if (this.draft) disposeLocalObject(this.draft);
+    this.draft = undefined;
+    this.viewport.dataset.drawingRectangle = 'false';
     this.requestRefresh();
   }
 
   refresh() {
-    if (!this.available || !this.dimensions) return;
+    if (!this.available || !this.dimensions || !this.viewport.clientWidth || !this.viewport.clientHeight) return;
     this.renderer.setPixelRatio(1);
     for (const view of this.views) {
       this.configureCamera(view.camera, view.id);
@@ -206,24 +186,17 @@ export class PitchPreview {
       view.canvas.getContext('2d').drawImage(this.renderer.domElement, 0, 0);
       view.button.setAttribute('aria-pressed', String(view.id === this.cameraId));
       const preset = CAMERA_PRESETS.find((item) => item.id === view.id);
-      const name = this.analysisMode ? view.id === 'top' ? '俯视微调广告位' : '三维点云浏览' : preset.name;
-      view.button.querySelector('.camera-card-name').textContent = name;
-      view.button.querySelector('.thumbnail-number').textContent = this.analysisMode && view.id === 'main' ? '3D' : preset.code;
-      view.button.setAttribute('aria-label', name);
+      view.button.setAttribute('aria-label', preset.name);
     }
     const preset = CAMERA_PRESETS.find((item) => item.id === this.cameraId);
     const preview = this.viewport.parentElement;
-    preview.querySelector('#active-camera-id').textContent = this.analysisMode && this.cameraId === 'main' ? '3D' : preset.code;
-    preview.querySelector('#active-camera-name').textContent = this.analysisMode ? this.cameraId === 'top' ? '俯视微调广告位' : '分析结果 · 三维点云' : preset.name;
-    preview.querySelector('#active-camera-description').textContent = this.analysisMode
-      ? this.cameraId === 'top' ? '在球场坐标内拖动已有点位；Esc 取消本次拖动。' : '拖动旋转 · 右键平移 · 滚轮缩放；切到俯视可拖动广告位。'
-      : preset.description;
-    preview.querySelector('.model-badge').textContent = this.analysisMode ? this.aligned ? '条件坐标对齐 · 非实测标定' : '坐标未确认 · 仅点云' : '场次广告位 · 仅本地预览';
+    preview.querySelector('#active-camera-id').textContent = preset.code;
+    preview.querySelector('#active-camera-name').textContent = preset.name;
+    preview.querySelector('#active-camera-description').textContent = preset.description;
     preview.querySelector('#active-ad-name').textContent = this.slots.find((slot) => slot.id === this.selectedId)?.name ?? '场次广告位';
     this.viewport.dataset.cameraId = this.cameraId;
     this.viewport.dataset.previewMode = 'free';
-    this.viewport.dataset.analysisMode = String(this.analysisMode);
-    this.renderer.domElement.setAttribute('aria-label', this.analysisMode ? '导入的彩色点云与场次广告位，条件坐标对齐，不代表视频标定' : `${preset.name} · 仅预览场次配置的广告位，不新增广告位`);
+    this.renderer.domElement.setAttribute('aria-label', `${preset.name} · 球场 2D / 3D 广告位预览`);
     this.configureCamera(this.camera, this.cameraId);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(Math.max(this.viewport.clientWidth, 1), Math.max(this.viewport.clientHeight, 1), false);
@@ -234,10 +207,10 @@ export class PitchPreview {
     this.available = false;
     this.resetDrag();
     this.resizeObserver.disconnect();
-    this.cloudControls.dispose();
     cancelAnimationFrame(this.renderRequest);
     this.creatives?.dispose();
-    this.disposeCloud();
+    this.localAds.dispose();
+    this.cancelGroundRectangle();
     if (this.field) disposeSceneObject(this.field);
     if (this.overlay) disposeSceneObject(this.overlay);
     this.lighting.dispose();
@@ -245,62 +218,12 @@ export class PitchPreview {
   }
 
   private configureCamera(camera: THREE.PerspectiveCamera, id: CameraId) {
-    if (this.analysisMode && id === 'main') camera.copy(this.cloudCamera);
-    else if (this.analysisMode && !this.aligned) this.fitCloudTop(camera);
-    else if (id === 'main') {
+    if (id === 'main') {
       camera.near = 1;
       camera.far = 2000;
       applyPreviewCamera(camera, DEFAULT_CAMERA_POSITION, this.lens);
     }
     else { camera.aspect = 16 / 9; fitTopCamera(camera, this.dimensions); }
-  }
-
-  private cloudBounds() {
-    return new THREE.Box3(new THREE.Vector3(...this.analysis.minimum), new THREE.Vector3(...this.analysis.maximum));
-  }
-
-  private fitCloudView() {
-    if (!this.analysis) return;
-    const sphere = this.cloudBounds().getBoundingSphere(new THREE.Sphere());
-    const radius = Math.max(sphere.radius, 0.01), distance = radius / Math.sin(Math.PI / 8) * 1.1;
-    this.cloudCamera.position.copy(sphere.center).addScaledVector(new THREE.Vector3(0, 0.8, -0.6), distance);
-    this.cloudCamera.near = Math.max(radius / 10000, 0.001);
-    this.cloudCamera.far = distance + radius * 10;
-    this.cloudCamera.updateProjectionMatrix();
-    this.cloudControls.target.copy(sphere.center);
-    this.cloudControls.minDistance = Math.max(radius / 1000, 0.01);
-    this.cloudControls.maxDistance = radius * 40;
-    this.cloudControls.update();
-  }
-
-  private fitCloudTop(camera: THREE.PerspectiveCamera) {
-    const sphere = this.cloudBounds().getBoundingSphere(new THREE.Sphere());
-    const radius = Math.max(sphere.radius, 0.01), distance = radius / Math.sin(Math.PI / 8) * 1.1;
-    camera.aspect = 16 / 9;
-    camera.fov = 45;
-    camera.up.set(0, -1, 0);
-    camera.position.copy(sphere.center).add(new THREE.Vector3(0, 0, -distance));
-    camera.lookAt(sphere.center);
-    camera.near = Math.max(radius / 10000, 0.001);
-    camera.far = distance + radius * 10;
-    camera.updateProjectionMatrix();
-    camera.updateMatrixWorld();
-  }
-
-  private disposeCloud() {
-    if (!this.points) return;
-    this.points.geometry.dispose();
-    this.points.material.dispose();
-    this.points.removeFromParent();
-    this.points = undefined;
-  }
-
-  private applyVisibility() {
-    if (this.field) this.field.visible = !this.analysisMode;
-    if (this.points) this.points.visible = this.analysisMode;
-    const overlays = !this.analysisMode || this.aligned;
-    if (this.creatives) this.creatives.group.visible = overlays;
-    if (this.overlay) this.overlay.visible = overlays;
   }
 
   private requestRefresh() {
@@ -336,7 +259,6 @@ export class PitchPreview {
       this.overlay.add(group);
     }
     this.scene.add(this.overlay);
-    this.applyVisibility();
   }
 
   private groundPoint(event: PointerEvent) {
@@ -368,7 +290,18 @@ export class PitchPreview {
   private bindControls(canvas: HTMLCanvasElement) {
     canvas.addEventListener('pointerdown', (event) => {
       if (!this.available || !this.dimensions || event.button !== 0 || !event.isPrimary) return;
-      if (this.analysisMode && (this.cameraId === 'main' || !this.aligned)) return;
+      if (this.draw) {
+        const point = this.groundPoint(event);
+        if (!point || Math.abs(point.x) > this.dimensions.length / 2 || Math.abs(point.y) > this.dimensions.width / 2) {
+          this.viewport.dispatchEvent(new CustomEvent('rectangledrawmiss'));
+          return;
+        }
+        this.rectangle = { id: event.pointerId, start: point };
+        canvas.setPointerCapture(event.pointerId);
+        canvas.focus({ preventScroll: true });
+        event.preventDefault();
+        return;
+      }
       if (this.cameraId === 'main') this.drag = { kind: 'lens', id: event.pointerId, x: event.clientX, y: event.clientY, lens: { ...this.lens } };
       else {
         const point = this.groundPoint(event);
@@ -385,6 +318,25 @@ export class PitchPreview {
       canvas.focus({ preventScroll: true });
     });
     canvas.addEventListener('pointermove', (event) => {
+      if (this.rectangle?.id === event.pointerId) {
+        const point = this.groundPoint(event);
+        if (!point) return;
+        point.x = THREE.MathUtils.clamp(point.x, -this.dimensions.length / 2, this.dimensions.length / 2);
+        point.y = THREE.MathUtils.clamp(point.y, -this.dimensions.width / 2, this.dimensions.width / 2);
+        const start = this.rectangle.start;
+        const plane: AdPlane = { origin: [Math.min(start.x, point.x), Math.min(start.y, point.y), 0],
+          u: [1, 0, 0], v: [0, 1, 0], width: Math.abs(point.x - start.x), height: Math.abs(point.y - start.y) };
+        this.rectangle.plane = plane;
+        if (this.draft) disposeLocalObject(this.draft);
+        const [x, y] = plane.origin;
+        this.draft = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(x, y, -0.04), new THREE.Vector3(x + plane.width, y, -0.04),
+          new THREE.Vector3(x + plane.width, y + plane.height, -0.04), new THREE.Vector3(x, y + plane.height, -0.04),
+        ]), new THREE.LineBasicMaterial({ color: '#ddff54', depthTest: false }));
+        this.scene.add(this.draft);
+        this.requestRefresh();
+        return;
+      }
       const drag = this.drag;
       if (!drag || drag.id !== event.pointerId) return;
       if (drag.kind === 'lens') this.lens = clampPreviewLens({ ...drag.lens, pan: drag.lens.pan - (event.clientX - drag.x) * 0.12, tilt: drag.lens.tilt + (event.clientY - drag.y) * 0.12 });
@@ -402,6 +354,16 @@ export class PitchPreview {
       this.requestRefresh();
     });
     canvas.addEventListener('pointerup', (event) => {
+      if (this.rectangle?.id === event.pointerId) {
+        const plane = this.rectangle.plane, complete = this.draw;
+        this.rectangle = undefined;
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+        if (plane && plane.width >= 0.1 && plane.height >= 0.1) {
+          this.cancelGroundRectangle();
+          complete(plane);
+        } else this.viewport.dispatchEvent(new CustomEvent('rectangledrawmiss'));
+        return;
+      }
       const drag = this.drag;
       if (!drag || drag.id !== event.pointerId) return;
       this.drag = undefined;
@@ -409,18 +371,28 @@ export class PitchPreview {
       if (drag.kind === 'placement') this.onMove(drag.candidate);
     });
     for (const type of ['pointercancel', 'lostpointercapture'] as const) canvas.addEventListener(type, (event) => {
+      if (this.rectangle?.id === event.pointerId) {
+        this.cancelGroundRectangle();
+        this.viewport.dispatchEvent(new CustomEvent('rectangledrawcancel'));
+      }
       if (this.drag?.id !== event.pointerId) return;
       this.resetDrag();
       this.refresh();
     });
     canvas.addEventListener('wheel', (event) => {
-      if (this.cameraId !== 'main' || this.analysisMode) return;
+      if (this.cameraId !== 'main') return;
       event.preventDefault();
       const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1);
       this.lens = clampPreviewLens({ ...this.lens, zoom: this.lens.zoom * Math.exp(-pixels * 0.001) });
       this.requestRefresh();
     }, { passive: false });
     canvas.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && this.draw) {
+        event.preventDefault();
+        this.cancelGroundRectangle();
+        this.viewport.dispatchEvent(new CustomEvent('rectangledrawcancel'));
+        return;
+      }
       if (event.key === 'Escape' && this.drag) {
         event.preventDefault();
         this.resetDrag();
@@ -428,10 +400,6 @@ export class PitchPreview {
         return;
       }
       if (this.cameraId !== 'main') return;
-      if (this.analysisMode) {
-        if (event.key === 'Home') { event.preventDefault(); this.resetView(); }
-        return;
-      }
       const next = { ...this.lens };
       if (event.key === 'ArrowLeft') next.pan -= 2;
       else if (event.key === 'ArrowRight') next.pan += 2;

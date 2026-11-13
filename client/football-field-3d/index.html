@@ -25,53 +25,81 @@
             <form id="match-lookup-form"><label for="match-lookup-id">比赛场次唯一 ID</label><div class="on-lookup-row"><input id="match-lookup-id" placeholder="输入 Fusion 提供的比赛 ID" maxlength="80" required autocomplete="off" /><button class="on-button primary" id="match-lookup-submit" type="submit">核验并添加</button></div></form>
             <p class="on-help">Enter a Fusion MATCH or CMP identifier. Reloading fetches the latest saved Ads, placements and assigned materials.</p>
             <p id="lookup-status" role="status" class="on-help"></p>
+            <div class="on-action-row"><button id="import-offline-package" class="on-button" type="button">Import offline ZIP</button><input id="offline-package-file" type="file" accept=".zip,application/zip" hidden /></div>
+            <p class="on-help">Import a complete match package downloaded from Fusion, including images and GLB models. No API connection is required. Up to 256 MB of materials; saved in this browser.</p>
+            <p id="offline-package-status" class="on-help" role="status"></p>
           </section>
           <div class="on-section-heading on-library-heading"><h2>我的比赛 <span id="match-count">0</span></h2><span class="on-help">比赛与位置草稿按场次分别保存</span></div>
+          <p id="match-delete-status" class="on-help" role="status" hidden></p>
           <div id="match-cards" class="on-match-grid"></div>
         </section>
         <section id="match-page" hidden>
-          <div class="on-hero"><div><p class="on-eyebrow">MATCH WORKSPACE</p><h1 id="match-title"></h1><p id="match-meta" class="on-sub"></p><div class="on-context"><code id="match-code"></code><span id="match-source" class="on-badge amber">Fusion match</span><span id="draft-badge" class="on-badge">Local draft</span></div><p id="configuration-status" class="on-help" role="status"></p></div><div class="on-action-row"><button id="refresh-configuration" class="on-button" type="button">Refresh configuration</button><a class="on-button" href="#matches">All matches</a></div></div>
-          <div class="on-workflow"><div><b>01</b><span>场次资源<small id="resource-step">等待场次配置</small></span></div><div><b>02</b><span>全场扫描<small id="scan-step">未选择视频</small></span></div><div><b>03</b><span>Fusion 分析<small>接口待接入</small></span></div><div><b>04</b><span>位置微调<small id="adjust-step">等待分析结果</small></span></div></div>
-          <nav class="on-tabs" aria-label="场次准备步骤"><button data-tab="preview" class="active">01　广告位预览</button><button data-tab="scan">02　场地扫描与分析</button><button data-tab="adjust">03　广告位微调 <span id="result-dot" hidden></span></button></nav>
+          <div class="on-hero"><div><p class="on-eyebrow">MATCH WORKSPACE</p><h1 id="match-title"></h1><p id="match-meta" class="on-sub"></p><div class="on-context"><code id="match-code"></code><span id="match-source" class="on-badge amber">Fusion match</span><span id="draft-badge" class="on-badge">Local draft</span></div><p id="configuration-status" class="on-help" role="status"></p></div><div class="on-action-row"><button id="refresh-configuration" class="on-button" type="button">Refresh configuration</button><button id="replace-offline-package" class="on-button" type="button" hidden>Replace offline ZIP</button><a class="on-button" href="#matches">All matches</a></div></div>
+          <div class="on-workflow"><div><b>01</b><span>场次与广告位<small id="resource-step">等待场次配置</small></span></div><div><b>02</b><span>本地视频<small id="scan-step">未选择视频</small></span></div><div><b>03</b><span>手动导入结果<small id="analysis-step">等待结果文件夹</small></span></div><div><b>04</b><span>效果与微调<small id="adjust-step">等待结果文件夹</small></span></div></div>
+          <nav class="on-tabs" aria-label="场次准备步骤"><button data-tab="preview" class="active">01　广告位预览</button><button data-tab="scan">02　场地视频</button><button data-tab="adjust">03　导入结果与微调 <span id="result-dot" hidden></span></button></nav>
           <div id="preview-tab" class="on-tab-panel">
-            <div class="on-work-grid"><section class="on-card on-preview-card"><div class="on-card-head"><div><h2>预置广告位 · 球场预览</h2><p class="on-help">点位来自场次配置。可选择检查，不再绘制新广告位。</p></div><span id="field-size" class="on-badge"></span></div>
+            <section id="pitch-ad-workspace" aria-labelledby="pitch-ad-heading">
+            <div class="on-section-heading"><div><p class="on-eyebrow">PITCH ADVERTISING</p><h2 id="pitch-ad-heading">球场广告 · 2D / 3D 预览</h2><p class="on-help">俯视图与主看台预览场次广告和本地新增广告，不依赖下方点云。</p></div></div>
+            <div class="on-work-grid"><section class="on-card on-preview-card"><div class="on-card-head"><div><h2>俯视图 / 主看台</h2><p class="on-help">右侧可新增 2D 图片广告或 3D 模型广告，并分别上传素材。</p></div><span id="field-size" class="on-badge"></span></div>
               <div id="pitch-mount"><div class="preview">
-                <div class="preview-header"><span>PITCH PREVIEW</span><span class="model-badge">场次广告位 · 仅本地预览</span></div>
+                <div class="preview-header"><span>PITCH PREVIEW</span><span class="model-badge">球场广告 · 仅本地预览</span></div>
                 <div id="viewport"><div id="loading" class="feed-loading" role="status">正在加载场次广告位…</div></div>
                 <div class="preview-bottom"><div><span class="camera-id" id="active-camera-id">TOP</span><h2 id="active-camera-name">全场俯视机位</h2><p id="active-camera-description">点位来自场次配置</p></div><div class="selection-badge" id="active-ad-name">场次广告位</div></div>
               </div></div>
-              <div class="on-preview-footer"><span>俯视图可拖动已有点位；主看台可拖动视角、滚轮变焦。</span><span class="on-badge amber">赛前近似预览</span></div><div id="camera-mount"><div id="camera-list" class="camera-list" role="group" aria-label="选择预览机位"></div></div><button id="reset-business-view" class="on-text-button" type="button">重置主看台预览视角</button></section>
-              <aside class="on-card on-placement-panel"><div class="on-card-head"><h2>场次广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">可分别显示或隐藏 2D / 3D 广告位，仅影响本地预览。显示设置和位置草稿按场次保存，不会自动播出或回传 Fusion。</p><button class="on-button primary on-next" data-go-tab="scan">下一步：场地扫描 →</button></aside></div>
-          </div>
-          <div id="scan-tab" class="on-tab-panel" hidden>
-            <div class="on-scan-grid"><section class="on-card"><div class="on-card-head"><div><p class="on-eyebrow">STATIC GEOMETRY SCAN</p><h2>上传全场扫描视频</h2></div><span class="on-badge amber">当前仅本地选择</span></div><div class="on-card-body">
-              <label id="scan-dropzone" class="on-dropzone" for="scan-file" tabindex="0" role="button"><span class="on-upload-icon">↑</span><strong>选择或拖入扫描视频</strong><span>MP4 / WebM / MOV · 建议数分钟，覆盖整个球场</span><span class="on-button">选择视频文件</span></label><input id="scan-file" type="file" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" hidden />
-              <div id="scan-video-area" hidden><div class="on-file-row"><div><strong id="scan-filename"></strong><p id="scan-file-meta" class="on-help"></p></div><button id="replace-scan" class="on-button" type="button">重新选择</button></div><video id="scan-preview" controls playsinline preload="metadata"></video></div>
-              <p id="scan-status" class="on-help" role="status">视频仅在浏览器本地预览，不会自动上传。刷新后需重新选择文件。</p>
-              <div class="on-action-row"><button id="submit-scan" class="on-button primary" disabled>提交 Fusion 分析（待接入）</button><span class="on-help">等待上传、任务状态及结果接口</span></div>
-            </div></section><aside class="on-card on-scan-guide"><p class="on-eyebrow">CAPTURE CHECKLIST</p><h2>扫描前检查</h2><ol><li><b>选定比赛与场地</b><p>扫描任务需绑定当前比赛 ID 和场地 ID。</p></li><li><b>主相机平稳扫过全场</b><p>覆盖左右球门、边线与中圈，避免快速运动及明显抖动。</p></li><li><b>关键区域多视角覆盖</b><p>球门和中圈附近留出小范围角度变化，保留多张清晰画面。</p></li><li><b>完成后提交静态分析</b><p>Fusion 将返回相机位置、多视角图集、特征点及 H / Ti 等结果，具体格式以后续接口为准。</p></li></ol><div class="on-notice">现场服务器接收 SDI 并编码的流程不在网页内执行；这里负责选择已编码的视频及后续提交。</div></aside></div>
-            <section class="on-card on-analysis-card"><div><p class="on-eyebrow">FUSION ANALYSIS</p><h2>分析任务与结果</h2><p id="analysis-status" class="on-help" role="status">尚未接入扫描分析接口，没有创建或提交分析任务。</p></div></section>
-          </div>
-          <div id="adjust-tab" class="on-tab-panel" hidden>
-            <section id="analysis-import" class="on-card on-analysis-import" aria-label="手动导入分析结果">
-              <div><p class="on-eyebrow">LOCAL ANALYSIS RESULT</p><h2>手动导入分析结果</h2><p class="on-help">选择或拖入彩色 PLY 点云（ASCII / 二进制，最大 64 MB / 200 万点）。仅在本机解析，不上传 Fusion；刷新后需重新导入。</p><p id="analysis-import-status" class="on-help" role="status"></p></div>
-              <div class="on-action-row"><button id="import-analysis" class="on-button primary" type="button">选择 PLY 文件</button><button id="cancel-analysis" class="on-button" type="button" hidden>取消导入</button><button id="remove-analysis" class="on-button" type="button" hidden>移除结果</button></div>
+              <div class="on-preview-footer"><span>俯视图编辑底面，主看台查看 2D / 3D 效果；导入点云不会替换此画面。</span><span class="on-badge amber">近似预览机位</span></div>
+              <div id="camera-mount"><div id="camera-list" class="camera-list" role="group" aria-label="选择球场预览机位"></div></div><button id="reset-business-view" class="on-text-button" type="button">复位球场预览视角</button>
+            </section><aside class="on-local-sidebar">
+              <section class="on-card on-placement-panel"><div class="on-card-head"><h2>场次配置广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">显示设置和位置草稿按场次保存，不会自动播出或回传 Fusion。</p></section>
+              <section id="pitch-local-editor" class="on-card on-local-editor" aria-label="球场本地广告编辑"></section>
+            </aside></div>
+            </section>
+            <section id="cloud-ad-workspace" class="on-cloud-workspace" aria-labelledby="cloud-ad-heading">
+            <div class="on-section-heading"><div><p class="on-eyebrow">POINT CLOUD ADVERTISING</p><h2 id="cloud-ad-heading">点云广告 · 独立绘制区</h2><p class="on-help">在扫描点云的任意表面绘制另一类广告位；与上方球场广告的相机、列表和素材独立。</p></div></div>
+            <section id="analysis-import" class="on-card on-analysis-import" aria-label="点云广告位工作区">
+              <div><h2>导入参考视频与 PLY 点云</h2><p class="on-help">视频仅供本地参考；PLY 已包含点云，选择后直接显示，不执行视频重建。选三点确定任意广告平面，可上传图片或 GLB 模型。</p><p id="analysis-import-status" class="on-help" role="status"></p></div>
+              <div class="on-action-row"><button id="choose-cloud-video" class="on-button" type="button">选择参考视频</button><button id="import-analysis" class="on-button primary" type="button">选择 PLY 点云</button><button id="cancel-analysis" class="on-button" type="button" hidden>取消导入</button><button id="remove-analysis" class="on-button" type="button" hidden>移除点云</button></div>
               <input id="analysis-file" type="file" accept=".ply" hidden />
             </section>
-            <div id="analysis-empty" class="on-card on-empty"><span class="on-upload-icon">◎</span><h2 id="analysis-empty-title">等待场地分析结果</h2><p id="analysis-empty-description">可在上方手动导入点云，或前往场地扫描等待 Fusion 分析接口接入。</p><button class="on-button" data-go-tab="scan">前往场地扫描</button></div>
+            <section id="cloud-video-area" class="on-card on-card-body" hidden><h2>本地参考视频</h2><p id="cloud-video-name" class="on-help"></p><video id="cloud-preview-video" controls playsinline preload="metadata"></video></section>
+            <div id="analysis-empty" class="on-help"><span id="analysis-empty-title">尚未导入点云</span><p id="analysis-empty-description">导入 PLY 后在此处绘制点云广告；不影响上方球场广告。</p></div>
             <div id="analysis-workspace" hidden>
-              <div class="on-result-summary"><span><small>结果文件</small><b id="result-source"></b></span><span><small>坐标状态</small><b id="result-camera"></b></span><span><small>点数</small><b id="result-coverage"></b></span><span><small>调整状态</small><b>本地草稿 · 未回传</b></span></div>
-              <div class="on-work-grid"><div>
-                <section id="review-mount" class="on-card on-preview-card on-analysis-preview">
-                  <div class="on-card-head"><h2>点云与广告位</h2><button id="reset-analysis-view" class="on-button" type="button">复位视角</button></div>
-                  <div id="analysis-pitch-mount"></div><div id="analysis-camera-mount"></div>
-                  <div class="on-cloud-controls"><label>点大小（文件坐标单位）<output id="cloud-point-size-value">0.15</output><input id="cloud-point-size" type="range" min="0.02" max="1" step="0.01" value="0.15" /></label><label class="on-alignment-toggle"><input id="analysis-aligned" type="checkbox" /> 按球场坐标叠加广告位（米制、球场中心原点、−Z 向上）</label><p id="analysis-coordinate-note" class="on-help"></p><p id="analysis-bounds" class="on-help"></p></div>
-                </section>
-                <p class="on-help">点云不含相机或视频标定，当前为条件坐标对齐，非实测标定或视频对齐验证。右侧可输入位置，俯视图可拖动点位；显示 / 隐藏仍在“广告位预览”设置。</p>
-              </div>
-                <aside class="on-card on-editor"><div class="on-card-head"><h2>微调已有广告位</h2></div><div id="adjust-placement-list"></div><form id="placement-form" class="on-card-body"><h3 id="editor-name"></h3><p id="editor-info" class="on-help"></p><fieldset id="placement-edit-controls" disabled><div id="placement-fields" class="on-field-grid"></div><p id="placement-error" class="on-form-error" role="alert"></p><button class="on-button primary" type="submit">应用并保存本地草稿</button><button id="reset-placement" class="on-text-button" type="button">恢复此点位的场次配置</button></fieldset></form></aside></div>
-              <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿仅保存在本机，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
+              <div class="on-result-summary"><span><small>点云文件</small><b id="cloud-source"></b></span><span><small>坐标状态</small><b id="cloud-camera"></b></span><span><small>点数</small><b id="cloud-coverage"></b></span><span><small>数据状态</small><b>本地点云 · 未上传</b></span></div>
+            <div class="on-work-grid"><section class="on-card on-preview-card"><div class="on-card-head"><h2>点云与点云广告</h2><span class="on-badge">原始坐标</span></div>
+              <div id="cloud-viewport"></div>
+              <div class="on-cloud-toolbar"><button id="cloud-view-orbit" class="on-button" type="button" aria-pressed="true">三维浏览</button><button id="cloud-view-top" class="on-button" type="button" aria-pressed="false">点云俯视</button><button id="reset-cloud-view" class="on-text-button" type="button">复位点云视角</button></div>
+              <p id="cloud-engine-status" class="on-panel-note" role="status">点击广告选中 · 拖内部移动 · 拖边角调整大小 · 松开自动保存 · Esc 取消；拖空白旋转，右键平移，滚轮缩放。</p>
+              <div id="cloud-controls" class="on-cloud-controls" hidden>
+                <label>点大小 <output id="cloud-point-size-value">0.15</output><input id="cloud-point-size" type="range" min="0.02" max="1" step="0.01" value="0.15" /></label>
+                <label>选点半径（原始单位）<input id="cloud-pick-tolerance" type="number" min="0.01" max="10" step="0.05" value="0.3" /></label>
+                <label class="on-alignment-toggle"><input id="analysis-aligned" type="checkbox" /> 确认该点云与当前球场同坐标（米制、中心原点、−Z 向上），允许视频叠加</label>
+                <p id="analysis-coordinate-note" class="on-help"></p><p id="analysis-bounds" class="on-help"></p>
+              </div></section>
+              <aside id="cloud-local-editor" class="on-card on-local-editor" aria-label="点云广告编辑"></aside>
+            </div></div>
+            </section>
+          </div>
+          <div id="scan-tab" class="on-tab-panel" hidden>
+            <div class="on-scan-grid"><section class="on-card"><div class="on-card-head"><div><p class="on-eyebrow">STATIC GEOMETRY SCAN</p><h2>选择全场扫描视频</h2></div><span class="on-badge amber">仅本地预览</span></div><div class="on-card-body">
+              <label id="scan-dropzone" class="on-dropzone" for="scan-file" tabindex="0" role="button"><span class="on-upload-icon">↑</span><strong>选择或拖入扫描视频</strong><span>MP4 / WebM / MOV · 建议数分钟，覆盖整个球场</span><span class="on-button">选择视频文件</span></label><input id="scan-file" type="file" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" hidden />
+              <div id="scan-video-area" hidden><div class="on-file-row"><div><strong id="scan-filename"></strong><p id="scan-file-meta" class="on-help"></p></div><button id="replace-scan" class="on-button" type="button">重新选择</button></div><video id="scan-preview" controls playsinline preload="metadata"></video></div>
+              <p id="scan-status" class="on-help" role="status">视频仅在浏览器本地预览，无需提交 Fusion。已有分析结果可直接导入文件夹；点云 PLY 请在“广告位预览”选择。</p>
+              <div class="on-action-row"><button id="submit-scan" class="on-button" type="button" disabled>提交 Fusion 分析（待接入）</button><button class="on-button primary" type="button" data-go-tab="adjust">手动导入结果文件夹 →</button><span class="on-help">Fusion 提交入口暂时保留；已有结果可直接导入，无需提交视频。</span></div>
+            </div></section><aside class="on-card on-scan-guide"><p class="on-eyebrow">CAPTURE CHECKLIST</p><h2>扫描前检查</h2><ol><li><b>选定比赛与场地</b><p>本地视频和手动导入的结果应属于当前比赛与场地。</p></li><li><b>主相机平稳扫过全场</b><p>覆盖左右球门、边线与中圈，避免快速运动及明显抖动。</p></li><li><b>关键区域多视角覆盖</b><p>球门和中圈附近留出小范围角度变化，保留多张清晰画面。</p></li><li><b>手动导入已有分析结果</b><p>在外部完成分析后，前往“导入结果与微调”选择完整结果文件夹，查看原画面和广告叠加效果。</p></li></ol><div class="on-notice">网页不提交视频到 Fusion，也不会自动生成点云。视频仅供本地预览，分析结果由你手动导入。</div></aside></div>
+            <section class="on-card on-analysis-card"><div><p class="on-eyebrow">LOCAL ANALYSIS RESULT</p><h2>手动分析结果</h2><p id="analysis-status" class="on-help" role="status">可直接前往“导入结果与微调”选择已有结果文件夹，无需提交视频到 Fusion。</p></div></section>
+          </div>
+          <div id="adjust-tab" class="on-tab-panel" hidden>
+            <section class="on-card on-analysis-import" aria-label="手动导入分析结果文件夹">
+              <div><p class="on-eyebrow">LOCAL CALIBRATION RESULT</p><h2>手动导入结果文件夹</h2><p class="on-help">支持 Ti 结果包（metadata.json + shots），以及诊断投影包（MANIFEST.json + media + model，含 P_aux / 径向畸变 / 逐帧 postwarp）。选择完整文件夹，外层解压目录也可。只读本地文件，不执行包内脚本，不上传 Fusion；刷新后需重新选择。</p><p id="result-folder-status" class="on-help" role="status"></p></div>
+              <div class="on-action-row"><button id="import-result-folder" class="on-button primary" type="button">选择结果文件夹</button><button id="cancel-result-folder" class="on-button" type="button" hidden>取消导入</button><button id="remove-result-folder" class="on-button" type="button" hidden>移除结果</button></div>
+              <input id="result-folder" type="file" webkitdirectory multiple hidden />
+            </section>
+            <div id="result-review" hidden>
+              <div class="on-card on-card-body on-result-controls"><label>结果镜头<select id="result-shot"></select></label><div class="on-action-row"><button id="result-play" class="on-button" type="button">播放</button><button id="result-toggle-ads" class="on-button primary" type="button" aria-pressed="false" disabled>显示广告</button></div><label class="on-result-timeline">播放进度<input id="result-timeline" type="range" min="0" max="1" step="0.001" value="0" /></label><label id="result-extrapolate-control" class="on-help" hidden><input id="result-extrapolate-cloud" type="checkbox" checked /> 允许点云广告实验性外推（看台 / 棚顶等范围外区域，位置及高度精度未经验证，仅本地预览）</label><p id="result-frame-status" class="on-help" role="status"></p><p id="result-overlay-note" class="on-help"></p></div>
+              <div class="on-monitors"><section class="on-card"><div class="on-card-head"><h2>SOURCE　原始画面</h2><span class="on-help">始终无广告</span></div><canvas id="result-source" aria-label="原始比赛视频"></canvas></section><section class="on-card"><div class="on-card-head"><h2>PROGRAM　广告叠加效果</h2><span class="on-help">仅本地预览</span></div><canvas id="result-program" aria-label="视频叠加广告效果"></canvas></section></div>
+              <video id="result-video" playsinline preload="auto" hidden></video><p id="result-quality" class="on-help"></p>
             </div>
+            <section class="on-card on-editor"><div class="on-card-head"><h2>Fusion 场次广告位微调</h2><button class="on-button" type="button" data-go-tab="preview">返回球场 / 点云广告编辑</button></div><div id="adjust-placement-list"></div><form id="placement-form" class="on-card-body"><h3 id="editor-name"></h3><p id="editor-info" class="on-help"></p><fieldset id="placement-edit-controls" disabled><div id="placement-fields" class="on-field-grid"></div><p id="placement-error" class="on-form-error" role="alert"></p><button class="on-button primary" type="submit">应用并保存本地草稿</button><button id="reset-placement" class="on-text-button" type="button">恢复此点位的场次配置</button></fieldset></form></section>
+            <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿仅保存在本机，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
           </div>
           <p id="engine-status" class="on-help" role="status"></p>
         </section>

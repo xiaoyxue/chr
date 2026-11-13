@@ -2,6 +2,7 @@ export const MAX_PLY_BYTES = 64 * 1024 * 1024;
 export const MAX_PLY_POINTS = 2_000_000;
 
 export interface PlyCloud {
+  id: string;
   fileName: string;
   byteLength: number;
   positions: Float32Array<ArrayBuffer>;

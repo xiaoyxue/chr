@@ -23,7 +23,7 @@ function array(value: unknown): unknown[] {
   return value;
 }
 
-export function mapFusionMatch(value: unknown, requestedId: string): Match {
+export function mapFusionMatch(value: unknown, requestedId: string, offlinePackageId?: string): Match {
   const data = object(value), field = object(data.field), coordinates = object(data.coordinates);
   const matchId = id(data.id), campaignId = id(data.campaignId);
   if (![matchId, campaignId].includes(requestedId)) throw new Error('Fusion returned a different match.');
@@ -38,7 +38,8 @@ export function mapFusionMatch(value: unknown, requestedId: string): Match {
     if (!['image/png', 'image/jpeg', 'image/webp', 'model/gltf-binary'].includes(contentType))
       throw new Error('Unsupported Fusion material format.');
     assets.set(assetId, { id: assetId, name: text(asset.name), contentType,
-      url: `/fusion-api/matches/${matchId}/assets/${assetId}` });
+      url: offlinePackageId ? `/fusion-offline/packages/${offlinePackageId}/assets/${assetId}`
+        : `/fusion-api/matches/${matchId}/assets/${assetId}` });
   }
   const placements: Placement[] = [];
   const adIds = new Set<string>();
@@ -74,7 +75,8 @@ export function mapFusionMatch(value: unknown, requestedId: string): Match {
     }
   }
   return validateMatch({ id: requestedId, name: text(data.name), date: text(data.date),
-    venue: text(data.venue) || text(field.name), venueId: id(field.id), mode: 'api',
+    venue: text(data.venue) || text(field.name), venueId: id(field.id),
+    mode: offlinePackageId ? 'offline' : 'api', offlinePackageId,
     field: { length: number(field.length), width: number(field.width) }, placements });
 }
 

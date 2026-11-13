@@ -63,7 +63,8 @@ async function parse(file: File): Promise<PlyCloud> {
       }
     }
     if (maximum.every((value, axis) => value === minimum[axis])) throw new Error('点云没有可查看的空间范围。');
-    return { fileName: file.name, byteLength: file.size, positions, colors, minimum, maximum, declaredPitchCoordinates: header.declaredPitchCoordinates };
+    const id = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return { id, fileName: file.name, byteLength: file.size, positions, colors, minimum, maximum, declaredPitchCoordinates: header.declaredPitchCoordinates };
   } finally { geometry.dispose(); }
 }
 

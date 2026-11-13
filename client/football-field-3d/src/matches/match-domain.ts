@@ -23,7 +23,7 @@ export function validatePlacement(slot: unknown, field: FieldDimensions): Placem
     const source = slot.asset;
     if (!isRecord(source) || typeof source.id !== 'string' || typeof source.name !== 'string'
       || typeof source.url !== 'string'
-      || !/^\/fusion-api\/matches\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/assets\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(source.url)
+      || !/^\/(?:fusion-api\/matches|fusion-offline\/packages)\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/assets\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(source.url)
       || source.url.split('/').pop() !== source.id
       || typeof source.contentType !== 'string'
       || !(type === '3D' ? source.contentType === 'model/gltf-binary' : ['image/png', 'image/jpeg', 'image/webp'].includes(source.contentType)))
@@ -68,13 +68,19 @@ export function validateMatch(match: unknown): Match {
     || typeof match.date !== 'string' || !match.date.trim()
     || typeof match.venue !== 'string' || !match.venue.trim()
     || typeof match.venueId !== 'string' || !match.venueId.trim()
-    || match.mode !== 'api' || !Array.isArray(match.placements)) throw new Error('场次数据不完整，无法打开。');
+    || (match.mode !== 'api' && match.mode !== 'offline') || !Array.isArray(match.placements)) throw new Error('场次数据不完整，无法打开。');
+  if (match.mode === 'offline' && (typeof match.offlinePackageId !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(match.offlinePackageId))) throw new Error('Invalid offline package identifier.');
   if (!isRecord(match.field) || !hasNumbers(match.field, ['length', 'width'])) throw new Error('请输入有效的球场长、宽。');
   const field = validateDimensions(match.field.length, match.field.width);
   const slots = match.placements.map((slot) => validatePlacement(slot, field));
+  if (slots.some((slot) => slot.asset && (match.mode === 'offline'
+    ? !slot.asset.url.startsWith(`/fusion-offline/packages/${match.offlinePackageId}/assets/`)
+    : !slot.asset.url.startsWith('/fusion-api/matches/')))) throw new Error('Material source does not match the match configuration.');
   if (new Set(slots.map((slot) => slot.id)).size !== slots.length
     || new Set(slots.filter((slot) => slot.type === '3D' && slot.assetRole).map((slot) => slot.assetRole)).size !== slots.filter((slot) => slot.type === '3D' && slot.assetRole).length) throw new Error('场次广告位 ID 或模型角色重复。');
-  return { ...match, id: match.id, name: match.name, date: match.date, venue: match.venue, venueId: match.venueId, mode: match.mode, field, placements: slots };
+  return { ...match, id: match.id, name: match.name, date: match.date, venue: match.venue, venueId: match.venueId,
+    mode: match.mode, field, placements: slots };
 }
 
 export function validateScanFile<T extends Pick<File, 'name' | 'size'>>(file: T): T {

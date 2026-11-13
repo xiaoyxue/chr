@@ -23,7 +23,8 @@ export interface Match {
   date: string;
   venue: string;
   venueId: string;
-  mode: 'api';
+  mode: 'api' | 'offline';
+  offlinePackageId?: string;
   field: FieldDimensions;
   placements: Placement[];
 }

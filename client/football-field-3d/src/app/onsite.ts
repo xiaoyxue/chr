@@ -1,6 +1,11 @@
 import { FusionGateway, MatchRepository, validatePlacement, validateScanFile } from '../matches/match-domain.ts';
 import { HttpFusionAdapter } from '../matches/fusion-client.ts';
+import { offlinePackages, parseOfflinePackage } from '../matches/offline-package.ts';
 import { importPlyFile } from '../analysis/ply-import.ts';
+import { ResultReview } from '../analysis/result-review.ts';
+import { LocalAdEditor } from '../placements/local-ad-editor.ts';
+import { LocalAdRepository, validatePitchAd } from '../placements/local-ad.ts';
+import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
@@ -16,17 +21,52 @@ const analysisResults = new Map<string, LocalAnalysis>();
 let analysisImport: { matchId: string; controller: AbortController };
 let analysisNotice: { matchId: string; text: string; failed?: boolean };
 let records: MatchRecord[] | null = null;
+let libraryBusy = false;
+let deletingMatchId: string;
 let currentId: string;
 let selectedId: string;
 let activeTab = 'preview';
 let enginePromise: Promise<PitchPreview>;
 let engine: PitchPreview;
+let cloudEngine: PointCloudPreview;
 let enginePending = false;
 let engineReadyMatchId: string;
 let matchLoadVersion = 0;
 let engineQueue = Promise.resolve();
 let scanURL: string;
 let scanAbort: AbortController;
+const resultReview = new ResultReview(showError, clearError);
+const pitchEditor = new LocalAdEditor({
+  root: $('#pitch-local-editor'),
+  prefix: 'pitch-',
+  space: 'pitch',
+  update: async (ads, selectedId) => {
+    await Promise.all([engine?.setLocalAds(ads, selectedId), resultReview.setPitchAds(ads)]);
+  },
+  pick: () => {
+    try { engine.startGroundRectangle((plane) => { void pitchEditor.finishPlane(plane); }); }
+    catch (error) { pitchEditor.cancelDrawing(); showError(error); }
+  },
+  cancelPick: () => engine?.cancelGroundRectangle(),
+  validate: (ad) => validatePitchAd(ad, current().match.field),
+  error: showError,
+});
+const localEditor = new LocalAdEditor({
+  root: $('#cloud-local-editor'),
+  prefix: '',
+  space: 'cloud',
+  update: async (ads, selectedId) => {
+    await Promise.all([cloudEngine?.setLocalAds(ads, selectedId), resultReview.setLocalAds(ads, analysisResults.get(currentId)?.aligned ?? false)]);
+  },
+  pick: () => {
+    try { cloudEngine.startPlanePick((count) => localEditor.picked(count), (points, normalSign) => { void localEditor.finish(points, normalSign); }); }
+    catch (error) { localEditor.cancelDrawing(); showError(error); }
+  },
+  cancelPick: () => { cloudEngine?.cancelPlanePick(); cloudEngine?.cancelAdDrag(); },
+  manipulationAvailable: (available) => cloudEngine?.setAdEditingEnabled(available),
+  error: showError,
+});
+resultReview.onChange = () => renderAnalysis();
 
 const htmlEscapes: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHTML = (value: unknown) => String(value).replace(/[&<>"']/g, (char) => htmlEscapes[char]);
@@ -43,11 +83,72 @@ function clearError() { $('#app-error').hidden = true; }
 function renderMatches() {
   $('#match-count').textContent = String(records?.length ?? 0);
   $('#match-cards').innerHTML = records?.length ? records.map(({ match, draft }) => `
-    <article class="on-card on-match-card"><span class="on-badge amber">Fusion configuration</span>
+    <article class="on-card on-match-card"><span class="on-badge amber">${match.mode === 'offline' ? 'Offline package' : 'Fusion configuration'}</span>
       <h2>${escapeHTML(match.name)}</h2><code>${escapeHTML(match.id)}</code>
       <p class="on-sub">${escapeHTML(match.date.replace('T', ' '))}　·　${escapeHTML(match.venue)}</p>
-      <div class="on-match-foot"><span class="on-help">${draft.length} 个广告位 · ${analysisResults.has(match.id) ? '已导入本地点云' : '等待场地分析'}</span><a class="on-button primary" href="#match/${encodeURIComponent(match.id)}/preview">进入场次 →</a></div>
+      <div class="on-match-foot"><span class="on-help">${draft.length} 个广告位 · ${analysisResults.has(match.id) ? '已导入本地点云' : '等待场地分析'}</span>
+        <div class="on-match-actions"><button type="button" class="on-button on-delete-match" data-delete-match="${escapeHTML(match.id)}" aria-label="删除比赛 ${escapeHTML(match.name)}（仅本机）" ${libraryBusy ? 'disabled' : ''}>${deletingMatchId === match.id ? '删除中…' : '删除'}</button>
+        <a class="on-button primary" href="#match/${encodeURIComponent(match.id)}/preview">进入场次 →</a></div></div>
     </article>`).join('') : `<div class="on-card on-empty"><h2>${records ? '还没有添加比赛' : '本地记录读取失败'}</h2><p>${records ? '输入 Fusion 提供的比赛 ID 获取场次配置。' : '为避免覆盖原记录，已停止写入。请查看页面上方错误信息。'}</p></div>`;
+}
+
+function setLibraryBusy(busy: boolean) {
+  libraryBusy = busy;
+  for (const selector of ['#match-lookup-submit', '#import-offline-package', '#replace-offline-package']) {
+    $<HTMLButtonElement>(selector).disabled = busy || !records;
+  }
+  renderMatches();
+}
+
+async function deleteMatch(id: string) {
+  const record = records?.find((item) => item.match.id === id);
+  if (!record || libraryBusy) return;
+  if (!window.confirm(`删除本机保存的比赛“${record.match.name}”？\n\n本地广告位、素材及导入结果也会移除，此操作不可撤销。\n不会删除 Fusion 上的比赛，也不会删除原始视频、PLY 或结果文件夹。`)) return;
+  clearError();
+  deletingMatchId = id;
+  setLibraryBusy(true);
+  const status = $('#match-delete-status');
+  status.hidden = false;
+  status.textContent = '正在删除本地比赛及关联数据…';
+  let removed = false;
+  try {
+    const next = records.filter((item) => item.match.id !== id);
+    repository.write(next);
+    records = next;
+    removed = true;
+    scanFiles.delete(id);
+    analysisResults.delete(id);
+    if (analysisImport?.matchId === id) cancelAnalysisImport();
+    if (analysisNotice?.matchId === id) analysisNotice = undefined;
+    if (engineReadyMatchId === id) engineReadyMatchId = undefined;
+    const navigation = $<HTMLButtonElement>('#workspace-nav');
+    if (navigation.dataset.matchId === id) {
+      navigation.disabled = true;
+      delete navigation.dataset.matchId;
+    }
+    if (currentId === id) {
+      history.replaceState(null, '', '#matches');
+      await renderRoute();
+    }
+    await resultReview.removeMatch(id);
+    renderMatches();
+    const cleanup = [new LocalAdRepository().remove(id)];
+    if (record.match.offlinePackageId && !next.some((item) => item.match.offlinePackageId === record.match.offlinePackageId)) {
+      cleanup.push(offlinePackages.remove(record.match.offlinePackageId));
+    }
+    const results = await Promise.allSettled(cleanup);
+    const errors = results.flatMap((result) => result.status === 'rejected'
+      ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []);
+    if (errors.length) throw new Error(errors.join('；'));
+    status.textContent = `已删除本机比赛“${record.match.name}”及相关本地数据；Fusion 和原始文件未改变。`;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    status.textContent = `${removed ? '比赛已从本机列表移除，但关联数据清理未完成。' : '删除失败，比赛记录未改变。'} ${detail}`;
+    showError(new Error(status.textContent));
+  } finally {
+    deletingMatchId = undefined;
+    setLibraryBusy(false);
+  }
 }
 
 function routeToTab(tab: string) {
@@ -100,10 +201,9 @@ function renderRecord() {
   $('#match-title').textContent = match.name;
   $('#match-meta').textContent = `${match.date.replace('T', ' ')}　·　${match.venue}　·　场地 ${match.venueId}`;
   $('#match-code').textContent = match.id;
-  $('#match-source').textContent = 'Fusion match';
-  $('#resource-step').textContent = 'Loaded from Fusion';
+  $('#match-source').textContent = match.mode === 'offline' ? 'Offline package' : 'Fusion match';
+  $('#resource-step').textContent = match.mode === 'offline' ? 'Loaded from offline ZIP' : 'Loaded from Fusion';
   $('#field-size').textContent = `${match.field.length} × ${match.field.width} m`;
-  $('#analysis-status').textContent = '尚未接入扫描分析接口，没有创建或提交分析任务。';
   $('#draft-badge').textContent = record.updatedAt ? '本地草稿已保存' : '场次初始配置';
   $('#save-status').textContent = record.updatedAt
     ? `本机保存于 ${new Date(record.updatedAt).toLocaleTimeString('zh-CN')}；未回传 Fusion，也未触发播出。`
@@ -116,6 +216,7 @@ function renderRecord() {
 function syncEngine() {
   if (!engine || !current() || enginePending || engineReadyMatchId !== currentId) return;
   engine.setPlacements(current().draft, selectedId, selectSlot, commitSlot, current().hiddenPlacementIds);
+  void resultReview.setPlacements(current().draft, current().hiddenPlacementIds).catch(showError);
 }
 
 function cancelAnalysisImport() {
@@ -128,53 +229,47 @@ function renderAnalysis() {
   const ready = Boolean(current() && !enginePending && engineReadyMatchId === currentId);
   const busy = Boolean(analysisImport && analysisImport.matchId === currentId);
   $('#analysis-import').setAttribute('aria-busy', String(busy));
-  $<HTMLButtonElement>('#import-analysis').disabled = !ready || busy;
-  $<HTMLButtonElement>('#import-analysis').textContent = result ? '替换 PLY 文件' : '选择 PLY 文件';
+  $<HTMLButtonElement>('#import-analysis').disabled = !current() || busy;
+  $<HTMLButtonElement>('#import-analysis').textContent = result ? '替换 PLY 点云' : '选择 PLY 点云';
   $('#cancel-analysis').hidden = !busy;
   $('#remove-analysis').hidden = !result;
   $<HTMLButtonElement>('#remove-analysis').disabled = busy;
-  $('#analysis-empty').hidden = Boolean(result && ready);
-  $('#analysis-workspace').hidden = !result || !ready;
-  $('#analysis-empty-title').textContent = result ? '场次预览尚未就绪' : '等待场地分析结果';
-  $('#analysis-empty-description').textContent = result
-    ? '本地点云已保留。场次配置载入后可继续预览；若加载失败，请刷新场次配置重试。'
-    : '可在上方手动导入点云，或前往场地扫描等待 Fusion 分析接口接入。';
+  $('#analysis-empty').hidden = Boolean(result);
+  $('#analysis-workspace').hidden = !result;
+  $('#cloud-controls').hidden = !result;
+  $('#analysis-empty-title').textContent = '尚未导入点云';
+  $('#analysis-empty-description').textContent = '导入 PLY 后在下方绘制独立点云广告；上方球场 2D / 3D 广告不需要点云。';
   const notice = analysisNotice?.matchId === currentId ? analysisNotice : undefined;
   $('#analysis-import-status').textContent = busy ? '正在本地解析点云，请稍候…'
     : notice?.text ?? (result ? `${result.cloud.fileName} · ${(result.cloud.positions.length / 3).toLocaleString('zh-CN')} 点 · ${(result.cloud.byteLength / 1024 / 1024).toFixed(1)} MB · 未上传`
-      : ready ? '结果将绑定当前场次，请确认文件属于本场比赛。' : '请等待当前场次配置和广告素材载入后再导入。');
+      : current() ? '点云广告绑定当前场次；导入不会替换上方球场预览。' : '请先选择比赛场次。');
   $('#analysis-import-status').classList.toggle('on-form-error', Boolean(!busy && notice?.failed));
   $('#analysis-status').textContent = result
-    ? `已为当前场次手动导入 ${result.cloud.fileName}。仅本地使用，未创建 Fusion 分析任务，也未上传文件。`
-    : '尚未接入扫描分析接口，没有创建或提交分析任务；可在“广告位微调”手动导入 PLY 点云。';
-  $('#adjust-step').textContent = result ? '本地点云已导入' : '等待分析结果';
-  $('#result-dot').hidden = !result;
-  $<HTMLFieldSetElement>('#placement-edit-controls').disabled = !ready || !result?.aligned;
+    ? '广告位预览中已载入本地点云；视频与投影结果文件夹请在“导入结果与微调”单独导入。'
+    : '可直接前往“导入结果与微调”选择已有结果文件夹，无需提交视频到 Fusion。';
+  $<HTMLFieldSetElement>('#placement-edit-controls').disabled = !ready || !resultReview.hasResult;
   if (result) {
-    $('#result-source').textContent = result.cloud.fileName;
-    $('#result-camera').textContent = result.aligned ? result.cloud.declaredPitchCoordinates ? '条件球场锚定（文件声明）' : '球场坐标（手动确认）' : '未确认坐标 · 叠加关闭';
-    $('#result-coverage').textContent = (result.cloud.positions.length / 3).toLocaleString('zh-CN');
+    $('#cloud-source').textContent = result.cloud.fileName;
+    $('#cloud-camera').textContent = result.aligned ? result.cloud.declaredPitchCoordinates ? '条件球场锚定（文件声明）' : '球场坐标（手动确认）' : '未确认坐标 · 叠加关闭';
+    $('#cloud-coverage').textContent = (result.cloud.positions.length / 3).toLocaleString('zh-CN');
     $<HTMLInputElement>('#analysis-aligned').checked = result.aligned;
     $<HTMLInputElement>('#cloud-point-size').value = String(result.pointSize);
     $('#cloud-point-size-value').textContent = result.pointSize.toFixed(2);
     $('#analysis-coordinate-note').textContent = result.cloud.declaredPitchCoordinates
       ? '文件声明：条件球场锚定、米制、−Z 向上。保持原始点坐标，不自动平移、旋转或缩放；不保证已与本场比赛精确配准。'
-      : '文件未完整声明球场锚定、米制和 −Z 向上。默认不叠加广告位；仅在你确认坐标符合当前球场后再勾选，否则位置无效。';
+      : '文件未完整声明球场锚定、米制和 −Z 向上。仍可在点云中绘制，但默认不向视频叠加点云广告；确认坐标符合当前球场后再勾选。';
     $('#analysis-bounds').textContent = `原始范围${result.aligned ? ' / m' : '（原始单位）'}：${['X', 'Y', 'Z'].map((axis, i) => `${axis} ${result.cloud.minimum[i].toFixed(2)} ～ ${result.cloud.maximum[i].toFixed(2)}`).join(' · ')}`;
   }
-  const showCloud = Boolean(result && ready && activeTab === 'adjust');
-  const previewMount = $(showCloud ? '#analysis-pitch-mount' : '#pitch-mount');
-  const cameraMount = $(showCloud ? '#analysis-camera-mount' : '#camera-mount');
-  const preview = $('#viewport').parentElement;
-  if (preview.parentElement !== previewMount) previewMount.append(preview);
-  if ($('#camera-list').parentElement !== cameraMount) cameraMount.append($('#camera-list'));
-  if (ready) engine?.setAnalysis(result?.cloud, result?.aligned ?? false, result?.pointSize ?? 0.15);
-  engine?.setAnalysisMode(showCloud);
+  cloudEngine?.setCloud(result?.cloud, result?.pointSize ?? 0.15);
+  pitchEditor.setAvailable(ready);
+  localEditor.setCloud(result?.cloud.id);
+  localEditor.setAvailable(Boolean(current() && result && cloudEngine?.isAvailable));
+  void resultReview.setLocalAds(localEditor.ads, result?.aligned ?? false).catch(showError);
 }
 
 async function selectAnalysisFile(file: File) {
-  if (!current() || enginePending || engineReadyMatchId !== currentId) {
-    showError(new Error('当前场次预览尚未就绪，请先完成场次配置加载。'));
+  if (!current()) {
+    showError(new Error('请先选择比赛场次。'));
     return;
   }
   cancelAnalysisImport();
@@ -186,6 +281,18 @@ async function selectAnalysisFile(file: File) {
   try {
     const cloud = await importPlyFile(file, job.controller.signal);
     if (job.controller.signal.aborted || currentId !== job.matchId) return;
+    if (!cloudEngine) {
+      cloudEngine = new PointCloudPreview($('#cloud-viewport'), (error) => {
+        $('#cloud-engine-status').textContent = error.message;
+        localEditor.setAvailable(false);
+        showError(error);
+      });
+      cloudEngine.setPickTolerance($<HTMLInputElement>('#cloud-pick-tolerance').valueAsNumber);
+      cloudEngine.onAdEditStart = (id) => localEditor.beginPlaneEdit(id);
+      cloudEngine.onAdEditPreview = (ad) => localEditor.previewPlane(ad);
+      cloudEngine.onAdEditEnd = (cancelled) => { void localEditor.finishPlaneEdit(cancelled).catch(showError); };
+    }
+    if (!cloudEngine.isAvailable) throw new Error('点云预览不可用，请刷新页面并检查硬件加速。');
     analysisResults.set(job.matchId, { cloud, aligned: cloud.declaredPitchCoordinates, pointSize: 0.15, importedAt: new Date().toISOString() });
     renderRecord();
     renderMatches();
@@ -251,6 +358,8 @@ async function ensureEngine() {
   if (!enginePromise) {
     enginePromise = import('../scene/pitch-preview.ts').then(({ PitchPreview }) => {
       engine = new PitchPreview($('#viewport'), $('#camera-list'), (error) => {
+        engineReadyMatchId = undefined;
+        pitchEditor.setAvailable(false);
         $('#engine-status').textContent = error.message;
         showError(error);
       });
@@ -267,11 +376,17 @@ function setActiveTab(tab: string) {
     button.classList.toggle('active', button.dataset.tab === activeTab);
     button.setAttribute('aria-current', button.dataset.tab === activeTab ? 'step' : 'false');
   });
-  const tabLabels: Record<string, string> = { preview: '广告位预览', scan: '场地扫描与分析', adjust: '广告位微调' };
+  const tabLabels: Record<string, string> = { preview: '广告位预览', scan: '场地视频', adjust: '导入结果与微调' };
   $('#page-crumb').textContent = tabLabels[activeTab];
   if (activeTab !== 'scan') $<HTMLVideoElement>('#scan-preview').pause();
+  if (activeTab !== 'preview') {
+    $<HTMLVideoElement>('#cloud-preview-video').pause();
+    localEditor.cancelDrawing();
+    pitchEditor.cancelDrawing();
+  }
+  if (activeTab !== 'adjust') resultReview.pause();
   renderAnalysis();
-  requestAnimationFrame(() => engine?.refresh());
+  requestAnimationFrame(() => { engine?.refresh(); cloudEngine?.refresh(); });
 }
 
 async function renderRoute(refresh = false) {
@@ -287,12 +402,15 @@ async function renderRoute(refresh = false) {
   if (!record) {
     ++matchLoadVersion;
     cancelAnalysisImport();
-    engine?.setAnalysisMode(false);
+    pitchEditor.cancelDrawing();
+    localEditor.cancelDrawing();
+    cloudEngine?.setCloud();
     resetScanPreview();
     $('#page-crumb').textContent = '比赛列表';
     renderMatches();
     if (records && parts[0] === 'match') showError(new Error('尚未添加这场比赛，请先核验比赛 ID。'));
     currentId = undefined;
+    void Promise.all([resultReview.setMatch(), pitchEditor.setMatch(), localEditor.setMatch()]).catch(showError);
     return;
   }
   if (sameMatch && !refresh) { setActiveTab(parts[2]); return; }
@@ -304,6 +422,7 @@ async function renderRoute(refresh = false) {
   selectedId = record.draft[0]?.id;
   enginePending = true;
   engineReadyMatchId = undefined;
+  void Promise.all([resultReview.setMatch(currentId), pitchEditor.setMatch(currentId), localEditor.setMatch(currentId)]).catch(showError);
   $<HTMLButtonElement>('#workspace-nav').disabled = false;
   $<HTMLButtonElement>('#workspace-nav').dataset.matchId = currentId;
   renderRecord();
@@ -314,18 +433,23 @@ async function renderRoute(refresh = false) {
   $('#pitch-mount').inert = true;
   if (!sameMatch) $('#pitch-mount').hidden = true;
   const refreshButton = $<HTMLButtonElement>('#refresh-configuration');
+  const offline = record.match.mode === 'offline';
+  refreshButton.hidden = offline;
+  $('#replace-offline-package').hidden = !offline;
   refreshButton.disabled = true;
-  $('#configuration-status').textContent = 'Fetching the latest saved Fusion configuration...';
+  $('#configuration-status').textContent = offline ? 'Loading the saved offline match package...' : 'Fetching the latest saved Fusion configuration...';
   $('#engine-status').textContent = 'Loading the field and assigned Fusion materials...';
   try {
-    const match = await gateway.lookupMatch(record.match.id);
-    if (version !== matchLoadVersion) return;
-    record = { match, draft: structuredClone(match.placements),
-      hiddenPlacementIds: record.hiddenPlacementIds?.filter((id) => match.placements.some((slot) => slot.id === id)) };
-    replaceRecord(record);
-    selectedId = sameMatch && record.draft.some((slot) => slot.id === previousSelection) ? previousSelection : record.draft[0]?.id;
-    renderRecord();
-    $('#configuration-status').textContent = 'Latest Fusion settings received. Loading assigned materials...';
+    if (!offline) {
+      const match = await gateway.lookupMatch(record.match.id);
+      if (version !== matchLoadVersion) return;
+      record = { match, draft: structuredClone(match.placements),
+        hiddenPlacementIds: record.hiddenPlacementIds?.filter((id) => match.placements.some((slot) => slot.id === id)) };
+      replaceRecord(record);
+      selectedId = sameMatch && record.draft.some((slot) => slot.id === previousSelection) ? previousSelection : record.draft[0]?.id;
+      renderRecord();
+      $('#configuration-status').textContent = 'Latest Fusion settings received. Loading assigned materials...';
+    }
   } catch (error) {
     if (version === matchLoadVersion) {
       enginePending = false;
@@ -350,23 +474,28 @@ async function renderRoute(refresh = false) {
       engineReadyMatchId = currentId;
       renderLists();
       syncEngine();
+      void Promise.all([pitchEditor.refresh(), localEditor.refresh()]).catch(showError);
       renderAnalysis();
       $('#pitch-mount').hidden = false;
       $('#pitch-mount').inert = false;
-      $('#configuration-status').textContent = `Updated from Fusion at ${new Date().toLocaleTimeString()}. Refresh replaces local adjustments.`;
-      $('#engine-status').textContent = 'Fusion placements and materials loaded. Local preview only; scan analysis is not connected.';
+      $('#configuration-status').textContent = offline ? 'Offline match and materials loaded from this browser. Import a newer ZIP to update; no Fusion requests were made.'
+        : `Updated from Fusion at ${new Date().toLocaleTimeString()}. Refresh replaces local adjustments.`;
+      $('#engine-status').textContent = offline ? 'Offline placements, images and models loaded. No Fusion connection is required.'
+        : 'Fusion placements and materials loaded. 视频和分析结果仅本地使用，不会提交 Fusion。';
     } catch (error) {
       console.error('Unable to load match preview:', error);
       if (version === matchLoadVersion) {
         enginePending = false;
         renderLists();
         renderAnalysis();
-        $('#configuration-status').textContent = 'Latest settings received, but the preview could not be loaded. Use Refresh configuration to retry.';
-        $('#engine-status').textContent = 'Preview failed to load. Check the Fusion materials and connection, then reload the match.';
+        $('#configuration-status').textContent = offline ? 'The offline preview could not be loaded. Import the original Fusion ZIP again.'
+          : 'Latest settings received, but the preview could not be loaded. Use Refresh configuration to retry.';
+        $('#engine-status').textContent = offline ? 'Offline material loading failed. Check browser storage and reimport the ZIP.'
+          : 'Preview failed to load. Check the Fusion materials and connection, then reload the match.';
         showError(error);
       }
     } finally {
-      if (version === matchLoadVersion) refreshButton.disabled = false;
+      if (version === matchLoadVersion) refreshButton.disabled = offline;
     }
   });
   await engineQueue;
@@ -384,7 +513,12 @@ function resetScanPreview() {
   $('#scan-dropzone').hidden = false;
   $('#scan-step').textContent = '未选择视频';
   $<HTMLInputElement>('#scan-file').value = '';
-  $('#scan-status').textContent = '视频仅在浏览器本地预览，不会自动上传。刷新后需重新选择文件。';
+  $('#scan-status').textContent = '视频仅在浏览器本地预览，无需提交 Fusion。已有分析结果可直接导入文件夹；点云 PLY 请在“广告位预览”选择。';
+  const cloudVideo = $<HTMLVideoElement>('#cloud-preview-video');
+  cloudVideo.pause();
+  cloudVideo.removeAttribute('src');
+  cloudVideo.load();
+  $('#cloud-video-area').hidden = true;
 }
 
 async function selectScanFile(file: File) {
@@ -421,7 +555,10 @@ async function selectScanFile(file: File) {
     scanFiles.set(matchId, file);
     $('#scan-file-meta').textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · ${video.videoWidth} × ${video.videoHeight} · ${Math.round(video.duration)} 秒`;
     $('#scan-step').textContent = '已选择 · 未上传';
-    $('#scan-status').textContent = '本地视频可预览，未上传 Fusion，未启动分析；刷新后需重新选择。';
+    $('#scan-status').textContent = '本地视频可预览，无需提交 Fusion。可直接导入结果文件夹；点云 PLY 请在“广告位预览”选择。刷新后需重新选择视频。';
+    $<HTMLVideoElement>('#cloud-preview-video').src = scanURL;
+    $('#cloud-video-area').hidden = false;
+    $('#cloud-video-name').textContent = `${file.name} · 仅参考，与结果包原视频分开；不会自动估计点云或相机。`;
   } catch (error) {
     if (error.name === 'AbortError') return;
     $('#scan-step').textContent = '视频读取失败';
@@ -430,12 +567,63 @@ async function selectScanFile(file: File) {
   }
 }
 
+async function importOfflinePackage(file: File) {
+  if (!records || libraryBusy) return;
+  setLibraryBusy(true);
+  clearError();
+  const startingRoute = location.hash;
+  $('#offline-package-status').textContent = 'Verifying the complete match package and material checksums...';
+  try {
+    const packageData = await parseOfflinePackage(file);
+    const previous = records.find((item) => item.match.id === packageData.match.id);
+    if (previous && !window.confirm('Replace this match configuration and its local placement adjustments with the imported offline package?')) {
+      $('#offline-package-status').textContent = 'Import cancelled. Previous configuration and materials were retained.';
+      return;
+    }
+    await offlinePackages.write(packageData);
+    const next = [...records.filter((item) => item.match.id !== packageData.match.id),
+      { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [] }];
+    try { repository.write(next); }
+    catch (error) {
+      try { await offlinePackages.remove(packageData.id); }
+      catch (cleanup) { console.error('Unable to remove the uncommitted offline package.', cleanup); }
+      throw error;
+    }
+    records = next;
+    renderMatches();
+    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${packageData.assets.size} materials. Saved in this browser; no Fusion API is used.`;
+    if (location.hash === startingRoute || currentId === packageData.match.id) {
+      const route = `#match/${encodeURIComponent(packageData.match.id)}/preview`;
+      if (location.hash !== route) history.pushState(null, '', route);
+      currentId = undefined;
+      await renderRoute();
+    }
+    await engineQueue;
+    if (previous?.match.offlinePackageId && previous.match.offlinePackageId !== packageData.id) {
+      try { await offlinePackages.remove(previous.match.offlinePackageId); }
+      catch (error) { showError(error); }
+    }
+  } catch (error) {
+    $('#offline-package-status').textContent = `Package import failed. Previous configuration was retained. ${error instanceof Error ? error.message : String(error)}`;
+    showError(error);
+  } finally {
+    setLibraryBusy(false);
+    $<HTMLInputElement>('#offline-package-file').value = '';
+  }
+}
+for (const selector of ['#import-offline-package', '#replace-offline-package']) {
+  $<HTMLButtonElement>(selector).addEventListener('click', () => $<HTMLInputElement>('#offline-package-file').click());
+}
+$<HTMLInputElement>('#offline-package-file').addEventListener('change', (event) => {
+  const file = (event.target as HTMLInputElement).files[0];
+  if (file) void importOfflinePackage(file);
+});
+
 $<HTMLFormElement>('#match-lookup-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (!records) return;
+  if (!records || libraryBusy) return;
+  setLibraryBusy(true);
   clearError();
-  const button = $<HTMLButtonElement>('#match-lookup-submit');
-  button.disabled = true;
   $('#lookup-status').textContent = 'Requesting saved match configuration from Fusion...';
   try {
     const match = await gateway.lookupMatch($<HTMLInputElement>('#match-lookup-id').value);
@@ -451,12 +639,19 @@ $<HTMLFormElement>('#match-lookup-form').addEventListener('submit', async (event
     const route = `#match/${encodeURIComponent(match.id)}/preview`;
     if (location.hash === route) void renderRoute();
     else location.hash = route;
+    if (previous?.match.offlinePackageId) {
+      await engineQueue;
+      try { await offlinePackages.remove(previous.match.offlinePackageId); }
+      catch (error) { showError(error); }
+    }
   } catch (error) { $('#lookup-status').textContent = error.message; showError(error); }
-  finally { button.disabled = false; }
+  finally { setLibraryBusy(false); }
 });
 
 document.addEventListener('click', (event) => {
   if (!(event.target instanceof Element)) return;
+  const deletion = event.target.closest<HTMLElement>('[data-delete-match]');
+  if (deletion) { void deleteMatch(deletion.dataset.deleteMatch); return; }
   const visibility = event.target.closest<HTMLElement>('[data-visibility-id]');
   if (visibility) { togglePlacementVisibility(visibility.dataset.visibilityId); return; }
   const tab = event.target.closest<HTMLElement>('[data-tab],[data-go-tab]');
@@ -475,7 +670,7 @@ $<HTMLButtonElement>('#refresh-configuration').addEventListener('click', () => {
 $<HTMLFormElement>('#placement-form').addEventListener('submit', (event) => {
   event.preventDefault();
   if ($<HTMLFieldSetElement>('#placement-edit-controls').disabled) {
-    showError(new Error('请先确认点云使用当前球场坐标，再微调广告位。'));
+    showError(new Error('请先载入场次配置和结果文件夹，再微调场次广告位。'));
     return;
   }
   const slot: Record<string, unknown> = { ...selected() };
@@ -492,7 +687,24 @@ $<HTMLButtonElement>('#reset-placement').addEventListener('click', () => {
 $<HTMLButtonElement>('#reset-business-view').addEventListener('click', () => {
   engine?.resetView();
 });
-$<HTMLButtonElement>('#reset-analysis-view').addEventListener('click', () => engine?.resetView());
+$<HTMLButtonElement>('#choose-cloud-video').addEventListener('click', () => $<HTMLInputElement>('#scan-file').click());
+$('#viewport').addEventListener('rectangledrawcancel', () => pitchEditor.cancelDrawing());
+$('#viewport').addEventListener('rectangledrawmiss', () => { $('#pitch-local-draw-status').textContent = '请从草坪内拖出矩形，长宽至少 0.1 米。'; });
+$('#cloud-viewport').addEventListener('pointpickcancel', () => localEditor.cancelDrawing());
+$('#cloud-viewport').addEventListener('pointpickmiss', () => { $('#local-draw-status').textContent = '该位置未命中点云，请点击可见点，或调大选点半径后重试。'; });
+for (const mode of ['orbit', 'top'] as const) $(`#cloud-view-${mode}`).addEventListener('click', () => {
+  cloudEngine?.setView(mode);
+  for (const name of ['orbit', 'top']) $(`#cloud-view-${name}`).setAttribute('aria-pressed', String(name === mode));
+});
+$('#reset-cloud-view').addEventListener('click', () => cloudEngine?.resetView());
+$('#cloud-viewport').addEventListener('cloudviewchange', (event) => {
+  if (!(event instanceof CustomEvent)) return;
+  for (const name of ['orbit', 'top']) $(`#cloud-view-${name}`).setAttribute('aria-pressed', String(name === event.detail));
+});
+$<HTMLInputElement>('#cloud-pick-tolerance').addEventListener('change', (event) => {
+  try { cloudEngine?.setPickTolerance((event.target as HTMLInputElement).valueAsNumber); }
+  catch (error) { showError(error); }
+});
 $<HTMLButtonElement>('#import-analysis').addEventListener('click', () => $<HTMLInputElement>('#analysis-file').click());
 $<HTMLInputElement>('#analysis-file').addEventListener('change', (event) => {
   if (event.target instanceof HTMLInputElement && event.target.files[0]) void selectAnalysisFile(event.target.files[0]);
@@ -520,7 +732,7 @@ $<HTMLInputElement>('#cloud-point-size').addEventListener('input', (event) => {
   const result = analysisResults.get(currentId);
   if (!result || !(event.target instanceof HTMLInputElement)) return;
   result.pointSize = event.target.valueAsNumber;
-  engine?.setPointSize(result.pointSize);
+  cloudEngine?.setPointSize(result.pointSize);
   $('#cloud-point-size-value').textContent = result.pointSize.toFixed(2);
 });
 for (const type of ['dragenter', 'dragover']) $('#analysis-import').addEventListener(type, (event) => {
@@ -572,9 +784,9 @@ $<HTMLButtonElement>('#export-placements').addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 window.addEventListener('hashchange', () => { void renderRoute(); });
-window.addEventListener('beforeunload', () => { cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); });
+window.addEventListener('beforeunload', () => { cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); cloudEngine?.dispose(); resultReview.dispose(); });
 
 try { repository = new MatchRepository(localStorage); records = repository.read(); }
-catch (error) { showError(error); $<HTMLButtonElement>('#match-lookup-submit').disabled = true; }
+catch (error) { showError(error); $<HTMLButtonElement>('#match-lookup-submit').disabled = true; $<HTMLButtonElement>('#import-offline-package').disabled = true; }
 renderMatches();
 void renderRoute();

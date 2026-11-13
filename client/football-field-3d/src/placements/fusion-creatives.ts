@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import type { Placement, ModelPlacement } from '../shared/types.ts';
+import { resolveFusionAsset } from '../matches/offline-package.ts';
 
 export function fitFusionModel(width: number, depth: number, slot: ModelPlacement) {
   const { region, modelPose: pose } = slot;
@@ -63,62 +64,65 @@ export class FusionCreatives {
           }
           return;
         }
-        if (slot.type === '2D') {
-          const texture = await new THREE.TextureLoader().loadAsync(slot.asset.url);
-          if (!this.active) { texture.dispose(); return; }
-          texture.colorSpace = THREE.SRGBColorSpace;
-          const image: unknown = texture.image;
-          if (!(image instanceof HTMLImageElement) || !image.naturalWidth || !image.naturalHeight) {
-            texture.dispose();
-            throw new Error('The Fusion image has invalid dimensions.');
+        const resource = await resolveFusionAsset(slot.asset);
+        try {
+          if (slot.type === '2D') {
+            const texture = await new THREE.TextureLoader().loadAsync(resource.url);
+            if (!this.active) { texture.dispose(); return; }
+            texture.colorSpace = THREE.SRGBColorSpace;
+            const image: unknown = texture.image;
+            if (!(image instanceof HTMLImageElement) || !image.naturalWidth || !image.naturalHeight) {
+              texture.dispose();
+              throw new Error('The Fusion image has invalid dimensions.');
+            }
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(image.naturalWidth, image.naturalHeight),
+              new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide,
+                polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+            mesh.rotation.x = Math.PI;
+            const holder = new THREE.Group();
+            holder.visible = !this.hiddenPlacementIds.has(slot.id);
+            holder.userData.imageSize = { width: image.naturalWidth, height: image.naturalHeight };
+            holder.add(mesh);
+            holder.userData.placementId = slot.id;
+            this.planes.set(slot.id, holder);
+            this.group.add(holder);
+          } else {
+            const manager = new THREE.LoadingManager();
+            manager.setURLModifier((url) => {
+              if (/^(blob:|data:)/.test(url)) return url;
+              throw new Error('Only embedded GLB resources are supported.');
+            });
+            const response = await fetch(resource.url, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`Model download failed (${response.status}).`);
+            const gltf = await new GLTFLoader(manager).parseAsync(await response.arrayBuffer(), '');
+            if (!this.active) { dispose(gltf.scene); return; }
+            const bounds = new THREE.Box3().setFromObject(gltf.scene);
+            const size = bounds.getSize(new THREE.Vector3()), center = bounds.getCenter(new THREE.Vector3());
+            if (![...bounds.min, ...bounds.max].every(Number.isFinite) || size.x + size.z <= 0) {
+              dispose(gltf.scene);
+              throw new Error('The model has no finite ground footprint.');
+            }
+            const centered = new THREE.Group();
+            centered.add(gltf.scene);
+            centered.position.set(-center.x, -bounds.min.y, -center.z);
+            const upright = new THREE.Group();
+            upright.add(centered);
+            upright.rotation.x = -Math.PI / 2;
+            const holder = new THREE.Group();
+            holder.visible = !this.hiddenPlacementIds.has(slot.id);
+            holder.add(upright);
+            holder.userData.placementId = slot.id;
+            holder.traverse((object) => {
+              if (!(object instanceof THREE.Mesh)) return;
+              object.castShadow = true;
+              object.receiveShadow = true;
+              for (const material of Array.isArray(object.material) ? object.material : [object.material])
+                if (material instanceof THREE.MeshStandardMaterial) material.envMap = this.environment.texture;
+            });
+            this.models.set(slot.id, { group: holder, width: size.x, depth: size.z });
+            this.group.add(holder);
           }
-          const mesh = new THREE.Mesh(new THREE.PlaneGeometry(image.naturalWidth, image.naturalHeight),
-            new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide,
-              polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
-          mesh.rotation.x = Math.PI;
-          const holder = new THREE.Group();
-          holder.visible = !this.hiddenPlacementIds.has(slot.id);
-          holder.userData.imageSize = { width: image.naturalWidth, height: image.naturalHeight };
-          holder.add(mesh);
-          holder.userData.placementId = slot.id;
-          this.planes.set(slot.id, holder);
-          this.group.add(holder);
-        } else {
-          const manager = new THREE.LoadingManager();
-          manager.setURLModifier((url) => {
-            if (/^(blob:|data:)/.test(url)) return url;
-            throw new Error('Only embedded GLB resources are supported.');
-          });
-          const response = await fetch(slot.asset.url, { cache: 'no-store' });
-          if (!response.ok) throw new Error(`Model download failed (${response.status}).`);
-          const gltf = await new GLTFLoader(manager).parseAsync(await response.arrayBuffer(), '');
-          if (!this.active) { dispose(gltf.scene); return; }
-          const bounds = new THREE.Box3().setFromObject(gltf.scene);
-          const size = bounds.getSize(new THREE.Vector3()), center = bounds.getCenter(new THREE.Vector3());
-          if (![...bounds.min, ...bounds.max].every(Number.isFinite) || size.x + size.z <= 0) {
-            dispose(gltf.scene);
-            throw new Error('The model has no finite ground footprint.');
-          }
-          const centered = new THREE.Group();
-          centered.add(gltf.scene);
-          centered.position.set(-center.x, -bounds.min.y, -center.z);
-          const upright = new THREE.Group();
-          upright.add(centered);
-          upright.rotation.x = -Math.PI / 2;
-          const holder = new THREE.Group();
-          holder.visible = !this.hiddenPlacementIds.has(slot.id);
-          holder.add(upright);
-          holder.userData.placementId = slot.id;
-          holder.traverse((object) => {
-            if (!(object instanceof THREE.Mesh)) return;
-            object.castShadow = true;
-            object.receiveShadow = true;
-            for (const material of Array.isArray(object.material) ? object.material : [object.material])
-              if (material instanceof THREE.MeshStandardMaterial) material.envMap = this.environment.texture;
-          });
-          this.models.set(slot.id, { group: holder, width: size.x, depth: size.z });
-          this.group.add(holder);
-        }
+        } finally { resource.release(); }
       }));
       if (this.active) this.update(this.slots);
     } catch (error) {
