@@ -112,8 +112,9 @@ documents informed it; their private measurements are not part of this project.
 
 ## Required checks
 
-Run on both Windows and Linux; report missing environments as unverified, not
-passed. Do not duplicate unrelated trd browser/video gates in this smaller project.
+Run on Linux; the live service is Linux-only and Windows only previews its SRT
+output, so Windows checks are optional. Report missing environments as
+unverified, not passed. Do not duplicate unrelated trd browser/video gates in this smaller project.
 
 From the repository root inside the development shell:
 

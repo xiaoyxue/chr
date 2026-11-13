@@ -1,7 +1,9 @@
 # chr server
 
-The live render server for **Windows and Linux**: a Rust + wgpu renderer and the
-code that runs in the same process with it. The Cargo workspace is at the
+The live render server: a Rust + wgpu renderer and the code that runs in the
+same process with it. The live service (`chr-server`, its render worker and
+`chr-monitor`) runs on **Linux**; Windows PCs only preview its SRT output. The
+renderer and viewer also build on Windows for local development. The Cargo workspace is at the
 repository root; its server crates live here:
 
 | Directory | Crate | Role |

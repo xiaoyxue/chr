@@ -71,8 +71,8 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
 - The writer stages the file and renames it into place, so a reader never maps
   a partial header. `push` writes slots round-robin; readers of such rings (the
   program tap) find the newest slot from `write_count`.
-- Linux first. A Windows file-mapping backend is required before Windows
-  acceptance of steps 2 and 4.
+- Linux only. The live service does not run on Windows; Windows machines only
+  preview its SRT output (for example in VLC).
 
 ### Program tap
 
@@ -296,8 +296,9 @@ measurement the input (1920x1080) differs from the output extent, so the frames
 without CG repeated the last frame instead of carrying clean feed. A rotating
 1.35M-triangle model rendered at 30 fps with 0 deadline misses after GPU mesh
 buffers were reused across scene revisions (#106). Scene edits during a restart
-were not measured separately. Windows is not verified (the CLI and worker path is
-portable Rust, but the kill/stop tests use Unix signals), nor is physical SDI.
+were not measured separately. Physical SDI is not verified (#80). The live
+service is Linux-only; SRT preview from a Windows PC in VLC was checked against
+this stack (the Linux host must allow the SRT UDP port through its firewall).
 
 ## Documentation to update with the code
 
