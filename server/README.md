@@ -792,9 +792,10 @@ listens:
 
 The summary also gives the URLs to open and the `ssh -L` forwards a remote
 machine needs. With every component enabled, the stack runs four components and
-seven long-lived processes: simulator, chr-server, its render worker,
-chr-monitor, relay and two Vite servers. The relay starts one `ffmpeg` per
-connected viewer. The script uses only the standard library;
+eight working processes: simulator, its `ffmpeg` decoder, chr-server, its render
+worker, chr-monitor, relay and two Vite servers. Seven more are wrappers that do
+no work: `run-tracked.sh` and its three restart loops, and the npm and esbuild
+helpers. The relay starts one `ffmpeg` per connected viewer. The script uses only the standard library;
 `python3 server/scripts/stack.py` works as well.
 
 ### Program stills (chr-renderer-cli)

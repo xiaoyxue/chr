@@ -140,6 +140,7 @@ def services(config: Config) -> list[Service]:
     rows = [
         Service("render", "chr-tracking-sim", f"unix {config.dir}/render.sock",
                 "simulated tracked camera: frames into the input ring, Ti/C to chr-server"),
+        Service("render", "ffmpeg (decoder)", "", "decodes the clip in a loop for chr-tracking-sim"),
         Service("render", "chr-server", f"ws://{config.server_ws}", "control JSON-RPC (description.load, status)", server),
         Service("render", "chr-renderer-cli worker", "", "GPU render worker, supervised by chr-server"),
         Service("render", "chr-monitor", f"ws://{config.monitor_ws}", "monitor status and WebRTC signalling", monitor),
@@ -170,7 +171,8 @@ def summary(config: Config, probe: bool) -> str:
     rows = services(config)
     components = sorted({row.component for row in rows})
     processes = len({(row.component, row.process) for row in rows})
-    lines = [f"{len(components)} components ({', '.join(components)}), {processes} processes:"]
+    lines = [f"{len(components)} components ({', '.join(components)}), {processes} working processes"
+             " (plus run-tracked.sh restart loops and npm wrappers):"]
     for row in rows:
         state = ("up" if listening(*row.probe) else "down") if probe and row.probe else ""
         lines.append(f"  {row.component:13} {row.process:24} {row.address:38} {state:5} {row.role}")

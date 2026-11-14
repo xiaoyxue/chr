@@ -51,7 +51,7 @@ class SummaryTests(unittest.TestCase):
         config = stack.Config(scene="s.json", video="v.mp4", server_ws="127.0.0.1:18987", monitor_ws="127.0.0.1:18989",
                               webrtc_tcp="127.0.0.1:18992", srt="10.0.0.5:18990", srt_relay_port=18991)
         text = stack.summary(config, probe=False)
-        self.assertIn("4 components (monitor-page, pitch-studio, render, srt-relay), 7 processes:", text)
+        self.assertIn("4 components (monitor-page, pitch-studio, render, srt-relay), 8 working processes", text)
         for address in ["ws://127.0.0.1:18987", "ws://127.0.0.1:18989", "srt://10.0.0.5:18990",
                         "tcp://127.0.0.1:18992-18995", "tcp://127.0.0.1:18991", "http://127.0.0.1:4173/", "http://127.0.0.1:5173/"]:
             self.assertIn(address, text)
@@ -59,7 +59,7 @@ class SummaryTests(unittest.TestCase):
 
     def test_disabled_components_are_left_out(self):
         config = stack.Config(scene="s.json", video="v.mp4", pitch_studio_port=0, monitor_page_port=0)
-        self.assertIn("1 components (render), 4 processes:", stack.summary(config, probe=False))
+        self.assertIn("1 components (render), 5 working processes", stack.summary(config, probe=False))
         self.assertNotIn(0, stack.forwarded_ports(config))
 
 
