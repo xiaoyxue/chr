@@ -5,7 +5,7 @@ import { createServer } from 'vite';
 // These modules have no dependencies to pre-bundle; skip the scan that would outlive the server.
 const server = await createServer({ configFile: false, server: { middlewareMode: true }, optimizeDeps: { noDiscovery: true } });
 after(() => server.close());
-const { anchorPoint, moveAnchor, planeRectangle, rectanglePlane, resizeFromCorner, resizeSide, uniformScale } =
+const { anchorPoint, moveAnchor, parseAspect, planeRectangle, rectanglePlane, resizeFromCorner, resizeSide, uniformScale, withAspect } =
   await server.ssrLoadModule('/src/placements/ground-edit.ts');
 const { UndoStack } = await server.ssrLoadModule('/src/shared/undo-stack.ts');
 
@@ -33,6 +33,18 @@ test('resizing one side keeps the anchor and, when locked, the aspect ratio', ()
   near(anchorPoint(locked, 'top-left'), { x: 6, y: -5 });
   near(resizeSide(quad, 'centre', 'sizeY', 4, true), { x: 10, y: -4, sizeX: 16, sizeY: 4 });
   near(resizeSide(quad, 'centre', 'sizeY', 4, false), { sizeX: 8, sizeY: 4 });
+});
+
+test('an aspect ratio is parsed from W:H or a number and sets Y from X at the anchor', () => {
+  assert.equal(parseAspect('16:9'), 16 / 9);
+  assert.equal(parseAspect(' 4 / 3 '), 4 / 3);
+  assert.equal(parseAspect('2：1'), 2);
+  assert.equal(parseAspect('1.5'), 1.5);
+  for (const text of ['', '0', '-1', '16:0', 'a:b', '1:2:3']) assert.equal(parseAspect(text), undefined, text);
+  const wide = withAspect(quad, 'top-left', 2);
+  near(wide, { sizeX: 8, sizeY: 4 });
+  near(anchorPoint(wide, 'top-left'), { x: 6, y: -5 });
+  near(withAspect(quad, 'centre', 2), { x: 10, y: -4, sizeX: 8, sizeY: 4 });
 });
 
 test('a corner drag keeps the opposite corner and the locked ratio', () => {

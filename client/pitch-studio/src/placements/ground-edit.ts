@@ -37,6 +37,18 @@ export function resizeSide<T extends GroundRectangle>(rect: T, anchor: Anchor, s
   return moveAnchor({ ...rect, sizeX, sizeY }, anchor, anchorPoint(rect, anchor));
 }
 
+/** Width / height from "16:9", "16/9" or "1.78"; undefined unless finite and positive. */
+export function parseAspect(text: string): number | undefined {
+  const parts = text.trim().split(/\s*[:/：]\s*/).map(Number);
+  const ratio = parts.length === 2 ? parts[0] / parts[1] : parts.length === 1 ? parts[0] : NaN;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : undefined;
+}
+
+/** Sets width / height to `ratio` by changing the Y side; the X side and the anchor stay. */
+export function withAspect<T extends GroundRectangle>(rect: T, anchor: Anchor, ratio: number): T {
+  return resizeSide(rect, anchor, 'sizeY', rect.sizeX / ratio, false);
+}
+
 /**
  * Drags the corner at local signs `corner` (each -1 or 1) to `point` while the
  * opposite corner stays fixed. With `keepAspect` the size follows the projection

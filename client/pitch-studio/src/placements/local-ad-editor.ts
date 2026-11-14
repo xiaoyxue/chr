@@ -1,7 +1,7 @@
 import { LocalAdRepository } from './local-ad.ts';
 import { fetchServerFile, serverPath } from '../shared/server-files.ts';
 import { planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
-import { anchorPoint, moveAnchor, planeRectangle, rectanglePlane, resizeSide, type Anchor } from './ground-edit.ts';
+import { anchorPoint, moveAnchor, parseAspect, planeRectangle, rectanglePlane, resizeSide, withAspect, type Anchor } from './ground-edit.ts';
 import type { AdPlane, AdSpace, LocalAd, Vector3Tuple } from './local-ad.ts';
 
 function editorMarkup(space: AdSpace, prefix: string) {
@@ -29,7 +29,9 @@ function editorMarkup(space: AdSpace, prefix: string) {
         <div class="on-segmented" role="radiogroup" aria-label="定位锚点"><label><input type="radio" name="anchor" value="top-left" checked />左上角</label><label><input type="radio" name="anchor" value="centre" />中心</label></div>
         <div class="on-field-grid"><label><span data-anchor-label>左上角</span> X / m<input name="anchorX" type="number" step="0.01" required /></label><label><span data-anchor-label>左上角</span> Y / m<input name="anchorY" type="number" step="0.01" required /></label></div>
         <h3>尺寸</h3><div class="on-field-grid"><label>长 X / m<input name="width" type="number" step="0.01" min="0.01" max="1000" required /></label><label>宽 Y / m<input name="height" type="number" step="0.01" min="0.01" max="1000" required /></label></div>
+        <div class="on-aspect-row"><label>宽高比 W:H<input name="aspect" type="text" inputmode="decimal" aria-label="宽高比，如 16:9 或 1.78" /></label>
         <label class="on-check"><input name="keepAspect" type="checkbox" checked /> 锁定宽高比</label></div>
+        <p class="on-help">输入 16:9 或 1.78 后按 Enter：保持长 X 和锚点，按比例调整宽 Y。</p></div>
       <div ${id('local-ad-pitch-3d')} class="on-inspector-group"><h3>位置（世界坐标）</h3>
         <div class="on-field-grid"><label>中心 X / m<input name="centreX" type="number" step="0.01" required /></label><label>中心 Y / m<input name="centreY" type="number" step="0.01" required /></label>
         <label>Z（负值向上）<input name="z" type="number" step="0.01" required /></label><label>整体缩放 / ×<input name="scale" type="number" step="0.01" min="0.01" max="1000" required /></label></div></div>
@@ -166,6 +168,10 @@ export class LocalAdEditor {
       const plane = rectanglePlane(selected.plane, rect);
       return { next: { ...selected, plane: { ...plane, origin: [plane.origin[0], plane.origin[1], scalar('z')] } }, action: '移动' };
     }
+    if (input.name === 'aspect') {
+      rect = withAspect(rect, this.anchor, parseAspect(input.value));
+      return { next: { ...selected, plane: rectanglePlane(selected.plane, rect) }, action: '设置宽高比' };
+    }
     if (input.name === 'width' || input.name === 'height') {
       rect = resizeSide(rect, this.anchor, input.name === 'width' ? 'sizeX' : 'sizeY', input.valueAsNumber, this.keepAspect);
       return { next: { ...selected, plane: rectanglePlane(selected.plane, rect) }, action: '调整尺寸' };
@@ -178,7 +184,11 @@ export class LocalAdEditor {
     const selected = this.selected();
     const unchanged = input.type === 'checkbox' ? input.checked === input.defaultChecked : input.value === input.defaultValue;
     if (!selected || this.busy || this.planeEdit || this.locked || unchanged) return;
-    if (input.type === 'number' && !Number.isFinite(input.valueAsNumber)) { this.render(); return; }
+    if ((input.type === 'number' && !Number.isFinite(input.valueAsNumber)) || (input.name === 'aspect' && !parseAspect(input.value))) {
+      this.render();
+      if (input.name === 'aspect') this.options.error(new Error('宽高比请输入 16:9 这样的 W:H，或 1.78 这样的正数。'));
+      return;
+    }
     const { next, action } = this.edited(selected, input);
     if (!next.name) { this.options.error(new Error('请输入广告位名称。')); this.render(); return; }
     void this.commit(this.items.map((ad) => ad.id === next.id ? next : ad), next.id, `${action} ${next.name}`);
@@ -408,7 +418,7 @@ export class LocalAdEditor {
       (form.querySelector(`[name=anchor][value=${this.anchor}]`) as HTMLInputElement).checked = true;
       (form.elements.namedItem('keepAspect') as HTMLInputElement).checked = this.keepAspect;
       form.querySelectorAll('[data-anchor-label]').forEach((label) => { label.textContent = this.anchor === 'top-left' ? '左上角' : '中心'; });
-      set('anchorX', point.x); set('anchorY', point.y); set('width', rect.sizeX); set('height', rect.sizeY);
+      set('anchorX', point.x); set('anchorY', point.y); set('width', rect.sizeX); set('height', rect.sizeY); set('aspect', rect.sizeX / rect.sizeY);
       set('centreX', rect.x); set('centreY', rect.y); set('z', selected.plane.origin[2]); set('scale', selected.scale);
       this.element('local-ad-readonly').textContent = selected.type === '2D' ? '贴地图片 · 暂不支持调整旋转'
         : `朝向 ${selected.yaw.toFixed(1)}° · 暂不支持调整旋转；底面大小请用“重画底面”`;

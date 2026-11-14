@@ -233,3 +233,6 @@
 .onsite .on-readonly { margin-top:12px; padding:8px 10px; border-radius:6px; background:#142733; color:#9fb3bd; font-size:10px; line-height:1.7; }
 .on-target-bar { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:4px 0 8px; }
 .on-target-bar .on-visibility-toggle { flex-direction:row; min-height:32px; }
+.on-aspect-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; margin:4px 0; }
+.onsite .on-aspect-row label:first-child { margin:0; font-size:10px; color:#a2b9c5; }
+.onsite .on-aspect-row input[type=text] { display:block; width:100%; min-width:0; margin-top:6px; padding:9px 6px; background:#12232e; color:var(--on-ink); border:1px solid #3a5261; border-radius:6px; font-size:12px; }

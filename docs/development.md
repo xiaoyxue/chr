@@ -136,10 +136,13 @@ the page's `/chr-render` WebSocket proxy (`CHR_RENDER_URL`); see
 `server/docs/render-description.md`.
 
 Placement editing in the top view uses pitch-centred world coordinates (+X right,
-+Y down), drawn as axes with metre ticks. A selected placement opens locked; it
-must be unlocked (button or `L`) before it can be dragged, resized from its
-corners or edited numerically: 2D areas by their top-left corner or centre with
-an optional aspect-ratio lock, 3D models by centre and one uniform scale.
++Y down), drawn as axes with metre ticks, the pitch length and width and its corner
+coordinates. A selected placement shows its vertices and opens locked; it must be
+unlocked (button or `L`) before it can be dragged, resized from its corners or
+edited numerically: 2D areas by their top-left corner or centre, with an aspect
+ratio that can be locked or set (`16:9`, `1.78`), 3D models by centre and one
+uniform scale. Outlines are the placement slots; a selected 3D model also shows
+its real XY bounding box.
 Rotation is read-only. Each target can be enabled or disabled, and every draft
 change can be undone with the 撤销 button or `Ctrl/Cmd+Z` until the match is
 reloaded.

@@ -11,7 +11,7 @@ import { blendedMaterials, describeScene, loadDescription, sha256, type Describe
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
-import { anchorPoint, moveAnchor, resizeSide, uniformScale, type Anchor } from '../placements/ground-edit.ts';
+import { anchorPoint, moveAnchor, parseAspect, resizeSide, uniformScale, withAspect, type Anchor } from '../placements/ground-edit.ts';
 import { UndoStack } from '../shared/undo-stack.ts';
 import type { MatchRecord, Placement } from '../shared/types.ts';
 import type { PitchPreview } from '../scene/pitch-preview.ts';
@@ -228,7 +228,9 @@ function renderInspector() {
       <p class="on-help">左上角指俯视图中广告局部 −X / −Y 方向的角点（+X 向右，+Y 向下）。</p></div>
       <div class="on-inspector-group"><h3>尺寸</h3>
       <div class="on-field-grid">${field('sizeX', '长 X / m', slot.sizeX, 'min="0.1"')}${field('sizeY', '宽 Y / m', slot.sizeY, 'min="0.1"')}</div>
-      <label class="on-check"><input type="checkbox" name="keepAspect" ${keepAspect ? 'checked' : ''} /> 锁定宽高比（${metres(slot.sizeX / slot.sizeY)} : 1）</label></div>
+      <div class="on-aspect-row"><label>宽高比 W:H<input name="aspect" type="text" inputmode="decimal" value="${metres(slot.sizeX / slot.sizeY)}" aria-label="宽高比，如 16:9 或 1.78" /></label>
+      <label class="on-check"><input type="checkbox" name="keepAspect" ${keepAspect ? 'checked' : ''} /> 锁定宽高比</label></div>
+      <p class="on-help">输入 16:9 或 1.78 后按 Enter：保持长 X 和锚点，按比例调整宽 Y。</p></div>
       ${readonly(`旋转 Z ${slot.rz.toFixed(1)}° · 暂不支持调整旋转`)}`;
   } else {
     const maximum = slot.region ? Math.min(5, 1 / slot.modelPose.scale) : 5;
@@ -237,16 +239,29 @@ function renderInspector() {
       <div class="on-inspector-group"><h3>整体缩放</h3>
       <div class="on-field-grid">${field('scale', '缩放 / ×', slot.scaleX, `min="0.1" max="${metres(maximum)}"`)}</div>
       <p class="on-help">按比例整体缩放，范围 0.1–${metres(maximum)} 倍${slot.region ? '，模型始终限制在区域内' : ''}。</p></div>
+      <p id="inspector-footprint" class="on-readonly"></p>
       ${readonly(`高度 Z ${slot.z.toFixed(2)} m · 旋转 X / Y / Z ${slot.rx.toFixed(1)}° / ${slot.ry.toFixed(1)}° / ${slot.rz.toFixed(1)}° · 暂不支持调整旋转`)}`;
+    renderFootprint();
   }
   // Re-rendering replaces the inputs; keep keyboard focus where the operator was.
   if (focused) $<HTMLInputElement>(`#placement-fields [name="${focused}"]:is(:checked, :not([type=radio]))`)?.focus();
   $('#placement-error').textContent = '';
 }
 
+/** The loaded model's real XY bounding box, next to its placement slot. */
+function renderFootprint() {
+  const slot = selected(), target = $('#inspector-footprint');
+  if (!target || slot?.type !== '3D') return;
+  const box = engine?.modelFootprint(slot.id);
+  target.textContent = box
+    ? `模型实际占地（XY 轴对齐包围盒）：X ${box.minX.toFixed(2)} ～ ${box.maxX.toFixed(2)}，Y ${box.minY.toFixed(2)} ～ ${box.maxY.toFixed(2)} m · ${(box.maxX - box.minX).toFixed(2)} × ${(box.maxY - box.minY).toFixed(2)} m`
+    : `模型尚未加载或已停用；俯视图中的${slot.region ? '黄色框是广告位区域' : '圆环是广告位中心'}，不是模型本身。`;
+}
+
 /** The selected placement with one inspector field set to `value`. */
 function editedSlot(slot: Placement, name: string, value: number): { next: Placement; action: string } {
   if (slot.type === '2D') {
+    if (name === 'aspect') return { next: withAspect(slot, anchor, value), action: '设置宽高比' };
     if (name === 'anchorX' || name === 'anchorY') {
       const point = anchorPoint(slot, anchor);
       return { next: moveAnchor(slot, anchor, name === 'anchorX' ? { ...point, x: value } : { ...point, y: value }), action: '移动' };
@@ -259,9 +274,14 @@ function editedSlot(slot: Placement, name: string, value: number): { next: Place
 
 function applyInspectorField(input: HTMLInputElement) {
   const slot = selected();
-  if (!slot || slot.id !== unlockedId || input.type !== 'number' || !input.isConnected || input.value === input.defaultValue) return;
-  if (!Number.isFinite(input.valueAsNumber)) { renderInspector(); return; }
-  const { next, action } = editedSlot(slot, input.name, input.valueAsNumber);
+  if (!slot || slot.id !== unlockedId || !['number', 'text'].includes(input.type) || !input.isConnected || input.value === input.defaultValue) return;
+  const value = input.name === 'aspect' ? parseAspect(input.value) : input.valueAsNumber;
+  if (value === undefined || !Number.isFinite(value)) {
+    renderInspector();
+    if (input.name === 'aspect') $('#placement-error').textContent = '宽高比请输入 16:9 这样的 W:H，或 1.78 这样的正数。';
+    return;
+  }
+  const { next, action } = editedSlot(slot, input.name, value);
   commitSlot(next, `${action} ${slot.name}`);
 }
 
@@ -311,6 +331,7 @@ function syncEngine() {
   if (!engine || !current() || enginePending || engineReadyMatchId !== currentId) return;
   engine.setEditing(unlockedId, keepAspect);
   engine.setPlacements(current().draft, selectedId, selectSlot, moveSlot, current().hiddenPlacementIds);
+  renderFootprint();
   void resultReview.setPlacements(current().draft, current().hiddenPlacementIds).catch(showError);
 }
 

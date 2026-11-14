@@ -16,6 +16,19 @@ type CameraId = typeof CAMERA_PRESETS[number]['id'];
 type Corner = readonly [number, number];
 // Local corner signs of a ground rectangle: top-left, top-right, bottom-right, bottom-left in the top view.
 const CORNERS: readonly Corner[] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+const VERTEX_COLOR = '#2f8cff';
+
+/** A small blue dot with a white rim at a selected target's vertex; larger while it can be dragged. */
+function vertexMarker(position: THREE.Vector3, large: boolean) {
+  const marker = new THREE.Group();
+  const flat = { depthTest: false, depthWrite: false, side: THREE.DoubleSide, toneMapped: false };
+  marker.add(new THREE.Mesh(new THREE.RingGeometry(0.42, 0.6, 20), new THREE.MeshBasicMaterial({ color: '#ffffff', ...flat })));
+  marker.add(new THREE.Mesh(new THREE.CircleGeometry(0.42, 20), new THREE.MeshBasicMaterial({ color: VERTEX_COLOR, ...flat })));
+  marker.position.set(position.x, position.y, -0.06);
+  marker.scale.setScalar(large ? 1.35 : 1);
+  marker.traverse((object) => { object.renderOrder = 1700; });
+  return marker;
+}
 type Drag = { id: number } & (
   { kind: 'placement'; start: THREE.Vector3; slot: Placement; candidate: Placement; corner?: Corner }
   | { kind: 'lens'; x: number; y: number; lens: PreviewLens }
@@ -141,7 +154,8 @@ export class PitchPreview {
       throw error;
     }
     loading.hidden = true;
-    this.lighting.markShadows();
+    // The selection overlay shows loaded models' footprints.
+    this.updatePlacements();
     this.refresh();
   }
 
@@ -169,6 +183,11 @@ export class PitchPreview {
   setAxesVisible(visible: boolean) {
     this.showAxes = visible;
     this.refresh();
+  }
+
+  /** The loaded model's real world XY bounding box, see FusionCreatives.footprint. */
+  modelFootprint(id: string) {
+    return this.creatives?.footprint(id);
   }
 
   /** Loaded material geometry of each placement; empty until the materials load. */
@@ -289,19 +308,21 @@ export class PitchPreview {
       if (footprint && (slot.type === '2D' || selected)) {
         const corners = CORNERS.map(([x, y]) => new THREE.Vector3(x * footprint[0] / 2, y * footprint[1] / 2, -0.03));
         group.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners), outline));
-        if (unlocked && slot.type === '2D') {
-          const geometry = new THREE.SphereGeometry(0.55, 12, 8), material = new THREE.MeshBasicMaterial({ color: '#ddff54' });
-          for (const corner of corners) {
-            const marker = new THREE.Mesh(geometry, material);
-            marker.position.copy(corner);
-            group.add(marker);
-          }
-        }
+        if (selected && slot.type === '2D') for (const corner of corners) group.add(vertexMarker(corner, unlocked));
       }
       group.position.set(slot.x, slot.y, 0);
       // A model's rz turns the model inside its axis-aligned region, not the region.
       if (slot.type === '2D') group.rotation.z = THREE.MathUtils.degToRad(slot.rz);
       this.overlay.add(group);
+      const box = selected && slot.type === '3D' ? this.creatives?.footprint(slot.id) : undefined;
+      if (box) {
+        // The model's own footprint, which is usually smaller than its slot.
+        const corners = [[box.minX, box.minY], [box.maxX, box.minY], [box.maxX, box.maxY], [box.minX, box.maxY]].map(([x, y]) => new THREE.Vector3(x, y, -0.04));
+        const loop = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners), new THREE.LineBasicMaterial({ color: VERTEX_COLOR, depthTest: false }));
+        loop.renderOrder = 1600;
+        this.overlay.add(loop);
+        for (const corner of corners) this.overlay.add(vertexMarker(corner, unlocked));
+      }
     }
     this.scene.add(this.overlay);
   }
