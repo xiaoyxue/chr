@@ -11,6 +11,11 @@ video = "/path/to/clip.mp4"
 # description = "output/description/start.json"
 # asset_root = "/path/to/packages"
 
+# "worker": chr-server hands every frame to its tracking worker (chr-tracking-sim-cli,
+# which replays the manifest's cameras until the real tracking module replaces it).
+# "external": chr-tracking-sim sends the cameras over tracking.frame.
+tracking = "worker"
+
 size = "1280x720"
 # Socket, input ring and program tap; kept between runs.
 # dir = "/run/user/1000/chr-stack"

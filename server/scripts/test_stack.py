@@ -30,6 +30,8 @@ class ConfigTests(unittest.TestCase):
             self.load('scene = "a"\nvideo = "b"\nsene = "c"\n')
         with self.assertRaisesRegex(SystemExit, "missing video"):
             self.load('scene = "a"\n')
+        with self.assertRaisesRegex(SystemExit, "tracking must be"):
+            self.load('scene = "a"\nvideo = "b"\ntracking = "both"\n')
 
 
 class ComponentTests(unittest.TestCase):
@@ -42,6 +44,10 @@ class ComponentTests(unittest.TestCase):
         self.assertNotIn("github:nix-community/nixGL#nixGLNvidia", render)
         self.assertEqual(render[render.index("--asset-root") + 1], "/assets")
         self.assertNotIn("--description", render)
+        self.assertIn("--tracking-worker", render, "the tracking worker is the default")
+        external = stack.Config(scene="s.json", video="v.mp4", tracking="external")
+        render = next(c for c in stack.components(external) if c.name == "render").command
+        self.assertNotIn("--tracking-worker", render)
         # A wildcard listener is reached on loopback.
         self.assertIn("srt://127.0.0.1:9001?mode=caller&latency=120000", by_name["srt-relay"].command)
 
@@ -53,6 +59,7 @@ class ReportTests(unittest.TestCase):
 
     def test_short_names(self):
         self.assertEqual(stack.describe(["/x/target/chr-renderer-cli", "worker"]), "chr-renderer-cli worker")
+        self.assertIn(stack.describe(["/x/target/chr-tracking-sim-cli", "worker"]), stack.PORTLESS)
         self.assertEqual(stack.describe(["bash", "/x/server/scripts/run-tracked.sh", "--scene", "s.json"]), "bash run-tracked.sh")
         self.assertEqual(stack.describe(["python3", "server/scripts/stack.py", "relay", "srt://a:1"]), "python3 stack.py relay")
         self.assertEqual(stack.describe(["npm exec vite --host 127.0.0.1"]), "npm exec vite")

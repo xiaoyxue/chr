@@ -100,6 +100,7 @@ export class RpcError extends Error {
   constructor(readonly code: number, message: string) { super(message); }
 }
 const METHOD_NOT_FOUND = -32601;
+const NO_TRACKER = 'no tracking worker';
 
 /** `render.get_worker_status` result (chr_common::methods::render_worker::WorkerStatus). */
 export interface WorkerStatus {
@@ -107,6 +108,17 @@ export interface WorkerStatus {
   pid: number | null;
   restarts: number;
   deadline_misses: number;
+  last_error: string | null;
+}
+/** `tracking.get_worker_status` result (chr_common::methods::tracking::TrackerStatus). */
+export interface TrackerStatus {
+  state: WorkerStatus['state'];
+  pid: number | null;
+  restarts: number;
+  requests: number;
+  cameras: number;
+  unavailable: number;
+  not_sent: number;
   last_error: string | null;
 }
 /** `sdi.get_status` result (chr_common::methods::sdi::SdiStatus). */
@@ -120,6 +132,15 @@ export function workerProblem(status: WorkerStatus): string | undefined {
   return status.state === 'starting'
     ? `渲染 worker 正在启动，尚未就绪；请稍候几秒再发送。${detail}`
     : `渲染 worker 已退出，正在等待自动重启（已重启 ${status.restarts} 次）。${detail}请查看渲染日志（stack 为 output/stack/render.log）。`;
+}
+
+/** Why the tracking worker cannot supply cameras now, or undefined when it is ready. */
+export function trackerProblem(status: TrackerStatus): string | undefined {
+  if (status.state === 'ready') return undefined;
+  const detail = status.last_error ? `最近错误：${status.last_error}。` : '';
+  return status.state === 'starting'
+    ? `跟踪 worker 正在启动，尚未就绪；此时的画面没有相机、不会渲染，请稍候再发送。${detail}`
+    : `跟踪 worker 已退出，正在等待自动重启（已重启 ${status.restarts} 次）。${detail}请查看渲染日志（stack 为 output/stack/render.log）。`;
 }
 
 /** The operator-facing reason a renderer call failed. */
@@ -174,7 +195,9 @@ async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise
       pending.delete(id);
       reject(new Error(`chr-server 在 ${timeoutMs / 1000} 秒内没有回应 ${method}。`));
     }, timeoutMs);
-    pending.set(id, { method, resolve, reject: (error) => reject(new Error(rendererFailure(method, error))), timer });
+    pending.set(id, { method, resolve, reject: (error) => reject(new Error(
+      method === 'tracking.get_worker_status' && error instanceof RpcError && error.code === METHOD_NOT_FOUND
+        ? NO_TRACKER : rendererFailure(method, error))), timer });
     socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }));
   });
   try { return await run(call); }
@@ -190,6 +213,13 @@ export function sendDescription(url: string, scene: DescriptionScene, timeoutMs 
     const worker = await call('render.get_worker_status') as WorkerStatus;
     const problem = workerProblem(worker);
     if (problem) throw new Error(problem);
+    // Only a server started with --tracking-worker answers; otherwise cameras come from tracking.frame.
+    const tracker = await call('tracking.get_worker_status').catch((error: unknown): undefined => {
+      if (error instanceof Error && error.message.startsWith(NO_TRACKER)) return undefined;
+      throw error;
+    }) as TrackerStatus | undefined;
+    const trackingProblem = tracker && trackerProblem(tracker);
+    if (trackingProblem) throw new Error(trackingProblem);
     const sdi = await call('sdi.get_status') as SdiStatus;
     const loaded = await call('description.load', { scene }, timeoutMs) as LoadResult;
     return { loaded, sdi, worker };

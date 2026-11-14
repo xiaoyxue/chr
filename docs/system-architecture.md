@@ -26,7 +26,7 @@ chr 初期有两大交付组件：
 | 控制 WebUI（含 Local Server） | 广告位信息管理、业务操作、现场工作流、状态呈现和交互预览。 | chr；WebUI 与 Local Server 的内部拆分后续细化。 |
 | 实时渲染服务（现场视频运行时） | 组织 SDI 采集、实时追踪接入、逐帧渲染合成、视频输出及录制任务，执行运行时控制。 | chr，以本地 CLI/服务形式运行。 |
 | 离线场景建模 | 读取扫描视频，产出已注册到球场的 atlas 图像/Ti 对及同参考系下的光心 C。 | 可能在仓库外；chr 负责准备输入和接入结果。 |
-| 实时追踪服务 | 使用标定参考模型分析实时视频，提供逐帧 Ti；特征、索引和匹配策略属于内部细节。 | 可能在仓库外；双向接入协议在 chr 侧需要明确。 |
+| 实时追踪服务 | 使用标定参考模型分析实时视频，提供逐帧 Ti；特征、索引和匹配策略属于内部细节。 | 作为 `chr-server` 监管的跟踪 worker 进程运行（`server/tracking/`），协议与语言无关；当前由回放已记录相机的 `chr-tracking-sim-cli` 代替，真实模块（可能是 Python）按同一协议替换它。见 [Tracking worker](../server/docs/tracking-worker.md)。 |
 
 Local Server 属于控制侧，不另计为第五个大模块。离线与实时分析也不因名称中有
 “服务”就要求远端部署；可否本地运行、使用什么传输方式均未冻结。
@@ -124,10 +124,11 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 写入共享内存节目 tap；`chr-monitor` 编码该 tap 并发送给浏览器或 SRT 接收端。
 当前编码使用 CPU readback 后的软件编码，是开发实现，不是已验证的硬件零拷贝链路。
 `chr-server` 不创建 GPU 设备：每帧由它启动并监管的 `chr-renderer-cli worker` 进程渲染；worker 超时、失败或重启期间输出 clean feed（Linux 已验证，Windows 未验证）。
-实际 SDI 采集/输出硬件、视频输入、录制、实时追踪和 calibration 管线仍未实现。
+实际 SDI 采集/输出硬件、视频输入、录制、真实的实时追踪算法和 calibration 管线仍未实现；
+跟踪 worker 的进程、协议与监管已实现，目前用回放替身代替算法。
 已有坐标契约见 [Coordinate contract](../server/docs/coordinates.md)。
 
 `client/src/` 目前仍是占位目录；`common/` 已是 Rust 协议的权威实现，TypeScript 客户端镜像其类型。
-只有 `algorithm/src/` 的实现栈仍未定。后续业务 WebUI/Local Server 集成应结合现有协议与示例，
+离线场景建模不在本仓库；实时追踪的接入已由跟踪 worker 协议定义（#128）。后续业务 WebUI/Local Server 集成应结合现有协议与示例，
 而不是在此重复搭建或把示例客户端当作完整产品。
 渲染服务部署提案 #4 不改变这里记录的现有路径或自动确认产品级待决问题。

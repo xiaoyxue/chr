@@ -55,6 +55,8 @@ class Config:
     srt_relay_port: int = 0
     pitch_studio_port: int = 4173
     monitor_page_port: int = 5173
+    # "worker": chr-server's tracking worker supplies cameras; "external": the simulator does.
+    tracking: str = "worker"
 
 
 def load_config(path: Path) -> Config:
@@ -68,6 +70,8 @@ def load_config(path: Path) -> Config:
     missing = [key for key in ("scene", "video") if key not in values]
     if missing:
         raise SystemExit(f"{path}: missing {', '.join(missing)}")
+    if values.get("tracking", "worker") not in ("worker", "external"):
+        raise SystemExit(f"{path}: tracking must be \"worker\" or \"external\"")
     return Config(**values)
 
 
@@ -97,6 +101,8 @@ def components(config: Config) -> list[Component]:
         render += ["--description", config.description]
     if config.asset_root:
         render += ["--asset-root", config.asset_root]
+    if config.tracking == "worker":
+        render += ["--tracking-worker"]
     if config.nixgl:
         render = NIXGL + render
     stack = [
@@ -136,7 +142,8 @@ def roles(config: Config) -> dict[str, str]:
     host, port = endpoint(config.webrtc_tcp)
     known = {
         f"tcp {config.server_ws}": "chr-server control JSON-RPC WebSocket (description.load, status)",
-        f"unix {config.dir}/render.sock": "chr-server NativeSocket (tracking.frame from chr-tracking-sim)",
+        f"unix {config.dir}/render.sock": "chr-server NativeSocket: local control"
+                                         + (", tracking.frame from chr-tracking-sim" if config.tracking == "external" else ""),
         f"tcp {config.monitor_ws}": "chr-monitor WebSocket: status and WebRTC signalling",
         f"udp {config.srt}": "chr-monitor SRT listener: the program for VLC / ffplay",
         **{f"tcp {host}:{port + i}": "chr-monitor WebRTC ICE-TCP, one per open stream" for i in range(4)},
@@ -149,9 +156,12 @@ def roles(config: Config) -> dict[str, str]:
 
 # Processes that hold no socket, and what they do instead.
 PORTLESS = {
-    "chr-tracking-sim": "frames into the input ring (shared memory), Ti/C to chr-server's socket",
+    "chr-tracking-sim": "camera: frames into the input ring (shared memory);"
+                        " with tracking = \"external\" also Ti/C to chr-server's socket",
     "ffmpeg": "decodes the clip in a loop for chr-tracking-sim",
     "chr-renderer-cli worker": "GPU renderer; stdin/stdout and shared memory with chr-server",
+    "chr-tracking-sim-cli worker": "tracking worker (replays recorded cameras); frames from chr-server's"
+                                   " shared-memory ring, cameras back over stdin/stdout",
 }
 # Launchers and restart loops that only start and watch the processes doing the work.
 WRAPPERS = ("bash", "npm", "esbuild")

@@ -28,6 +28,7 @@ gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 chr-renderer.workspace = true
 chr-common.workspace = true
 chr-shm.workspace = true
+chr-tracking.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 log.workspace = true

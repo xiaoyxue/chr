@@ -5,6 +5,11 @@ path with a replayed calibrated clip; it is not a production tracking service,
 capture card or calibration contract. The default daemon and the initial
 `scene_frame_v1` pinhole profile are unchanged.
 
+With `chr-server --tracking-worker` the simulator is the camera only
+(`--no-tracking`) and the server's [tracking worker](tracking-worker.md) supplies
+the cameras; `stack.py` runs that mode by default. This document describes the
+external mode, in which `chr-tracking-sim` sends the cameras itself.
+
 `chr-tracking-sim` stands in for a camera with a tracking system. It sends every
 frame of a calibrated clip into `chr-server`, and it sends each frame's camera
 separately. `chr-server --tracked-scene` pairs both by capture sequence, renders

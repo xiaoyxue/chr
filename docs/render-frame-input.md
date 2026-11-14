@@ -60,7 +60,9 @@ Tracking → Ti/C associated with FrameKey ────────────�
 图像与几何可以独立到达，按 `FrameKey` 关联，不能用到达顺序或缓存序号配对。
 C 不一定由 tracking 每帧重复传送，但提交时必须解析到与该帧 Ti 相容的值。
 运行时可以利用有界延迟窗口等待几何并批量处理，输出仍保持既定连续节奏。
-缺失/迟到几何的行为待定，不默认使用旧 Ti 或合成占位相机。
+缺失/迟到几何的行为待定，不默认使用旧 Ti 或合成占位相机。现有模拟（含跟踪 worker，
+见 [Tracking worker](../server/docs/tracking-worker.md)）在等待窗口内拿不到几何时跳过该帧、不渲染，输出口重复上一帧；
+这仍是模拟行为，不是正式播出的决定。
 
 ## Frame storage and lifetime
 

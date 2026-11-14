@@ -130,7 +130,8 @@
             // {
               inherit cargoArtifacts;
               pname = "chr-runtime";
-              cargoExtraArgs = "-p chr-runtime";
+              # chr-server starts chr-tracking-sim-cli from its own directory.
+              cargoExtraArgs = "-p chr-runtime -p chr-tracking";
               doCheck = false;
               nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               postInstall = ''

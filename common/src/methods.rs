@@ -132,6 +132,31 @@ pub mod tracking {
         /// Captured frames the input ring overwrote before the server read them.
         pub frames_overwritten: u64,
     }
+
+    /// Reads the tracking worker's supervision counters. No params. Result:
+    /// [`TrackerStatus`]. Only a server started with `--tracking-worker` answers it;
+    /// its cameras then come from that worker, and `tracking.frame` is rejected.
+    pub const GET_WORKER_STATUS: &str = "tracking.get_worker_status";
+
+    /// Counters since the server started. Whether a frame was rendered with its
+    /// camera is counted by [`TrackingStatus`].
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct TrackerStatus {
+        pub state: super::render_worker::WorkerState,
+        /// Process ID of the current worker, if one is running.
+        pub pid: Option<u32>,
+        /// Workers started after the first.
+        pub restarts: u64,
+        /// Frames sent to the worker.
+        pub requests: u64,
+        /// Cameras the worker returned.
+        pub cameras: u64,
+        /// Frames the worker reported it could not track.
+        pub unavailable: u64,
+        /// Frames not sent: no ready worker, or every ring slot awaits a reply.
+        pub not_sent: u64,
+        pub last_error: Option<String>,
+    }
 }
 
 /// WebRTC signaling, served by `chr-monitor` on its own WebSocket, not by
