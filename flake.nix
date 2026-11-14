@@ -230,7 +230,7 @@
                   export HOME="$TMPDIR"
                   export PYTHONDONTWRITEBYTECODE=1
                   python -B -m unittest discover -s ${./server/scripts} \
-                    -p test_mp4_gstreamer_source.py > "$out" 2>&1
+                    -p 'test_*.py' > "$out" 2>&1
                 '';
             fmt = craneLib.cargoFmt { inherit src; };
             clippy = craneLib.cargoClippy (
