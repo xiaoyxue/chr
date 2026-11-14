@@ -790,8 +790,18 @@ start time, so `stop` signals only processes the script started (TERM, then KILL
 after 15 s). `start` skips a component that is already running or whose port is
 taken. Inside the render component the processes still restart on their own.
 `start` (once ready) and `status` end with a report read from `/proc`. For each
-component it lists every process with its PID and the sockets that process
-actually holds, each with its purpose. Wrappers that do no work are folded into
+component it lists every process with its PID, uptime and the sockets that process
+actually holds, each with its purpose. A process whose executable was rebuilt
+since it started is marked `OLD BUILD`. The report then asks chr-server itself,
+over `<dir>/render.sock`, twice one second apart, for its health:
+- SDI output and repeat rates;
+- the render worker and the tracking worker states;
+- frames paired with a camera per second.
+
+It ends with `PROBLEM` lines when something is not working. `stop` lists every
+process it stopped or had to kill. chr-server handles SIGTERM like Ctrl-C, removing
+its workers' ring directories in `$XDG_RUNTIME_DIR/chr/`. On startup it also
+removes directories left there by servers that were killed. Wrappers that do no work are folded into
 one line: the `run-tracked.sh` restart loops and the npm and esbuild helpers.
 The report ends with the URLs to open and the `ssh -L` forwards a remote viewer
 needs. With every component enabled the stack runs nine working processes:

@@ -1,7 +1,9 @@
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -82,6 +84,83 @@ class ReportTests(unittest.TestCase):
         config = stack.Config(scene="s.json", video="v.mp4", server_ws="127.0.0.1:18987", monitor_ws="127.0.0.1:18989",
                               webrtc_tcp="127.0.0.1:18992", srt_relay_port=18991, monitor_page_port=0)
         self.assertEqual(stack.forwarded_ports(config), [4173, 18987, 18989, 18992, 18993, 18994, 18995, 18991])
+
+
+class HealthTests(unittest.TestCase):
+    def test_calls_chr_server_over_its_native_socket(self):
+        import socket as sockets
+        import threading
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/render.sock"
+            listener = sockets.socket(sockets.AF_UNIX)
+            listener.bind(path)
+            listener.listen()
+
+            def serve():
+                connection, _ = listener.accept()
+                with connection:
+                    for _ in range(2):
+                        request = json.loads(stack.receive(connection, int.from_bytes(stack.receive(connection, 4), "big")))
+                        replies = [{"jsonrpc": "2.0", "method": "note"}]  # not an answer; skipped
+                        if request["method"] == "sdi.get_status":
+                            replies.append({"jsonrpc": "2.0", "id": request["id"], "result": {"frames_output": 7}})
+                        else:
+                            replies.append({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601, "message": "Method not found"}})
+                        for reply in replies:
+                            payload = json.dumps(reply).encode()
+                            connection.sendall(len(payload).to_bytes(4, "big") + payload)
+
+            thread = threading.Thread(target=serve)
+            thread.start()
+            results = stack.rpc(path, ["sdi.get_status", "tracking.get_worker_status"])
+            thread.join()
+            listener.close()
+        self.assertEqual(results, {"sdi.get_status": {"frames_output": 7},
+                                   "tracking.get_worker_status": {"error": "Method not found"}})
+
+    def test_reports_rates_and_problems(self):
+        sdi = {"video_mode": "1280x720p30", "frames_output": 100, "repeated_frames": 2, "dropped_frames": 0}
+        render = {"state": "ready", "pid": 5, "restarts": 0, "deadline_misses": 1, "clean_feed_frames": 0, "last_error": None}
+        tracker = {"state": "backoff", "pid": None, "restarts": 1, "requests": 50, "cameras": 49, "unavailable": 0,
+                   "not_sent": 3, "last_error": "the tracking worker exited"}
+        join = {"frames_joined": 40, "frames_without_tracking": 3, "samples_late": 0, "frames_dropped": 1}
+        first = {"sdi.get_status": sdi, "render.get_worker_status": render, "tracking.get_worker_status": tracker,
+                 "tracking.get_status": join}
+        second = {**first, "sdi.get_status": {**sdi, "frames_output": 130, "repeated_frames": 12},
+                  "tracking.get_status": {**join, "frames_without_tracking": 13}}
+        text = "\n".join(stack.health(first, second, 1.0))
+        self.assertIn("30.0 slots/s, 10.0 repeats/s", text)
+        self.assertIn("PROBLEM: tracking worker backoff: the tracking worker exited", text)
+        self.assertIn("PROBLEM: no frame was paired with a camera", text)
+        external = {**second, "tracking.get_worker_status": {"error": "Method not found"}}
+        self.assertIn("none: cameras come from tracking.frame", "\n".join(stack.health(first, external, 1.0)))
+
+
+class StopTests(unittest.TestCase):
+    def start(self, directory: str, name: str, script: str) -> subprocess.Popen:
+        process = subprocess.Popen(["sh", "-c", script], start_new_session=True)
+        time.sleep(0.2)
+        (Path(directory) / f"{name}.pid").write_text(f"{process.pid} {stack.start_time(process.pid)}\n")
+        return process
+
+    def test_lists_every_stopped_and_killed_process(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(stack, "STATE", Path(directory)), \
+                mock.patch.object(stack, "STOP_TIMEOUT_S", 1):
+            polite = self.start(directory, "polite", "sleep 30 & wait")
+            stubborn = self.start(directory, "stubborn", "trap '' TERM; sleep 30; true")
+            try:
+                with mock.patch("builtins.print"):
+                    stopped = stack.stop()
+            finally:
+                for process in (polite, stubborn):
+                    process.kill()
+                    process.wait()
+            by_component = {}
+            for component, pid, name, outcome in stopped:
+                by_component.setdefault(component, []).append((name.split()[0], outcome))
+            self.assertEqual(sorted(by_component["polite"]), [("sh", "stopped (SIGTERM)"), ("sleep", "stopped (SIGTERM)")])
+            self.assertEqual(sorted(by_component["stubborn"]), [("sh", "killed (SIGKILL)"), ("sleep", "killed (SIGKILL)")])
+            self.assertEqual(list(Path(directory).glob("*.pid")), [])
 
 
 class RecordTests(unittest.TestCase):

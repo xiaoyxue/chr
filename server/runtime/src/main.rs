@@ -307,6 +307,7 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<()> {
+    remove_stale_private_dirs();
     if args.software_video.is_some() && !cfg!(all(unix, feature = "gstreamer-media")) {
         return Err("--software-video requires Linux/Unix and the gstreamer-media feature".into());
     }
@@ -621,7 +622,7 @@ fn run(args: Args) -> Result<()> {
             result = native => result,
             () = render_watch => Err("render loop stopped".into()),
             result = injection => result,
-            signal = tokio::signal::ctrl_c() => {
+            signal = shutdown_signal() => {
                 signal?;
                 log::info!("shutting down");
                 Ok(())
@@ -645,6 +646,65 @@ fn run(args: Args) -> Result<()> {
     }
     served?;
     stopped.map_err(Into::into)
+}
+
+/// Resolves on Ctrl-C or SIGTERM (`stack.py stop`, service managers), so both shut
+/// the server down cleanly and its workers' ring directories are removed.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => signal,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
+}
+
+/// Removes the worker and tracking ring directories of chr-servers that are gone:
+/// a server that was killed (SIGKILL, a crash) cannot remove its own, and they
+/// live in memory-backed `$XDG_RUNTIME_DIR`.
+fn remove_stale_private_dirs() {
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return;
+    };
+    for path in stale_private_dirs(&PathBuf::from(runtime).join("chr"), server_running) {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => log::info!("removed {} left by a stopped chr-server", path.display()),
+            Err(error) => log::warn!("cannot remove {}: {error}", path.display()),
+        }
+    }
+}
+
+/// `<root>/worker-<pid>` and `<root>/tracking-<pid>` directories whose server is not running.
+fn stale_private_dirs(root: &std::path::Path, running: impl Fn(u32) -> bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut stale: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let (kind, pid) = name.split_once('-')?;
+            let pid = pid.parse().ok()?;
+            (matches!(kind, "worker" | "tracking") && entry.path().is_dir() && !running(pid))
+                .then(|| entry.path())
+        })
+        .collect();
+    stale.sort();
+    stale
+}
+
+/// Whether `pid` is a running chr-server. Without `/proc` every PID counts as running,
+/// so nothing is removed.
+fn server_running(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(comm) => comm.trim_end() == "chr-server",
+        Err(_) => !std::path::Path::new("/proc/self").exists(),
+    }
 }
 
 /// Queues the tracking worker's cameras for the join; it counts late ones.
@@ -714,6 +774,27 @@ mod tests {
                 .chain(args)
                 .map(|arg| (*arg).to_owned()),
         )
+    }
+
+    #[test]
+    fn only_ring_directories_of_stopped_servers_are_stale() {
+        let root = std::env::temp_dir().join(format!("chr-stale-{}", std::process::id()));
+        for dir in [
+            "worker-1",
+            "tracking-1",
+            "worker-2",
+            "tracking-x",
+            "other-3",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("worker-4"), b"").unwrap();
+        assert_eq!(
+            stale_private_dirs(&root, |pid| pid == 2),
+            [root.join("tracking-1"), root.join("worker-1")]
+        );
+        assert!(stale_private_dirs(&root.join("missing"), |_| false).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
