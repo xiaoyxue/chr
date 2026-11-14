@@ -14,10 +14,9 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 ## Architecture and scope
 
 - Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `runtime/`
-  (`chr-runtime`) builds the `chr-server` render server, the headless
-  `chr-renderer-cli` and the `chr-tracking-sim` camera simulator; `tracking/`
-  (`chr-tracking`) holds the tracking worker protocol, its supervisor and the
-  `chr-tracking-sim-cli` replay stand-in; `viewer/` (`chr-app`) is the
+  (`chr-runtime`) builds the `chr-server` render server, its two workers (the
+  headless `chr-renderer-cli` and the `chr-tracking-sim-cli` tracking replay
+  stand-in) and the `chr-tracking-sim` camera simulator; `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
 - Keep all rendering in `renderer/`. It has no networking, video-device, or
@@ -30,7 +29,8 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   calibration and associates it with frames; `src/program/` assembles demo
   scenes and bridges admitted frames into rendering; `src/worker/` supervises
   the out-of-process renderer (`chr-renderer-cli worker`), which holds the GPU
-  device, while `chr-server` holds none; `src/sdi.rs` owns the
+  device, while `chr-server` holds none; `src/worker/tracking/` holds the
+  tracking worker protocol and its supervisor; `src/sdi.rs` owns the
   simulated output port and writes every transmitted slot into the shared-memory
   program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
   encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer helpers

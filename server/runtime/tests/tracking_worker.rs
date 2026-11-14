@@ -6,9 +6,9 @@ use std::{
 };
 
 use chr_common::methods::{render_worker::WorkerState, tracking::TrackingFrame};
-use chr_tracking::{
-    replay::Replay,
-    supervisor::{StatusHandle, Tracker, TrackerConfig, status_handle},
+use chr_runtime::{
+    calibration::tracking::TrackingReplay,
+    worker::tracking::supervisor::{StatusHandle, Tracker, TrackerConfig, status_handle},
 };
 
 const WIDTH: u32 = 4;
@@ -108,7 +108,7 @@ fn every_sent_frame_gets_the_recorded_camera() {
         fixture.tracker().track(sequence, &Fixture::frame(sequence));
     }
     let cameras = fixture.until(|_, cameras| cameras.len() == 4);
-    let replay = Replay::new(TI, [0., 0., -10.], &WARPS).unwrap();
+    let replay = TrackingReplay::new(TI, [0., 0., -10.], &WARPS).unwrap();
     for camera in &cameras {
         assert_eq!(*camera, replay.frame(camera.sequence.get()));
     }

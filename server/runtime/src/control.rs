@@ -24,7 +24,7 @@ pub struct ControlHandler {
     worker: Option<StatusHandle>,
     scenes: Option<crate::retained::SceneControl>,
     tracking: Option<TrackingFeed>,
-    tracker: Option<chr_tracking::supervisor::StatusHandle>,
+    tracker: Option<crate::worker::tracking::supervisor::StatusHandle>,
     description: Option<std::sync::Arc<crate::program::description::Loader>>,
 }
 
@@ -62,7 +62,10 @@ impl ControlHandler {
 
     /// Cameras come from the supervised tracking worker, reported through
     /// `tracking.get_worker_status`; `tracking.frame` is then rejected.
-    pub fn with_tracking_worker(mut self, status: chr_tracking::supervisor::StatusHandle) -> Self {
+    pub fn with_tracking_worker(
+        mut self,
+        status: crate::worker::tracking::supervisor::StatusHandle,
+    ) -> Self {
         self.tracker = Some(status);
         self
     }
@@ -385,7 +388,7 @@ mod tests {
             .handle(&CONNECTION, tracking::FRAME, Some(camera.clone()))
             .await
             .unwrap();
-        let status = chr_tracking::supervisor::status_handle();
+        let status = crate::worker::tracking::supervisor::status_handle();
         status.lock().unwrap().cameras = 2;
         let handler = handler.with_tracking_worker(status);
         let reported = handler

@@ -63,7 +63,7 @@ if [[ -z $scene || -z $video ]]; then
 fi
 fps=$(tr -d ' \n' <"$scene" | sed -n 's/.*"fps":\([0-9]*\).*/\1/p')
 
-cargo build --locked --release -p chr-runtime -p chr-tracking -p chr-monitor \
+cargo build --locked --release -p chr-runtime -p chr-monitor \
   --features chr-runtime/gstreamer-media,chr-monitor/gstreamer-media
 target=$(cargo metadata --locked --format-version 1 --no-deps |
   sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')

@@ -1,10 +1,10 @@
 //! `chr-tracking-sim-cli`: a stand-in tracking worker for `chr-server
 //! --tracking-worker`, to be replaced by the real tracking module.
 //!
-//! It speaks the tracking worker protocol (`chr_tracking::protocol`) and reads
-//! every frame from the shared ring like a real tracker would, but answers with
-//! the recorded camera of a calibrated clip (`chr_tracking::replay`): it replays,
-//! it does not estimate. Options inject delays, unavailable results, crashes and
+//! It speaks the tracking worker protocol (`chr_runtime::worker::tracking::protocol`)
+//! and reads every frame from the shared ring like a real tracker would, but
+//! answers with the recorded camera of a calibrated clip (`TrackingReplay`): it
+//! replays, it does not estimate. Options inject delays, unavailable results, crashes and
 //! hangs to exercise chr-server's supervision and missing-camera handling.
 
 use std::{
@@ -14,11 +14,12 @@ use std::{
     time::Duration,
 };
 
-use chr_shm::{Read, Reader};
-use chr_tracking::{
-    protocol::{self, Reply, Request, VERSION},
-    replay::Replay,
+use chr_runtime::{
+    calibration::tracking::TrackingReplay,
+    worker::tracking::protocol::{self, Reply, Request, VERSION},
 };
+use chr_shm::{Read, Reader};
+use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -100,6 +101,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// The fields of a `calibrated-video-v1` manifest the replay needs.
+#[derive(Deserialize)]
+struct Calibration {
+    ti: [[f64; 3]; 3],
+    center: [f64; 3],
+    #[serde(default)]
+    frame_warps: Vec<[[f64; 3]; 3]>,
+}
+
+fn load(path: &std::path::Path) -> Result<TrackingReplay> {
+    let calibration: Calibration = serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    TrackingReplay::new(calibration.ti, calibration.center, &calibration.frame_warps)
+}
+
 fn serve(faults: Faults) -> Result<()> {
     let mut input = BufReader::new(io::stdin().lock());
     let mut output = io::stdout().lock();
@@ -112,11 +128,11 @@ fn serve(faults: Faults) -> Result<()> {
     else {
         return Err("expected hello".into());
     };
-    let started = (|| -> Result<(Replay, Reader)> {
+    let started = (|| -> Result<(TrackingReplay, Reader)> {
         if version != VERSION {
             return Err(format!("protocol version {version}, expected {VERSION}").into());
         }
-        Ok((Replay::load(&calibration)?, Reader::open(&input_ring)?))
+        Ok((load(&calibration)?, Reader::open(&input_ring)?))
     })();
     let (replay, ring) = match started {
         Ok(started) => started,
