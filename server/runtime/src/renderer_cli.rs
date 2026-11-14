@@ -2,7 +2,7 @@
 //!
 //! `render` renders one program frame through the same installation, scene control
 //! and program bridge as `chr-server`, and writes the BT.709 RGBA composition as a
-//! PNG. `worker` is the render worker that `chr-server` starts and supervises; it
+//! PNG; `bench` times that frame through the render worker's path. `worker` is the render worker that `chr-server` starts and supervises; it
 //! speaks the protocol of `chr_runtime::worker` on stdin/stdout and logs to stderr.
 
 use std::{
@@ -16,7 +16,7 @@ use chr_renderer::Gpu;
 use chr_runtime::{
     program::{
         spec::ProgramSpec,
-        still::{self, Background, Still},
+        still::{self, Background, FrameTiming, Still},
     },
     sdi::VideoMode,
 };
@@ -25,10 +25,13 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "\
 Usage: chr-renderer-cli render <program> --output <png> [options]
+       chr-renderer-cli bench <program> [--frames <n>] [options]
        chr-renderer-cli worker      (started by chr-server; not for interactive use)
 
-Renders one frame of a chr-server program and writes the BT.709 RGBA program image
-as PNG code values, without further colour conversion.
+render: renders one frame of a chr-server program and writes the BT.709 RGBA program
+image as PNG code values, without further colour conversion.
+bench: renders the same frame repeatedly the way a render worker does (composition,
+UYVY conversion, readback) and prints GPU and wall time per frame.
 
 Program (exactly one):
   --synthetic-program     synthetic-program-v1 (max 1280x720)
@@ -40,8 +43,9 @@ Program (exactly one):
                           camera.reference and the warp of --frame
 
 Options:
-  --output <png>          Output file; refuses to replace it without --overwrite
-  --overwrite             Replace an existing output file
+  --output <png>          render: output file; refuses to replace it without --overwrite
+  --overwrite             render: replace an existing output file
+  --frames <n>            bench: frames to time after 10 warm-up frames [default: 300]
   --size <WxH>            Output size; both even [default: 1280x720]
   --fps <n>               Output rate, 1-120; a video scene needs its clip rate [default: 50]
   --state <json>          chr-common SceneState replacing the program's initial scene
@@ -61,6 +65,8 @@ struct RenderArgs {
     state: Option<PathBuf>,
     background: Option<PathBuf>,
     frame: u64,
+    /// `Some` for `bench`: frames to time.
+    bench: Option<u32>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -70,8 +76,9 @@ enum Subcommand {
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand>> {
-    match raw.next().as_deref() {
-        Some("render") => {}
+    let bench = match raw.next().as_deref() {
+        Some("render") => None,
+        Some("bench") => Some(300),
         Some("worker") => {
             return match raw.next() {
                 None => Ok(Some(Subcommand::Worker)),
@@ -80,7 +87,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         }
         Some("-h" | "--help") | None => return Ok(None),
         Some(other) => return Err(format!("unknown subcommand {other:?}\n\n{USAGE}").into()),
-    }
+    };
     let mut specs = Vec::new();
     let mut output = None;
     let mut args = RenderArgs {
@@ -95,6 +102,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         state: None,
         background: None,
         frame: 0,
+        bench,
     };
     while let Some(flag) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -125,6 +133,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
             "--state" => args.state = Some(value()?.into()),
             "--background" => args.background = Some(value()?.into()),
             "--frame" => args.frame = value()?.parse()?,
+            "--frames" if args.bench.is_some() => args.bench = Some(value()?.parse()?),
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
@@ -138,7 +147,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
             );
         }
     };
-    args.output = output.ok_or("--output <png> is required")?;
+    match (args.bench, output) {
+        (None, Some(output)) => args.output = output,
+        (None, None) => return Err("--output <png> is required".into()),
+        (Some(0), _) => return Err("--frames must be positive".into()),
+        (Some(_), None) => {}
+        (Some(_), Some(_)) => return Err("bench takes no --output".into()),
+    }
     let mode = args.mode;
     if mode.width == 0
         || mode.height == 0
@@ -184,7 +199,7 @@ fn main() {
 }
 
 fn render(args: RenderArgs) -> Result<()> {
-    if !args.overwrite && args.output.exists() {
+    if args.bench.is_none() && !args.overwrite && args.output.exists() {
         return Err(format!(
             "{} exists; pass --overwrite to replace it",
             args.output.display()
@@ -218,9 +233,13 @@ fn render(args: RenderArgs) -> Result<()> {
             frame: args.frame,
         })
         .await?;
-        let gpu = Gpu::request(&Gpu::instance(), None)
-            .await
-            .map_err(|error| error.to_string())?;
+        let gpu = if args.bench.is_some() {
+            timed_gpu().await?
+        } else {
+            Gpu::request(&Gpu::instance(), None)
+                .await
+                .map_err(|error| error.to_string())?
+        };
         let info = gpu.adapter.get_info();
         log::info!(
             "GPU adapter: {} ({:?}, {:?})",
@@ -234,12 +253,71 @@ fn render(args: RenderArgs) -> Result<()> {
             );
         }
         let extent = prepared.extent();
-        Ok((extent, prepared.render(&gpu).await?))
+        if let Some(frames) = args.bench {
+            let timings = prepared.bench(&gpu, WARM_UP + frames).await?;
+            print_timings(extent, &timings[WARM_UP as usize..]);
+            return Ok(None);
+        }
+        Ok(Some((extent, prepared.render(&gpu).await?)))
     })?;
-    let ((width, height), rgba) = pixels;
+    let Some(((width, height), rgba)) = pixels else {
+        return Ok(());
+    };
     write_png(&args.output, args.overwrite, width, height, rgba)?;
     log::info!("wrote {width}x{height} {}", args.output.display());
     Ok(())
+}
+
+/// Frames rendered before timing starts, so pipelines, caches and clocks settle.
+const WARM_UP: u32 = 10;
+
+/// The default high-performance adapter with timestamp queries when it supports them.
+async fn timed_gpu() -> Result<Gpu> {
+    let instance = Gpu::instance();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        })
+        .await?;
+    let timestamps =
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("chr-renderer-cli bench"),
+            required_features: adapter.features() & timestamps,
+            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            ..Default::default()
+        })
+        .await?;
+    Ok(Gpu {
+        adapter,
+        device,
+        queue,
+    })
+}
+
+fn print_timings((width, height): (u32, u32), timings: &[FrameTiming]) {
+    let summary = |mut values: Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+        format!(
+            "mean {:7.3}  p50 {:7.3}  p95 {:7.3}  max {:7.3} ms",
+            values.iter().sum::<f64>() / values.len() as f64,
+            at(0.5),
+            at(0.95),
+            at(1.0)
+        )
+    };
+    println!("{width}x{height}, {} frames", timings.len());
+    match timings.iter().map(|t| t.gpu_ms).collect::<Option<Vec<_>>>() {
+        Some(gpu) => println!("gpu   {}", summary(gpu)),
+        None => println!("gpu   unavailable: the adapter has no timestamp queries inside encoders"),
+    }
+    println!(
+        "wall  {}",
+        summary(timings.iter().map(|t| t.wall_ms).collect())
+    );
 }
 
 fn read_background(path: &Path) -> Result<Background> {
@@ -320,7 +398,19 @@ mod tests {
                 state: Some("state.json".into()),
                 background: Some("plate.png".into()),
                 frame: 12,
+                bench: None,
             }
+        );
+        let bench = parse(&["bench", "--description", "d.json", "--frames", "50"])
+            .unwrap()
+            .unwrap();
+        assert_eq!((bench.bench, bench.output), (Some(50), PathBuf::new()));
+        assert_eq!(
+            parse(&["bench", "--synthetic-program"])
+                .unwrap()
+                .unwrap()
+                .bench,
+            Some(300)
         );
         let defaults = parse(&["render", "--synthetic-program", "--output", "o.png"])
             .unwrap()
@@ -340,6 +430,16 @@ mod tests {
         for bad in [
             &["paint"][..],
             &["render", "--output", "o.png"],
+            &[
+                "render",
+                "--synthetic-program",
+                "--output",
+                "o.png",
+                "--frames",
+                "5",
+            ],
+            &["bench", "--synthetic-program", "--output", "o.png"],
+            &["bench", "--synthetic-program", "--frames", "0"],
             &["render", "--synthetic-program"],
             &[
                 "render",

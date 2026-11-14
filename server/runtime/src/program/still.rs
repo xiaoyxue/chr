@@ -9,6 +9,7 @@ use super::{Error, ProgramRenderer, spec::ProgramSpec, synthetic::Synthetic};
 use crate::{frame_submissions::Execution, retained::SceneControl, sdi::VideoMode};
 use chr_common::scene_frame as w;
 use chr_renderer::Gpu;
+use std::time::Instant;
 
 pub struct Still {
     pub spec: ProgramSpec,
@@ -125,6 +126,109 @@ impl Prepared {
         self.control.shutdown().await;
         self.owner.await?;
         rendered
+    }
+
+    /// Renders the admitted frame `frames` times the way a render worker does
+    /// (composition, UYVY conversion and readback) and times each frame. GPU time
+    /// needs a device with timestamp queries inside encoders; otherwise it is `None`.
+    /// Nothing is transmitted.
+    pub async fn bench(self, gpu: &Gpu, frames: u32) -> Result<Vec<FrameTiming>, Error> {
+        let timings = (|| {
+            let mut renderer = ProgramRenderer::new(gpu, &self.program.configuration)?;
+            renderer.set_lenses(&self.program);
+            let timer = Timer::new(gpu);
+            renderer.set_timestamp_queries(gpu, timer.as_ref().map(|t| t.queries.clone()))?;
+            let frame = super::Frame::of(&self.execution)?;
+            (0..frames)
+                .map(|_| {
+                    let start = Instant::now();
+                    renderer.render_frame(gpu, &frame)?;
+                    let wall_ms = start.elapsed().as_secs_f64() * 1e3;
+                    let gpu_ms = timer.as_ref().map(|t| t.read(gpu)).transpose()?;
+                    Ok(FrameTiming { gpu_ms, wall_ms })
+                })
+                .collect::<Result<Vec<_>, Error>>()
+        })();
+        self.execution.failed().map_err(|e| e.to_string())?;
+        self.control.shutdown().await;
+        self.owner.await?;
+        timings
+    }
+}
+
+/// One benchmarked frame, in milliseconds.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameTiming {
+    /// From the first command to the end of the UYVY conversion on the GPU.
+    pub gpu_ms: Option<f64>,
+    /// The whole call on the CPU, including upload, submission and readback.
+    pub wall_ms: f64,
+}
+
+/// The two timestamps [`ProgramRenderer`] writes around a frame, read back after it.
+struct Timer {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+}
+
+impl Timer {
+    fn new(gpu: &Gpu) -> Option<Self> {
+        let required =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        gpu.device.features().contains(required).then(|| {
+            let buffer = |label, usage| {
+                gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: 16,
+                    usage,
+                    mapped_at_creation: false,
+                })
+            };
+            Self {
+                queries: gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("bench timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                }),
+                resolve: buffer(
+                    "bench timestamp resolve",
+                    wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                ),
+                readback: buffer(
+                    "bench timestamp readback",
+                    wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                ),
+            }
+        })
+    }
+
+    fn read(&self, gpu: &Gpu) -> Result<f64, Error> {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.resolve_query_set(&self.queries, 0..2, &self.resolve, 0);
+        encoder.copy_buffer_to_buffer(&self.resolve, 0, &self.readback, 0, 16);
+        gpu.queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| e.to_string())?;
+        receiver.recv()?.map_err(|e| e.to_string())?;
+        let ticks = {
+            let bytes = self
+                .readback
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| e.to_string())?;
+            let stamp = |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().expect("8 bytes"));
+            stamp(8).saturating_sub(stamp(0))
+        };
+        self.readback.unmap();
+        Ok(ticks as f64 * f64::from(gpu.queue.get_timestamp_period()) / 1e6)
     }
 }
 

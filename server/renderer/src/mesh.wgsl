@@ -24,6 +24,9 @@ struct Light {
 @group(2) @binding(7) var emissive_sampler: sampler;
 @group(2) @binding(8) var ao_map: texture_2d<f32>;
 @group(2) @binding(9) var ao_sampler: sampler;
+// Lighting functions take a light index and read fields from `lights` directly. A
+// by-value Light copy indexed by a runtime cascade spills the whole struct to local
+// memory in every fragment; that made shaded frames about three times slower.
 @group(3) @binding(0) var<storage,read> lights: array<Light>;
 @group(3) @binding(1) var shadow_maps: texture_depth_2d_array;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
@@ -177,7 +180,7 @@ fn cube_direction(face:u32,uv:vec2<f32>)->vec3<f32> {
 }
 
 // Raw radial depth and receiver-plane comparison depth at the actual fetched texel.
-fn point_depths(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->vec2<f32> {
+fn point_depths(li:u32,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->vec2<f32> {
     let address=cube_coordinates(direction);
     let size=vec2<f32>(textureDimensions(shadow_maps));
     let pixel=clamp(vec2<i32>(address.uv*size),vec2(0),vec2<i32>(size)-vec2(1));
@@ -185,11 +188,11 @@ fn point_depths(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f3
     let numerator=dot(receiver,plane);
     let denominator=dot(ray,plane);
     if numerator*denominator<=0.0 {return vec2(1.0,0.0);}
-    let depth=textureLoad(shadow_maps,pixel,i32(light.shadow_params.x)+i32(address.face),0);
-    return vec2(depth,min(1.0,numerator/denominator/light.shadow_depth[0].y-light.shadow_params.y));
+    let depth=textureLoad(shadow_maps,pixel,i32(lights[li].shadow_params.x)+i32(address.face),0);
+    return vec2(depth,min(1.0,numerator/denominator/lights[li].shadow_depth[0].y-lights[li].shadow_params.y));
 }
 
-fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->f32 {
+fn point_compare(li:u32,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f32>)->f32 {
     let address=cube_coordinates(direction);
     let size=vec2<f32>(textureDimensions(shadow_maps));
     let pixel=address.uv*size-vec2(0.5);
@@ -200,7 +203,7 @@ fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f
         for(var x=0;x<2;x++) {
             // Remap even bilinear neighbours across faces, instead of clamping UVs.
             let ray=cube_direction(address.face,(base+vec2(f32(x),f32(y))+vec2(0.5))/size);
-            let depths=point_depths(light,ray,receiver,plane);
+            let depths=point_depths(li,ray,receiver,plane);
             let weight=select(1.0-fraction.x,fraction.x,x==1)*select(1.0-fraction.y,fraction.y,y==1);
             result+=weight*select(0.0,1.0,depths.y<=depths.x);
         }
@@ -208,14 +211,14 @@ fn point_compare(light:Light,direction:vec3<f32>,receiver:vec3<f32>,plane:vec3<f
     return result;
 }
 
-fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
-    let mode=u32(light.pcss.w);
+fn point_visibility(li:u32,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+    let mode=u32(lights[li].pcss.w);
     let radius=length(receiver);
-    if radius<light.shadow_depth[0].x || radius>=light.shadow_depth[0].y {return 1.0;}
+    if radius<lights[li].shadow_depth[0].x || radius>=lights[li].shadow_depth[0].y {return 1.0;}
     let direction=receiver/radius;
     let plane=cross(px,py);
-    if mode==1u || (mode==3u && light.pcss.x==0.0) {
-        let depths=point_depths(light,direction,receiver,plane);
+    if mode==1u || (mode==3u && lights[li].pcss.x==0.0) {
+        let depths=point_depths(li,direction,receiver,plane);
         return select(0.0,1.0,depths.y<=depths.x);
     }
     let up=select(vec3(0.0,0.0,1.0),vec3(0.0,1.0,0.0),abs(direction.z)>0.99);
@@ -224,45 +227,45 @@ fn point_visibility(light:Light,receiver:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f
     let texel=2.0/f32(textureDimensions(shadow_maps).x);
     if mode==2u {
         var visibility=0.0;
-        let side=u32(sqrt(light.pcss_samples.z));
+        let side=u32(sqrt(lights[li].pcss_samples.z));
         let center=(f32(side)-1.0)*0.5;
-        let step=texel*light.shadow_params.w*2.0/max(f32(side)-1.0,1.0);
+        let step=texel*lights[li].shadow_params.w*2.0/max(f32(side)-1.0,1.0);
         for(var y=0u;y<side;y++) {
             for(var x=0u;x<side;x++) {
-                visibility+=point_compare(light,direction+step*((f32(x)-center)*tangent+(f32(y)-center)*bitangent),receiver,plane);
+                visibility+=point_compare(li,direction+step*((f32(x)-center)*tangent+(f32(y)-center)*bitangent),receiver,plane);
             }
         }
-        return visibility/light.pcss_samples.z;
+        return visibility/lights[li].pcss_samples.z;
     }
-    let near=light.shadow_depth[0].z;
-    let search=min(light.pcss.x*max(radius-near,0.0)/(near*radius),texel*light.pcss.y);
-    let blocker_samples=u32(light.pcss_samples.x);
+    let near=lights[li].shadow_depth[0].z;
+    let search=min(lights[li].pcss.x*max(radius-near,0.0)/(near*radius),texel*lights[li].pcss.y);
+    let blocker_samples=u32(lights[li].pcss_samples.x);
     var sum=0.0;
     var count=0u;
     for(var i=0u;i<blocker_samples;i++) {
         let p=shadow_disk(i,blocker_samples)*search;
-        let depths=point_depths(light,direction+p.x*tangent+p.y*bitangent,receiver,plane);
+        let depths=point_depths(li,direction+p.x*tangent+p.y*bitangent,receiver,plane);
         if depths.x<1.0 && depths.x<depths.y {
-            sum+=depths.x*light.shadow_depth[0].y;
+            sum+=depths.x*lights[li].shadow_depth[0].y;
             count++;
         }
     }
     if count==0u {return 1.0;}
     let blocker=sum/f32(count);
-    let penumbra=min(light.pcss.x*max(radius-blocker,0.0)/(blocker*radius),texel*light.pcss.z);
-    let filter_samples=u32(light.pcss_samples.y);
+    let penumbra=min(lights[li].pcss.x*max(radius-blocker,0.0)/(blocker*radius),texel*lights[li].pcss.z);
+    let filter_samples=u32(lights[li].pcss_samples.y);
     var visibility=0.0;
     for(var i=0u;i<filter_samples;i++) {
         let p=shadow_disk(i,filter_samples)*penumbra;
-        visibility+=point_compare(light,direction+p.x*tangent+p.y*bitangent,receiver,plane);
+        visibility+=point_compare(li,direction+p.x*tangent+p.y*bitangent,receiver,plane);
     }
     return visibility/f32(filter_samples);
 }
 
-fn linear_shadow_depth(light:Light,depth:f32,cascade:u32)->f32 {
-    let near=light.shadow_depth[cascade].x;
-    let far=light.shadow_depth[cascade].y;
-    if light.position_kind.w>0.5 {
+fn linear_shadow_depth(li:u32,depth:f32,cascade:u32)->f32 {
+    let near=lights[li].shadow_depth[cascade].x;
+    let far=lights[li].shadow_depth[cascade].y;
+    if lights[li].position_kind.w>0.5 {
         return near/(1.0-depth+depth*(near/far));
     }
     return depth*far;
@@ -278,19 +281,19 @@ fn bounded_shadow_radius(radius:vec2<f32>,limit:f32,size:vec2<f32>)->vec2<f32> {
     return radius*min(1.0,limit/max(largest,1e-20));
 }
 
-fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>,cascade:u32)->f32 {
+fn pcss_visibility(li:u32,uv:vec2<f32>,depth:f32,gradient:vec2<f32>,cascade:u32)->f32 {
     let size=vec2<f32>(textureDimensions(shadow_maps));
-    let layer=i32(light.shadow_params.x)+i32(cascade);
-    let receiver=linear_shadow_depth(light,clamp(depth,0.0,1.0),cascade);
-    let near=light.shadow_depth[cascade].x;
-    var projection=light.shadow_depth[cascade].zw;
-    var search_world=light.pcss.x*receiver;
-    if light.position_kind.w>0.5 {
+    let layer=i32(lights[li].shadow_params.x)+i32(cascade);
+    let receiver=linear_shadow_depth(li,clamp(depth,0.0,1.0),cascade);
+    let near=lights[li].shadow_depth[cascade].x;
+    var projection=lights[li].shadow_depth[cascade].zw;
+    var search_world=lights[li].pcss.x*receiver;
+    if lights[li].position_kind.w>0.5 {
         projection/=receiver;
-        search_world=light.pcss.x*max(receiver-near,0.0)/near;
+        search_world=lights[li].pcss.x*max(receiver-near,0.0)/near;
     }
-    let search=bounded_shadow_radius(search_world*projection,light.pcss.y,size);
-    let blocker_samples=u32(light.pcss_samples.x);
+    let search=bounded_shadow_radius(search_world*projection,lights[li].pcss.y,size);
+    let blocker_samples=u32(lights[li].pcss_samples.x);
     var blocker_sum=0.0;
     var blockers=0u;
     for(var i=0u;i<blocker_samples;i++) {
@@ -301,16 +304,16 @@ fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>,cascade
         let stored=textureLoad(shadow_maps,pixel,layer,0);
         if stored<1.0 && stored<depth+dot(gradient,offset) {
             // Average reconstructed distances, never nonlinear perspective depths.
-            blocker_sum+=linear_shadow_depth(light,stored,cascade);
+            blocker_sum+=linear_shadow_depth(li,stored,cascade);
             blockers++;
         }
     }
     if blockers==0u {return 1.0;}
     let blocker=blocker_sum/f32(blockers);
-    var penumbra=light.pcss.x*max(receiver-blocker,0.0);
-    if light.position_kind.w>0.5 {penumbra/=blocker;}
-    let radius=bounded_shadow_radius(penumbra*projection,light.pcss.z,size);
-    let filter_samples=u32(light.pcss_samples.y);
+    var penumbra=lights[li].pcss.x*max(receiver-blocker,0.0);
+    if lights[li].position_kind.w>0.5 {penumbra/=blocker;}
+    let radius=bounded_shadow_radius(penumbra*projection,lights[li].pcss.z,size);
+    let filter_samples=u32(lights[li].pcss_samples.y);
     let receiver_bias=dot(abs(gradient),1.0/size);
     var visibility=0.0;
     for(var i=0u;i<filter_samples;i++) {
@@ -326,23 +329,23 @@ fn pcss_visibility(light:Light,uv:vec2<f32>,depth:f32,gradient:vec2<f32>,cascade
     return visibility/f32(filter_samples);
 }
 
-fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>,cascade:u32)->f32 {
-    let mode=u32(light.pcss.w);
-    let matrix=light.shadow_matrix[cascade];
-    let clip=matrix*vec4(position+normal*light.shadow_params.z,1.0);
+fn planar_visibility(li:u32,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>,cascade:u32)->f32 {
+    let mode=u32(lights[li].pcss.w);
+    let matrix=lights[li].shadow_matrix[cascade];
+    let clip=matrix*vec4(position+normal*lights[li].shadow_params.z,1.0);
     if clip.w<=0.0 {return 1.0;}
     let ndc=clip.xyz/clip.w;
     let uv=ndc.xy*vec2(0.5,-0.5)+vec2(0.5);
     if any(uv<vec2(0.0)) || any(uv>=vec2(1.0)) || ndc.z<0.0 || ndc.z>1.0 {return 1.0;}
-    let layer=i32(light.shadow_params.x)+i32(cascade);
-    var depth=ndc.z-light.shadow_params.y;
-    if light.position_kind.w==2.0 {
+    let layer=i32(lights[li].shadow_params.x)+i32(cascade);
+    var depth=ndc.z-lights[li].shadow_params.y;
+    if lights[li].position_kind.w==2.0 {
         // Perspective spot depth is nonlinear: apply the bias to linear depth as a fraction
         // of the far distance, like point cubemaps, so a near plane fitted close to the
         // light cannot stretch it over many metres.
-        let near=light.shadow_depth[cascade].x;
-        let far=light.shadow_depth[cascade].y;
-        let z=linear_shadow_depth(light,clamp(ndc.z,0.0,1.0),cascade)-light.shadow_params.y*far;
+        let near=lights[li].shadow_depth[cascade].x;
+        let far=lights[li].shadow_depth[cascade].y;
+        let z=linear_shadow_depth(li,clamp(ndc.z,0.0,1.0),cascade)-lights[li].shadow_params.y*far;
         depth=far*(z-near)/(max(z,near)*(far-near));
     }
     let size=textureDimensions(shadow_maps);
@@ -357,16 +360,16 @@ fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
     if abs(determinant)>1e-12 {
         gradient=vec2(dx.z*uy.y-dy.z*ux.y,ux.x*dy.z-uy.x*dx.z)/determinant;
     }
-    if mode==1u || (mode==3u && light.pcss.x==0.0) {
+    if mode==1u || (mode==3u && lights[li].pcss.x==0.0) {
         let pixel=clamp(vec2<i32>(uv*vec2<f32>(size)),vec2(0),vec2<i32>(size)-vec2(1));
         let offset=(vec2<f32>(pixel)+vec2(0.5))/vec2<f32>(size)-uv;
         return select(0.0,1.0,depth+dot(gradient,offset)<=textureLoad(shadow_maps,pixel,layer,0));
     }
-    if mode==3u {return pcss_visibility(light,uv,depth,gradient,cascade);}
+    if mode==3u {return pcss_visibility(li,uv,depth,gradient,cascade);}
     var visibility=0.0;
-    let side=u32(sqrt(light.pcss_samples.z));
+    let side=u32(sqrt(lights[li].pcss_samples.z));
     let center=(f32(side)-1.0)*0.5;
-    let step=light.shadow_params.w/vec2<f32>(size)*2.0/max(f32(side)-1.0,1.0);
+    let step=lights[li].shadow_params.w/vec2<f32>(size)*2.0/max(f32(side)-1.0,1.0);
     // Correct the receiver plane per tap; cover the bilinear footprint's depth slope.
     let receiver_bias=dot(abs(gradient),1.0/vec2<f32>(size));
     for(var y=0u;y<side;y++) {
@@ -375,30 +378,30 @@ fn planar_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32
             visibility+=textureSampleCompareLevel(shadow_maps,shadow_sampler,uv+offset,layer,depth+dot(gradient,offset)-receiver_bias);
         }
     }
-    return visibility/light.pcss_samples.z;
+    return visibility/lights[li].pcss_samples.z;
 }
 
-fn shadow_visibility(light:Light,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
-    if light.pcss.w==0.0 || light.shadow_params.x<0.0 {return 1.0;}
+fn shadow_visibility(li:u32,position:vec3<f32>,normal:vec3<f32>,px:vec3<f32>,py:vec3<f32>)->f32 {
+    if lights[li].pcss.w==0.0 || lights[li].shadow_params.x<0.0 {return 1.0;}
     // Point and area lights share one centre cubemap.
-    if light.position_kind.w==1.0 || light.position_kind.w==3.0 {
-        return point_visibility(light,position+normal*light.shadow_params.z-light.position_kind.xyz,px,py);
+    if lights[li].position_kind.w==1.0 || lights[li].position_kind.w==3.0 {
+        return point_visibility(li,position+normal*lights[li].shadow_params.z-lights[li].position_kind.xyz,px,py);
     }
-    let count=u32(light.pcss_samples.w);
-    if count<=1u {return planar_visibility(light,position,normal,px,py,0u);}
+    let count=u32(lights[li].pcss_samples.w);
+    if count<=1u {return planar_visibility(li,position,normal,px,py,0u);}
     let depth=dot(camera.optical_depth,vec4(position,1.0));
-    if depth<light.cascade_params.x || depth>=light.cascade_splits[count-1u] {return 1.0;}
+    if depth<lights[li].cascade_params.x || depth>=lights[li].cascade_splits[count-1u] {return 1.0;}
     var cascade=0u;
-    while cascade+1u<count && depth>light.cascade_splits[cascade] {cascade++;}
-    let visibility=planar_visibility(light,position,normal,px,py,cascade);
-    if light.cascade_params.y==0.0 {return visibility;}
-    var begin=light.cascade_params.x;
-    if cascade>0u {begin=light.cascade_splits[cascade-1u];}
-    let end=light.cascade_splits[cascade];
-    let blend_start=end-(end-begin)*light.cascade_params.y;
+    while cascade+1u<count && depth>lights[li].cascade_splits[cascade] {cascade++;}
+    let visibility=planar_visibility(li,position,normal,px,py,cascade);
+    if lights[li].cascade_params.y==0.0 {return visibility;}
+    var begin=lights[li].cascade_params.x;
+    if cascade>0u {begin=lights[li].cascade_splits[cascade-1u];}
+    let end=lights[li].cascade_splits[cascade];
+    let blend_start=end-(end-begin)*lights[li].cascade_params.y;
     if depth<=blend_start {return visibility;}
     var next=1.0;
-    if cascade+1u<count {next=planar_visibility(light,position,normal,px,py,cascade+1u);}
+    if cascade+1u<count {next=planar_visibility(li,position,normal,px,py,cascade+1u);}
     return mix(visibility,next,smoothstep(blend_start,end,depth));
 }
 
@@ -460,12 +463,12 @@ fn perpendicular(d:vec3<f32>)->vec3<f32> {
 const AREA_CURVE_SEGMENTS:u32=64u;
 
 // Unoccluded ltc-plausible-v1 emitter: Schlick LTC specular plus Lambert*(1-F0) diffuse.
-fn area_lighting(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
-    let shape=u32(light.emission_outer.w);
-    var center=light.position_kind.xyz-x;
-    var normal=light.direction_inner.xyz;
-    var u=light.area[0].xyz;
-    var extent=light.area[0].w;
+fn area_lighting(li:u32,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    let shape=u32(lights[li].emission_outer.w);
+    var center=lights[li].position_kind.xyz-x;
+    var normal=lights[li].direction_inner.xyz;
+    var u=lights[li].area[0].xyz;
+    var extent=lights[li].area[0].w;
     if shape==2u {
         let d2=dot(center,center);
         // Outward emission never reaches a receiver inside or on the sphere.
@@ -478,7 +481,7 @@ fn area_lighting(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,
         extent*=sqrt(factor);
     } else {
         let side=-dot(normal,center);
-        if side==0.0 || (side<0.0 && light.direction_inner.w==0.0) {return vec3(0.0);}
+        if side==0.0 || (side<0.0 && lights[li].direction_inner.w==0.0) {return vec3(0.0);}
     }
     let w=cross(normal,u);
     let nv=clamp(dot(n,v),1e-4,1.0);
@@ -495,7 +498,7 @@ fn area_lighting(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,
         var offset=vec3(0.0);
         if shape==0u {
             let k=i%4u;
-            offset=select(-1.0,1.0,k==1u || k==2u)*extent*u+select(-1.0,1.0,k>=2u)*light.area[1].x*w;
+            offset=select(-1.0,1.0,k==1u || k==2u)*extent*u+select(-1.0,1.0,k>=2u)*lights[li].area[1].x*w;
         } else {
             let angle=6.283185307*f32(i%count)/f32(count);
             offset=extent*(cos(angle)*u+sin(angle)*w);
@@ -517,32 +520,32 @@ fn area_lighting(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,
     let lambert=abs(integral.diffuse)/6.283185307;
     let specular=abs(integral.specular.sum)/6.283185307;
     let f0=mix(vec3(0.04),base,metal);
-    return light.emission_outer.rgb*(specular*(f0*entry.amplitude.x+(vec3(1.0)-f0)*entry.amplitude.y)
+    return lights[li].emission_outer.rgb*(specular*(f0*entry.amplitude.x+(vec3(1.0)-f0)*entry.amplitude.y)
         +base*(1.0-metal)*(vec3(1.0)-f0)*lambert);
 }
 
 // Unoccluded direct contribution of one light; visibility is applied by the caller.
-fn direct_light(light:Light,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
-    if light.position_kind.w>2.5 {return area_lighting(light,x,n,v,base,metal,rough);}
-    var l=-light.direction_inner.xyz;
+fn direct_light(li:u32,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    if lights[li].position_kind.w>2.5 {return area_lighting(li,x,n,v,base,metal,rough);}
+    var l=-lights[li].direction_inner.xyz;
     var attenuation=1.0;
-    if light.position_kind.w>0.5 {
-        let delta=light.position_kind.xyz-x;
+    if lights[li].position_kind.w>0.5 {
+        let delta=lights[li].position_kind.xyz-x;
         let distance2=dot(delta,delta);
         // An ideal point source has no defined direction at its exact centre.
         if distance2==0.0 {return vec3(0.0);}
         l=delta*inverseSqrt(distance2);
         attenuation=1.0/distance2;
-        if light.position_kind.w>1.5 {
-            let cosine=dot(-l,light.direction_inner.xyz);
-            if cosine<=light.emission_outer.w {return vec3(0.0);}
-            if cosine<light.direction_inner.w {
-                attenuation*=smoothstep(light.emission_outer.w,light.direction_inner.w,cosine);
+        if lights[li].position_kind.w>1.5 {
+            let cosine=dot(-l,lights[li].direction_inner.xyz);
+            if cosine<=lights[li].emission_outer.w {return vec3(0.0);}
+            if cosine<lights[li].direction_inner.w {
+                attenuation*=smoothstep(lights[li].emission_outer.w,lights[li].direction_inner.w,cosine);
             }
         }
     }
     if dot(n,l)<=0.0 {return vec3(0.0);}
-    return light.emission_outer.rgb*attenuation*brdf(n,v,l,base,metal,rough);
+    return lights[li].emission_outer.rgb*attenuation*brdf(n,v,l,base,metal,rough);
 }
 
 // GGX with height-correlated Smith visibility and Burley diffuse.
@@ -601,7 +604,7 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     let mr = textureSample(mr_map,mr_sampler,surface.uv);
     let normal_texel = textureSample(normal_map,normal_sampler,surface.uv).xyz*2.0-vec3(1.0);
     let emissive = textureSample(emissive_map,emissive_sampler,surface.uv).rgb*object.emissive_cutoff.rgb;
-    // Occlusion maps affect indirect lighting, not punctual direct light.
+    // Occlusion maps affect indirect lighting, not punctual direct lights[li].
     let occlusion = textureSample(ao_map,ao_sampler,surface.uv).r;
     let px=dpdx(surface.position); let py=dpdy(surface.position);
     let tx=dpdx(surface.uv); let ty=dpdy(surface.uv);
@@ -645,10 +648,9 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     let ao=mix(1.0,occlusion,object.factors.w);
     var radiance=emissive+environment_lighting(n,v,base.rgb,metal,rough,ao);
     for (var i=0u;i<camera.options.y;i++) {
-        let light=lights[i];
-        let shaded=direct_light(light,surface.position,n,v,base.rgb,metal,rough);
+        let shaded=direct_light(i,surface.position,n,v,base.rgb,metal,rough);
         if any(shaded>vec3(0.0)) {
-            radiance+=shaded*shadow_visibility(light,surface.position,shadow_normal,px,py);
+            radiance+=shaded*shadow_visibility(i,surface.position,shadow_normal,px,py);
         }
     }
     return vec4(clamp(radiance,vec3(0.0),vec3(65504.0)),1.0);
@@ -656,7 +658,7 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
 
 // Shadow catcher: premultiplied black whose alpha is the luminance fraction of light
 // removed by shadows, so "over" blending multiplies what lies behind by
-// shadowed / unshadowed light. Computed in linear HDR before any tone mapping.
+// shadowed / unshadowed lights[li]. Computed in linear HDR before any tone mapping.
 @fragment
 fn fs_shadow_catcher(surface:Surface,@builtin(front_facing) front_facing:bool)->@location(0) vec4<f32> {
     let px=dpdx(surface.position); let py=dpdy(surface.position);
@@ -680,11 +682,10 @@ fn fs_shadow_catcher(surface:Surface,@builtin(front_facing) front_facing:bool)->
     var open=ambient;
     var lit=ambient;
     for (var i=0u;i<camera.options.y;i++) {
-        let light=lights[i];
-        let shaded=direct_light(light,surface.position,n,v,base,metal,rough);
+        let shaded=direct_light(i,surface.position,n,v,base,metal,rough);
         if any(shaded>vec3(0.0)) {
             open+=shaded;
-            lit+=shaded*shadow_visibility(light,surface.position,n,px,py);
+            lit+=shaded*shadow_visibility(i,surface.position,n,px,py);
         }
     }
     let weights=vec3(0.2126,0.7152,0.0722);

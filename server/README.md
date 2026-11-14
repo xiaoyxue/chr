@@ -812,6 +812,26 @@ before a GPU is requested. The output is never replaced without `--overwrite`, a
 software GPU adapters are rejected. A general scene file with arbitrary model paths
 is not supported; it must not become a de facto asset or distortion schema.
 
+`chr-renderer-cli bench` takes the same program options without `--output` and
+renders that frame repeatedly the way a render worker does (composition, UYVY
+conversion and readback). After 10 warm-up frames it prints the mean, p50, p95 and
+maximum GPU time (timestamps from the first command to the end of the conversion,
+when the adapter supports timestamp queries inside encoders) and wall time of
+`--frames <n>` frames (default 300). The frame reuses one camera, so cached shadow
+maps stay valid as in a live scene that does not change:
+
+```sh
+cargo run --locked --release -p chr-runtime --bin chr-renderer-cli -- \
+  bench --description scene.json --fps 30 --frames 300
+```
+
+A worker must finish each frame within three quarters of the frame period. On
+hosts whose GPU driver lowers clocks for light, bursty loads (an NVIDIA RTX 3090
+stayed at 255 MHz while rendering 30 fps), frame time rises several fold; lock the
+minimum core clock on render hosts, for example
+`sudo nvidia-smi -pm 1 && sudo nvidia-smi -i 0 -lgc 1500,2100`
+(`nvidia-smi -i 0 -rgc` restores the default).
+
 Every run also saves a 960x640 sRGB image to repository-root
 `output/renderer/triangle.png`, from any directory in the checkout. Outside a
 checkout, the packaged app uses `output/renderer/triangle.png` under the working
