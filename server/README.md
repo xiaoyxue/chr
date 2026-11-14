@@ -783,8 +783,19 @@ Each component runs detached in its own process group, logs to
 start time, so `stop` signals only processes the script started (TERM, then KILL
 after 15 s). `start` skips a component that is already running or whose port is
 taken. Inside the render component the processes still restart on their own.
-The script uses only the standard library; `python3 server/scripts/stack.py`
-works as well.
+`start` (once ready) and `status` end with a summary of every process and where it
+listens:
+- chr-server's control WebSocket;
+- chr-monitor's WebSocket, SRT listener and four ICE-TCP ports;
+- the relay;
+- both pages.
+
+The summary also gives the URLs to open and the `ssh -L` forwards a remote
+machine needs. With every component enabled, the stack runs four components and
+seven long-lived processes: simulator, chr-server, its render worker,
+chr-monitor, relay and two Vite servers. The relay starts one `ffmpeg` per
+connected viewer. The script uses only the standard library;
+`python3 server/scripts/stack.py` works as well.
 
 ### Program stills (chr-renderer-cli)
 

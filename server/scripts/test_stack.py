@@ -46,6 +46,23 @@ class ComponentTests(unittest.TestCase):
         self.assertIn("srt://127.0.0.1:9001?mode=caller&latency=120000", by_name["srt-relay"].command)
 
 
+class SummaryTests(unittest.TestCase):
+    def test_lists_every_process_address_and_forward(self):
+        config = stack.Config(scene="s.json", video="v.mp4", server_ws="127.0.0.1:18987", monitor_ws="127.0.0.1:18989",
+                              webrtc_tcp="127.0.0.1:18992", srt="10.0.0.5:18990", srt_relay_port=18991)
+        text = stack.summary(config, probe=False)
+        self.assertIn("4 components (monitor-page, pitch-studio, render, srt-relay), 7 processes:", text)
+        for address in ["ws://127.0.0.1:18987", "ws://127.0.0.1:18989", "srt://10.0.0.5:18990",
+                        "tcp://127.0.0.1:18992-18995", "tcp://127.0.0.1:18991", "http://127.0.0.1:4173/", "http://127.0.0.1:5173/"]:
+            self.assertIn(address, text)
+        self.assertEqual(stack.forwarded_ports(config), [4173, 5173, 18987, 18989, 18992, 18993, 18994, 18995, 18991])
+
+    def test_disabled_components_are_left_out(self):
+        config = stack.Config(scene="s.json", video="v.mp4", pitch_studio_port=0, monitor_page_port=0)
+        self.assertIn("1 components (render), 4 processes:", stack.summary(config, probe=False))
+        self.assertNotIn(0, stack.forwarded_ports(config))
+
+
 class RecordTests(unittest.TestCase):
     def test_a_reused_pid_is_not_ours(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(stack, "STATE", Path(directory)):

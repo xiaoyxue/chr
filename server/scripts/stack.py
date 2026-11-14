@@ -21,6 +21,7 @@ only signals processes this script started.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import signal
 import socket
@@ -122,6 +123,70 @@ def components(config: Config) -> list[Component]:
     return stack
 
 
+@dataclass
+class Service:
+    component: str
+    process: str
+    # Where it listens, e.g. "ws://127.0.0.1:8787"; empty for processes without one.
+    address: str
+    role: str
+    # A TCP endpoint whose listening state `status` reports.
+    probe: tuple[str, int] | None = None
+
+
+def services(config: Config) -> list[Service]:
+    """Every process the stack runs, with its address, as `start` and `status` report them."""
+    server, monitor, webrtc, srt = (endpoint(address) for address in (config.server_ws, config.monitor_ws, config.webrtc_tcp, config.srt))
+    rows = [
+        Service("render", "chr-tracking-sim", f"unix {config.dir}/render.sock",
+                "simulated tracked camera: frames into the input ring, Ti/C to chr-server"),
+        Service("render", "chr-server", f"ws://{config.server_ws}", "control JSON-RPC (description.load, status)", server),
+        Service("render", "chr-renderer-cli worker", "", "GPU render worker, supervised by chr-server"),
+        Service("render", "chr-monitor", f"ws://{config.monitor_ws}", "monitor status and WebRTC signalling", monitor),
+        Service("render", "chr-monitor", f"srt://{config.srt}", "program over SRT (listener)"),
+        Service("render", "chr-monitor", f"tcp://{webrtc[0]}:{webrtc[1]}-{webrtc[1] + 3}", "WebRTC ICE-TCP, one port per stream"),
+    ]
+    if config.srt_relay_port:
+        rows.append(Service("srt-relay", "stack.py relay", f"tcp://127.0.0.1:{config.srt_relay_port}",
+                            "SRT copied to TCP for viewers behind SSH", ("127.0.0.1", config.srt_relay_port)))
+    if config.pitch_studio_port:
+        rows.append(Service("pitch-studio", "vite", f"http://127.0.0.1:{config.pitch_studio_port}/",
+                            f"placement editor; /chr-render -> ws://{config.server_ws}", ("127.0.0.1", config.pitch_studio_port)))
+    if config.monitor_page_port:
+        rows.append(Service("monitor-page", "vite", f"http://127.0.0.1:{config.monitor_page_port}/",
+                            "read-only program monitor page", ("127.0.0.1", config.monitor_page_port)))
+    return rows
+
+
+def forwarded_ports(config: Config) -> list[int]:
+    """Loopback TCP ports a remote browser or player needs through an SSH tunnel."""
+    webrtc = endpoint(config.webrtc_tcp)[1]
+    ports = [config.pitch_studio_port, config.monitor_page_port, endpoint(config.server_ws)[1],
+             endpoint(config.monitor_ws)[1], *range(webrtc, webrtc + 4), config.srt_relay_port]
+    return [port for port in ports if port]
+
+
+def summary(config: Config, probe: bool) -> str:
+    rows = services(config)
+    components = sorted({row.component for row in rows})
+    processes = len({(row.component, row.process) for row in rows})
+    lines = [f"{len(components)} components ({', '.join(components)}), {processes} processes:"]
+    for row in rows:
+        state = ("up" if listening(*row.probe) else "down") if probe and row.probe else ""
+        lines.append(f"  {row.component:13} {row.process:24} {row.address:38} {state:5} {row.role}")
+    lines.append("open:")
+    if config.pitch_studio_port:
+        lines.append(f"  placement editor  http://127.0.0.1:{config.pitch_studio_port}/")
+    if config.monitor_page_port:
+        lines.append(f"  program monitor   http://127.0.0.1:{config.monitor_page_port}/?transport=tcp"
+                     f"&ws=ws://{config.server_ws}&monitor=ws://{config.monitor_ws}")
+    lines.append(f"  SRT player        srt://{config.srt}" + (f"  or tcp://127.0.0.1:{config.srt_relay_port}" if config.srt_relay_port else ""))
+    forwards = " ".join(f"-L {port}:127.0.0.1:{port}" for port in forwarded_ports(config))
+    lines.append(f"from another machine: ssh -N {forwards} {getpass.getuser()}@{socket.gethostname()}")
+    lines.append("logs in output/stack/<component>.log")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------------------
 # Process records
 
@@ -182,6 +247,7 @@ def start(config: Config, wait_s: float) -> None:
         time.sleep(1)
     for label, host, port in sorted(pending):
         print(f"not ready after {wait_s:.0f}s: {label} on {host}:{port} (the first start builds; see the log)")
+    print(summary(config, probe=True))
 
 
 def stop() -> None:
@@ -217,7 +283,7 @@ def status(config: Config) -> None:
         endpoints = ", ".join(
             f"{label} {host}:{port} {'up' if listening(host, port) else 'down'}" for label, host, port in component.ready)
         print(f"{component.name:13} {'running (pid %d)' % pid if pid else 'stopped':20} {endpoints}")
-    print(f"SRT listener {config.srt}; WebRTC ICE-TCP from {config.webrtc_tcp}; logs in output/stack/")
+    print(summary(config, probe=True))
 
 
 # ---------------------------------------------------------------------------------------
