@@ -9,8 +9,7 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker |
-| `tracking/` | `chr-tracking` | Tracking worker protocol and chr-server's supervisor for it; `chr-tracking-sim-cli`, a stand-in worker that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)) |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim` simulates the camera |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers and the `stack.py` one-command development stack |
@@ -33,6 +32,7 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
 | `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
 | `worker/` | Render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
+| `worker/tracking/` | Tracking worker protocol (`protocol.rs`) and its supervisor in `chr-server` (`supervisor.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker |
 | `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 

@@ -28,7 +28,7 @@ behaviour, not a production policy (see
 
 | Executable | Role |
 | --- | --- |
-| `chr-tracking-sim-cli` (crate `chr-tracking`, `server/tracking/`) | Stand-in worker. It reads every frame from the ring but answers with the **recorded** camera of a `calibrated-video-v1` manifest (fixed `ti` and `center`, warp `sequence % frame_warps`). It replays; it never estimates. |
+| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`, next to `chr-renderer-cli`) | Stand-in worker. It reads every frame from the ring but answers with the **recorded** camera of a `calibrated-video-v1` manifest (fixed `ti` and `center`, warp `sequence % frame_warps`). It replays; it never estimates. |
 | The real tracking module | Any executable, in any language. chr-server runs it as `<executable> worker [args]...` (`--tracking-cli <path>`, `--tracking-worker-arg <arg>`). |
 
 `chr-tracking-sim-cli worker` options inject faults:
@@ -41,7 +41,7 @@ behaviour, not a production policy (see
 
 One JSON object per line on the worker's stdin (requests) and stdout (replies);
 a line is at most 64 KiB. Logs go to stderr. EOF on stdin asks the worker to exit.
-The authoritative types are in `server/tracking/src/protocol.rs`.
+The authoritative types are in `server/runtime/src/worker/tracking/protocol.rs`.
 
 | Direction | Message | Fields |
 | --- | --- | --- |

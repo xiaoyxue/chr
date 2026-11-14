@@ -25,7 +25,7 @@ use chr_common::methods::{
 };
 use chr_shm::{Layout, SlotHeader, Writer};
 
-use crate::protocol::{self, RING_SLOTS, Reply, Request, VERSION};
+use super::protocol::{self, RING_SLOTS, Reply, Request, VERSION};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 

@@ -7,7 +7,7 @@
 | `client/src/` | Client-side code | Primarily TypeScript |
 | `client/pitch-studio/` | Onsite pitch client: Three.js pitch preview and read-only Fusion match data | TypeScript (Vite) |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
-| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, `chr-renderer-cli` and `chr-tracking-sim`), the tracking worker in `tracking/` (`chr-tracking`, its protocol and supervisor and the `chr-tracking-sim-cli` replay stand-in), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
+| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, its render worker `chr-renderer-cli`, its tracking worker stand-in `chr-tracking-sim-cli` and the `chr-tracking-sim` camera simulator), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `monitor/` | `chr-monitor`: optional video monitor process that encodes the `chr-server` program tap for WebRTC/SRT viewers | Rust |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/`, `monitor/` and `common/` | Rust |
 | `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |

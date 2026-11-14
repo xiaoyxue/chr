@@ -1,5 +1,5 @@
 [workspace]
-members = ["server/renderer", "server/viewer", "server/runtime", "server/tracking", "common", "common/shm", "monitor"]
+members = ["server/renderer", "server/viewer", "server/runtime", "common", "common/shm", "monitor"]
 resolver = "3"
 
 [workspace.package]
@@ -11,7 +11,6 @@ repository = "https://github.com/xiaoyxue/chr"
 chr-renderer = { path = "server/renderer" }
 chr-common = { path = "common" }
 chr-shm = { path = "common/shm" }
-chr-tracking = { path = "server/tracking" }
 wgpu = "30"
 pollster = "0.4"
 log = "0.4"

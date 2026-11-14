@@ -79,15 +79,14 @@ worker runs ([tracked camera simulation](../server/docs/tracking-simulation.md))
 | Path | Package | Contents |
 | --- | --- | --- |
 | `server/renderer/` | `chr-renderer` | GPU rendering library (unchanged) |
-| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` and `chr-renderer-cli` executables |
-| `server/tracking/` | `chr-tracking` | Tracking worker protocol, chr-server's supervisor for it, and the `chr-tracking-sim-cli` replay stand-in |
+| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-tracking-sim` camera simulator |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
 | `common/shm/` | `chr-shm` | Shared-memory frame rings between processes; the only crate allowed to use `unsafe` |
 | `monitor/` | `chr-monitor` | Separate monitoring process |
 
-`chr-renderer-cli` is an executable of the runtime package rather than its own
-package because the worker reuses the runtime's scene mapping, registrations and
+`chr-renderer-cli` and `chr-tracking-sim-cli` are executables of the runtime
+package rather than their own packages because the worker reuses the runtime's scene mapping, registrations and
 program bridge, and because integration tests of the runtime need both
 executables (`CARGO_BIN_EXE_*`). The package is renamed from `chr-server` to
 `chr-runtime` so that its name describes the library rather than one binary.

@@ -30,11 +30,11 @@ use chr_runtime::input::ring::RingInput;
 use chr_runtime::pipeline::{RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
+use chr_runtime::worker::tracking::supervisor::{Tracker, TrackerConfig};
 use chr_runtime::worker::{
     protocol::{Output, WorkerProgram},
     supervisor::{WorkerAssets, WorkerConfig, status_handle},
 };
-use chr_tracking::supervisor::{Tracker, TrackerConfig};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -372,7 +372,7 @@ fn run(args: Args) -> Result<()> {
         .transpose()?;
     // The capture side of a tracked program: frames from the input ring wait in the
     // join for the camera that the tracking worker or tracking.frame delivers.
-    let tracker_status = chr_tracking::supervisor::status_handle();
+    let tracker_status = chr_runtime::worker::tracking::supervisor::status_handle();
     let tracking = match (&installation, &args.input_ring) {
         (Some((program, _)), Some(path)) => {
             let native = program.configuration.native_extent;

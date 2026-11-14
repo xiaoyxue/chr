@@ -21,15 +21,15 @@ Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
-server/runtime/           chr-runtime: chr-server (render server), chr-renderer-cli (stills, render worker)
+server/runtime/           chr-runtime: chr-server (render server), its workers chr-renderer-cli (also
+                          stills) and chr-tracking-sim-cli (replay stand-in for the tracking module),
                           and chr-tracking-sim (simulated camera, optionally with its cameras)
   src/input/              Video acquisition adapters (software MP4, shared-memory input ring)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
   src/sdi.rs              Simulated SDI output port, output clock and program tap
   src/worker/             Render worker protocol, the worker side and its supervisor
-server/tracking/          chr-tracking: tracking worker protocol and supervisor, and
-                          chr-tracking-sim-cli (replay stand-in for the tracking module)
+  src/worker/tracking/    Tracking worker protocol and its supervisor
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
@@ -50,7 +50,7 @@ The shared protocol is implemented in Rust (`common/`), with TypeScript
 mirrors in clients. No client framework is chosen by this environment setup.
 
 Live tracking runs in a tracking worker that `chr-server` supervises
-(`server/tracking/`, [tracking worker](../server/docs/tracking-worker.md)). Its
+(`server/runtime/src/worker/tracking/`, [tracking worker](../server/docs/tracking-worker.md)). Its
 protocol is language-neutral, so the real tracking module, which may be written in
 Python, replaces the `chr-tracking-sim-cli` replay stand-in without changing the
 server. Pairing frames with cameras belongs in the runtime, not the renderer:
