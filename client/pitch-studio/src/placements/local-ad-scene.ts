@@ -134,6 +134,17 @@ export class LocalAdScene {
           new THREE.Vector3(plane.width / 2, plane.height / 2, 0.03), new THREE.Vector3(-plane.width / 2, plane.height / 2, 0.03),
         ]), new THREE.LineBasicMaterial({ color: '#ddff54', depthTest: false }));
         selection.add(outline);
+        const radius = Math.min(0.45, Math.min(plane.width, plane.height) * 0.06);
+        const rim = new THREE.MeshBasicMaterial({ color: '#ffffff', depthTest: false, side: THREE.DoubleSide, toneMapped: false });
+        const dot = new THREE.MeshBasicMaterial({ color: '#2f8cff', depthTest: false, side: THREE.DoubleSide, toneMapped: false });
+        for (const [x, y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+          for (const [geometry, material] of [[new THREE.RingGeometry(radius, radius * 1.4, 20), rim], [new THREE.CircleGeometry(radius, 20), dot]] as const) {
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(x * plane.width / 2, y * plane.height / 2, 0.035);
+            mesh.renderOrder = 1700;
+            selection.add(mesh);
+          }
+        }
         if (ad.type === '3D') {
           const arrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, ad.normalSign), new THREE.Vector3(), Math.min(plane.width, plane.height) * 0.6, '#ddff54');
           selection.add(arrow);

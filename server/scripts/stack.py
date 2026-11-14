@@ -7,7 +7,7 @@
 
 The stack is the tracked-camera simulation (chr-tracking-sim, chr-server and
 chr-monitor through run-tracked.sh, which restarts whichever exits), the
-football client, the program monitor page and an optional SRT-to-TCP relay for
+pitch-studio client, the program monitor page and an optional SRT-to-TCP relay for
 viewers behind an SSH port forward. Machine-specific paths live in a local TOML
 file (default output/stack/stack.toml; see stack.example.toml).
 
@@ -21,6 +21,7 @@ only signals processes this script started.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import signal
 import socket
@@ -52,7 +53,7 @@ class Config:
     monitor_ws: str = "127.0.0.1:8789"
     webrtc_tcp: str = "127.0.0.1:8790"
     srt_relay_port: int = 0
-    football_port: int = 4173
+    pitch_studio_port: int = 4173
     monitor_page_port: int = 5173
 
 
@@ -111,7 +112,7 @@ def components(config: Config) -> list[Component]:
              str(config.srt_relay_port)],
             {}, [("SRT relay", "127.0.0.1", config.srt_relay_port)]))
     for name, directory, port, env in (
-        ("football", "client/football-field-3d", config.football_port, {"CHR_RENDER_URL": f"ws://{config.server_ws}"}),
+        ("pitch-studio", "client/pitch-studio", config.pitch_studio_port, {"CHR_RENDER_URL": f"ws://{config.server_ws}"}),
         ("monitor-page", "client/example/render-harness", config.monitor_page_port, {}),
     ):
         if port:
@@ -120,6 +121,155 @@ def components(config: Config) -> list[Component]:
             stack.append(Component(name, ["nix", "develop", ".#default", "--command", "bash", "-c", script], env,
                                    [(name, "127.0.0.1", port)]))
     return stack
+
+
+def forwarded_ports(config: Config) -> list[int]:
+    """Loopback TCP ports a remote browser or player needs through an SSH tunnel."""
+    webrtc = endpoint(config.webrtc_tcp)[1]
+    ports = [config.pitch_studio_port, config.monitor_page_port, endpoint(config.server_ws)[1],
+             endpoint(config.monitor_ws)[1], *range(webrtc, webrtc + 4), config.srt_relay_port]
+    return [port for port in ports if port]
+
+
+def roles(config: Config) -> dict[str, str]:
+    """What each configured socket is for, keyed like `listening_sockets` values."""
+    host, port = endpoint(config.webrtc_tcp)
+    known = {
+        f"tcp {config.server_ws}": "chr-server control JSON-RPC WebSocket (description.load, status)",
+        f"unix {config.dir}/render.sock": "chr-server NativeSocket (tracking.frame from chr-tracking-sim)",
+        f"tcp {config.monitor_ws}": "chr-monitor WebSocket: status and WebRTC signalling",
+        f"udp {config.srt}": "chr-monitor SRT listener: the program for VLC / ffplay",
+        **{f"tcp {host}:{port + i}": "chr-monitor WebRTC ICE-TCP, one per open stream" for i in range(4)},
+        f"tcp 127.0.0.1:{config.srt_relay_port}": "SRT copied to TCP for players behind SSH",
+        f"tcp 127.0.0.1:{config.pitch_studio_port}": f"pitch-studio page; /chr-render -> ws://{config.server_ws}",
+        f"tcp 127.0.0.1:{config.monitor_page_port}": "read-only program monitor page",
+    }
+    return known
+
+
+# Processes that hold no socket, and what they do instead.
+PORTLESS = {
+    "chr-tracking-sim": "frames into the input ring (shared memory), Ti/C to chr-server's socket",
+    "ffmpeg": "decodes the clip in a loop for chr-tracking-sim",
+    "chr-renderer-cli worker": "GPU renderer; stdin/stdout and shared memory with chr-server",
+}
+# Launchers and restart loops that only start and watch the processes doing the work.
+WRAPPERS = ("bash", "npm", "esbuild")
+
+
+def socket_address(field: str) -> str:
+    """`/proc/net/{tcp,udp}{,6}` local address, e.g. `0100007F:2253` -> `127.0.0.1:8787`."""
+    host, port = field.split(":")
+    raw = bytes.fromhex(host)
+    if len(raw) == 4:
+        ip = socket.inet_ntop(socket.AF_INET, raw[::-1])
+    else:
+        ip = socket.inet_ntop(socket.AF_INET6, b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)))
+    return f"{ip}:{int(port, 16)}"
+
+
+def listening_sockets() -> dict[int, str]:
+    """Listening TCP, bound UDP and listening Unix sockets by inode, e.g. `tcp 127.0.0.1:8787`."""
+    found = {}
+    # TCP LISTEN is state 0A; an unconnected UDP socket reports 07.
+    for table, state in (("tcp", "0A"), ("tcp6", "0A"), ("udp", "07"), ("udp6", "07")):
+        try:
+            lines = Path(f"/proc/net/{table}").read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if fields[3] == state:
+                found[int(fields[9])] = f"{table[:3]} {socket_address(fields[1])}"
+    for line in Path("/proc/net/unix").read_text().splitlines()[1:]:
+        fields = line.split()
+        if len(fields) == 8 and int(fields[3], 16) & 0x10000:  # __SO_ACCEPTCON: listening
+            found[int(fields[6])] = f"unix {fields[7]}"
+    return found
+
+
+def process_sockets(pid: int, sockets: dict[int, str]) -> list[str]:
+    found = set()
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return []
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:[") and (inode := int(target[8:-1])) in sockets:
+            found.add(sockets[inode])
+    return sorted(found)
+
+
+def describe(argv: list[str]) -> str:
+    """A short name from a command line: the program and its leading non-option words."""
+    words = [word for arg in argv for word in (arg.split() if arg is argv[0] else [arg])]
+    name = [Path(words[0]).name]
+    for word in words[1:3]:
+        if word.startswith("-") or ":" in word:
+            break
+        name.append(Path(word).name)
+    return " ".join(name)
+
+
+def group_processes(pgid: int) -> list[tuple[int, str]]:
+    """(pid, short name) of every process in the process group, by pid."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+            argv = [arg.decode(errors="replace") for arg in (entry / "cmdline").read_bytes().split(b"\0") if arg]
+        except OSError:
+            continue
+        if argv and int(stat.rsplit(")", 1)[1].split()[2]) == pgid:
+            found.append((int(entry.name), describe(argv)))
+    return sorted(found)
+
+
+def report(config: Config) -> str:
+    """What each component runs, with the sockets each process actually holds, then how to reach them."""
+    sockets, known = listening_sockets(), roles(config)
+    lines = []
+    total = working = 0
+    for component in components(config):
+        pgid = running(component.name)
+        lines.append(f"{component.name}: " + (f"pgid {pgid}, log output/stack/{component.name}.log" if pgid else "stopped"))
+        if not pgid:
+            continue
+        wrappers = []
+        for pid, name in group_processes(pgid):
+            total += 1
+            if name.split()[0] in WRAPPERS:
+                wrappers.append(name)
+                continue
+            working += 1
+            held = process_sockets(pid, sockets)
+            ports = [address for address in held if address in known]
+            others = len(held) - len(ports)
+            lines.append(f"  {name:24} pid {pid:<8}" + ("" if ports else PORTLESS.get(name, "no listening socket")))
+            lines += [f"      {address:40} {known[address]}" for address in ports]
+            if others:
+                lines.append(f"      + {others} other sockets (e.g. WebRTC ICE candidates)")
+        if wrappers:
+            counts = {name: wrappers.count(name) for name in wrappers}
+            lines.append("  wrappers: " + ", ".join(f"{count} x {name}" for name, count in counts.items()))
+    lines.insert(0, f"{total} processes, {working} doing the work:")
+    lines.append("open:")
+    if config.pitch_studio_port:
+        lines.append(f"  placement editor  http://127.0.0.1:{config.pitch_studio_port}/")
+    if config.monitor_page_port:
+        lines.append(f"  program monitor   http://127.0.0.1:{config.monitor_page_port}/?transport=tcp"
+                     f"&ws=ws://{config.server_ws}&monitor=ws://{config.monitor_ws}")
+    lines.append(f"  SRT player        srt://{config.srt}" + (f"  or tcp://127.0.0.1:{config.srt_relay_port}" if config.srt_relay_port else ""))
+    forwards = " ".join(f"-L {port}:127.0.0.1:{port}" for port in forwarded_ports(config))
+    lines.append(f"from another machine: ssh -N {forwards} {getpass.getuser()}@{socket.gethostname()}")
+    lines.append(f"  (ICE-TCP {config.webrtc_tcp} and up listen only while a WebRTC viewer is connected)")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------------------
@@ -182,6 +332,7 @@ def start(config: Config, wait_s: float) -> None:
         time.sleep(1)
     for label, host, port in sorted(pending):
         print(f"not ready after {wait_s:.0f}s: {label} on {host}:{port} (the first start builds; see the log)")
+    print(report(config))
 
 
 def stop() -> None:
@@ -212,12 +363,11 @@ def group_alive(pgid: int) -> bool:
 
 
 def status(config: Config) -> None:
-    for component in components(config):
-        pid = running(component.name)
-        endpoints = ", ".join(
-            f"{label} {host}:{port} {'up' if listening(host, port) else 'down'}" for label, host, port in component.ready)
-        print(f"{component.name:13} {'running (pid %d)' % pid if pid else 'stopped':20} {endpoints}")
-    print(f"SRT listener {config.srt}; WebRTC ICE-TCP from {config.webrtc_tcp}; logs in output/stack/")
+    print(report(config))
+    down = [f"{label} {host}:{port}" for component in components(config) if running(component.name)
+            for label, host, port in component.ready if not listening(host, port)]
+    if down:
+        print("not answering: " + ", ".join(down))
 
 
 # ---------------------------------------------------------------------------------------

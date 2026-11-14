@@ -1,12 +1,28 @@
 import { join } from 'node:path';
-import { defineConfig, loadEnv, type ConfigEnv, type UserConfig } from 'vite';
+import { defineConfig, loadEnv, type ConfigEnv, type Connect, type Plugin, type UserConfig } from 'vite';
 import { fusionApi } from './scripts/fusion-api.ts';
 import { localFiles } from './scripts/local-files.ts';
 
 // The page reaches chr-server's control WebSocket through its own origin, so one
 // tunnel to this page is enough. chr-server accepts the forwarded loopback origin.
-function renderProxy(url = 'ws://127.0.0.1:8787') {
+const DEFAULT_RENDER_URL = 'ws://127.0.0.1:8787';
+function renderProxy(url = DEFAULT_RENDER_URL) {
   return { '/chr-render': { target: url, ws: true, rewrite: () => '/' } };
+}
+
+// Tells the page where /chr-render forwards to, so a failed connection can name it.
+function renderTarget(url = DEFAULT_RENDER_URL): Plugin {
+  const middleware: Connect.NextHandleFunction = (request, response, next) => {
+    if (request.url !== '/chr-render-info') { next(); return; }
+    response.setHeader('Content-Type', 'application/json');
+    response.setHeader('Cache-Control', 'no-store');
+    response.end(JSON.stringify({ target: url }));
+  };
+  return {
+    name: 'chr-render-target',
+    configureServer(server) { server.middlewares.use(middleware); },
+    configurePreviewServer(server) { server.middlewares.use(middleware); },
+  };
 }
 
 export default defineConfig(({ mode }) => {
@@ -15,6 +31,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
       fusionApi(env.FUSION_API_URL ?? '', env.FUSION_API_KEY ?? ''),
       localFiles(env.LOCAL_FILES_ROOTS ?? ''),
+      renderTarget(env.CHR_RENDER_URL),
       {
         name: 'isolated-dependency-cache',
         // CLI --port is available here, after Vite merges its inline configuration.

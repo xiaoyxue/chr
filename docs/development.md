@@ -14,7 +14,7 @@ AGENTS.md                 Repository-wide contributor rules
 CLAUDE.md                 Imports AGENTS.md for Claude Code (also server/CLAUDE.md)
 README.md                 Project overview and quick start
 client/src/               TypeScript client sources (currently a placeholder)
-client/football-field-3d/ Onsite football-field client (Vite + Three.js), built by the flake
+client/pitch-studio/      Onsite pitch client (Vite + Three.js), built by the flake
 client/example/           Example clients and harnesses, each its own npm package
 Cargo.toml                Rust workspace definition (members under server/, monitor/, common/)
 Cargo.lock                Locked Rust dependencies
@@ -122,7 +122,7 @@ documented scripts inside each package (see
 `client/example/render-harness/README.md`). Keep client configuration within
 `client/`.
 
-`client/football-field-3d/` is a self-contained npm package. For development, run
+`client/pitch-studio/` is a self-contained npm package. For development, run
 `npm ci` and `npm run dev` (127.0.0.1:5186), `npm run build` or
 `npm run test:offline` inside it. Without Fusion, a match can be imported from an
 offline Fusion ZIP (`manifest.json` plus `assets/`) in the browser. Every import
@@ -135,10 +135,52 @@ placement draft into a render description and loads it into `chr-server` through
 the page's `/chr-render` WebSocket proxy (`CHR_RENDER_URL`); see
 `server/docs/render-description.md`.
 
+Placement editing in the top view uses pitch-centred world coordinates (+X right,
++Y down), drawn as axes with metre ticks, the pitch length and width and its corner
+coordinates. A selected placement shows its vertices and opens locked; it must be
+unlocked (button or `L`) before it can be dragged, resized from its corners or
+edited numerically: 2D areas by their top-left corner or centre, with an aspect
+ratio that can be locked or set (`16:9`, `1.78`), 3D models by centre and one
+uniform scale. Outlines are the placement slots; a selected 3D model also shows
+its real XY bounding box.
+Rotation is read-only. Each target can be enabled or disabled, and every draft
+change can be undone with the 撤销 button or `Ctrl/Cmd+Z` until the match is
+reloaded.
+
 `uv run server/scripts/stack.py start|stop|restart|status` starts and stops the
-whole local development stack (tracked simulation, football client, program
+whole local development stack (tracked simulation, pitch-studio client, program
 monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see
 `server/README.md`.
+
+The stack's processes and how they connect:
+
+```text
+              camera + tracking system (simulated)
+  ┌───────────────────────────────────────────┐
+  │ chr-tracking-sim  ◄── ffmpeg decodes clip │
+  └─────┬───────────────────────────┬─────────┘
+  frames│ input ring (shm)          │ Ti, C, frame_warp: tracking.frame
+        ▼                           ▼ on <dir>/render.sock
+  ┌───────────────────────────────────────────┐  ws :8787 control
+  │ chr-server (no GPU)                       │◄── description.load, status ── pitch-studio :4173
+  │ pairs frames and cameras, output clock,   │    (through its /chr-render proxy)
+  │ scene state, simulated SDI port (UYVY)    │◄── status ───────────────────── monitor page :5173
+  └─────┬────────────────▲──────────┬─────────┘
+        │ requests:      │ frames:  │ every slot the SDI port sends:
+        ▼ stdin/stdout   │ shm ring ▼ program tap (shm)
+  ┌──────────────────┐   │   ┌───────────────────────────────────────┐
+  │ chr-renderer-cli │───┘   │ chr-monitor (H.264: x264 or openh264) │── SRT udp :9001 ──► VLC / ffplay
+  │ worker (GPU)     │       └──────────────────┬────────────────────┘    └► stack.py relay tcp ──► players over SSH
+  └──────────────────┘                          ├─ ws :8789 status, WebRTC signalling ──► monitor page
+                                                └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+```
+
+Each box is one process; `shm` is a `chr-shm` shared-memory ring. chr-server
+starts and replaces its render worker. `run-tracked.sh` restarts the simulator,
+chr-server and chr-monitor independently, so one exiting does not stop the others.
+Viewers only ever see what the SDI port sent. Ports are the defaults of
+`server/scripts/stack.example.toml`; `stack.py start` and `status` print the
+ports each running process actually holds.
 
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.
@@ -157,33 +199,33 @@ nix fmt -- --check flake.nix
 
 The default package and named `chr-app` package build the renderer viewer,
 `chr-server` builds the headless render server and `chr-renderer-cli`, and `chr-monitor` builds the
-video monitor process. `football-field-3d` builds the onsite client: the static
-site in `share/football-field-3d/dist` and a `football-field-3d` launcher. The
-default application runs the viewer; `nix run .#football-field-3d` serves the
+video monitor process. `pitch-studio` builds the onsite client: the static
+site in `share/pitch-studio/dist` and a `pitch-studio` launcher. The
+default application runs the viewer; `nix run .#pitch-studio` serves the
 client.
 `nix flake check` includes:
 
 | Check | Coverage |
 | --- | --- |
 | `client-toolchain` | Node.js, npm, and TypeScript version commands execute in a Nix build sandbox |
-| `football-field-3d` | `client/football-field-3d` typecheck, production build and offline-package tests (`npm run test:offline`) from the locked npm dependencies |
+| `pitch-studio` | `client/pitch-studio` typecheck, production build and offline-package tests (`npm run test:offline`) from the locked npm dependencies |
 | `media-source` | Python tests in `server/scripts/`: synthetic MP4 decoding into a GStreamer appsink, pixel integrity, fractional-rate loop timing and short-input failure; `stack.py` configuration, components and process records |
 | `fmt` | Rust workspace formatting |
 | `clippy` | Rust workspace and all targets, with warnings treated as errors |
 | `tests` | Rust workspace CPU tests; hardware GPU tests remain explicitly ignored |
 
 The toolchain smoke check is not a client typecheck or application test. The
-`football-field-3d` check typechecks and builds that client and runs its Node
+`pitch-studio` check typechecks and builds that client and runs its Node
 tests, but does not run it in a browser.
 
 The client launcher runs `vite preview` on the built site, including the
 read-only Fusion proxy under `/fusion-api/`. Run it from a directory holding the
-onsite `.env.local` (see `client/football-field-3d/.env.example`), or set the
+onsite `.env.local` (see `client/pitch-studio/.env.example`), or set the
 variables in its environment; process variables take precedence:
 
 ```sh
 FUSION_API_URL=https://localhost:50001 FUSION_API_KEY=... \
-  nix run .#football-field-3d -- --port 4173
+  nix run .#pitch-studio -- --port 4173
 ```
 
 It listens on 127.0.0.1 (port 4173 by default). Without both variables the proxy

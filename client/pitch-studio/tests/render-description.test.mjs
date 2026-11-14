@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
-const { blendedMaterials, describeScene, glbModel, quadModel } = await server.ssrLoadModule('/src/render/render-description.ts');
+const { RpcError, blendedMaterials, describeScene, glbModel, quadModel, rendererFailure, workerProblem } = await server.ssrLoadModule('/src/render/render-description.ts');
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
 
 const apply = (rows, [x, y, z]) => rows.slice(0, 3).map((row) => row[0] * x + row[1] * y + row[2] * z + row[3]);
@@ -62,4 +62,18 @@ test('alpha-blended GLB materials are found and opted into masks', () => {
     packagePath: '/srv/match.zip',
   });
   assert.equal(scene.assets[0].blend_as, 'mask');
+});
+
+test('sending is refused with a reason until the render worker is ready', () => {
+  const status = { state: 'ready', pid: 7, restarts: 0, deadline_misses: 0, last_error: null };
+  assert.equal(workerProblem(status), undefined);
+  assert.match(workerProblem({ ...status, state: 'starting' }), /正在启动/);
+  assert.match(workerProblem({ ...status, state: 'backoff', restarts: 3, last_error: 'device lost' }), /已重启 3 次.*device lost/);
+});
+
+test('renderer errors name the missing chr-server capability', () => {
+  assert.match(rendererFailure('render.get_worker_status', new RpcError(-32601, 'Method not found')), /没有运行渲染 worker/);
+  assert.match(rendererFailure('description.load', new RpcError(-32601, 'Method not found')), /--description 和 --asset-root/);
+  assert.match(rendererFailure('description.load', new RpcError(-32602, 'asset outside root')), /错误 -32602.*asset outside root/);
+  assert.equal(rendererFailure('sdi.get_status', new Error('timeout')), 'timeout');
 });

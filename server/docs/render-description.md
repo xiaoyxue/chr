@@ -3,7 +3,7 @@
 **Status:** `implemented` opt-in profile `chr-render-description-v1`, used with the
 [tracked camera simulation](tracking-simulation.md). It describes what to draw and
 with which lens, independent of any client's own scene model. The schema lives in
-`chr_common::description`; the football client produces it from a Fusion match.
+`chr_common::description`; the pitch-studio client produces it from a Fusion match.
 
 ## Shape
 
@@ -89,9 +89,9 @@ restart. When the asset list grows, `chr-server` replaces its worker at once,
 without backoff. Until the new worker is ready (about one second for a 27 MB
 GLB), frames go out as clean feed or repeats, as during any worker restart.
 
-## From the football client
+## From the pitch-studio client
 
-`client/football-field-3d` converts the current match's placement draft:
+`client/pitch-studio` converts the current match's placement draft:
 
 - **3D placements:** `fitFusionModel` on the loaded GLB's three.js bounds. In
   chr's basis, the preview's centring becomes the translation `(-cx, -cz,
@@ -99,7 +99,7 @@ GLB), frames go out as clean feed or repeats, as during any worker restart.
   scale.
 - **2D placements:** the preview's contain fit of the image in its area,
   rotated by `rz + assetRotation`, at Z −0.02.
-- **Hidden placements:** become `visible: false`.
+- **Disabled placements:** become `visible: false`.
 - **Blended GLBs:** a GLB with BLEND materials gets `blend_as: "mask"`, and the
   page lists those materials after sending.
 - **Asset sources:** assets are entries of the offline ZIP, read by the server
@@ -113,7 +113,12 @@ whose preview has loaded its materials and that has a server path, and stay
 disabled while an action runs, so repeated clicks do not queue repeated loads.
 **发送到渲染器** calls `description.load` through the page's `/chr-render`
 WebSocket proxy (`CHR_RENDER_URL`, default `ws://127.0.0.1:8787`), so one tunnel
-to the page is enough. **导出渲染描述** downloads `{"scene": …}`; add a `camera`
+to the page is enough. Before loading, it checks on the same connection that
+chr-server answers and that `render.get_worker_status` is `ready`. If not, it
+names the cause instead of sending: the proxy target is unreachable (the page
+server reports it at `/chr-render-info`), there is no render worker, the worker
+is starting or backing off (with its last error), or `description.load` is not
+enabled (no `--description` / `--asset-root`). **导出渲染描述** downloads `{"scene": …}`; add a `camera`
 block for a startup file, for example
 `jq -s '.[0] + {scene: .[1].scene}' camera.json scene.json`.
 
@@ -134,7 +139,7 @@ the client.
 cargo test --locked -p chr-runtime --test description
 cargo test --locked -p chr-runtime --test description -- --ignored   # hardware GPU
 cargo test --locked -p chr-renderer --test glb
-npm --prefix client/football-field-3d run test:offline
+npm --prefix client/pitch-studio run test:offline
 ```
 
 The tests cover:

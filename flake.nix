@@ -152,20 +152,20 @@
           # Static site plus a `vite preview` launcher that also serves the Fusion read-only proxy.
           # The launcher reads FUSION_API_URL/FUSION_API_KEY and `.env*` from the working directory
           # at runtime, so no secret reaches the store.
-          footballField = pkgs.buildNpmPackage rec {
-            pname = "football-field-3d";
-            inherit ((pkgs.lib.importJSON ./client/football-field-3d/package.json)) version;
+          pitchStudio = pkgs.buildNpmPackage rec {
+            pname = "pitch-studio";
+            inherit ((pkgs.lib.importJSON ./client/pitch-studio/package.json)) version;
             src = pkgs.lib.fileset.toSource {
-              root = ./client/football-field-3d;
+              root = ./client/pitch-studio;
               fileset = pkgs.lib.fileset.unions [
-                ./client/football-field-3d/index.html
-                ./client/football-field-3d/package.json
-                ./client/football-field-3d/package-lock.json
-                ./client/football-field-3d/tsconfig.json
-                ./client/football-field-3d/vite.config.ts
-                ./client/football-field-3d/scripts
-                ./client/football-field-3d/src
-                ./client/football-field-3d/tests
+                ./client/pitch-studio/index.html
+                ./client/pitch-studio/package.json
+                ./client/pitch-studio/package-lock.json
+                ./client/pitch-studio/tsconfig.json
+                ./client/pitch-studio/vite.config.ts
+                ./client/pitch-studio/scripts
+                ./client/pitch-studio/src
+                ./client/pitch-studio/tests
               ];
             };
             npmDeps = pkgs.importNpmLock { npmRoot = src; };
@@ -178,15 +178,15 @@
             '';
             installPhase = ''
               runHook preInstall
-              share=$out/share/football-field-3d
+              share=$out/share/pitch-studio
               mkdir -p $share
               cp -r dist scripts node_modules package.json vite.config.ts $share/
-              makeWrapper ${pkgs.nodejs}/bin/node $out/bin/football-field-3d \
+              makeWrapper ${pkgs.nodejs}/bin/node $out/bin/pitch-studio \
                 --add-flags "$share/node_modules/vite/bin/vite.js preview" \
                 --add-flags "--config $share/vite.config.ts --configLoader runner --outDir $share/dist"
               runHook postInstall
             '';
-            meta.mainProgram = "football-field-3d";
+            meta.mainProgram = "pitch-studio";
           };
           shell = pkgs.mkShell {
             packages = [
@@ -208,11 +208,11 @@
             app
             server
             monitor
-            footballField
+            pitchStudio
             shell
             ;
           checks = {
-            football-field-3d = footballField;
+            pitch-studio = pitchStudio;
             client-toolchain =
               pkgs.runCommand "chr-client-toolchain"
                 {
@@ -265,16 +265,16 @@
         chr-app = (environment system).app;
         chr-server = (environment system).server;
         chr-monitor = (environment system).monitor;
-        football-field-3d = (environment system).footballField;
+        pitch-studio = (environment system).pitchStudio;
       });
       apps = perSystem (system: {
         default = {
           type = "app";
           program = "${(environment system).app}/bin/chr-app";
         };
-        football-field-3d = {
+        pitch-studio = {
           type = "app";
-          program = "${(environment system).footballField}/bin/football-field-3d";
+          program = "${(environment system).pitchStudio}/bin/pitch-studio";
         };
       });
       checks = perSystem (system: (environment system).checks);

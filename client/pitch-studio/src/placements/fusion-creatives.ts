@@ -163,6 +163,17 @@ export class FusionCreatives {
       }
     }
   }
+  /**
+   * The world XY axis-aligned bounding box of a placement's loaded model, from its
+   * transformed vertices; undefined without a loaded, enabled model.
+   */
+  footprint(id: string) {
+    const model = this.models.get(id);
+    if (!model?.group.visible) return undefined;
+    model.group.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model.group, true);
+    return { minX: box.min.x, maxX: box.max.x, minY: box.min.y, maxY: box.max.y };
+  }
   /** Loaded material geometry of each placement, for the render description. */
   geometry(): Map<string, SlotGeometry> {
     const result = new Map<string, SlotGeometry>();

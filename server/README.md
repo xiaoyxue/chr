@@ -265,7 +265,7 @@ renders through the worker to the SDI port, which `chr-monitor` streams. See
 `chr-server --description <json>` draws a `chr-render-description-v1` scene
 (GLB and image-quad assets placed by 4×4 matrices, one asset shared by many
 instances) through the same tracked camera. With `--asset-root <dir>`, clients
-replace the scene at runtime with `description.load`; the football client sends
+replace the scene at runtime with `description.load`; the pitch-studio client sends
 its Fusion match this way. Add `--description <json> --asset-root <dir>` to
 `run-tracked.sh`. See [Render description](docs/render-description.md).
 
@@ -765,7 +765,7 @@ monitor and WebRTC diagnostics) and verification scripts are in
 
 `server/scripts/stack.py` starts, stops and reports the whole local stack: the
 tracked-camera simulation (`run-tracked.sh`: simulator, `chr-server`,
-`chr-monitor`), the football client, the read-only program monitor page and an
+`chr-monitor`), the pitch-studio client, the read-only program monitor page and an
 optional SRT-to-TCP relay for `ffplay` through SSH. Copy
 `server/scripts/stack.example.toml` to `output/stack/stack.toml` and set the
 manifest, clip, optional description and asset root, addresses and ports; then
@@ -783,6 +783,24 @@ Each component runs detached in its own process group, logs to
 start time, so `stop` signals only processes the script started (TERM, then KILL
 after 15 s). `start` skips a component that is already running or whose port is
 taken. Inside the render component the processes still restart on their own.
+`start` (once ready) and `status` end with a report read from `/proc`. For each
+component it lists every process with its PID and the sockets that process
+actually holds, each with its purpose. Wrappers that do no work are folded into
+one line: the `run-tracked.sh` restart loops and the npm and esbuild helpers.
+The report ends with the URLs to open and the `ssh -L` forwards a remote viewer
+needs. With every component enabled the stack runs eight working processes:
+
+| Component | Process | Sockets |
+| --- | --- | --- |
+| render | `chr-server` | control WebSocket (`server_ws`), NativeSocket `<dir>/render.sock` |
+| render | `chr-renderer-cli worker` | none: stdin/stdout and shared memory with chr-server, holds the GPU |
+| render | `chr-tracking-sim` | none: input ring (shared memory) and chr-server's socket |
+| render | `ffmpeg` | none: decodes the clip for the simulator |
+| render | `chr-monitor` | WebSocket (`monitor_ws`), SRT listener (`srt`, UDP), ICE-TCP from `webrtc_tcp` (only while a viewer is connected) |
+| srt-relay | `stack.py relay` | TCP `srt_relay_port`, plus one `ffmpeg` per connected player |
+| pitch-studio | Vite | `pitch_studio_port` |
+| monitor-page | Vite | `monitor_page_port` |
+
 The script uses only the standard library; `python3 server/scripts/stack.py`
 works as well.
 

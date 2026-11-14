@@ -5,7 +5,7 @@
 | Directory | Purpose | Language |
 | --- | --- | --- |
 | `client/src/` | Client-side code | Primarily TypeScript |
-| `client/football-field-3d/` | Onsite football-field client: Three.js pitch preview and read-only Fusion match data | TypeScript (Vite) |
+| `client/pitch-studio/` | Onsite pitch client: Three.js pitch preview and read-only Fusion match data | TypeScript (Vite) |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
 | `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, `chr-renderer-cli` and `chr-tracking-sim`), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `monitor/` | `chr-monitor`: optional video monitor process that encodes the `chr-server` program tap for WebRTC/SRT viewers | Rust |
@@ -17,6 +17,39 @@
 | `docs/` | Repository-wide documentation, including `docs/development.md`; server contracts live in `server/docs/` | |
 | `reference/` | All reference materials (private, local-only, ignored by Git) | |
 | `output/<module>/` | Generated runtime artifacts, including renderer images in `output/renderer/` (local-only, ignored by Git) | |
+
+## Runtime processes
+
+The local stack (`uv run server/scripts/stack.py start`, see `server/README.md`)
+runs these processes and connections:
+
+```text
+              camera + tracking system (simulated)
+  ┌───────────────────────────────────────────┐
+  │ chr-tracking-sim  ◄── ffmpeg decodes clip │
+  └─────┬───────────────────────────┬─────────┘
+  frames│ input ring (shm)          │ Ti, C, frame_warp: tracking.frame
+        ▼                           ▼ on <dir>/render.sock
+  ┌───────────────────────────────────────────┐  ws :8787 control
+  │ chr-server (no GPU)                       │◄── description.load, status ── pitch-studio :4173
+  │ pairs frames and cameras, output clock,   │    (through its /chr-render proxy)
+  │ scene state, simulated SDI port (UYVY)    │◄── status ───────────────────── monitor page :5173
+  └─────┬────────────────▲──────────┬─────────┘
+        │ requests:      │ frames:  │ every slot the SDI port sends:
+        ▼ stdin/stdout   │ shm ring ▼ program tap (shm)
+  ┌──────────────────┐   │   ┌───────────────────────────────────────┐
+  │ chr-renderer-cli │───┘   │ chr-monitor (H.264: x264 or openh264) │── SRT udp :9001 ──► VLC / ffplay
+  │ worker (GPU)     │       └──────────────────┬────────────────────┘    └► stack.py relay tcp ──► players over SSH
+  └──────────────────┘                          ├─ ws :8789 status, WebRTC signalling ──► monitor page
+                                                └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+```
+
+Each box is one process; `shm` is a `chr-shm` shared-memory ring. chr-server
+starts and replaces its render worker. `run-tracked.sh` restarts the simulator,
+chr-server and chr-monitor independently, so one exiting does not stop the others.
+Viewers only ever see what the SDI port sent. Ports are the defaults of
+`server/scripts/stack.example.toml`; `stack.py start` and `status` print the
+ports each running process actually holds.
 
 ## Design Documentation
 
@@ -70,13 +103,13 @@ In a separate shell, from the repository root:
 nix build
 nix flake check
 nix run . -- --headless
-nix run .#football-field-3d
+nix run .#pitch-studio
 ```
 
 The default package and `packages.<system>.chr-app` build the renderer;
 the default app runs it. Checks include Node.js/npm/TypeScript tool availability,
-Rust formatting, Clippy, and CPU tests, plus the `football-field-3d` client
-typecheck and build. `nix run .#football-field-3d` serves that client; see
+Rust formatting, Clippy, and CPU tests, plus the `pitch-studio` client
+typecheck and build. `nix run .#pitch-studio` serves that client; see
 `docs/development.md` for its Fusion settings. `client/src/` is currently a
 placeholder; the example harness in `client/example/render-harness/` has its own
 npm scripts.
