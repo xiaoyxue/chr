@@ -22,6 +22,38 @@
 The local stack (`uv run server/scripts/stack.py start`, see `server/README.md`)
 runs these processes and connections:
 
+```mermaid
+flowchart LR
+  subgraph camera["Camera: simulated SDI input"]
+    sim["chr-tracking-sim<br/>+ ffmpeg decoder"]
+  end
+  subgraph render["render component: run-tracked.sh restarts each process"]
+    server["chr-server<br/>no GPU: pairs frames and cameras,<br/>output clock, SDI port"]
+    tracker["tracking worker<br/>chr-tracking-sim-cli<br/>(replays recorded cameras)"]
+    renderer["render worker<br/>chr-renderer-cli (GPU)"]
+    monitor["chr-monitor<br/>H.264 encoder"]
+  end
+  studio["pitch-studio page :4173"]
+  page["monitor page :5173"]
+  relay["SRT relay (srt_relay_port)"]
+  player["VLC / ffplay"]
+
+  sim -- "frames: input ring (shm)" --> server
+  server -- "frame N (shm + track)" --> tracker
+  tracker -- "camera N or unavailable" --> server
+  server -- "frame + camera (shm + render)" --> renderer
+  renderer -- "composed SDI frame" --> server
+  server -- "every SDI slot: program tap (shm)" --> monitor
+  studio -- "description.load: ws :8787" --> server
+  page -- "status: ws :8787" --> server
+  page -- "signalling ws :8789, WebRTC ICE-TCP :8790-8793" --> monitor
+  monitor -- "SRT :9001" --> player
+  monitor -- "SRT" --> relay
+  relay -- "TCP" --> player
+```
+
+The same in text, with every channel:
+
 ```text
               camera (simulated SDI input)
   ┌───────────────────────────────────────────┐
