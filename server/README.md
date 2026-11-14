@@ -778,7 +778,7 @@ manifest, clip, optional description and asset root, addresses and ports; then
 from the repository root, outside any Nix shell:
 
 ```sh
-uv run server/scripts/stack.py start     # waits until every endpoint answers
+uv run server/scripts/stack.py start     # waits until video flows through both workers
 uv run server/scripts/stack.py status
 uv run server/scripts/stack.py stop
 uv run server/scripts/stack.py restart
@@ -788,7 +788,12 @@ Each component runs detached in its own process group, logs to
 `output/stack/<name>.log` and is recorded in `output/stack/<name>.pid` with its
 start time, so `stop` signals only processes the script started (TERM, then KILL
 after 15 s). `start` skips a component that is already running or whose port is
-taken. Inside the render component the processes still restart on their own.
+taken, and names the process holding that port. `start` waits for the ports, then
+for chr-server's render and tracking workers to be ready and for frames to be
+paired with a camera for two seconds in a row. It prints `ready: …` lines as each
+step completes, or `PROBLEM: …` lines saying what is still wrong. For a component
+that exited right after starting, it shows the last lines of its log. Inside the
+render component the processes still restart on their own.
 `start` (once ready) and `status` end with a report read from `/proc`. For each
 component it lists every process with its PID, uptime and the sockets that process
 actually holds, each with its purpose. A process whose executable was rebuilt

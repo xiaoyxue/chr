@@ -444,35 +444,132 @@ def listening(host: str, port: int) -> bool:
         return probe.connect_ex((host, port)) == 0
 
 
+def holder(host: str, port: int) -> str:
+    """The process listening on host:port, e.g. `pid 123 (node vite)`."""
+    inodes = {inode for inode, address in listening_sockets().items() if address == f"tcp {host}:{port}"}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fds = os.listdir(entry / "fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(entry / "fd" / fd)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and int(target[8:-1]) in inodes:
+                return f"pid {entry.name} ({describe(command_line(int(entry.name)))})"
+    return "a process this user cannot see"
+
+
+def runs(component: str, config: Config) -> str:
+    """What a component starts, for the start messages."""
+    workers = "render and tracking workers" if config.tracking == "worker" else "render worker"
+    return {
+        "render": f"run-tracked.sh: chr-server with its {workers}, chr-tracking-sim, chr-monitor",
+        "srt-relay": "SRT-to-TCP relay",
+        "pitch-studio": "Vite server for client/pitch-studio",
+        "monitor-page": "Vite server for client/example/render-harness",
+    }[component]
+
+
+def wait_healthy(config: Config, deadline: float) -> list[str]:
+    """Waits until chr-server's workers are ready and frames are rendered, two
+    one-second samples in a row; returns what is still wrong at the deadline."""
+    path = f"{config.dir}/render.sock"
+    previous: dict[str, object] | None = None
+    announced: set[str] = set()
+    streak = 0
+    problems = [f"chr-server did not answer on {path}"]
+    while time.monotonic() < deadline:
+        try:
+            sample = rpc(path, HEALTH)
+        except OSError as error:
+            problems = [f"chr-server does not answer on {path}: {error}"]
+            time.sleep(1)
+            continue
+        problems = []
+        for label, method in (("render worker", "render.get_worker_status"), ("tracking worker", "tracking.get_worker_status")):
+            status = sample.get(method)
+            if not isinstance(status, dict) or "error" in status:
+                continue
+            if status["state"] != "ready":
+                problems.append(f"{label} is {status['state']}" + (f": {status['last_error']}" if status.get("last_error") else ""))
+            elif label not in announced:
+                announced.add(label)
+                print(f"ready: {label} (pid {status['pid']})")
+        if previous is not None and not problems:
+            def rate(method: str, key: str) -> float:
+                before, after = previous.get(method), sample.get(method)
+                valid = isinstance(before, dict) and isinstance(after, dict) and key in before and key in after
+                return after[key] - before[key] if valid else -1.0
+            slots, paired = rate("sdi.get_status", "frames_output"), rate("tracking.get_status", "frames_joined")
+            rendered = paired if paired >= 0 else slots
+            if rendered > 0:
+                streak += 1
+            else:
+                streak = 0
+                problems.append("no frame was paired with a camera in the last second (is the camera running?)"
+                                if paired >= 0 else "the SDI port sent no slot in the last second")
+            if streak >= 2:
+                print(f"ready: video flowing, {slots:.0f} SDI slots/s"
+                      + (f", {paired:.0f} frames/s paired with a camera" if paired >= 0 else ""))
+                return []
+        previous = sample
+        time.sleep(1)
+    return problems
+
+
+def log_tail(name: str, lines: int = 5) -> list[str]:
+    try:
+        return (STATE / f"{name}.log").read_text(errors="replace").splitlines()[-lines:]
+    except OSError:
+        return []
+
+
 def start(config: Config, wait_s: float) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     stack = components(config)
+    started = []
     for component in stack:
-        if running(component.name):
-            print(f"{component.name}: already running")
+        if pgid := running(component.name):
+            print(f"{component.name}: already running (process group {pgid})")
             continue
-        busy = [f"{host}:{port}" for _, host, port in component.ready if listening(host, port)]
+        busy = [f"{host}:{port}, held by {holder(host, port)}" for _, host, port in component.ready if listening(host, port)]
         if busy:
-            print(f"{component.name}: not started, {', '.join(busy)} is in use by another process")
+            print(f"{component.name}: not started, its port is taken: {'; '.join(busy)}")
             continue
         log = open(STATE / f"{component.name}.log", "ab")
         process = subprocess.Popen(component.command, cwd=ROOT, env={**os.environ, **component.env},
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
         (STATE / f"{component.name}.pid").write_text(f"{process.pid} {start_time(process.pid)}\n")
-        print(f"{component.name}: started (pid {process.pid}, log output/stack/{component.name}.log)")
-    pending = {(label, host, port) for component in stack for label, host, port in component.ready}
+        started.append(component.name)
+        print(f"{component.name}: starting {runs(component.name, config)} "
+              f"(process group {process.pid}, log output/stack/{component.name}.log)")
+    pending = {(label, host, port) for component in stack if running(component.name)
+               for label, host, port in component.ready}
     deadline = time.monotonic() + wait_s
     while pending and time.monotonic() < deadline:
         for label, host, port in sorted(pending):
             if listening(host, port):
-                print(f"ready: {label} on {host}:{port}")
+                print(f"listening: {label} on {host}:{port}")
                 pending.discard((label, host, port))
-        time.sleep(1)
+        if pending:
+            time.sleep(1)
     for label, host, port in sorted(pending):
-        print(f"not ready after {wait_s:.0f}s: {label} on {host}:{port} (the first start builds; see the log)")
-    # Workers become ready and frames start flowing in the first seconds; report steady rates.
-    time.sleep(3)
+        print(f"not listening after {wait_s:.0f}s: {label} on {host}:{port} (the first start builds; see the log)")
+    if running("render") and not pending:
+        problems = wait_healthy(config, max(deadline, time.monotonic() + 30))
+        for problem in problems:
+            print(f"PROBLEM: {problem}")
+    for name in started:
+        if not running(name):
+            print(f"{name}: exited after starting; last lines of output/stack/{name}.log:")
+            for line in log_tail(name):
+                print(f"  {line}")
     print(report(config))
 
 

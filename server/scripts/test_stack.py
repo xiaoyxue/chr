@@ -136,6 +136,36 @@ class HealthTests(unittest.TestCase):
         self.assertIn("none: cameras come from tracking.frame", "\n".join(stack.health(first, external, 1.0)))
 
 
+class StartTests(unittest.TestCase):
+    def test_names_the_process_holding_a_port(self):
+        import socket as sockets
+        with sockets.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            self.assertTrue(stack.holder("127.0.0.1", port).startswith(f"pid {os.getpid()} ("))
+
+    def test_waits_for_ready_workers_and_flowing_frames(self):
+        def sample(state, frames):
+            worker = {"state": state, "pid": 7, "restarts": 0, "last_error": None}
+            return {"sdi.get_status": {"frames_output": frames}, "render.get_worker_status": worker,
+                    "tracking.get_worker_status": worker, "tracking.get_status": {"frames_joined": frames}}
+        samples = iter([sample("starting", 0), sample("ready", 0), sample("ready", 30), sample("ready", 60)])
+        config = stack.Config(scene="s.json", video="v.mp4")
+        with mock.patch.object(stack, "rpc", side_effect=lambda *_: next(samples)), \
+                mock.patch.object(stack.time, "sleep"), mock.patch("builtins.print") as printed:
+            self.assertEqual(stack.wait_healthy(config, time.monotonic() + 60), [])
+        lines = [call.args[0] for call in printed.call_args_list]
+        self.assertEqual(lines, ["ready: render worker (pid 7)", "ready: tracking worker (pid 7)",
+                                 "ready: video flowing, 30 SDI slots/s, 30 frames/s paired with a camera"])
+
+    def test_reports_what_is_still_wrong_at_the_deadline(self):
+        stuck = {"render.get_worker_status": {"state": "backoff", "pid": None, "restarts": 3, "last_error": "device lost"}}
+        config = stack.Config(scene="s.json", video="v.mp4")
+        with mock.patch.object(stack, "rpc", return_value=stuck), mock.patch.object(stack.time, "sleep"):
+            self.assertEqual(stack.wait_healthy(config, time.monotonic() + 0.05), ["render worker is backoff: device lost"])
+
+
 class StopTests(unittest.TestCase):
     def start(self, directory: str, name: str, script: str) -> subprocess.Popen:
         process = subprocess.Popen(["sh", "-c", script], start_new_session=True)
