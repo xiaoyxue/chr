@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { importResultFolder } from './bundle-import.ts';
-import { fetchServerFolder } from '../shared/server-files.ts';
+import { fetchServerFolder, serverPath } from '../shared/server-files.ts';
 import { LocalAdScene } from '../placements/local-ad-scene.ts';
 import { FusionCreatives } from '../placements/fusion-creatives.ts';
 import { applyResultCamera } from '../scene/cameras/result-camera.ts';
@@ -63,8 +63,9 @@ export class ResultReview {
       if (files.length) void this.import(files.map((file) => ({ path: file.webkitRelativePath || file.name, file })));
     });
     const loadPath = () => {
-      const path = $<HTMLInputElement>('result-folder-path').value;
-      if (path.trim()) void this.import(path);
+      const field = $<HTMLInputElement>('result-folder-path'), path = serverPath(field.value);
+      field.value = path;
+      if (path) void this.import(path);
     };
     $('load-result-folder-path').addEventListener('click', loadPath);
     $('result-folder-path').addEventListener('keydown', (event) => { if (event.key === 'Enter') loadPath(); });

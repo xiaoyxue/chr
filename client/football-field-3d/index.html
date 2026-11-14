@@ -51,6 +51,7 @@
               <section class="on-card on-placement-panel"><div class="on-card-head"><h2>场次配置广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">显示设置和位置草稿按场次保存，不会自动播出或回传 Fusion。</p></section>
               <section id="pitch-local-editor" class="on-card on-local-editor" aria-label="球场本地广告编辑"></section>
             </aside></div>
+            <div class="on-save-bar on-renderer-bar" data-renderer-bar><input class="on-path-input" data-renderer-path placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button class="on-button" type="button" data-renderer-export>导出渲染描述</button><button class="on-button primary" type="button" data-renderer-send>发送到渲染器</button><p class="on-help" role="status" data-renderer-status></p></div>
             </section>
             <section id="cloud-ad-workspace" class="on-cloud-workspace" aria-labelledby="cloud-ad-heading">
             <div class="on-section-heading"><div><p class="on-eyebrow">POINT CLOUD ADVERTISING</p><h2 id="cloud-ad-heading">点云广告 · 独立绘制区</h2><p class="on-help">在扫描点云的任意表面绘制另一类广告位；与上方球场广告的相机、列表和素材独立。</p></div></div>
@@ -101,7 +102,7 @@
             </div>
             <section class="on-card on-editor"><div class="on-card-head"><h2>Fusion 场次广告位微调</h2><button class="on-button" type="button" data-go-tab="preview">返回球场 / 点云广告编辑</button></div><div id="adjust-placement-list"></div><form id="placement-form" class="on-card-body"><h3 id="editor-name"></h3><p id="editor-info" class="on-help"></p><fieldset id="placement-edit-controls" disabled><div id="placement-fields" class="on-field-grid"></div><p id="placement-error" class="on-form-error" role="alert"></p><button class="on-button primary" type="submit">应用并保存本地草稿</button><button id="reset-placement" class="on-text-button" type="button">恢复此点位的场次配置</button></fieldset></form></section>
             <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿仅保存在本机，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
-            <div class="on-save-bar on-renderer-bar"><input id="renderer-package-path" class="on-path-input" placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button id="export-description" class="on-button" type="button">导出渲染描述</button><button id="send-to-renderer" class="on-button primary" type="button">发送到渲染器</button><p id="renderer-status" class="on-help" role="status">把当前广告位草稿（含显示设置）发送给 chr-server，替换其场景。</p></div>
+            <div class="on-save-bar on-renderer-bar" data-renderer-bar><input class="on-path-input" data-renderer-path placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button class="on-button" type="button" data-renderer-export>导出渲染描述</button><button class="on-button primary" type="button" data-renderer-send>发送到渲染器</button><p class="on-help" role="status" data-renderer-status></p></div>
           </div>
           <p id="engine-status" class="on-help" role="status"></p>
         </section>

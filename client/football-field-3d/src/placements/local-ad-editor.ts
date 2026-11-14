@@ -1,5 +1,5 @@
 import { LocalAdRepository } from './local-ad.ts';
-import { fetchServerFile } from '../shared/server-files.ts';
+import { fetchServerFile, serverPath } from '../shared/server-files.ts';
 import { planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
 import type { AdPlane, AdSpace, LocalAd, Vector3Tuple } from './local-ad.ts';
 
@@ -98,8 +98,9 @@ export class LocalAdEditor {
     });
     this.element('choose-local-ad-material').addEventListener('click', () => this.element<HTMLInputElement>('local-ad-material').click());
     const loadPath = async () => {
-      const path = this.element<HTMLInputElement>('local-ad-material-path').value, selected = this.selected();
-      if (!path.trim() || !selected || this.busy) return;
+      const field = this.element<HTMLInputElement>('local-ad-material-path'), path = serverPath(field.value), selected = this.selected();
+      field.value = path;
+      if (!path || !selected || this.busy) return;
       try { await this.setMaterial(selected, await fetchServerFile(path)); }
       catch (error) { this.options.error(error); }
     };

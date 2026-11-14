@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Starts chr-server and chr-monitor together for development; stopping either stops both.
+# Starts chr-server and chr-monitor together for development. Each runs on its own: a
+# process that exits is restarted after a short delay while the other keeps running.
+# Ctrl-C stops both.
 #
-# Usage: server/scripts/run-live.sh [--media] [--monitor-arg <arg>]... [chr-server options]
+# Usage: server/scripts/run-live.sh [--media] [--no-monitor] [--monitor-arg <arg>]...
+#            [chr-server options]
 #
 #   --media              Build both with the gstreamer-media feature (run inside
 #                        `nix develop .#media`), for --software-video, --srt and
 #                        --encoder gstreamer.
 #   --monitor-arg <arg>  Pass one argument to chr-monitor (repeatable), for example
 #                        --monitor-arg --srt --monitor-arg 127.0.0.1:9001
+#   --no-monitor         Do not start chr-monitor; start it separately with the same
+#                        --size, --fps and tap path
 #
 # --size, --fps and --monitor-tap go to both processes (as --tap for chr-monitor);
 # every other option goes to chr-server. Run from the repository root.
@@ -16,10 +21,15 @@ set -euo pipefail
 features=()
 server_args=()
 monitor_args=()
+with_monitor=1
 while (($#)); do
   case $1 in
     --media)
       features=(--features chr-runtime/gstreamer-media,chr-monitor/gstreamer-media)
+      shift
+      ;;
+    --no-monitor)
+      with_monitor=
       shift
       ;;
     --monitor-arg)
@@ -47,9 +57,11 @@ cargo build --locked --release -p chr-runtime -p chr-monitor "${features[@]}"
 target=$(cargo metadata --locked --format-version 1 --no-deps |
   sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
-"$target/release/chr-server" "${server_args[@]}" &
-server=$!
-"$target/release/chr-monitor" "${monitor_args[@]}" &
-monitor=$!
-trap 'kill "$server" "$monitor" 2>/dev/null || true; wait' EXIT INT TERM
-wait -n
+# shellcheck source=server/scripts/supervise.sh
+source "$(dirname "$0")/supervise.sh"
+trap stop_supervised EXIT INT TERM
+supervise chr-server "$target/release/chr-server" "${server_args[@]}"
+if [[ -n $with_monitor ]]; then
+  supervise chr-monitor "$target/release/chr-monitor" "${monitor_args[@]}"
+fi
+wait

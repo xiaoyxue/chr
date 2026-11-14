@@ -26,11 +26,11 @@ nix develop --command bash -c \
 ```
 
 The startup line declares `runtime_id`, `scene_id` and `configuration_id`.
-Copy the first two into the example harness's **Local program scene** panel,
-connect its existing WebSocket and open its existing WebRTC stream (served by a
-`chr-monitor` started next to the server; see the [server README](../README.md)
-or use `server/scripts/run-live.sh --synthetic-program …`). Alternatively
-pass `?runtime=…&scene=…` to the page. `render.get_configuration` takes the printed
+Pass the first two to the example harness's `npm run scene -- --runtime … --scene …`
+to edit the camera, sun and shadows, and watch the result in its read-only program
+monitor page, whose WebRTC stream comes from a `chr-monitor` started next to the
+server (see the [server README](../README.md) or use
+`server/scripts/run-live.sh --synthetic-program …`). `render.get_configuration` takes the printed
 runtime ID. NativeSocket clients use exactly the same JSON-RPC methods and IDs.
 No discovery RPC, DataChannel commands or arbitrary file/URL registration is added.
 Run namespaces include process ID, nanosecond startup time and a nonwrapping
@@ -152,11 +152,10 @@ after a restart.
 CPU tests cover queue-full/drop-before-transmit, cancelled physical draining,
 repeated resource reuse, explicit port rejection and retained-control IPC parity.
 
-The harness has typecheck/unit/build gates and an optional real Chrome self-test:
-run its existing `verify:browser` with a URL containing
-`program=1&runtime=…&scene=…`. It clicks the actual camera/light/shadow controls,
-checks revisions/reset, and detects a pixel change in the **decoded SDI video**.
-Use a project-local `TMPDIR` for its isolated browser profile when required.
+The harness has typecheck/unit/build gates; its `npm run scene` helpers have unit
+tests for revisioned camera/light/shadow edits and reset, and `verify:browser`
+checks that a real Chrome decodes the program stream. Use a project-local `TMPDIR`
+for its isolated browser profile when required.
 
 No physical capture/output card, hardware encoder, production authorization,
 calibration/recording/tracking service, Windows or interactive native-window

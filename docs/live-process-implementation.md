@@ -113,7 +113,8 @@ chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
 - The render harness takes a separate monitor URL for video (`?monitor=`,
   `npm run verify -- --monitor`); control stays on `chr-server`. The development
   launcher `server/scripts/run-live.sh` starts both processes with matching
-  `--size`/`--fps`/tap and stops both when either exits.
+  `--size`/`--fps`/tap and restarts whichever exits while the other keeps
+  running; `--no-monitor` leaves the monitor to be started separately.
 
 ### Step 2 acceptance
 

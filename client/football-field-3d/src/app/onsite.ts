@@ -6,7 +6,7 @@ import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
 import { LocalAdRepository, validatePitchAd } from '../placements/local-ad.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
-import { fetchServerFile, isServerPath } from '../shared/server-files.ts';
+import { fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
 import { blendedMaterials, describeScene, loadDescription, sha256, type DescribedAsset } from '../render/render-description.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
@@ -270,6 +270,7 @@ function renderAnalysis() {
   }
   cloudEngine?.setCloud(result?.cloud, result?.pointSize ?? 0.15);
   pitchEditor.setAvailable(ready);
+  renderRendererBars();
   localEditor.setCloud(result?.cloud.id);
   localEditor.setAvailable(Boolean(current() && result && cloudEngine?.isAvailable));
   void resultReview.setLocalAds(localEditor.ads, result?.aligned ?? false).catch(showError);
@@ -369,6 +370,7 @@ async function ensureEngine() {
       engine = new PitchPreview($('#viewport'), $('#camera-list'), (error) => {
         engineReadyMatchId = undefined;
         pitchEditor.setAvailable(false);
+        renderRendererBars();
         $('#engine-status').textContent = error.message;
         showError(error);
       });
@@ -596,7 +598,7 @@ async function importOfflinePackage(source: File | string) {
     }
     await offlinePackages.write(packageData);
     if (typeof source === 'string')
-      localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [packageData.id]: source.trim() }));
+      localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [packageData.id]: serverPath(source) }));
     const next = [...records.filter((item) => item.match.id !== packageData.match.id),
       { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [] }];
     try { repository.write(next); }
@@ -638,8 +640,8 @@ $<HTMLInputElement>('#offline-package-file').addEventListener('change', (event) 
 $<HTMLFormElement>('#match-lookup-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!records || libraryBusy) return;
-  const lookup = $<HTMLInputElement>('#match-lookup-id').value;
-  if (isServerPath(lookup)) { void importOfflinePackage(lookup); return; }
+  const field = $<HTMLInputElement>('#match-lookup-id'), lookup = field.value;
+  if (isServerPath(lookup)) { field.value = serverPath(lookup); void importOfflinePackage(field.value); return; }
   setLibraryBusy(true);
   clearError();
   $('#lookup-status').textContent = 'Requesting saved match configuration from Fusion...';
@@ -709,8 +711,9 @@ $<HTMLButtonElement>('#choose-cloud-video').addEventListener('click', () => $<HT
 $<HTMLButtonElement>('#choose-scan-file').addEventListener('click', () => $<HTMLInputElement>('#scan-file').click());
 function bindServerPath(input: string, button: string, load: (path: string) => Promise<void>) {
   const run = () => {
-    const path = $<HTMLInputElement>(input).value;
-    if (path.trim()) void load(path).catch(showError);
+    const field = $<HTMLInputElement>(input), path = serverPath(field.value);
+    field.value = path;
+    if (path) void load(path).catch(showError);
   };
   $(button).addEventListener('click', run);
   $(input).addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') run(); });
@@ -817,6 +820,40 @@ $<HTMLButtonElement>('#export-placements').addEventListener('click', () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+// Both workspace tabs carry the same renderer bar; they share one package path and state.
+const rendererBars = [...document.querySelectorAll<HTMLElement>('[data-renderer-bar]')];
+const rendererPaths = rendererBars.map((bar) => bar.querySelector<HTMLInputElement>('[data-renderer-path]'));
+/** What the running renderer action is doing, or empty when idle. */
+let rendererBusy = '';
+let rendererMessage = '';
+let rendererMatchId: string;
+
+/** Why the current draft cannot be sent yet, or undefined when it can. */
+function rendererBlocker() {
+  const record = current();
+  if (!record || record.match.mode !== 'offline' || !record.match.offlinePackageId)
+    return '仅离线 ZIP 导入的场次可以发送到渲染器。';
+  if (enginePending || engineReadyMatchId !== record.match.id) return '等待球场预览加载素材后可发送到渲染器…';
+  if (!isServerPath(rendererPaths[0].value)) return '填写 chr-server 可读取的离线 ZIP 路径（--asset-root 之内）后可发送。';
+}
+
+function renderRendererBars() {
+  const record = current();
+  if (record?.match.id !== rendererMatchId) {
+    rendererMatchId = record?.match.id;
+    rendererMessage = '';
+    const remembered = record?.match.offlinePackageId ? packagePaths()[record.match.offlinePackageId] ?? '' : '';
+    for (const input of rendererPaths) input.value = remembered;
+  }
+  const blocker = rendererBlocker();
+  for (const bar of rendererBars) {
+    bar.querySelector<HTMLButtonElement>('[data-renderer-send]').disabled = Boolean(rendererBusy || blocker);
+    bar.querySelector<HTMLButtonElement>('[data-renderer-export]').disabled = Boolean(rendererBusy || blocker);
+    bar.querySelector('[data-renderer-status]').textContent = rendererBusy
+      || (blocker ?? (rendererMessage || '把当前广告位草稿（含显示设置）发送给 chr-server，替换其场景。'));
+  }
+}
+
 const MATERIAL_ENTRY: Record<string, { kind: DescribedAsset['kind']; extension: string }> = {
   'model/gltf-binary': { kind: 'glb', extension: '.glb' },
   'image/png': { kind: 'image_quad', extension: '.png' },
@@ -826,13 +863,8 @@ const MATERIAL_ENTRY: Record<string, { kind: DescribedAsset['kind']; extension: 
 /** The current draft as a render description scene, with assets read from the offline package. */
 async function renderScene() {
   const record = current();
-  if (!record || record.match.mode !== 'offline' || !record.match.offlinePackageId)
-    throw new Error('Only matches imported from an offline ZIP can be sent to the renderer.');
-  const input = $<HTMLInputElement>('#renderer-package-path');
-  const packagePath = input.value.trim() || packagePaths()[record.match.offlinePackageId] || '';
-  if (!isServerPath(packagePath)) throw new Error('Enter the ZIP path on the onsite server that chr-server may read (--asset-root).');
-  input.value = packagePath;
-  if (!engine || engineReadyMatchId !== record.match.id) throw new Error('Open the pitch preview and wait for the materials to load.');
+  if (rendererBlocker()) throw new Error(rendererBlocker());
+  const packagePath = serverPath(rendererPaths[0].value);
   const assets = new Map<string, DescribedAsset>();
   const masked: string[] = [];
   for (const slot of record.draft) {
@@ -849,34 +881,52 @@ async function renderScene() {
     geometry: engine.renderGeometry(), assets, packagePath }) };
 }
 
-$<HTMLButtonElement>('#send-to-renderer').addEventListener('click', async () => {
-  const status = $('#renderer-status');
-  try {
-    status.textContent = 'Sending the scene to chr-server...';
-    const { scene, masked } = await renderScene();
-    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
-    const loaded = await loadDescription(url, scene) as { scene_revision: string; assets_imported: number; assets_reused: number };
-    status.textContent = `已发送 ${scene.instances.length} 个广告位：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
-      + (masked.length ? ` 渲染器不支持半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '');
-  } catch (error) {
-    status.textContent = `发送失败：${error instanceof Error ? error.message : String(error)}`;
-  }
-});
-$<HTMLButtonElement>('#export-description').addEventListener('click', async () => {
-  const status = $('#renderer-status');
-  try {
-    const record = current();
-    const url = URL.createObjectURL(new Blob([JSON.stringify({ scene: (await renderScene()).scene }, null, 2)], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `render-scene-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    status.textContent = '已导出渲染描述的 scene 部分；启动文件还需要 camera 部分。';
-  } catch (error) {
-    status.textContent = `导出失败：${error instanceof Error ? error.message : String(error)}`;
-  }
-});
+/** Runs one renderer action at a time; a second click while it runs is ignored. */
+async function rendererAction(busy: string, action: () => Promise<string>, failure: string) {
+  if (rendererBusy) return;
+  rendererBusy = busy;
+  renderRendererBars();
+  try { rendererMessage = await action(); }
+  catch (error) { rendererMessage = `${failure}：${error instanceof Error ? error.message : String(error)}`; }
+  finally { rendererBusy = ''; renderRendererBars(); }
+}
+
+const sendToRenderer = () => rendererAction('正在发送到 chr-server…', async () => {
+  const record = current();
+  const { scene, masked } = await renderScene();
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
+  const loaded = await loadDescription(url, scene) as { scene_revision: string; assets_imported: number; assets_reused: number };
+  localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [record.match.offlinePackageId]: serverPath(rendererPaths[0].value) }));
+  return `已发送 ${scene.instances.length} 个广告位：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
+    + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '');
+}, '发送失败');
+
+const exportDescription = () => rendererAction('正在生成渲染描述…', async () => {
+  const record = current();
+  const url = URL.createObjectURL(new Blob([JSON.stringify({ scene: (await renderScene()).scene }, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `render-scene-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return '已导出渲染描述的 scene 部分；启动文件还需要 camera 部分。';
+}, '导出失败');
+
+for (const bar of rendererBars) {
+  const input = bar.querySelector<HTMLInputElement>('[data-renderer-path]');
+  input.addEventListener('input', () => {
+    for (const other of rendererPaths) if (other !== input) other.value = input.value;
+    renderRendererBars();
+  });
+  input.addEventListener('change', () => {
+    for (const other of rendererPaths) other.value = serverPath(input.value);
+    renderRendererBars();
+  });
+  input.addEventListener('keydown', (event) => { if (event.key === 'Enter') void sendToRenderer(); });
+  bar.querySelector('[data-renderer-send]').addEventListener('click', () => { void sendToRenderer(); });
+  bar.querySelector('[data-renderer-export]').addEventListener('click', () => { void exportDescription(); });
+}
+renderRendererBars();
 window.addEventListener('hashchange', () => { void renderRoute(); });
 window.addEventListener('beforeunload', () => { cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); cloudEngine?.dispose(); resultReview.dispose(); });
 

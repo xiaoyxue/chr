@@ -56,6 +56,10 @@ export const Methods = {
   renderWorker: {
     getStatus: "render.get_worker_status",
   },
+  /** Answered only by a tracked program (`chr-server --tracked-scene` or `--description`). */
+  tracking: {
+    getStatus: "tracking.get_status",
+  },
   /** Served by chr-monitor. */
   monitor: {
     getStatus: "monitor.get_status",
@@ -123,6 +127,22 @@ export interface WorkerStatus {
   /** Frames without CG whose input could not be converted, so the port repeated. */
   repeated_for_unavailable_clean_feed: number;
   last_error: string | null;
+}
+
+/** Tracking join counters since the server started. */
+export interface TrackingStatus {
+  /** `tracking.frame` calls accepted into the backlog. */
+  samples_received: number;
+  /** Calls rejected because their frame was already rendered or skipped. */
+  samples_late: number;
+  /** Input frames submitted for rendering with their camera. */
+  frames_joined: number;
+  /** Input frames whose camera did not arrive within the wait; not rendered. */
+  frames_without_tracking: number;
+  /** Input frames not rendered because the backlog was full or a newer frame resolved first. */
+  frames_dropped: number;
+  /** Captured frames the input ring overwrote before the server read them. */
+  frames_overwritten: number;
 }
 
 /** chr-monitor counters since the monitor started. */
