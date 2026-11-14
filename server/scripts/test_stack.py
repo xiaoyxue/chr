@@ -46,21 +46,35 @@ class ComponentTests(unittest.TestCase):
         self.assertIn("srt://127.0.0.1:9001?mode=caller&latency=120000", by_name["srt-relay"].command)
 
 
-class SummaryTests(unittest.TestCase):
-    def test_lists_every_process_address_and_forward(self):
-        config = stack.Config(scene="s.json", video="v.mp4", server_ws="127.0.0.1:18987", monitor_ws="127.0.0.1:18989",
-                              webrtc_tcp="127.0.0.1:18992", srt="10.0.0.5:18990", srt_relay_port=18991)
-        text = stack.summary(config, probe=False)
-        self.assertIn("4 components (monitor-page, pitch-studio, render, srt-relay), 8 working processes", text)
-        for address in ["ws://127.0.0.1:18987", "ws://127.0.0.1:18989", "srt://10.0.0.5:18990",
-                        "tcp://127.0.0.1:18992-18995", "tcp://127.0.0.1:18991", "http://127.0.0.1:4173/", "http://127.0.0.1:5173/"]:
-            self.assertIn(address, text)
-        self.assertEqual(stack.forwarded_ports(config), [4173, 5173, 18987, 18989, 18992, 18993, 18994, 18995, 18991])
+class ReportTests(unittest.TestCase):
+    def test_reads_proc_addresses(self):
+        self.assertEqual(stack.socket_address("0100007F:2253"), "127.0.0.1:8787")
+        self.assertEqual(stack.socket_address("00000000000000000000000001000000:1F90"), "::1:8080")
 
-    def test_disabled_components_are_left_out(self):
-        config = stack.Config(scene="s.json", video="v.mp4", pitch_studio_port=0, monitor_page_port=0)
-        self.assertIn("1 components (render), 5 working processes", stack.summary(config, probe=False))
-        self.assertNotIn(0, stack.forwarded_ports(config))
+    def test_short_names(self):
+        self.assertEqual(stack.describe(["/x/target/chr-renderer-cli", "worker"]), "chr-renderer-cli worker")
+        self.assertEqual(stack.describe(["bash", "/x/server/scripts/run-tracked.sh", "--scene", "s.json"]), "bash run-tracked.sh")
+        self.assertEqual(stack.describe(["python3", "server/scripts/stack.py", "relay", "srt://a:1"]), "python3 stack.py relay")
+        self.assertEqual(stack.describe(["npm exec vite --host 127.0.0.1"]), "npm exec vite")
+
+    def test_finds_the_ports_a_process_group_holds(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import socket, time\ns = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+             "print(s.getsockname()[1], flush=True); time.sleep(30)"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            port = int(child.stdout.readline())
+            self.assertEqual(stack.group_processes(child.pid)[0][0], child.pid)
+            self.assertIn(f"tcp 127.0.0.1:{port}", stack.process_sockets(child.pid, stack.listening_sockets()))
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+
+    def test_forwards_skip_disabled_ports(self):
+        config = stack.Config(scene="s.json", video="v.mp4", server_ws="127.0.0.1:18987", monitor_ws="127.0.0.1:18989",
+                              webrtc_tcp="127.0.0.1:18992", srt_relay_port=18991, monitor_page_port=0)
+        self.assertEqual(stack.forwarded_ports(config), [4173, 18987, 18989, 18992, 18993, 18994, 18995, 18991])
 
 
 class RecordTests(unittest.TestCase):
