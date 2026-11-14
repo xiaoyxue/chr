@@ -3,7 +3,7 @@
 **Status:** `implemented` opt-in profile `chr-render-description-v1`, used with the
 [tracked camera simulation](tracking-simulation.md). It describes what to draw and
 with which lens, independent of any client's own scene model. The schema lives in
-`chr_common::description`; the football client produces it from a Fusion match.
+`chr_common::description`; the pitch-studio client produces it from a Fusion match.
 
 ## Shape
 
@@ -89,9 +89,9 @@ restart. When the asset list grows, `chr-server` replaces its worker at once,
 without backoff. Until the new worker is ready (about one second for a 27 MB
 GLB), frames go out as clean feed or repeats, as during any worker restart.
 
-## From the football client
+## From the pitch-studio client
 
-`client/football-field-3d` converts the current match's placement draft:
+`client/pitch-studio` converts the current match's placement draft:
 
 - **3D placements:** `fitFusionModel` on the loaded GLB's three.js bounds. In
   chr's basis, the preview's centring becomes the translation `(-cx, -cz,
@@ -134,7 +134,7 @@ the client.
 cargo test --locked -p chr-runtime --test description
 cargo test --locked -p chr-runtime --test description -- --ignored   # hardware GPU
 cargo test --locked -p chr-renderer --test glb
-npm --prefix client/football-field-3d run test:offline
+npm --prefix client/pitch-studio run test:offline
 ```
 
 The tests cover:

@@ -7,7 +7,7 @@
 
 The stack is the tracked-camera simulation (chr-tracking-sim, chr-server and
 chr-monitor through run-tracked.sh, which restarts whichever exits), the
-football client, the program monitor page and an optional SRT-to-TCP relay for
+pitch-studio client, the program monitor page and an optional SRT-to-TCP relay for
 viewers behind an SSH port forward. Machine-specific paths live in a local TOML
 file (default output/stack/stack.toml; see stack.example.toml).
 
@@ -52,7 +52,7 @@ class Config:
     monitor_ws: str = "127.0.0.1:8789"
     webrtc_tcp: str = "127.0.0.1:8790"
     srt_relay_port: int = 0
-    football_port: int = 4173
+    pitch_studio_port: int = 4173
     monitor_page_port: int = 5173
 
 
@@ -111,7 +111,7 @@ def components(config: Config) -> list[Component]:
              str(config.srt_relay_port)],
             {}, [("SRT relay", "127.0.0.1", config.srt_relay_port)]))
     for name, directory, port, env in (
-        ("football", "client/football-field-3d", config.football_port, {"CHR_RENDER_URL": f"ws://{config.server_ws}"}),
+        ("pitch-studio", "client/pitch-studio", config.pitch_studio_port, {"CHR_RENDER_URL": f"ws://{config.server_ws}"}),
         ("monitor-page", "client/example/render-harness", config.monitor_page_port, {}),
     ):
         if port:

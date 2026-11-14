@@ -22,7 +22,7 @@ class ConfigTests(unittest.TestCase):
     def test_example_config_loads(self):
         example = Path(stack.__file__).with_name("stack.example.toml")
         config = stack.load_config(example)
-        self.assertEqual(config.football_port, 4173)
+        self.assertEqual(config.pitch_studio_port, 4173)
         self.assertEqual(config.srt_relay_port, 0)
 
     def test_rejects_unknown_and_missing_keys(self):
@@ -34,7 +34,7 @@ class ConfigTests(unittest.TestCase):
 
 class ComponentTests(unittest.TestCase):
     def test_optional_components_and_render_arguments(self):
-        config = stack.Config(scene="s.json", video="v.mp4", nixgl=False, football_port=0, srt_relay_port=18991,
+        config = stack.Config(scene="s.json", video="v.mp4", nixgl=False, pitch_studio_port=0, srt_relay_port=18991,
                               srt="0.0.0.0:9001", asset_root="/assets")
         by_name = {component.name: component for component in stack.components(config)}
         self.assertEqual(sorted(by_name), ["monitor-page", "render", "srt-relay"])

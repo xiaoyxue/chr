@@ -265,7 +265,7 @@ renders through the worker to the SDI port, which `chr-monitor` streams. See
 `chr-server --description <json>` draws a `chr-render-description-v1` scene
 (GLB and image-quad assets placed by 4×4 matrices, one asset shared by many
 instances) through the same tracked camera. With `--asset-root <dir>`, clients
-replace the scene at runtime with `description.load`; the football client sends
+replace the scene at runtime with `description.load`; the pitch-studio client sends
 its Fusion match this way. Add `--description <json> --asset-root <dir>` to
 `run-tracked.sh`. See [Render description](docs/render-description.md).
 
@@ -765,7 +765,7 @@ monitor and WebRTC diagnostics) and verification scripts are in
 
 `server/scripts/stack.py` starts, stops and reports the whole local stack: the
 tracked-camera simulation (`run-tracked.sh`: simulator, `chr-server`,
-`chr-monitor`), the football client, the read-only program monitor page and an
+`chr-monitor`), the pitch-studio client, the read-only program monitor page and an
 optional SRT-to-TCP relay for `ffplay` through SSH. Copy
 `server/scripts/stack.example.toml` to `output/stack/stack.toml` and set the
 manifest, clip, optional description and asset root, addresses and ports; then
