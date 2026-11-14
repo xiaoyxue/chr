@@ -1,0 +1,30 @@
+# Copy to output/stack/stack.toml (ignored by Git) and edit; used by
+# `uv run server/scripts/stack.py start|stop|restart|status`.
+# Relative paths are from the repository root.
+
+# calibrated-video-v1 manifest and its clip: the simulated tracked camera.
+scene = "/path/to/clip-manifest.json"
+video = "/path/to/clip.mp4"
+
+# Optional render description drawn instead of the manifest's scene, and the
+# directory clients may load description packages from (description.load).
+# description = "output/description/start.json"
+# asset_root = "/path/to/packages"
+
+size = "1280x720"
+# Socket, input ring and program tap; kept between runs.
+# dir = "/run/user/1000/chr-stack"
+# Wrap GPU processes with nixGLNvidia (non-NixOS NVIDIA hosts).
+nixgl = true
+
+# chr-monitor SRT listener; use an interface address to reach it from other hosts.
+srt = "127.0.0.1:9001"
+server_ws = "127.0.0.1:8787"
+monitor_ws = "127.0.0.1:8789"
+# First of four ICE-TCP ports for WebRTC viewers behind an SSH forward.
+webrtc_tcp = "127.0.0.1:8790"
+
+# Set a port to 0 to leave that component out.
+srt_relay_port = 0        # SRT -> TCP relay on 127.0.0.1, for ffplay through SSH
+football_port = 4173      # football-field-3d dev server (send to renderer)
+monitor_page_port = 5173  # read-only program monitor page

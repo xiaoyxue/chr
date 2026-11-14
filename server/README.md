@@ -12,7 +12,7 @@ repository root; its server crates live here:
 | `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
-| `scripts/` | | Windows development helpers, a Linux software video-input probe and the `run-live.sh` launcher |
+| `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers and the `stack.py` one-command development stack |
 
 The video monitor is a separate process, `chr-monitor`, in the repository-root
 `monitor/` crate (not under `server/`: it is optional and may run on another host
@@ -760,6 +760,31 @@ server/scripts/run-live.sh --monitor-arg --webrtc-tcp --monitor-arg 127.0.0.1:87
 The browser program monitor (read-only: video plus server, worker, tracking,
 monitor and WebRTC diagnostics) and verification scripts are in
 `client/example/render-harness/`.
+
+### One-command development stack
+
+`server/scripts/stack.py` starts, stops and reports the whole local stack: the
+tracked-camera simulation (`run-tracked.sh`: simulator, `chr-server`,
+`chr-monitor`), the football client, the read-only program monitor page and an
+optional SRT-to-TCP relay for `ffplay` through SSH. Copy
+`server/scripts/stack.example.toml` to `output/stack/stack.toml` and set the
+manifest, clip, optional description and asset root, addresses and ports; then
+from the repository root, outside any Nix shell:
+
+```sh
+uv run server/scripts/stack.py start     # waits until every endpoint answers
+uv run server/scripts/stack.py status
+uv run server/scripts/stack.py stop
+uv run server/scripts/stack.py restart
+```
+
+Each component runs detached in its own process group, logs to
+`output/stack/<name>.log` and is recorded in `output/stack/<name>.pid` with its
+start time, so `stop` signals only processes the script started (TERM, then KILL
+after 15 s). `start` skips a component that is already running or whose port is
+taken. Inside the render component the processes still restart on their own.
+The script uses only the standard library; `python3 server/scripts/stack.py`
+works as well.
 
 ### Program stills (chr-renderer-cli)
 

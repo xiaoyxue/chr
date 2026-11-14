@@ -135,6 +135,11 @@ placement draft into a render description and loads it into `chr-server` through
 the page's `/chr-render` WebSocket proxy (`CHR_RENDER_URL`); see
 `server/docs/render-description.md`.
 
+`uv run server/scripts/stack.py start|stop|restart|status` starts and stops the
+whole local development stack (tracked simulation, football client, program
+monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see
+`server/README.md`.
+
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.
 Validate on the actual target rather than assuming an output declaration proves
@@ -162,7 +167,7 @@ client.
 | --- | --- |
 | `client-toolchain` | Node.js, npm, and TypeScript version commands execute in a Nix build sandbox |
 | `football-field-3d` | `client/football-field-3d` typecheck, production build and offline-package tests (`npm run test:offline`) from the locked npm dependencies |
-| `media-source` | Synthetic MP4 decoding into a GStreamer appsink, pixel integrity, fractional-rate loop timing and short-input failure |
+| `media-source` | Python tests in `server/scripts/`: synthetic MP4 decoding into a GStreamer appsink, pixel integrity, fractional-rate loop timing and short-input failure; `stack.py` configuration, components and process records |
 | `fmt` | Rust workspace formatting |
 | `clippy` | Rust workspace and all targets, with warnings treated as errors |
 | `tests` | Rust workspace CPU tests; hardware GPU tests remain explicitly ignored |
