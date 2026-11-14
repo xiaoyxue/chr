@@ -11,7 +11,9 @@ import { blendedMaterials, describeScene, loadDescription, sha256, type Describe
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
-import type { MatchRecord } from '../shared/types.ts';
+import { anchorPoint, moveAnchor, resizeSide, uniformScale, type Anchor } from '../placements/ground-edit.ts';
+import { UndoStack } from '../shared/undo-stack.ts';
+import type { MatchRecord, Placement } from '../shared/types.ts';
 import type { PitchPreview } from '../scene/pitch-preview.ts';
 import type { LocalAnalysis } from '../analysis/ply-result.ts';
 
@@ -37,6 +39,12 @@ let matchLoadVersion = 0;
 let engineQueue = Promise.resolve();
 let scanURL: string;
 let scanAbort: AbortController;
+// Editing state of the selected Fusion placement; UI-only and never saved.
+let unlockedId: string;
+let anchor: Anchor = 'top-left';
+let keepAspect = true;
+let axesVisible = true;
+const undo = new UndoStack(renderUndo);
 const resultReview = new ResultReview(showError, clearError);
 const pitchEditor = new LocalAdEditor({
   root: $('#pitch-local-editor'),
@@ -52,6 +60,7 @@ const pitchEditor = new LocalAdEditor({
   cancelPick: () => engine?.cancelGroundRectangle(),
   validate: (ad) => validatePitchAd(ad, current().match.field),
   error: showError,
+  recordUndo: (label, restore) => undo.push({ label, restore }),
 });
 const localEditor = new LocalAdEditor({
   root: $('#cloud-local-editor'),
@@ -167,39 +176,116 @@ function renderLists() {
   const record = current();
   if (!record) return;
   const hidden = new Set(record.hiddenPlacementIds);
-  const markup = record.draft.map((slot) => `<div class="on-slot-row ${slot.id === selectedId ? 'active' : ''} ${hidden.has(slot.id) ? 'is-hidden' : ''}">
-    <button type="button" class="on-slot" aria-pressed="${slot.id === selectedId}" data-select-id="${escapeHTML(slot.id)}">
-      <span class="on-badge ${slot.type === '3D' ? 'amber' : ''}">${slot.type}</span><span><strong>${escapeHTML(slot.name)}</strong><small>${escapeHTML(slot.id)}<br />X ${slot.x.toFixed(1)} / Y ${slot.y.toFixed(1)} m · ${slot.rz.toFixed(1)}°</small></span>
+  const markup = record.draft.map((slot) => {
+    const enabled = !hidden.has(slot.id), active = slot.id === selectedId, unlocked = active && slot.id === unlockedId;
+    return `<div class="on-slot-row ${active ? 'active' : ''} ${enabled ? '' : 'is-hidden'}">
+    <button type="button" class="on-slot" aria-pressed="${active}" data-select-id="${escapeHTML(slot.id)}">
+      <span class="on-badge ${slot.type === '3D' ? 'amber' : ''}">${slot.type}</span><span><strong>${escapeHTML(slot.name)}</strong><small>${escapeHTML(slot.id)}<br />X ${slot.x.toFixed(2)} / Y ${slot.y.toFixed(2)} m${slot.type === '2D' ? ` · ${slot.sizeX.toFixed(2)} × ${slot.sizeY.toFixed(2)} m` : ` · ×${slot.scaleX.toFixed(2)}`}</small></span>
+      ${active ? `<span class="on-lock-state ${unlocked ? 'unlocked' : ''}" title="${unlocked ? '已解锁，可编辑' : '已锁定'}">${unlocked ? '🔓' : '🔒'}</span>` : ''}
     </button>
-    <button type="button" class="on-visibility-toggle" role="switch" aria-checked="${!hidden.has(slot.id)}" aria-label="显示广告位 ${escapeHTML(slot.name)}" title="${hidden.has(slot.id) ? '显示' : '隐藏'}此广告位（仅本地预览）" data-visibility-id="${escapeHTML(slot.id)}" ${enginePending ? 'disabled' : ''}>
-      <span class="on-toggle-track" aria-hidden="true"></span><span>${hidden.has(slot.id) ? '已隐藏' : '已显示'}</span>
+    <button type="button" class="on-visibility-toggle" role="switch" aria-checked="${enabled}" aria-label="启用广告位 ${escapeHTML(slot.name)}" title="${enabled ? '停用：不在预览和渲染器中显示' : '启用此广告位'}" data-visibility-id="${escapeHTML(slot.id)}" ${enginePending ? 'disabled' : ''}>
+      <span class="on-toggle-track" aria-hidden="true"></span><span>${enabled ? '启用' : '停用'}</span>
     </button>
-  </div>`).join('');
+  </div>`;
+  }).join('');
   $('#preview-placement-list').innerHTML = markup;
-  $('#adjust-placement-list').innerHTML = `<label class="on-editor-select">选择广告位<select id="editor-placement-select">${record.draft.map((slot) => `<option value="${escapeHTML(slot.id)}" ${slot.id === selectedId ? 'selected' : ''}>${slot.type} · ${escapeHTML(slot.name)}</option>`).join('')}</select></label>`;
+  $('#adjust-placement-list').innerHTML = `<label class="on-editor-select">选择广告位<select id="editor-placement-select">${record.draft.map((slot) => `<option value="${escapeHTML(slot.id)}" ${slot.id === selectedId ? 'selected' : ''}>${slot.type} · ${escapeHTML(slot.name)}${hidden.has(slot.id) ? '（已停用）' : ''}</option>`).join('')}</select></label>`;
   $('#placement-count').textContent = String(record.draft.length);
 }
 
-function renderEditor() {
-  const slot = selected();
-  $<HTMLFormElement>('#placement-form').hidden = !slot;
+const metres = (value: number) => String(Math.round(value * 1000) / 1000);
+const field = (name: string, label: string, value: number, bounds = '') =>
+  `<label>${label}<input name="${name}" type="number" step="0.01" ${bounds} value="${metres(value)}" required aria-label="${label}" /></label>`;
+
+/** The inspector of the selected Fusion placement; geometry fields are editable only while it is unlocked. */
+function renderInspector() {
+  const slot = selected(), record = current();
+  $('#placement-inspector').hidden = !slot;
   if (!slot) return;
-  $('#editor-name').textContent = slot.name;
-  $('#editor-info').textContent = slot.type === '2D'
-    ? '地面位置 / 尺寸以米计；绕 Z 旋转，始终贴地。'
-    : '位置以米计，旋转以度计，缩放为原模型的倍数；+Z 向下。';
-  const labels = slot.type === '3D' && slot.region
-    ? { x: 'Region X / m', y: 'Region Y / m', rz: 'Extra yaw / deg', scaleX: 'Uniform scale' }
-    : slot.type === '2D'
-    ? { x: 'X / m', y: 'Y / m', rz: '旋转 Z / °', sizeX: '长 X / m', sizeY: '宽 Y / m' }
-    : { x: 'X / m', y: 'Y / m', z: 'Z / m', rx: '旋转 X / °', ry: '旋转 Y / °', rz: '旋转 Z / °', scaleX: '缩放 X / ×', scaleY: '缩放 Y / ×', scaleZ: '缩放 Z / ×' };
-  const values: Record<string, unknown> = { ...slot };
-  $('#placement-fields').innerHTML = Object.entries(labels).map(([key, label]) => {
-    const min = key.startsWith('scale') || key.startsWith('size') ? 'min="0.1"' : key.startsWith('r') ? 'min="-180" max="180"' : '';
-    const max = key.startsWith('scale') ? 'max="5"' : '';
-    return `<label>${label}<input name="${key}" type="number" step="any" ${min} ${max} value="${values[key]}" required aria-label="${label}" /></label>`;
-  }).join('');
+  const ready = !enginePending && engineReadyMatchId === currentId;
+  const enabled = !record.hiddenPlacementIds?.includes(slot.id), unlocked = slot.id === unlockedId;
+  $('#inspector-name').textContent = slot.name;
+  $('#inspector-type').textContent = slot.type;
+  $('#inspector-type').classList.toggle('amber', slot.type === '3D');
+  const lock = $<HTMLButtonElement>('#inspector-lock');
+  lock.disabled = !ready || !enabled;
+  lock.setAttribute('aria-pressed', String(unlocked));
+  lock.textContent = unlocked ? '🔓 已解锁' : '🔒 已锁定';
+  $('#inspector-state').textContent = !enabled ? '此广告位已停用：不在预览和渲染器中显示。启用后才能解锁编辑。'
+    : !ready ? '等待球场预览加载完成…'
+    : unlocked ? '已解锁：修改数值后按 Enter 或离开输入框即生效；俯视图中可拖动移动' + (slot.type === '2D' ? '、拖角点调整大小。' : '。')
+    : '已锁定，避免误触。点击“已锁定”或按 L 解锁后再调整。';
+  $<HTMLFieldSetElement>('#placement-edit-controls').disabled = !ready || !enabled || !unlocked;
+  $<HTMLButtonElement>('#reset-placement').disabled = !ready || !enabled || !unlocked;
+  const readonly = (text: string) => `<p class="on-readonly">${text}</p>`;
+  const focused = document.activeElement instanceof HTMLInputElement && document.activeElement.closest('#placement-fields') ? document.activeElement.name : undefined;
+  if (slot.type === '2D') {
+    const point = anchorPoint(slot, anchor);
+    $('#placement-fields').innerHTML = `<div class="on-inspector-group"><h3>位置（世界坐标）</h3>
+      <div class="on-segmented" role="radiogroup" aria-label="定位锚点">${(['top-left', 'centre'] as const).map((value) =>
+        `<label><input type="radio" name="anchor" value="${value}" ${anchor === value ? 'checked' : ''} />${value === 'top-left' ? '左上角' : '中心'}</label>`).join('')}</div>
+      <div class="on-field-grid">${field('anchorX', `${anchor === 'top-left' ? '左上角' : '中心'} X / m`, point.x)}${field('anchorY', `${anchor === 'top-left' ? '左上角' : '中心'} Y / m`, point.y)}</div>
+      <p class="on-help">左上角指俯视图中广告局部 −X / −Y 方向的角点（+X 向右，+Y 向下）。</p></div>
+      <div class="on-inspector-group"><h3>尺寸</h3>
+      <div class="on-field-grid">${field('sizeX', '长 X / m', slot.sizeX, 'min="0.1"')}${field('sizeY', '宽 Y / m', slot.sizeY, 'min="0.1"')}</div>
+      <label class="on-check"><input type="checkbox" name="keepAspect" ${keepAspect ? 'checked' : ''} /> 锁定宽高比（${metres(slot.sizeX / slot.sizeY)} : 1）</label></div>
+      ${readonly(`旋转 Z ${slot.rz.toFixed(1)}° · 暂不支持调整旋转`)}`;
+  } else {
+    const maximum = slot.region ? Math.min(5, 1 / slot.modelPose.scale) : 5;
+    $('#placement-fields').innerHTML = `<div class="on-inspector-group"><h3>位置（世界坐标）</h3>
+      <div class="on-field-grid">${field('x', `${slot.region ? '区域' : ''}中心 X / m`, slot.x)}${field('y', `${slot.region ? '区域' : ''}中心 Y / m`, slot.y)}</div></div>
+      <div class="on-inspector-group"><h3>整体缩放</h3>
+      <div class="on-field-grid">${field('scale', '缩放 / ×', slot.scaleX, `min="0.1" max="${metres(maximum)}"`)}</div>
+      <p class="on-help">按比例整体缩放，范围 0.1–${metres(maximum)} 倍${slot.region ? '，模型始终限制在区域内' : ''}。</p></div>
+      ${readonly(`高度 Z ${slot.z.toFixed(2)} m · 旋转 X / Y / Z ${slot.rx.toFixed(1)}° / ${slot.ry.toFixed(1)}° / ${slot.rz.toFixed(1)}° · 暂不支持调整旋转`)}`;
+  }
+  // Re-rendering replaces the inputs; keep keyboard focus where the operator was.
+  if (focused) $<HTMLInputElement>(`#placement-fields [name="${focused}"]:is(:checked, :not([type=radio]))`)?.focus();
   $('#placement-error').textContent = '';
+}
+
+/** The selected placement with one inspector field set to `value`. */
+function editedSlot(slot: Placement, name: string, value: number): { next: Placement; action: string } {
+  if (slot.type === '2D') {
+    if (name === 'anchorX' || name === 'anchorY') {
+      const point = anchorPoint(slot, anchor);
+      return { next: moveAnchor(slot, anchor, name === 'anchorX' ? { ...point, x: value } : { ...point, y: value }), action: '移动' };
+    }
+    return { next: resizeSide(slot, anchor, name as 'sizeX' | 'sizeY', value, keepAspect), action: '调整尺寸' };
+  }
+  if (name === 'scale') return { next: uniformScale(slot, value), action: '缩放' };
+  return { next: { ...slot, [name]: value }, action: '移动' };
+}
+
+function applyInspectorField(input: HTMLInputElement) {
+  const slot = selected();
+  if (!slot || slot.id !== unlockedId || input.type !== 'number' || !input.isConnected || input.value === input.defaultValue) return;
+  if (!Number.isFinite(input.valueAsNumber)) { renderInspector(); return; }
+  const { next, action } = editedSlot(slot, input.name, input.valueAsNumber);
+  commitSlot(next, `${action} ${slot.name}`);
+}
+
+function setUnlocked(id?: string) {
+  if (unlockedId === id) return;
+  unlockedId = id;
+  renderLists();
+  renderInspector();
+  syncEngine();
+}
+
+function renderUndo() {
+  const label = undo.label;
+  document.querySelectorAll<HTMLButtonElement>('[data-undo]').forEach((button) => {
+    button.disabled = !undo.canUndo;
+    button.title = label ? `撤销：${label}（Ctrl+Z）` : '没有可撤销的操作';
+  });
+  document.querySelectorAll('[data-undo-label]').forEach((element) => { element.textContent = label ? `上一步：${label}` : '没有可撤销的操作'; });
+}
+
+async function undoLast() {
+  clearError();
+  try { await undo.undo(); }
+  catch (error) { showError(error); }
 }
 
 function renderRecord() {
@@ -217,13 +303,14 @@ function renderRecord() {
     ? `本机保存于 ${new Date(record.updatedAt).toLocaleTimeString('zh-CN')}；未回传 Fusion，也未触发播出。`
     : '草稿仅保存在本机，不会回传 Fusion。';
   renderLists();
-  renderEditor();
+  renderInspector();
   renderAnalysis();
 }
 
 function syncEngine() {
   if (!engine || !current() || enginePending || engineReadyMatchId !== currentId) return;
-  engine.setPlacements(current().draft, selectedId, selectSlot, commitSlot, current().hiddenPlacementIds);
+  engine.setEditing(unlockedId, keepAspect);
+  engine.setPlacements(current().draft, selectedId, selectSlot, moveSlot, current().hiddenPlacementIds);
   void resultReview.setPlacements(current().draft, current().hiddenPlacementIds).catch(showError);
 }
 
@@ -255,7 +342,6 @@ function renderAnalysis() {
   $('#analysis-status').textContent = result
     ? '广告位预览中已载入本地点云；视频与投影结果文件夹请在“导入结果与微调”单独导入。'
     : '可直接前往“导入结果与微调”选择已有结果文件夹，无需提交视频到 Fusion。';
-  $<HTMLFieldSetElement>('#placement-edit-controls').disabled = !ready || !resultReview.hasResult;
   if (result) {
     $('#cloud-source').textContent = result.cloud.fileName;
     $('#cloud-camera').textContent = result.aligned ? result.cloud.declaredPitchCoordinates ? '条件球场锚定（文件声明）' : '球场坐标（手动确认）' : '未确认坐标 · 叠加关闭';
@@ -321,9 +407,10 @@ async function selectAnalysisFile(source: File | string) {
 
 function selectSlot(id: string) {
   if (!current()?.draft.some((slot) => slot.id === id)) return;
+  if (id !== selectedId) unlockedId = undefined;
   selectedId = id;
   renderLists();
-  renderEditor();
+  renderInspector();
   syncEngine();
 }
 
@@ -339,9 +426,12 @@ function togglePlacementVisibility(id: string) {
   clearError();
   try {
     const hidden = new Set(record.hiddenPlacementIds);
-    if (hidden.has(id)) hidden.delete(id);
+    const enabling = hidden.has(id);
+    if (enabling) hidden.delete(id);
     else hidden.add(id);
+    if (!enabling && unlockedId === id) unlockedId = undefined;
     replaceRecord({ ...record, hiddenPlacementIds: [...hidden], updatedAt: new Date().toISOString() });
+    recordUndo(`${enabling ? '启用' : '停用'} ${record.draft.find((slot) => slot.id === id).name}`, record);
     renderRecord();
     syncEngine();
     document.querySelector<HTMLButtonElement>(`[data-visibility-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
@@ -350,18 +440,38 @@ function togglePlacementVisibility(id: string) {
   }
 }
 
-function commitSlot(slot: unknown) {
+/** Puts the draft and enabled state of `before` back when undone. */
+function recordUndo(label: string, before: MatchRecord) {
+  undo.push({ label, restore: () => {
+    const record = current();
+    replaceRecord({ ...record, draft: before.draft, hiddenPlacementIds: before.hiddenPlacementIds, updatedAt: new Date().toISOString() });
+    if (before.hiddenPlacementIds?.includes(unlockedId)) unlockedId = undefined;
+    renderRecord();
+    syncEngine();
+  } });
+}
+
+function commitSlot(slot: unknown, label: string) {
   try {
     const record = current();
     const validated = validatePlacement(slot, record.match.field);
+    const previous = record.draft.find((item) => item.id === validated.id);
+    if (JSON.stringify(previous) === JSON.stringify(validated)) { renderRecord(); syncEngine(); return; }
     replaceRecord({ ...record, draft: record.draft.map((item) => item.id === validated.id ? validated : item), updatedAt: new Date().toISOString() });
+    recordUndo(label, record);
     renderRecord();
     syncEngine();
   } catch (error) {
+    renderRecord();
     $('#placement-error').textContent = error.message;
     showError(error);
     syncEngine();
   }
+}
+
+/** A drag in the top view finished; the engine only drags the unlocked placement. */
+function moveSlot(slot: Placement) {
+  commitSlot(slot, `拖动 ${slot.name}`);
 }
 
 async function ensureEngine() {
@@ -381,7 +491,11 @@ async function ensureEngine() {
 }
 
 function setActiveTab(tab: string) {
-  activeTab = ['preview', 'scan', 'adjust'].includes(tab) ? tab : 'preview';
+  const next = ['preview', 'scan', 'adjust'].includes(tab) ? tab : 'preview';
+  if (next !== activeTab) setUnlocked(undefined);
+  activeTab = next;
+  // One inspector serves both tabs that edit placements.
+  if (activeTab !== 'scan') $(`#${activeTab}-inspector-slot`).append($('#placement-inspector'));
   for (const name of ['preview', 'scan', 'adjust']) $(`#${name}-tab`).hidden = name !== activeTab;
   document.querySelectorAll<HTMLElement>('[data-tab]').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === activeTab);
@@ -421,6 +535,8 @@ async function renderRoute(refresh = false) {
     renderMatches();
     if (records && parts[0] === 'match') showError(new Error('尚未添加这场比赛，请先核验比赛 ID。'));
     currentId = undefined;
+    undo.clear();
+    unlockedId = undefined;
     void Promise.all([resultReview.setMatch(), pitchEditor.setMatch(), localEditor.setMatch()]).catch(showError);
     return;
   }
@@ -428,6 +544,9 @@ async function renderRoute(refresh = false) {
   const version = ++matchLoadVersion;
   clearError();
   if (!sameMatch) cancelAnalysisImport();
+  // Loading (or refreshing) a match replaces its draft, so earlier steps no longer apply.
+  undo.clear();
+  unlockedId = undefined;
   currentId = record.match.id;
   const previousSelection = selectedId;
   selectedId = record.draft[0]?.id;
@@ -479,11 +598,14 @@ async function renderRoute(refresh = false) {
     try {
       const preview = await ensureEngine();
       if (version !== matchLoadVersion) return;
-      await preview.activate(record.draft, selectedId, selectSlot, commitSlot, record.match.field, record.hiddenPlacementIds);
+      preview.setEditing(unlockedId, keepAspect);
+      preview.setAxesVisible(axesVisible);
+      await preview.activate(record.draft, selectedId, selectSlot, moveSlot, record.match.field, record.hiddenPlacementIds);
       if (version !== matchLoadVersion) return;
       enginePending = false;
       engineReadyMatchId = currentId;
       renderLists();
+      renderInspector();
       syncEngine();
       void Promise.all([pitchEditor.refresh(), localEditor.refresh()]).catch(showError);
       renderAnalysis();
@@ -689,20 +811,36 @@ $<HTMLButtonElement>('#workspace-nav').addEventListener('click', () => {
 $<HTMLButtonElement>('#refresh-configuration').addEventListener('click', () => { void renderRoute(true); });
 $<HTMLFormElement>('#placement-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  if ($<HTMLFieldSetElement>('#placement-edit-controls').disabled) {
-    showError(new Error('请先载入场次配置和结果文件夹，再微调场次广告位。'));
-    return;
-  }
-  const slot: Record<string, unknown> = { ...selected() };
-  $('#placement-fields').querySelectorAll('input').forEach((input) => { slot[input.name] = input.valueAsNumber; });
-  const original = selected();
-  if (original?.type === '3D' && original.region) slot.scaleY = slot.scaleZ = slot.scaleX;
-  commitSlot(slot);
+  if (document.activeElement instanceof HTMLInputElement) applyInspectorField(document.activeElement);
+});
+$('#placement-fields').addEventListener('change', (event) => {
+  const input = event.target as HTMLInputElement;
+  if (input.name === 'anchor') { anchor = input.value as Anchor; renderInspector(); }
+  else if (input.name === 'keepAspect') { keepAspect = input.checked; syncEngine(); }
+  // After Tab moves focus on, so the re-rendered inspector can restore it there.
+  else setTimeout(() => applyInspectorField(input));
 });
 $<HTMLButtonElement>('#reset-placement').addEventListener('click', () => {
-  if ($<HTMLFieldSetElement>('#placement-edit-controls').disabled) return;
   const original = current().match.placements.find((slot) => slot.id === selectedId);
-  commitSlot({ ...original });
+  if (original && selectedId === unlockedId) commitSlot({ ...original }, `恢复场次配置 ${original.name}`);
+});
+$<HTMLButtonElement>('#inspector-lock').addEventListener('click', () => setUnlocked(unlockedId === selectedId ? undefined : selectedId));
+document.querySelectorAll('[data-undo]').forEach((button) => button.addEventListener('click', () => { void undoLast(); }));
+$<HTMLButtonElement>('#toggle-axes').addEventListener('click', () => {
+  axesVisible = !axesVisible;
+  $('#toggle-axes').setAttribute('aria-pressed', String(axesVisible));
+  engine?.setAxesVisible(axesVisible);
+});
+document.addEventListener('keydown', (event) => {
+  const target = event.target as HTMLElement;
+  if (!currentId || activeTab === 'scan' || event.altKey || target.closest('input:not([type=checkbox]):not([type=radio]),textarea,select,[contenteditable]')) return;
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
+    event.preventDefault();
+    void undoLast();
+  } else if (!event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'l' && !$<HTMLButtonElement>('#inspector-lock').disabled) {
+    event.preventDefault();
+    $('#inspector-lock').click();
+  }
 });
 $<HTMLButtonElement>('#reset-business-view').addEventListener('click', () => {
   engine?.resetView();
@@ -850,7 +988,7 @@ function renderRendererBars() {
     bar.querySelector<HTMLButtonElement>('[data-renderer-send]').disabled = Boolean(rendererBusy || blocker);
     bar.querySelector<HTMLButtonElement>('[data-renderer-export]').disabled = Boolean(rendererBusy || blocker);
     bar.querySelector('[data-renderer-status]').textContent = rendererBusy
-      || (blocker ?? (rendererMessage || '把当前广告位草稿（含显示设置）发送给 chr-server，替换其场景。'));
+      || (blocker ?? (rendererMessage || '把当前广告位草稿（含启用状态）发送给 chr-server，替换其场景。'));
   }
 }
 

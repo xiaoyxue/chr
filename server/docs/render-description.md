@@ -99,7 +99,7 @@ GLB), frames go out as clean feed or repeats, as during any worker restart.
   scale.
 - **2D placements:** the preview's contain fit of the image in its area,
   rotated by `rz + assetRotation`, at Z −0.02.
-- **Hidden placements:** become `visible: false`.
+- **Disabled placements:** become `visible: false`.
 - **Blended GLBs:** a GLB with BLEND materials gets `blend_as: "mask"`, and the
   page lists those materials after sending.
 - **Asset sources:** assets are entries of the offline ZIP, read by the server

@@ -135,6 +135,15 @@ placement draft into a render description and loads it into `chr-server` through
 the page's `/chr-render` WebSocket proxy (`CHR_RENDER_URL`); see
 `server/docs/render-description.md`.
 
+Placement editing in the top view uses pitch-centred world coordinates (+X right,
++Y down), drawn as axes with metre ticks. A selected placement opens locked; it
+must be unlocked (button or `L`) before it can be dragged, resized from its
+corners or edited numerically: 2D areas by their top-left corner or centre with
+an optional aspect-ratio lock, 3D models by centre and one uniform scale.
+Rotation is read-only. Each target can be enabled or disabled, and every draft
+change can be undone with the 撤销 button or `Ctrl/Cmd+Z` until the match is
+reloaded.
+
 `uv run server/scripts/stack.py start|stop|restart|status` starts and stops the
 whole local development stack (tracked simulation, pitch-studio client, program
 monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see

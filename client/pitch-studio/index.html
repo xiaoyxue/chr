@@ -40,15 +40,22 @@
             <section id="pitch-ad-workspace" aria-labelledby="pitch-ad-heading">
             <div class="on-section-heading"><div><p class="on-eyebrow">PITCH ADVERTISING</p><h2 id="pitch-ad-heading">球场广告 · 2D / 3D 预览</h2><p class="on-help">俯视图与主看台预览场次广告和本地新增广告，不依赖下方点云。</p></div></div>
             <div class="on-work-grid"><section class="on-card on-preview-card"><div class="on-card-head"><div><h2>俯视图 / 主看台</h2><p class="on-help">右侧可新增 2D 图片广告或 3D 模型广告，并分别上传素材。</p></div><span id="field-size" class="on-badge"></span></div>
+              <div class="on-edit-toolbar" role="toolbar" aria-label="球场编辑工具"><button class="on-button on-undo" type="button" data-undo disabled>↶ 撤销</button><span class="on-help" data-undo-label>没有可撤销的操作</span><button id="toggle-axes" class="on-button" type="button" aria-pressed="true" title="在俯视图显示以球场中心为原点的世界坐标轴（X / Y，米）">坐标轴</button></div>
               <div id="pitch-mount"><div class="preview">
-                <div class="preview-header"><span>PITCH PREVIEW</span><span class="model-badge">球场广告 · 仅本地预览</span></div>
+                <div class="preview-header"><span>PITCH PREVIEW</span><span id="pointer-coordinates" class="pointer-coordinates"></span><span class="model-badge">球场广告 · 仅本地预览</span></div>
                 <div id="viewport"><div id="loading" class="feed-loading" role="status">正在加载场次广告位…</div></div>
                 <div class="preview-bottom"><div><span class="camera-id" id="active-camera-id">TOP</span><h2 id="active-camera-name">全场俯视机位</h2><p id="active-camera-description">点位来自场次配置</p></div><div class="selection-badge" id="active-ad-name">场次广告位</div></div>
               </div></div>
               <div class="on-preview-footer"><span>俯视图编辑底面，主看台查看 2D / 3D 效果；导入点云不会替换此画面。</span><span class="on-badge amber">近似预览机位</span></div>
               <div id="camera-mount"><div id="camera-list" class="camera-list" role="group" aria-label="选择球场预览机位"></div></div><button id="reset-business-view" class="on-text-button" type="button">复位球场预览视角</button>
             </section><aside class="on-local-sidebar">
-              <section class="on-card on-placement-panel"><div class="on-card-head"><h2>场次配置广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">显示设置和位置草稿按场次保存，不会自动播出或回传 Fusion。</p></section>
+              <section class="on-card on-placement-panel"><div class="on-card-head"><h2>场次配置广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">启用状态和位置草稿按场次保存，不会自动播出或回传 Fusion。</p></section>
+              <div id="preview-inspector-slot"><section id="placement-inspector" class="on-card on-inspector" aria-labelledby="inspector-name">
+                <div class="on-card-head"><div class="on-inspector-title"><span id="inspector-type" class="on-badge"></span><h2 id="inspector-name">广告位属性</h2></div><button id="inspector-lock" class="on-lock-toggle" type="button" aria-pressed="false" title="解锁后才能移动、调整尺寸或缩放（快捷键 L）">🔒 已锁定</button></div>
+                <form id="placement-form" class="on-card-body" novalidate><p id="inspector-state" class="on-help" role="status"></p>
+                  <fieldset id="placement-edit-controls" disabled><div id="placement-fields"></div><p id="placement-error" class="on-form-error" role="alert"></p></fieldset>
+                  <div class="on-action-row"><button class="on-button on-undo" type="button" data-undo disabled>↶ 撤销</button><button id="reset-placement" class="on-text-button" type="button" disabled>恢复此点位的场次配置</button></div>
+                </form></section></div>
               <section id="pitch-local-editor" class="on-card on-local-editor" aria-label="球场本地广告编辑"></section>
             </aside></div>
             <div class="on-save-bar on-renderer-bar" data-renderer-bar><input class="on-path-input" data-renderer-path placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button class="on-button" type="button" data-renderer-export>导出渲染描述</button><button class="on-button primary" type="button" data-renderer-send>发送到渲染器</button><p class="on-help" role="status" data-renderer-status></p></div>
@@ -100,7 +107,7 @@
               <div class="on-monitors"><section class="on-card"><div class="on-card-head"><h2>SOURCE　原始画面</h2><span class="on-help">始终无广告</span></div><canvas id="result-source" aria-label="原始比赛视频"></canvas></section><section class="on-card"><div class="on-card-head"><h2>PROGRAM　广告叠加效果</h2><span class="on-help">仅本地预览</span></div><canvas id="result-program" aria-label="视频叠加广告效果"></canvas></section></div>
               <video id="result-video" playsinline preload="auto" hidden></video><p id="result-quality" class="on-help"></p>
             </div>
-            <section class="on-card on-editor"><div class="on-card-head"><h2>Fusion 场次广告位微调</h2><button class="on-button" type="button" data-go-tab="preview">返回球场 / 点云广告编辑</button></div><div id="adjust-placement-list"></div><form id="placement-form" class="on-card-body"><h3 id="editor-name"></h3><p id="editor-info" class="on-help"></p><fieldset id="placement-edit-controls" disabled><div id="placement-fields" class="on-field-grid"></div><p id="placement-error" class="on-form-error" role="alert"></p><button class="on-button primary" type="submit">应用并保存本地草稿</button><button id="reset-placement" class="on-text-button" type="button">恢复此点位的场次配置</button></fieldset></form></section>
+            <section class="on-card on-editor"><div class="on-card-head"><h2>Fusion 场次广告位微调</h2><button class="on-button" type="button" data-go-tab="preview">返回球场 / 点云广告编辑</button></div><div id="adjust-placement-list"></div><div id="adjust-inspector-slot"></div></section>
             <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿仅保存在本机，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
             <div class="on-save-bar on-renderer-bar" data-renderer-bar><input class="on-path-input" data-renderer-path placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button class="on-button" type="button" data-renderer-export>导出渲染描述</button><button class="on-button primary" type="button" data-renderer-send>发送到渲染器</button><p class="on-help" role="status" data-renderer-status></p></div>
           </div>

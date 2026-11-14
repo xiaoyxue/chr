@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { FieldDimensions } from '../../shared/types.ts';
 
 export const CAMERA_PRESETS = [
-  { id: 'top', code: 'TOP', name: '全场俯视机位', description: '点位来自场次配置 · 拖动已有广告位微调位置' },
+  { id: 'top', code: 'TOP', name: '全场俯视机位', description: '点击选中广告位 · 解锁后拖动移动、拖角点调整大小' },
   { id: 'main', code: 'CAM 01', name: '主看台机位', description: '赛前近似预览 · 可拖动镜头、滚轮变焦' },
 ] as const;
 

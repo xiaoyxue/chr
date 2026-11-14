@@ -4,15 +4,20 @@ import { validateDimensions } from './pitch/dimensions.ts';
 import { containsGroundPlacement, isPlacementInside } from './pitch/pitch-layout.ts';
 import { CAMERA_PRESETS, fitTopCamera } from './pitch/pitch-cameras.ts';
 import { createPitch, disposeSceneObject } from './pitch/pitch-scene.ts';
+import { createWorldAxes, disposeWorldAxes } from './pitch/pitch-axes.ts';
+import { resizeFromCorner } from '../placements/ground-edit.ts';
 import { DEFAULT_CAMERA_POSITION, applyPreviewCamera, clampPreviewLens, defaultPreviewLens } from './cameras/preview-camera.ts';
 import { createPreviewLighting } from './lighting/preview-lighting.ts';
 import { LocalAdScene, disposeLocalObject } from '../placements/local-ad-scene.ts';
 import type { AdPlane, LocalAd } from '../placements/local-ad.ts';
-import type { FieldDimensions, Placement, PreviewLens } from '../shared/types.ts';
+import type { FieldDimensions, GroundPlacement, Placement, PreviewLens } from '../shared/types.ts';
 
 type CameraId = typeof CAMERA_PRESETS[number]['id'];
+type Corner = readonly [number, number];
+// Local corner signs of a ground rectangle: top-left, top-right, bottom-right, bottom-left in the top view.
+const CORNERS: readonly Corner[] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
 type Drag = { id: number } & (
-  { kind: 'placement'; start: THREE.Vector3; slot: Placement; candidate: Placement }
+  { kind: 'placement'; start: THREE.Vector3; slot: Placement; candidate: Placement; corner?: Corner }
   | { kind: 'lens'; x: number; y: number; lens: PreviewLens }
 );
 
@@ -28,6 +33,10 @@ export class PitchPreview {
   private dimensions?: FieldDimensions;
   private field?: THREE.Group;
   private overlay?: THREE.Group;
+  private axes?: THREE.Group;
+  private showAxes = true;
+  private unlockedId?: string;
+  private keepAspect = true;
   private creatives?: FusionCreatives;
   private slots: Placement[] = [];
   private hiddenIds: ReadonlySet<string> = new Set();
@@ -114,6 +123,9 @@ export class PitchPreview {
     this.dimensions = dimensions;
     this.field = createPitch(dimensions);
     this.scene.add(this.field);
+    if (this.axes) disposeWorldAxes(this.axes);
+    this.axes = createWorldAxes(dimensions);
+    this.scene.add(this.axes);
     this.cameraId = 'top';
     this.lens = defaultPreviewLens(DEFAULT_CAMERA_POSITION);
     this.setPlacements(slots, selectedId, onSelect, onMove, hiddenIds);
@@ -141,6 +153,21 @@ export class PitchPreview {
     this.onSelect = onSelect;
     this.onMove = onMove;
     this.updatePlacements();
+    this.refresh();
+  }
+
+  /**
+   * Only the unlocked placement can be dragged or resized; the others can just be
+   * selected. Takes effect with the next `setPlacements`.
+   */
+  setEditing(unlockedId: string | undefined, keepAspect: boolean) {
+    if (unlockedId !== this.unlockedId) this.resetDrag();
+    this.unlockedId = unlockedId;
+    this.keepAspect = keepAspect;
+  }
+
+  setAxesVisible(visible: boolean) {
+    this.showAxes = visible;
     this.refresh();
   }
 
@@ -186,6 +213,7 @@ export class PitchPreview {
     this.renderer.setPixelRatio(1);
     for (const view of this.views) {
       this.configureCamera(view.camera, view.id);
+      this.axes.visible = this.showAxes && view.id === 'top';
       this.renderer.setSize(320, 180, false);
       this.renderer.render(this.scene, view.camera);
       view.canvas.getContext('2d').drawImage(this.renderer.domElement, 0, 0);
@@ -203,6 +231,7 @@ export class PitchPreview {
     this.viewport.dataset.previewMode = 'free';
     this.renderer.domElement.setAttribute('aria-label', `${preset.name} · 球场 2D / 3D 广告位预览`);
     this.configureCamera(this.camera, this.cameraId);
+    this.axes.visible = this.showAxes && this.cameraId === 'top';
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(Math.max(this.viewport.clientWidth, 1), Math.max(this.viewport.clientHeight, 1), false);
     this.renderer.render(this.scene, this.camera);
@@ -218,6 +247,7 @@ export class PitchPreview {
     this.cancelGroundRectangle();
     if (this.field) disposeSceneObject(this.field);
     if (this.overlay) disposeSceneObject(this.overlay);
+    if (this.axes) disposeWorldAxes(this.axes);
     this.lighting.dispose();
     this.renderer.dispose();
   }
@@ -242,28 +272,70 @@ export class PitchPreview {
     if (this.overlay) disposeSceneObject(this.overlay);
     this.overlay = new THREE.Group();
     for (const slot of this.slots) {
-      if (slot.type !== '2D' || this.hiddenIds.has(slot.id)) continue;
-      const selected = slot.id === this.selectedId;
+      if (this.hiddenIds.has(slot.id)) continue;
+      const selected = slot.id === this.selectedId, unlocked = selected && slot.id === this.unlockedId;
+      const outline = new THREE.LineBasicMaterial({ color: unlocked ? '#ddff54' : selected ? '#ffd297' : '#829b75' });
       const group = new THREE.Group();
-      const surface = new THREE.MeshBasicMaterial({ color: '#ffac48', transparent: true, opacity: selected ? 0.5 : 0.12, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(slot.sizeX, slot.sizeY), surface);
-      mesh.rotation.x = Math.PI;
-      group.add(mesh);
-      const corners = [[-slot.sizeX / 2, -slot.sizeY / 2], [slot.sizeX / 2, -slot.sizeY / 2], [slot.sizeX / 2, slot.sizeY / 2], [-slot.sizeX / 2, slot.sizeY / 2]];
-      group.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners.map(([x, y]) => new THREE.Vector3(x, y, 0))), new THREE.LineBasicMaterial({ color: selected ? '#ffd297' : '#829b75' })));
-      if (selected) {
-        const geometry = new THREE.SphereGeometry(0.3, 10, 8), material = new THREE.MeshBasicMaterial({ color: '#ffe2b7' });
-        for (const [x, y] of corners) {
-          const marker = new THREE.Mesh(geometry, material);
-          marker.position.set(x, y, 0);
-          group.add(marker);
+      const footprint = slot.type === '2D' ? [slot.sizeX, slot.sizeY] : slot.region ? [slot.region.width, slot.region.height] : undefined;
+      if (slot.type === '2D') {
+        const surface = new THREE.MeshBasicMaterial({ color: '#ffac48', transparent: true, opacity: selected ? 0.5 : 0.12, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(slot.sizeX, slot.sizeY), surface);
+        mesh.rotation.x = Math.PI;
+        group.add(mesh);
+      } else if (selected) {
+        group.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(Array.from({ length: 32 }, (_, i) =>
+          new THREE.Vector3(Math.cos(i / 16 * Math.PI) * 1.2, Math.sin(i / 16 * Math.PI) * 1.2, -0.03))), outline));
+      }
+      if (footprint && (slot.type === '2D' || selected)) {
+        const corners = CORNERS.map(([x, y]) => new THREE.Vector3(x * footprint[0] / 2, y * footprint[1] / 2, -0.03));
+        group.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners), outline));
+        if (unlocked && slot.type === '2D') {
+          const geometry = new THREE.SphereGeometry(0.55, 12, 8), material = new THREE.MeshBasicMaterial({ color: '#ddff54' });
+          for (const corner of corners) {
+            const marker = new THREE.Mesh(geometry, material);
+            marker.position.copy(corner);
+            group.add(marker);
+          }
         }
       }
       group.position.set(slot.x, slot.y, 0);
-      group.rotation.z = THREE.MathUtils.degToRad(slot.rz);
+      // A model's rz turns the model inside its axis-aligned region, not the region.
+      if (slot.type === '2D') group.rotation.z = THREE.MathUtils.degToRad(slot.rz);
       this.overlay.add(group);
     }
     this.scene.add(this.overlay);
+  }
+
+  /** The corner handle of the unlocked 2D placement under the pointer, if any. */
+  private cornerAt(event: PointerEvent): Corner | undefined {
+    const slot = this.slots.find((item) => item.id === this.unlockedId && item.id === this.selectedId);
+    if (this.cameraId !== 'top' || slot?.type !== '2D' || this.hiddenIds.has(slot.id)) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const angle = THREE.MathUtils.degToRad(slot.rz), c = Math.cos(angle), s = Math.sin(angle);
+    return CORNERS.find(([sx, sy]) => {
+      const x = sx * slot.sizeX / 2, y = sy * slot.sizeY / 2;
+      const screen = new THREE.Vector3(slot.x + c * x - s * y, slot.y + s * x + c * y, 0).project(this.camera);
+      return Math.hypot(rect.left + (screen.x + 1) * rect.width / 2 - event.clientX, rect.top + (1 - screen.y) * rect.height / 2 - event.clientY) < 14;
+    });
+  }
+
+  /** The visible placement under the pointer; 3D models first, then 2D areas from the top. */
+  private placementAt(point: THREE.Vector3) {
+    const id = this.creatives && this.raycaster.intersectObject(this.creatives.group, true).map((hit) => this.visiblePlacementId(hit.object)).find(Boolean);
+    return id ? this.slots.find((item) => item.id === id)
+      : [...this.slots].reverse().find((item) => item.type === '2D' && !this.hiddenIds.has(item.id) && containsGroundPlacement(item, point));
+  }
+
+  private hover(event: PointerEvent) {
+    if (!this.dimensions) return;
+    const readout = this.viewport.parentElement.querySelector('#pointer-coordinates');
+    const point = this.cameraId === 'top' && !event.buttons ? this.groundPoint(event) : undefined;
+    const onPitch = point && Math.abs(point.x) <= this.dimensions.length / 2 + 6 && Math.abs(point.y) <= this.dimensions.width / 2 + 5;
+    if (readout) readout.textContent = onPitch ? `X ${point.x.toFixed(2)} m · Y ${point.y.toFixed(2)} m` : '';
+    if (this.draw || this.drag || this.cameraId !== 'top') return;
+    const corner = this.cornerAt(event);
+    const movable = !corner && point && this.unlockedId && this.placementAt(point)?.id === this.unlockedId;
+    this.renderer.domElement.style.cursor = corner ? (corner[0] === corner[1] ? 'nwse-resize' : 'nesw-resize') : movable ? 'move' : '';
   }
 
   private groundPoint(event: PointerEvent) {
@@ -311,12 +383,13 @@ export class PitchPreview {
       else {
         const point = this.groundPoint(event);
         if (!point) return;
-        const id = this.creatives && this.raycaster.intersectObject(this.creatives.group, true).map((hit) => this.visiblePlacementId(hit.object)).find(Boolean);
-        const slot = id ? this.slots.find((item) => item.id === id)
-          : [...this.slots].reverse().find((item) => item.type === '2D' && !this.hiddenIds.has(item.id) && containsGroundPlacement(item, point));
+        const corner = this.cornerAt(event);
+        const slot = corner ? this.slots.find((item) => item.id === this.unlockedId) : this.placementAt(point);
         if (!slot) return;
-        this.onSelect(slot.id);
-        this.drag = { kind: 'placement', id: event.pointerId, start: point, slot: { ...slot }, candidate: { ...slot } };
+        if (slot.id !== this.selectedId) this.onSelect(slot.id);
+        // A locked placement is only selected, never moved, so a stray drag cannot change it.
+        else if (slot.id === this.unlockedId) this.drag = { kind: 'placement', id: event.pointerId, start: point, slot: { ...slot }, candidate: { ...slot }, corner };
+        if (!this.drag) return;
       }
       event.preventDefault();
       canvas.setPointerCapture(event.pointerId);
@@ -343,12 +416,13 @@ export class PitchPreview {
         return;
       }
       const drag = this.drag;
-      if (!drag || drag.id !== event.pointerId) return;
+      if (!drag || drag.id !== event.pointerId) { this.hover(event); return; }
       if (drag.kind === 'lens') this.lens = clampPreviewLens({ ...drag.lens, pan: drag.lens.pan - (event.clientX - drag.x) * 0.12, tilt: drag.lens.tilt + (event.clientY - drag.y) * 0.12 });
       else {
         const point = this.groundPoint(event);
         if (!point) return;
-        const candidate = { ...drag.slot, x: drag.slot.x + point.x - drag.start.x, y: drag.slot.y + point.y - drag.start.y };
+        const candidate = drag.corner ? resizeFromCorner(drag.slot as GroundPlacement, drag.corner, point, this.keepAspect)
+          : { ...drag.slot, x: drag.slot.x + point.x - drag.start.x, y: drag.slot.y + point.y - drag.start.y };
         if (Math.abs(candidate.x) > this.dimensions.length / 2 || Math.abs(candidate.y) > this.dimensions.width / 2
           || (candidate.type === '2D' && !isPlacementInside(candidate, this.dimensions))
           || (candidate.type === '3D' && candidate.region && !isPlacementInside({ x: candidate.x, y: candidate.y, sizeX: candidate.region.width, sizeY: candidate.region.height }, this.dimensions))) return;
@@ -383,6 +457,10 @@ export class PitchPreview {
       if (this.drag?.id !== event.pointerId) return;
       this.resetDrag();
       this.refresh();
+    });
+    canvas.addEventListener('pointerleave', () => {
+      const readout = this.viewport.parentElement.querySelector('#pointer-coordinates');
+      if (readout) readout.textContent = '';
     });
     canvas.addEventListener('wheel', (event) => {
       if (this.cameraId !== 'main') return;
