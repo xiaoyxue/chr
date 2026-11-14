@@ -152,6 +152,36 @@ whole local development stack (tracked simulation, pitch-studio client, program
 monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see
 `server/README.md`.
 
+The stack's processes and how they connect:
+
+```text
+              camera + tracking system (simulated)
+  ┌───────────────────────────────────────────┐
+  │ chr-tracking-sim  ◄── ffmpeg decodes clip │
+  └─────┬───────────────────────────┬─────────┘
+  frames│ input ring (shm)          │ Ti, C, frame_warp: tracking.frame
+        ▼                           ▼ on <dir>/render.sock
+  ┌───────────────────────────────────────────┐  ws :8787 control
+  │ chr-server (no GPU)                       │◄── description.load, status ── pitch-studio :4173
+  │ pairs frames and cameras, output clock,   │    (through its /chr-render proxy)
+  │ scene state, simulated SDI port (UYVY)    │◄── status ───────────────────── monitor page :5173
+  └─────┬────────────────▲──────────┬─────────┘
+        │ requests:      │ frames:  │ every slot the SDI port sends:
+        ▼ stdin/stdout   │ shm ring ▼ program tap (shm)
+  ┌──────────────────┐   │   ┌───────────────────────────────────────┐
+  │ chr-renderer-cli │───┘   │ chr-monitor (H.264: x264 or openh264) │── SRT udp :9001 ──► VLC / ffplay
+  │ worker (GPU)     │       └──────────────────┬────────────────────┘    └► stack.py relay tcp ──► players over SSH
+  └──────────────────┘                          ├─ ws :8789 status, WebRTC signalling ──► monitor page
+                                                └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+```
+
+Each box is one process; `shm` is a `chr-shm` shared-memory ring. chr-server
+starts and replaces its render worker. `run-tracked.sh` restarts the simulator,
+chr-server and chr-monitor independently, so one exiting does not stop the others.
+Viewers only ever see what the SDI port sent. Ports are the defaults of
+`server/scripts/stack.example.toml`; `stack.py start` and `status` print the
+ports each running process actually holds.
+
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.
 Validate on the actual target rather than assuming an output declaration proves
