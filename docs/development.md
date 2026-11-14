@@ -22,19 +22,20 @@ rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
 server/runtime/           chr-runtime: chr-server (render server), chr-renderer-cli (stills, render worker)
-                          and chr-tracking-sim (simulated tracked camera)
+                          and chr-tracking-sim (simulated camera, optionally with its cameras)
   src/input/              Video acquisition adapters (software MP4, shared-memory input ring)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
   src/sdi.rs              Simulated SDI output port, output clock and program tap
   src/worker/             Render worker protocol, the worker side and its supervisor
+server/tracking/          chr-tracking: tracking worker protocol and supervisor, and
+                          chr-tracking-sim-cli (replay stand-in for the tracking module)
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
 monitor/                  chr-monitor: program-tap encoding and WebRTC/SRT fan-out
 common/                   chr-common: JSON-RPC 2.0 messages and local IPC (Rust)
 common/shm/               chr-shm: shared-memory frame rings; the only crate with unsafe
-algorithm/src/            Scene reconstruction algorithms (stack undecided)
 docs/                     Repository-wide documentation
 reference/                Private, local-only reference materials
 output/<module>/          Generated runtime artifacts, including output/renderer/
@@ -46,16 +47,18 @@ Use `docs/` for cross-module development and architecture documents, and
 `server/docs/` for server-specific contracts. Do not move private reference
 materials into documentation, source files, fixtures, or Nix build inputs.
 The shared protocol is implemented in Rust (`common/`), with TypeScript
-mirrors in clients. No client framework or algorithm
-technology stack is chosen by this environment setup.
+mirrors in clients. No client framework is chosen by this environment setup.
 
-Algorithm estimation belongs in `algorithm/`; receiving and associating its
-results belongs in the runtime, not the renderer. The current `calibration/replay`
-module is only a startup-loaded lens replay for a validated clip;
-`calibration/tracking` pairs per-frame cameras from the simulated tracking source
-(`server/docs/tracking-simulation.md`). Production algorithm transport, a general
-public distortion contract, and physical SDI adapters are not implemented by this
-layout.
+Live tracking runs in a tracking worker that `chr-server` supervises
+(`server/tracking/`, [tracking worker](../server/docs/tracking-worker.md)). Its
+protocol is language-neutral, so the real tracking module, which may be written in
+Python, replaces the `chr-tracking-sim-cli` replay stand-in without changing the
+server. Pairing frames with cameras belongs in the runtime, not the renderer:
+`calibration/tracking` joins them by capture sequence. The `calibration/replay`
+module is only a startup-loaded lens replay for a validated clip. Offline scene
+modelling (scan video to calibration results) stays outside this repository.
+A general public distortion contract and physical SDI adapters are not
+implemented by this layout.
 
 `chr-server` creates no GPU device. As decided in #94 and implemented in #97, it
 starts and supervises a `chr-renderer-cli worker` process that renders every
@@ -154,33 +157,75 @@ monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see
 
 The stack's processes and how they connect:
 
+```mermaid
+flowchart LR
+  subgraph camera["Camera: simulated SDI input"]
+    sim["chr-tracking-sim<br/>+ ffmpeg decoder"]
+  end
+  subgraph render["render component: run-tracked.sh restarts each process"]
+    server["chr-server<br/>no GPU: pairs frames and cameras,<br/>output clock, SDI port"]
+    tracker["tracking worker<br/>chr-tracking-sim-cli<br/>(replays recorded cameras)"]
+    renderer["render worker<br/>chr-renderer-cli (GPU)"]
+    monitor["chr-monitor<br/>H.264 encoder"]
+  end
+  studio["pitch-studio page :4173"]
+  page["monitor page :5173"]
+  relay["SRT relay (srt_relay_port)"]
+  player["VLC / ffplay"]
+
+  sim -- "frames: input ring (shm)" --> server
+  server -- "frame N (shm + track)" --> tracker
+  tracker -- "camera N or unavailable" --> server
+  server -- "frame + camera (shm + render)" --> renderer
+  renderer -- "composed SDI frame" --> server
+  server -- "every SDI slot: program tap (shm)" --> monitor
+  studio -- "description.load: ws :8787" --> server
+  page -- "status: ws :8787" --> server
+  page -- "signalling ws :8789, WebRTC ICE-TCP :8790-8793" --> monitor
+  monitor -- "SRT :9001" --> player
+  monitor -- "SRT" --> relay
+  relay -- "TCP" --> player
+```
+
+The same in text, with every channel:
+
 ```text
-              camera + tracking system (simulated)
+              camera (simulated SDI input)
   ┌───────────────────────────────────────────┐
   │ chr-tracking-sim  ◄── ffmpeg decodes clip │
-  └─────┬───────────────────────────┬─────────┘
-  frames│ input ring (shm)          │ Ti, C, frame_warp: tracking.frame
-        ▼                           ▼ on <dir>/render.sock
-  ┌───────────────────────────────────────────┐  ws :8787 control
-  │ chr-server (no GPU)                       │◄── description.load, status ── pitch-studio :4173
-  │ pairs frames and cameras, output clock,   │    (through its /chr-render proxy)
-  │ scene state, simulated SDI port (UYVY)    │◄── status ───────────────────── monitor page :5173
-  └─────┬────────────────▲──────────┬─────────┘
-        │ requests:      │ frames:  │ every slot the SDI port sends:
-        ▼ stdin/stdout   │ shm ring ▼ program tap (shm)
-  ┌──────────────────┐   │   ┌───────────────────────────────────────┐
-  │ chr-renderer-cli │───┘   │ chr-monitor (H.264: x264 or openh264) │── SRT udp :9001 ──► VLC / ffplay
-  │ worker (GPU)     │       └──────────────────┬────────────────────┘    └► stack.py relay tcp ──► players over SSH
-  └──────────────────┘                          ├─ ws :8789 status, WebRTC signalling ──► monitor page
-                                                └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+  └─────┬─────────────────────────────────────┘
+  frames│ input ring (shm)
+        ▼
+  ┌───────────────────────────────────────────────────────────┐ ws :8787 control
+  │ chr-server (no GPU)                                       │◄── description.load, status ── pitch-studio :4173
+  │ pairs frames and cameras, output clock, scene state,      │    (through its /chr-render proxy)
+  │ supervises both workers, simulated SDI port (UYVY)        │◄── status ───────────────────── monitor page :5173
+  └───┬─────▲───────────────────┬─────▲─────────────────┬─────┘
+      │     │ ①                 │     │ ②               │ ③ program tap (shm)
+      ▼     │                   ▼     │                 ▼
+  ┌─────────┴────────────┐  ┌─────────┴────────┐  ┌───────────────────────────────────────┐
+  │ tracking worker      │  │ render worker    │  │ chr-monitor (H.264: x264 or openh264) │── SRT udp :9001 ──► VLC / ffplay
+  │ chr-tracking-sim-cli │  │ chr-renderer-cli │  └───────────────────┬───────────────────┘   └► stack.py relay tcp ──► players over SSH
+  │ (replay stand-in)    │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
+  └──────────────────────┘  └──────────────────┘                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+
+  ① frame N in a shm ring and a `track` line ▼; its camera (Ti, C, frame_warp) or `unavailable` ▲
+  ② frame N with its camera, in a shm ring and a `render` line ▼; the composed SDI frame ▲
+  ③ every slot the SDI port sends
 ```
 
 Each box is one process; `shm` is a `chr-shm` shared-memory ring. chr-server
-starts and replaces its render worker. `run-tracked.sh` restarts the simulator,
+starts, feeds and replaces both workers; their requests and replies are JSON lines
+on stdin/stdout. `chr-tracking-sim-cli` replays the clip's recorded cameras and
+estimates nothing. The real tracking module replaces it by speaking the same
+protocol (`chr-server --tracking-cli`); see
+[tracking worker](../server/docs/tracking-worker.md). With `tracking = "external"` in
+`stack.toml`, no tracking worker runs and the simulator sends each camera as
+`tracking.frame` on `<dir>/render.sock`. `run-tracked.sh` restarts the simulator,
 chr-server and chr-monitor independently, so one exiting does not stop the others.
 Viewers only ever see what the SDI port sent. Ports are the defaults of
-`server/scripts/stack.example.toml`; `stack.py start` and `status` print the
-ports each running process actually holds.
+`server/scripts/stack.example.toml`; `stack.py start` and `status` print the ports
+each running process actually holds.
 
 Run Cargo commands from the repository root after entering the root shell.
 Windows native setup is documented in `server/README.md`; this flake defines Linux outputs for x86_64 and aarch64.

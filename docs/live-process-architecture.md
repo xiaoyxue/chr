@@ -10,8 +10,9 @@ Implementation steps are in
 
 **Scope:** which processes make up the live render path, what each one owns,
 how they communicate, and how program output survives renderer and monitor
-failures. Physical SDI hardware, algorithm/tracking transport and recording are
-referenced, not defined.
+failures. Physical SDI hardware and recording are referenced, not defined. The
+tracking worker's channel is defined in
+[tracking worker](../server/docs/tracking-worker.md).
 
 **Depends on:** [System architecture](system-architecture.md),
 [Frame ingestion and rendering](render-frame-input.md),
@@ -47,24 +48,31 @@ WebUI / CLI / tests ────────────────────
                                                       │ authoritative scene state, health
                                                       │ output clock + output port
              stdin/stdout JSON lines + chr-shm rings  │
-        ┌─────────────────────────────────────────────┤
-        ▼                                             │ chr-shm tap ring (read-only for readers)
-chr-renderer-cli worker                               ▼
-  chr-renderer: upload → composite → readback     chr-monitor (optional)
-  killable, restartable, stateless                  H.264 → WebRTC / SRT
-                                                    own signalling WebSocket
+        ┌───────────────────────┬─────────────────────┤
+        ▼                       ▼                     │ chr-shm tap ring (read-only for readers)
+chr-renderer-cli worker   tracking worker             ▼
+  chr-renderer: upload →    frame → Ti, C, warp     chr-monitor (optional)
+  composite → readback      (chr-tracking-sim-cli     H.264 → WebRTC / SRT
+  killable, restartable,     replays until the real   own signalling WebSocket
+  stateless                  module replaces it)
 ```
 
 | Process | Owns | Must not |
 | --- | --- | --- |
 | `chr-server` | Input adapters, frame identity, admission, deadlines, clean feed, output clock/port, JSON-RPC control, scene state, worker supervision, health | Create a GPU device; wait on the monitor |
 | `chr-renderer-cli worker` | GPU device, renderer resources, composition of one frame per request | Hold authoritative state; touch input/output devices; decide timing |
+| Tracking worker (`chr-tracking-sim-cli` until the real module) | The tracking reference, per-frame estimation (the stand-in replays), its own GPU device if it needs one (one GPU is shared for now) | Hold authoritative state; touch input/output devices; decide timing or reuse another frame's camera |
 | `chr-monitor` | Reading the tap, encoding, WebRTC/SRT fan-out, its own signalling endpoint | Feed anything back into program output |
 
-Algorithm/tracking processes are expected to be out of process as well, but
-their frame and result channels belong to #60 and are not defined here. The
-opt-in [tracked camera simulation](../server/docs/tracking-simulation.md) stands in
-for them with a shared-memory input ring and per-frame `tracking.frame` calls.
+Tracking runs out of process as a worker that `chr-server` supervises like the
+render worker (#128). `chr-server` hands it every captured frame through a
+`chr-shm` ring and joins its cameras with the frames by capture sequence; see
+[tracking worker](../server/docs/tracking-worker.md). The protocol is
+language-neutral, so the real tracking module can replace the replay stand-in.
+#60 keeps the questions this does not settle: the tracking reference lifecycle
+(#59), `FrameKey` versus capture sequence, and production missing/late policy.
+An external tracker can still send cameras as `tracking.frame` when no tracking
+worker runs ([tracked camera simulation](../server/docs/tracking-simulation.md)).
 
 ## Repository layout
 
@@ -72,6 +80,7 @@ for them with a shared-memory input ring and per-frame `tracking.frame` calls.
 | --- | --- | --- |
 | `server/renderer/` | `chr-renderer` | GPU rendering library (unchanged) |
 | `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` and `chr-renderer-cli` executables |
+| `server/tracking/` | `chr-tracking` | Tracking worker protocol, chr-server's supervisor for it, and the `chr-tracking-sim-cli` replay stand-in |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
 | `common/shm/` | `chr-shm` | Shared-memory frame rings between processes; the only crate allowed to use `unsafe` |
@@ -139,6 +148,7 @@ sharing is not required and not claimed.
 | Worker exits, crashes or reports a fatal error | Clean feed until a replacement is ready; respawn with backoff; counted |
 | Worker stops responding (oldest request older than the hang limit) | `SIGKILL`, then respawn |
 | GPU device lost inside the worker | Worker exits; handled as a crash |
+| Tracking worker exits, fails or leaves a frame unanswered past the hang limit | Killed and respawned with backoff; frames meanwhile have no camera and are not rendered, so the output port repeats its last frame |
 | Monitor crashes, stalls or has no viewers | No effect on program output; the tap writer never waits |
 | `chr-server` itself fails | Out of scope here: hardware bypass/watchdog and a service supervisor (#80) |
 
@@ -148,4 +158,5 @@ follow-ups, not part of this decision.
 ## References
 
 - #94 decision; #95 monitor split and `chr-shm`; #96 `chr-renderer-cli`;
-  #97 worker supervision and clean feed; #80 physical SDI; #60 tracking results.
+  #97 worker supervision and clean feed; #80 physical SDI; #60 tracking results;
+  #128 tracking worker.

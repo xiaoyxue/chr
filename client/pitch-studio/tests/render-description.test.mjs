@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
-const { RpcError, blendedMaterials, describeScene, glbModel, quadModel, rendererFailure, workerProblem } = await server.ssrLoadModule('/src/render/render-description.ts');
+const { RpcError, blendedMaterials, describeScene, glbModel, quadModel, rendererFailure, trackerProblem, workerProblem } = await server.ssrLoadModule('/src/render/render-description.ts');
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
 
 const apply = (rows, [x, y, z]) => rows.slice(0, 3).map((row) => row[0] * x + row[1] * y + row[2] * z + row[3]);
@@ -76,4 +76,11 @@ test('renderer errors name the missing chr-server capability', () => {
   assert.match(rendererFailure('description.load', new RpcError(-32601, 'Method not found')), /--description 和 --asset-root/);
   assert.match(rendererFailure('description.load', new RpcError(-32602, 'asset outside root')), /错误 -32602.*asset outside root/);
   assert.equal(rendererFailure('sdi.get_status', new Error('timeout')), 'timeout');
+});
+
+test('sending is refused with a reason until the tracking worker is ready', () => {
+  const status = { state: 'ready', pid: 9, restarts: 0, requests: 3, cameras: 3, unavailable: 0, not_sent: 0, last_error: null };
+  assert.equal(trackerProblem(status), undefined);
+  assert.match(trackerProblem({ ...status, state: 'starting' }), /跟踪 worker 正在启动/);
+  assert.match(trackerProblem({ ...status, state: 'backoff', restarts: 2, last_error: 'exited' }), /已重启 2 次.*exited/);
 });

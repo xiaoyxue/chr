@@ -5,7 +5,8 @@
 //! and its camera, the manifest's `Ti`/`C` with the clip's warp of that frame, goes
 //! to `chr-server` as `tracking.frame` over the NativeSocket. The two channels are
 //! independent; the server pairs them by capture sequence. No physical SDI or
-//! tracking system is involved.
+//! tracking system is involved. With `--no-tracking` it is the camera only, for a
+//! server whose tracking worker supplies the cameras (`chr-server --tracking-worker`).
 
 use std::{error::Error, path::PathBuf};
 
@@ -24,6 +25,8 @@ Options:
   --input-ring <path>        Input ring to create [default: $XDG_RUNTIME_DIR/chr/input.ring]
   --tracking-delay-ms <n>    Send each camera this long after its frame [default: 0]
   --drop-tracking-every <n>  Withhold every n-th camera to exercise skipped frames
+  --no-tracking              Camera only: write frames, send no cameras (for a server
+                             started with --tracking-worker)
   -h, --help                 Show this help";
 
 #[derive(Debug, PartialEq)]
@@ -34,6 +37,7 @@ struct Args {
     input_ring: PathBuf,
     delay_ms: u64,
     drop_every: Option<u64>,
+    no_tracking: bool,
 }
 
 fn runtime_dir(name: &str) -> Result<PathBuf> {
@@ -44,7 +48,7 @@ fn runtime_dir(name: &str) -> Result<PathBuf> {
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     let (mut video, mut scene, mut socket, mut input_ring) = (None, None, None, None);
-    let (mut delay_ms, mut drop_every) = (0, None);
+    let (mut delay_ms, mut drop_every, mut no_tracking) = (0, None, false);
     while let Some(flag) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
@@ -59,9 +63,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                     return Err("--drop-tracking-every must be positive".into());
                 }
             }
+            "--no-tracking" => no_tracking = true,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
+    }
+    if no_tracking && (delay_ms > 0 || drop_every.is_some()) {
+        return Err("--no-tracking sends no cameras to delay or drop".into());
     }
     Ok(Some(Args {
         video: video.ok_or("--video <mp4> is required")?,
@@ -76,6 +84,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         },
         delay_ms,
         drop_every,
+        no_tracking,
     }))
 }
 
@@ -138,13 +147,21 @@ fn run(args: Args) -> Result<()> {
         fps: mode.fps,
     }
     .to_meta();
-    log::info!(
-        "simulating a tracked {} camera: frames into {}, cameras to {} (+{} ms)",
-        mode.name(),
-        args.input_ring.display(),
-        args.socket.display(),
-        args.delay_ms
-    );
+    if args.no_tracking {
+        log::info!(
+            "simulating a {} camera: frames into {}; the server's tracking worker supplies cameras",
+            mode.name(),
+            args.input_ring.display()
+        );
+    } else {
+        log::info!(
+            "simulating a tracked {} camera: frames into {}, cameras to {} (+{} ms)",
+            mode.name(),
+            args.input_ring.display(),
+            args.socket.display(),
+            args.delay_ms
+        );
+    }
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -175,6 +192,9 @@ fn run(args: Args) -> Result<()> {
                     &frame.rgba,
                 )?;
                 frames += 1;
+                if args.no_tracking {
+                    continue;
+                }
                 if args.drop_every.is_some_and(|n| (frame.sequence + 1) % n == 0) {
                     withheld += 1;
                 } else {
@@ -266,7 +286,34 @@ mod tests {
                 input_ring: "/tmp/r".into(),
                 delay_ms: 40,
                 drop_every: Some(10),
+                no_tracking: false,
             }
+        );
+        let camera_only = parse(&[
+            "--video",
+            "v.mp4",
+            "--scene",
+            "s.json",
+            "--socket",
+            "/tmp/s",
+            "--input-ring",
+            "/tmp/r",
+            "--no-tracking",
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(camera_only.no_tracking);
+        assert!(
+            parse(&[
+                "--video",
+                "v.mp4",
+                "--scene",
+                "s.json",
+                "--no-tracking",
+                "--tracking-delay-ms",
+                "5"
+            ])
+            .is_err()
         );
         assert!(parse(&["--help"]).unwrap().is_none());
         for bad in [

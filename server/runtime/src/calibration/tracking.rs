@@ -370,6 +370,19 @@ mod tests {
     }
 
     #[test]
+    fn the_tracking_worker_replay_sends_the_same_cameras() {
+        let ti = [[0.02, 0., 0.], [0., 0.02, 0.], [0., 0., 1.]];
+        let warps = [
+            [[S, 0., -1.], [0., S, -0.5], [0., 0., 1.]],
+            [[S, 0., -0.9], [0., S, -0.5], [0., 0., 1.]],
+        ];
+        let worker = chr_tracking::replay::Replay::new(ti, [0., 0., -10.], &warps).unwrap();
+        for sequence in 0..5 {
+            assert_eq!(worker.frame(sequence), replay().frame(sequence));
+        }
+    }
+
+    #[test]
     fn pairs_by_sequence_regardless_of_arrival_order() {
         let feed = TrackingFeed::new(8);
         let mut join = TrackingJoin::new(feed.clone(), Duration::from_millis(100), 4);

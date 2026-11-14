@@ -15,7 +15,9 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 
 - Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `runtime/`
   (`chr-runtime`) builds the `chr-server` render server, the headless
-  `chr-renderer-cli` and the `chr-tracking-sim` capture/tracking simulator; `viewer/` (`chr-app`) is the
+  `chr-renderer-cli` and the `chr-tracking-sim` camera simulator; `tracking/`
+  (`chr-tracking`) holds the tracking worker protocol, its supervisor and the
+  `chr-tracking-sim-cli` replay stand-in; `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
 - Keep all rendering in `renderer/`. It has no networking, video-device, or
@@ -33,8 +35,13 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
   encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer helpers
   serve only the software input and remain private to it.
-  Keep algorithm estimation in `algorithm/`; replay calibration is not a live
-  tracking service or a public distortion protocol.
+  Live tracking runs in a tracking worker that `chr-server` starts, feeds and
+  supervises like the render worker (`docs/tracking-worker.md`). It may hold its
+  own GPU device; for now both workers share one GPU. `chr-tracking-sim-cli`
+  replays recorded cameras and must never be described as estimating them; the
+  real tracking module, possibly in another language, replaces it through the
+  same protocol. Replay calibration is not a live tracking service or a public
+  distortion protocol.
 - Use the same wgpu pipeline for Windows, Linux, and offscreen GPU tests.
 - Keep generated PNGs in repository-root `output/renderer/`, ignored by Git but retained locally.
   PNG encoding/filesystem I/O belongs in the shell; GPU readback belongs in `renderer/`.

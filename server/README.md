@@ -9,7 +9,8 @@ repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker |
+| `tracking/` | `chr-tracking` | Tracking worker protocol and chr-server's supervisor for it; `chr-tracking-sim-cli`, a stand-in worker that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)) |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers and the `stack.py` one-command development stack |
@@ -40,9 +41,11 @@ sends every frame to a supervised `chr-renderer-cli worker` process (#97), which
 calls the `chr-renderer` library; see [Render worker](#render-worker). #95 moved
 video monitoring out of `chr-server` into `chr-monitor`.
 
-Algorithm estimation stays in repository-root `algorithm/`. Runtime calibration
-consumption does not implement that algorithm: the existing replay loads local
-lens data at startup and associates it by native stream/frame identity.
+Live tracking runs in a supervised tracking worker
+([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim-cli` stands in for
+the real module by replaying recorded cameras. Runtime calibration consumption
+estimates nothing: the existing replay loads local lens data at startup and
+associates it by native stream/frame identity.
 `program/video.rs` retains the demo-specific GLB and scene setup. The opt-in
 [tracked camera simulation](docs/tracking-simulation.md) receives `Ti`, `C` and a
 frame warp per frame from `chr-tracking-sim`; it is a simulation, not a production
@@ -258,7 +261,10 @@ replays the same manifest and clip as a tracked camera: `chr-tracking-sim` write
 each frame into a shared-memory input ring and sends its `Ti`/`C`/frame warp as
 `tracking.frame`; `chr-server --tracked-scene` pairs them by capture sequence and
 renders through the worker to the SDI port, which `chr-monitor` streams. See
-[Tracked camera simulation](docs/tracking-simulation.md).
+[Tracked camera simulation](docs/tracking-simulation.md). With `--tracking-worker`
+the simulator is the camera only and chr-server's tracking worker supplies the
+cameras ([tracking worker](docs/tracking-worker.md)); `stack.py` uses that mode
+by default.
 
 ### Render description
 
@@ -772,7 +778,7 @@ manifest, clip, optional description and asset root, addresses and ports; then
 from the repository root, outside any Nix shell:
 
 ```sh
-uv run server/scripts/stack.py start     # waits until every endpoint answers
+uv run server/scripts/stack.py start     # waits until video flows through both workers
 uv run server/scripts/stack.py status
 uv run server/scripts/stack.py stop
 uv run server/scripts/stack.py restart
@@ -782,19 +788,35 @@ Each component runs detached in its own process group, logs to
 `output/stack/<name>.log` and is recorded in `output/stack/<name>.pid` with its
 start time, so `stop` signals only processes the script started (TERM, then KILL
 after 15 s). `start` skips a component that is already running or whose port is
-taken. Inside the render component the processes still restart on their own.
+taken, and names the process holding that port. `start` waits for the ports, then
+for chr-server's render and tracking workers to be ready and for frames to be
+paired with a camera for two seconds in a row. It prints `ready: …` lines as each
+step completes, or `PROBLEM: …` lines saying what is still wrong. For a component
+that exited right after starting, it shows the last lines of its log. Inside the
+render component the processes still restart on their own.
 `start` (once ready) and `status` end with a report read from `/proc`. For each
-component it lists every process with its PID and the sockets that process
-actually holds, each with its purpose. Wrappers that do no work are folded into
+component it lists every process with its PID, uptime and the sockets that process
+actually holds, each with its purpose. A process whose executable was rebuilt
+since it started is marked `OLD BUILD`. The report then asks chr-server itself,
+over `<dir>/render.sock`, twice one second apart, for its health:
+- SDI output and repeat rates;
+- the render worker and the tracking worker states;
+- frames paired with a camera per second.
+
+It ends with `PROBLEM` lines when something is not working. `stop` lists every
+process it stopped or had to kill. chr-server handles SIGTERM like Ctrl-C, removing
+its workers' ring directories in `$XDG_RUNTIME_DIR/chr/`. On startup it also
+removes directories left there by servers that were killed. Wrappers that do no work are folded into
 one line: the `run-tracked.sh` restart loops and the npm and esbuild helpers.
 The report ends with the URLs to open and the `ssh -L` forwards a remote viewer
-needs. With every component enabled the stack runs eight working processes:
+needs. With every component enabled the stack runs nine working processes:
 
 | Component | Process | Sockets |
 | --- | --- | --- |
 | render | `chr-server` | control WebSocket (`server_ws`), NativeSocket `<dir>/render.sock` |
 | render | `chr-renderer-cli worker` | none: stdin/stdout and shared memory with chr-server, holds the GPU |
-| render | `chr-tracking-sim` | none: input ring (shared memory) and chr-server's socket |
+| render | `chr-tracking-sim-cli worker` | none: frames from chr-server's shared-memory ring, cameras back over stdin/stdout (`tracking = "worker"`) |
+| render | `chr-tracking-sim` | none: input ring (shared memory); with `tracking = "external"` also chr-server's socket |
 | render | `ffmpeg` | none: decodes the clip for the simulator |
 | render | `chr-monitor` | WebSocket (`monitor_ws`), SRT listener (`srt`, UDP), ICE-TCP from `webrtc_tcp` (only while a viewer is connected) |
 | srt-relay | `stack.py relay` | TCP `srt_relay_port`, plus one `ffmpeg` per connected player |

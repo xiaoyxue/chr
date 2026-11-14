@@ -24,6 +24,7 @@ pub struct ControlHandler {
     worker: Option<StatusHandle>,
     scenes: Option<crate::retained::SceneControl>,
     tracking: Option<TrackingFeed>,
+    tracker: Option<chr_tracking::supervisor::StatusHandle>,
     description: Option<std::sync::Arc<crate::program::description::Loader>>,
 }
 
@@ -39,6 +40,7 @@ impl ControlHandler {
             worker: None,
             scenes: None,
             tracking: None,
+            tracker: None,
             description: None,
         }
     }
@@ -55,6 +57,13 @@ impl ControlHandler {
     /// Accepts `tracking.frame` for a tracked program.
     pub fn with_tracking(mut self, feed: TrackingFeed) -> Self {
         self.tracking = Some(feed);
+        self
+    }
+
+    /// Cameras come from the supervised tracking worker, reported through
+    /// `tracking.get_worker_status`; `tracking.frame` is then rejected.
+    pub fn with_tracking_worker(mut self, status: chr_tracking::supervisor::StatusHandle) -> Self {
+        self.tracker = Some(status);
         self
     }
 
@@ -160,6 +169,12 @@ impl Handler for ControlHandler {
                         serde_json::from_value(value)
                             .map_err(|error| ErrorObject::invalid_params(error.to_string()))
                     })?;
+                if self.tracker.is_some() {
+                    return Err(crate::retained::reject(
+                        chr_common::scene_frame::RejectionKind::InvalidState,
+                        "cameras come from the tracking worker (chr-server --tracking-worker)",
+                    ));
+                }
                 self.tracking(method)?.push(frame)?;
                 Ok(Value::Null)
             }
@@ -186,6 +201,18 @@ impl Handler for ControlHandler {
             tracking::GET_STATUS => {
                 params::<NoParams>(raw_params)?;
                 serde_json::to_value(self.tracking(method)?.status())
+                    .map_err(|error| ErrorObject::internal(error.to_string()))
+            }
+            tracking::GET_WORKER_STATUS => {
+                params::<NoParams>(raw_params)?;
+                let status = self
+                    .tracker
+                    .as_ref()
+                    .ok_or_else(|| ErrorObject::method_not_found(method))?
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                serde_json::to_value(status)
                     .map_err(|error| ErrorObject::internal(error.to_string()))
             }
             render_worker::GET_STATUS => {
@@ -340,6 +367,46 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn a_tracking_worker_reports_status_and_rejects_external_cameras() {
+        let (handler, _worker) = fake_worker();
+        let feed = TrackingFeed::new(4);
+        let handler = handler.with_tracking(feed.clone());
+        let camera = json!({"sequence": "1", "ti": [0.02, 0, 0, 0, 0.02, 0, 0, 0, 1],
+                            "camera_center": [0, 0, -10], "frame_warp": null});
+        let error = handler
+            .handle(&CONNECTION, tracking::GET_WORKER_STATUS, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, METHOD_NOT_FOUND);
+        handler
+            .handle(&CONNECTION, tracking::FRAME, Some(camera.clone()))
+            .await
+            .unwrap();
+        let status = chr_tracking::supervisor::status_handle();
+        status.lock().unwrap().cameras = 2;
+        let handler = handler.with_tracking_worker(status);
+        let reported = handler
+            .handle(&CONNECTION, tracking::GET_WORKER_STATUS, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (&reported["state"], &reported["cameras"]),
+            (&json!("backoff"), &json!(2))
+        );
+        let mut external = camera;
+        external["sequence"] = json!("2");
+        let error = handler
+            .handle(&CONNECTION, tracking::FRAME, Some(external))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            chr_common::scene_frame::RejectionKind::InvalidState.code()
+        );
+        assert_eq!(feed.status().samples_received, 1);
     }
 
     #[tokio::test]
