@@ -95,18 +95,103 @@ export async function sha256(blob: Blob): Promise<string> {
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-/** Calls description.load on chr-server through the page's /chr-render WebSocket proxy. */
-export function loadDescription(url: string, scene: DescriptionScene, timeoutMs = 60000): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
-    const timer = setTimeout(() => { socket.close(); reject(new Error('chr-server did not answer in time.')); }, timeoutMs);
-    const finish = (settle: () => void) => { clearTimeout(timer); socket.close(); settle(); };
-    socket.onopen = () => socket.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'description.load', params: { scene } }));
-    socket.onerror = () => finish(() => reject(new Error(`Cannot reach chr-server at ${url}.`)));
-    socket.onmessage = (event) => {
-      const message = JSON.parse(String(event.data)) as { id?: unknown; result?: unknown; error?: { message?: string } };
-      if (message.id !== 1) return;
-      finish(() => message.error ? reject(new Error(message.error.message ?? 'description.load failed.')) : resolve(message.result));
+/** A JSON-RPC error answer from chr-server. */
+export class RpcError extends Error {
+  constructor(readonly code: number, message: string) { super(message); }
+}
+const METHOD_NOT_FOUND = -32601;
+
+/** `render.get_worker_status` result (chr_common::methods::render_worker::WorkerStatus). */
+export interface WorkerStatus {
+  state: 'starting' | 'ready' | 'backoff';
+  pid: number | null;
+  restarts: number;
+  deadline_misses: number;
+  last_error: string | null;
+}
+/** `sdi.get_status` result (chr_common::methods::sdi::SdiStatus). */
+export interface SdiStatus { video_mode: string; frames_output: number; repeated_frames: number; dropped_frames: number }
+export interface LoadResult { scene_revision: string; assets_imported: number; assets_reused: number }
+
+/** Why the render worker cannot take a scene now, or undefined when it is ready. */
+export function workerProblem(status: WorkerStatus): string | undefined {
+  if (status.state === 'ready') return undefined;
+  const detail = status.last_error ? `最近错误：${status.last_error}。` : '';
+  return status.state === 'starting'
+    ? `渲染 worker 正在启动，尚未就绪；请稍候几秒再发送。${detail}`
+    : `渲染 worker 已退出，正在等待自动重启（已重启 ${status.restarts} 次）。${detail}请查看渲染日志（stack 为 output/stack/render.log）。`;
+}
+
+/** The operator-facing reason a renderer call failed. */
+export function rendererFailure(method: string, error: unknown): string {
+  if (!(error instanceof RpcError)) return error instanceof Error ? error.message : String(error);
+  if (error.code === METHOD_NOT_FOUND) {
+    if (method === 'render.get_worker_status')
+      return 'chr-server 已连接，但没有运行渲染 worker（可能是默认的三角形程序）。请用 --tracked-scene 或 --description 启动渲染程序。';
+    if (method === 'description.load')
+      return 'chr-server 没有启用场景描述加载：请以 --description 和 --asset-root 启动（stack.toml 的 description / asset_root）。';
+  }
+  return `chr-server 拒绝了 ${method}（错误 ${error.code}）：${error.message}`;
+}
+
+type Call = (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
+
+/** Runs `run` on one connection to chr-server through the page's /chr-render WebSocket proxy. */
+async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise<T> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    const unreachable = async (reason: string) => {
+      socket.close();
+      let target = '';
+      try { target = ((await (await fetch('/chr-render-info', { cache: 'no-store' })).json()) as { target: string }).target; }
+      catch { /* An older page server has no /chr-render-info; the message stays generic. */ }
+      reject(new Error(`无法连接 chr-server：${reason}。页面代理 /chr-render${target ? ` 转发到 ${target}` : ''}；`
+        + '请确认渲染服务已启动（uv run server/scripts/stack.py status），且页面服务的 CHR_RENDER_URL 与 chr-server 的 --ws 地址一致。'));
     };
+    const timer = setTimeout(() => { void unreachable('5 秒内未建立连接'); }, 5000);
+    socket.onopen = () => { clearTimeout(timer); socket.onerror = null; resolve(); };
+    socket.onerror = () => { clearTimeout(timer); void unreachable('连接被拒绝'); };
+  });
+  const pending = new Map<number, { method: string; resolve: (value: unknown) => void; reject: (error: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+  let next = 0;
+  const failAll = (error: Error) => {
+    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error); }
+    pending.clear();
+  };
+  socket.onmessage = (event) => {
+    const message = JSON.parse(String(event.data)) as { id?: number; result?: unknown; error?: { code: number; message?: string } };
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id);
+    clearTimeout(request.timer);
+    if (message.error) request.reject(new RpcError(message.error.code, message.error.message ?? '未知错误'));
+    else request.resolve(message.result);
+  };
+  socket.onclose = () => failAll(new Error('chr-server 断开了连接（可能正在重启）；请确认它已恢复后重试。'));
+  const call: Call = (method, params, timeoutMs = 5000) => new Promise((resolve, reject) => {
+    const id = ++next;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`chr-server 在 ${timeoutMs / 1000} 秒内没有回应 ${method}。`));
+    }, timeoutMs);
+    pending.set(id, { method, resolve, reject: (error) => reject(new Error(rendererFailure(method, error))), timer });
+    socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }));
+  });
+  try { return await run(call); }
+  finally { socket.onclose = null; failAll(new Error('connection closed')); socket.close(); }
+}
+
+/**
+ * Checks that chr-server is reachable and its render worker is ready, then calls
+ * description.load. Every failure becomes an operator-facing message.
+ */
+export function sendDescription(url: string, scene: DescriptionScene, timeoutMs = 60000) {
+  return session(url, async (call) => {
+    const worker = await call('render.get_worker_status') as WorkerStatus;
+    const problem = workerProblem(worker);
+    if (problem) throw new Error(problem);
+    const sdi = await call('sdi.get_status') as SdiStatus;
+    const loaded = await call('description.load', { scene }, timeoutMs) as LoadResult;
+    return { loaded, sdi, worker };
   });
 }

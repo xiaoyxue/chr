@@ -7,7 +7,7 @@ import { LocalAdEditor } from '../placements/local-ad-editor.ts';
 import { LocalAdRepository, validatePitchAd } from '../placements/local-ad.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import { fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
-import { blendedMaterials, describeScene, loadDescription, sha256, type DescribedAsset } from '../render/render-description.ts';
+import { blendedMaterials, describeScene, sendDescription, sha256, type DescribedAsset } from '../render/render-description.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
@@ -985,6 +985,7 @@ const rendererPaths = rendererBars.map((bar) => bar.querySelector<HTMLInputEleme
 /** What the running renderer action is doing, or empty when idle. */
 let rendererBusy = '';
 let rendererMessage = '';
+let rendererFailed = false;
 let rendererMatchId: string;
 
 /** Why the current draft cannot be sent yet, or undefined when it can. */
@@ -1008,8 +1009,10 @@ function renderRendererBars() {
   for (const bar of rendererBars) {
     bar.querySelector<HTMLButtonElement>('[data-renderer-send]').disabled = Boolean(rendererBusy || blocker);
     bar.querySelector<HTMLButtonElement>('[data-renderer-export]').disabled = Boolean(rendererBusy || blocker);
-    bar.querySelector('[data-renderer-status]').textContent = rendererBusy
-      || (blocker ?? (rendererMessage || '把当前广告位草稿（含启用状态）发送给 chr-server，替换其场景。'));
+    const status = bar.querySelector('[data-renderer-status]');
+    status.textContent = rendererBusy
+      || (blocker ?? (rendererMessage || '把当前广告位草稿（含启用状态）发送给 chr-server，替换其场景；发送前会检查 chr-server 和渲染 worker 是否就绪。'));
+    status.classList.toggle('on-form-error', !rendererBusy && !blocker && rendererFailed);
   }
 }
 
@@ -1045,8 +1048,12 @@ async function rendererAction(busy: string, action: () => Promise<string>, failu
   if (rendererBusy) return;
   rendererBusy = busy;
   renderRendererBars();
+  rendererFailed = false;
   try { rendererMessage = await action(); }
-  catch (error) { rendererMessage = `${failure}：${error instanceof Error ? error.message : String(error)}`; }
+  catch (error) {
+    rendererFailed = true;
+    rendererMessage = `${failure}：${error instanceof Error ? error.message : String(error)}`;
+  }
   finally { rendererBusy = ''; renderRendererBars(); }
 }
 
@@ -1054,9 +1061,9 @@ const sendToRenderer = () => rendererAction('正在发送到 chr-server…', asy
   const record = current();
   const { scene, masked } = await renderScene();
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
-  const loaded = await loadDescription(url, scene) as { scene_revision: string; assets_imported: number; assets_reused: number };
+  const { loaded, sdi } = await sendDescription(url, scene);
   localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [record.match.offlinePackageId]: serverPath(rendererPaths[0].value) }));
-  return `已发送 ${scene.instances.length} 个广告位：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
+  return `已发送 ${scene.instances.length} 个广告位到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
     + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '');
 }, '发送失败');
 

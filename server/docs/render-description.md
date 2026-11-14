@@ -113,7 +113,12 @@ whose preview has loaded its materials and that has a server path, and stay
 disabled while an action runs, so repeated clicks do not queue repeated loads.
 **发送到渲染器** calls `description.load` through the page's `/chr-render`
 WebSocket proxy (`CHR_RENDER_URL`, default `ws://127.0.0.1:8787`), so one tunnel
-to the page is enough. **导出渲染描述** downloads `{"scene": …}`; add a `camera`
+to the page is enough. Before loading, it checks on the same connection that
+chr-server answers and that `render.get_worker_status` is `ready`. If not, it
+names the cause instead of sending: the proxy target is unreachable (the page
+server reports it at `/chr-render-info`), there is no render worker, the worker
+is starting or backing off (with its last error), or `description.load` is not
+enabled (no `--description` / `--asset-root`). **导出渲染描述** downloads `{"scene": …}`; add a `camera`
 block for a startup file, for example
 `jq -s '.[0] + {scene: .[1].scene}' camera.json scene.json`.
 
