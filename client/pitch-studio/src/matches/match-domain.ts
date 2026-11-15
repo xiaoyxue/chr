@@ -1,6 +1,6 @@
 import { validateDimensions } from '../scene/pitch/dimensions.ts';
 import { isPlacementInside } from '../scene/pitch/pitch-layout.ts';
-import type { FusionAdapter, Match, MatchRecord, Placement, FieldDimensions, StorageAdapter, FusionAsset } from '../shared/types.ts';
+import type { FusionAdapter, Match, MatchRecord, Placement, FieldDimensions, FusionAsset } from '../shared/types.ts';
 
 export const MATCH_STORAGE_KEY = 'liveshow.onsite.matches.v1';
 
@@ -118,50 +118,43 @@ export class FusionGateway {
   }
 }
 
-export class MatchRepository {
-  constructor(private readonly storage: StorageAdapter) {}
-  read(): MatchRecord[] {
-    const text = this.storage.getItem(MATCH_STORAGE_KEY);
-    if (!text) return [];
-    let data: unknown;
-    try { data = JSON.parse(text); } catch { throw new Error('本地比赛记录损坏，未覆盖原记录。请检查浏览器存储。'); }
-    if (!isRecord(data) || data.version !== 1 || !Array.isArray(data.records)) throw new Error('本地比赛记录版本无效，未覆盖原记录。');
-    let migrated = false;
-    const retained = data.records.filter((record: unknown) => {
-      if (isRecord(record) && isRecord(record.match) && record.match.mode === 'demo') {
-        migrated = true;
-        return false;
+/**
+ * The match library as stored: `{ version: 1, records }`. Every record's match,
+ * draft and enabled state is validated; an offline match also maps each of its
+ * materials to the stored file the studio reads it from. Throws on anything else.
+ * Demo matches and analyses of earlier versions are dropped.
+ */
+export function validateLibrary(data: unknown): MatchRecord[] {
+  if (!isRecord(data) || data.version !== 1 || !Array.isArray(data.records)) throw new Error('比赛记录版本无效，未覆盖原记录。');
+  const retained = data.records.filter((record: unknown) => !(isRecord(record) && isRecord(record.match) && record.match.mode === 'demo'));
+  const records = retained.map((record: unknown): MatchRecord => {
+    if (!isRecord(record)) throw new Error('比赛记录无效，未覆盖原记录。');
+    const match = validateMatch(record.match);
+    if (!Array.isArray(record.draft)) throw new Error('广告位草稿与场次配置不一致。');
+    const draft = record.draft.map((slot: unknown) => validatePlacement(slot, match.field));
+    if (draft.length !== match.placements.length
+      || new Set(draft.map((slot) => slot.id)).size !== match.placements.length
+      || draft.some((slot) => !match.placements.some((original) => original.id === slot.id && original.type === slot.type && original.assetRole === slot.assetRole))) throw new Error('广告位草稿与场次配置不一致。');
+    if (record.analysis != null && (!isRecord(record.analysis) || record.analysis.mode !== 'demo')) throw new Error('分析记录无效，未加载未经验证的相机数据。');
+    if (record.updatedAt !== undefined && typeof record.updatedAt !== 'string') throw new Error('草稿保存时间无效，未覆盖原记录。');
+    const hiddenPlacementIds: string[] = [];
+    if (record.hiddenPlacementIds !== undefined) {
+      if (!Array.isArray(record.hiddenPlacementIds)) throw new Error('广告位显示设置无效，未覆盖原记录。');
+      for (const id of record.hiddenPlacementIds) {
+        if (typeof id !== 'string') throw new Error('广告位显示设置无效，未覆盖原记录。');
+        if (match.placements.some((slot) => slot.id === id)) hiddenPlacementIds.push(id);
       }
-      return true;
-    });
-    const records = retained.map((record: unknown): MatchRecord => {
-      if (!isRecord(record)) throw new Error('本地比赛记录无效，未覆盖原记录。');
-      const match = validateMatch(record.match);
-      if (!Array.isArray(record.draft)) throw new Error('本地广告位草稿与场次配置不一致。');
-      const draft = record.draft.map((slot: unknown) => validatePlacement(slot, match.field));
-      if (draft.length !== match.placements.length
-        || new Set(draft.map((slot) => slot.id)).size !== match.placements.length
-        || draft.some((slot) => !match.placements.some((original) => original.id === slot.id && original.type === slot.type && original.assetRole === slot.assetRole))) throw new Error('本地广告位草稿与场次配置不一致。');
-      if ('analysis' in record) {
-        if (record.analysis != null && (!isRecord(record.analysis) || record.analysis.mode !== 'demo')) throw new Error('本地分析记录无效，未加载未经验证的相机数据。');
-        migrated = true;
-      }
-      if (record.updatedAt !== undefined && typeof record.updatedAt !== 'string') throw new Error('本地草稿保存时间无效，未覆盖原记录。');
-      const hiddenPlacementIds: string[] = [];
-      if (record.hiddenPlacementIds !== undefined) {
-        if (!Array.isArray(record.hiddenPlacementIds)) throw new Error('本地广告位显示设置无效，未覆盖原记录。');
-        for (const id of record.hiddenPlacementIds) {
-          if (typeof id !== 'string') throw new Error('本地广告位显示设置无效，未覆盖原记录。');
-          if (match.placements.some((slot) => slot.id === id)) hiddenPlacementIds.push(id);
-        }
-      }
-      return { match, draft, hiddenPlacementIds: [...new Set(hiddenPlacementIds)], updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined };
-    });
-    if (migrated) this.write(records);
-    return records;
-  }
-  write(records: MatchRecord[]) {
-    try { this.storage.setItem(MATCH_STORAGE_KEY, JSON.stringify({ version: 1, records })); }
-    catch { throw new Error('无法保存本地草稿，请检查浏览器存储权限或磁盘空间；改动未保存。'); }
-  }
+    }
+    const assetFiles = record.assetFiles;
+    if (assetFiles !== undefined) {
+      const used = new Set(match.placements.flatMap((slot) => slot.asset ? [slot.asset.id] : []));
+      if (match.mode !== 'offline' || !isRecord(assetFiles)
+        || Object.entries(assetFiles).some(([id, path]) => !used.has(id) || typeof path !== 'string' || !path.startsWith('/') || path.split('/').some((part) => part.startsWith('.')))
+        || [...used].some((id) => !(id in assetFiles))) throw new Error('离线素材文件记录无效。');
+    }
+    return { match, draft, hiddenPlacementIds: [...new Set(hiddenPlacementIds)],
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined, ...(assetFiles ? { assetFiles: assetFiles as Record<string, string> } : {}) };
+  });
+  if (new Set(records.map((record) => record.match.id)).size !== records.length) throw new Error('比赛记录中有重复的场次。');
+  return records;
 }

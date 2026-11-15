@@ -28,7 +28,14 @@ export interface Match {
   field: FieldDimensions;
   placements: Placement[];
 }
-export interface MatchRecord { match: Match; draft: Placement[]; hiddenPlacementIds?: string[]; updatedAt?: string }
+export interface MatchRecord {
+  match: Match;
+  draft: Placement[];
+  hiddenPlacementIds?: string[];
+  updatedAt?: string;
+  /** An offline match's material id → the stored file the studio reads it from. */
+  assetFiles?: Record<string, string>;
+}
 export interface StorageAdapter { getItem(key: string): string | null; setItem(key: string, value: string): void }
 export interface FusionAdapter {
   lookupMatch(id: string): Promise<unknown>;

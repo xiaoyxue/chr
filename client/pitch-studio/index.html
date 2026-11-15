@@ -15,7 +15,7 @@
       <div class="on-side-bottom"><b>Fusion integration</b><p>Match lookup and assigned materials</p><span class="on-badge amber">Read-only API</span></div>
     </aside>
     <div class="on-shell">
-      <header class="on-topbar"><div>LiveShow 现场控制 <span>/</span> <b id="page-crumb">比赛列表</b></div><div class="on-top-right"><span class="on-badge">数据保存在本机</span><span class="on-avatar">LC</span></div></header>
+      <header class="on-topbar"><div>LiveShow 现场控制 <span>/</span> <b id="page-crumb">比赛列表</b></div><div class="on-top-right"><span class="on-badge">数据保存在现场服务器</span><span class="on-avatar">LC</span></div></header>
       <main class="on-main">
         <p id="app-error" class="on-alert error" role="alert" hidden></p>
         <section id="matches-page">
@@ -24,7 +24,7 @@
             <div class="on-section-heading"><div><p class="on-eyebrow">GET STARTED</p><h2>添加比赛场次</h2></div><span class="on-step-number">01</span></div>
             <form id="match-lookup-form"><label for="match-lookup-id">比赛场次 ID，或现场服务器上的离线 ZIP 路径</label><div class="on-lookup-row"><input id="match-lookup-id" placeholder="Fusion 比赛 ID，或 /home/…/match.zip" maxlength="1024" required autocomplete="off" /><button class="on-button primary" id="match-lookup-submit" type="submit">核验并添加</button><button id="import-offline-package" class="on-button" type="button">选择本地 ZIP</button></div></form>
             <input id="offline-package-file" type="file" accept=".zip,application/zip" hidden />
-            <p class="on-help">Enter a Fusion MATCH or CMP identifier to fetch the latest saved Ads, placements and assigned materials. An absolute path (starting with /) loads an offline Fusion ZIP from the onsite server; “选择本地 ZIP” picks one on this computer. Offline packages include images and GLB models, need no API connection, hold up to 256 MB of materials and are saved in this browser.</p>
+            <p class="on-help">Enter a Fusion MATCH or CMP identifier to fetch the latest saved Ads, placements and assigned materials. An absolute path (starting with /) loads an offline Fusion ZIP from the onsite server; “选择本地 ZIP” picks one on this computer. Offline packages include images and GLB models, need no API connection, hold up to 256 MB of materials and are saved in the studio store on the onsite server.</p>
             <p id="lookup-status" role="status" class="on-help"></p>
             <p id="offline-package-status" class="on-help" role="status"></p>
           </section>
@@ -49,7 +49,13 @@
               <div class="on-preview-footer"><span>俯视图编辑底面，主看台查看 2D / 3D 效果；导入点云不会替换此画面。</span><span class="on-badge amber">近似预览机位</span></div>
               <div id="camera-mount"><div id="camera-list" class="camera-list" role="group" aria-label="选择球场预览机位"></div></div><button id="reset-business-view" class="on-text-button" type="button">复位球场预览视角</button>
             </section><aside class="on-local-sidebar">
-              <section class="on-card on-placement-panel"><div class="on-card-head"><h2>场次配置广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">启用状态和位置草稿按场次保存，不会自动播出或回传 Fusion。</p></section>
+              <section class="on-card on-placement-panel"><div class="on-card-head"><h2>场次配置广告位 <span id="placement-count"></span></h2></div><div id="preview-placement-list"></div><p class="on-panel-note">启用状态和位置草稿按场次保存，不会自动播出或回传 Fusion。</p><div class="on-local-transfer"><h3>现场广告位文件</h3>
+                <p class="on-help">导出 / 导入本场次现场创建的球场本地和点云广告位、旗帜（不含 Fusion 离线包）。</p>
+                <div class="on-action-row"><button id="export-local-placements" class="on-button" type="button">导出现场广告位</button><button id="import-local-placements" class="on-button" type="button">导入现场广告位</button><input id="local-placements-file" type="file" accept=".json,application/json" hidden /></div>
+                <div class="on-source-row"><input id="local-placements-path" class="on-path-input" placeholder="服务器上的导出文件或存储中的 local-ads.json" autocomplete="off" aria-label="服务器上的现场广告位文件路径" /><button id="load-local-placements-path" class="on-button" type="button">按路径导入</button></div>
+                <p id="local-transfer-status" class="on-help" role="status"></p></div>
+                <dialog id="local-import-dialog" class="on-dialog"><form method="dialog"><h3>导入现场广告位</h3><p id="local-import-summary"></p>
+                <div class="on-action-row"><button value="merge" class="on-button primary">合并</button><button value="replace" class="on-button">替换全部本地广告位</button><button value="cancel" class="on-text-button">取消</button></div></form></dialog></section>
               <div id="preview-inspector-slot"><section id="placement-inspector" class="on-card on-inspector" aria-labelledby="inspector-name">
                 <div class="on-card-head"><div class="on-inspector-title"><span id="inspector-type" class="on-badge"></span><h2 id="inspector-name">广告位属性</h2></div><button id="inspector-lock" class="on-lock-toggle" type="button" aria-pressed="false" title="解锁后才能移动、调整尺寸或缩放（快捷键 L）">🔒 已锁定</button></div>
                 <form id="placement-form" class="on-card-body" novalidate><p id="inspector-state" class="on-help" role="status"></p>
@@ -108,7 +114,7 @@
               <video id="result-video" playsinline preload="auto" hidden></video><p id="result-quality" class="on-help"></p>
             </div>
             <section class="on-card on-editor"><div class="on-card-head"><h2>Fusion 场次广告位微调</h2><button class="on-button" type="button" data-go-tab="preview">返回球场 / 点云广告编辑</button></div><div id="adjust-placement-list"></div><div id="adjust-inspector-slot"></div></section>
-            <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿仅保存在本机，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
+            <div class="on-save-bar"><p id="save-status" class="on-help" role="status">草稿保存在现场服务器的 studio 存储中，不会回传 Fusion。</p><button id="export-placements" class="on-button">导出位置 JSON</button></div>
             <div class="on-save-bar on-renderer-bar" data-renderer-bar><input class="on-path-input" data-renderer-path placeholder="渲染器读取的离线 ZIP 路径，如 /home/…/match.fusion.zip" autocomplete="off" aria-label="现场服务器上的离线 ZIP 路径" /><button class="on-button" type="button" data-renderer-export>导出渲染描述</button><button class="on-button primary" type="button" data-renderer-send>发送到渲染器</button><p class="on-help" role="status" data-renderer-status></p></div>
           </div>
           <p id="engine-status" class="on-help" role="status"></p>

@@ -55,6 +55,9 @@ class Config:
     webrtc_tcp: str = "127.0.0.1:8790"
     srt_relay_port: int = 0
     pitch_studio_port: int = 4173
+    # Where pitch-studio keeps matches, placements, sessions and uploaded files
+    # (STUDIO_DATA_DIR); inside asset_root so chr-server can read the uploads.
+    studio_data_dir: str | None = None
     monitor_page_port: int = 5173
     # "worker": chr-server's tracking worker supplies cameras; "external": the simulator does.
     tracking: str = "worker"
@@ -118,8 +121,11 @@ def components(config: Config) -> list[Component]:
             ["nix", "develop", ".#media", "--command", "python3", "server/scripts/stack.py", "relay", caller,
              str(config.srt_relay_port)],
             {}, [("SRT relay", "127.0.0.1", config.srt_relay_port)]))
+    studio_env = {"CHR_RENDER_URL": f"ws://{config.server_ws}"}
+    if config.studio_data_dir:
+        studio_env["STUDIO_DATA_DIR"] = config.studio_data_dir
     for name, directory, port, env in (
-        ("pitch-studio", "client/pitch-studio", config.pitch_studio_port, {"CHR_RENDER_URL": f"ws://{config.server_ws}"}),
+        ("pitch-studio", "client/pitch-studio", config.pitch_studio_port, studio_env),
         ("monitor-page", "client/example/render-harness", config.monitor_page_port, {}),
     ):
         if port:

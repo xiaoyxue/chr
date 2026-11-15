@@ -71,7 +71,7 @@ const wall = { origin: [50, -2, -3], u: [0, 1, 0], v: [0, 0, 1], width: 4, heigh
 const flagSettings = { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' };
 const local = { name: 'ad', space: 'pitch', normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
 // Flags exist on point-cloud planes only.
-const onCloud = { space: 'cloud', cloudId: 'c1' }, confirmed = { id: 'c1', aligned: true };
+const onCloud = { space: 'cloud', cloudId: 'c1' }, confirmed = { loadedId: 'c1', alignment: { c1: true } }, noCloud = { alignment: {} };
 const options = { field: { length: 105, width: 68 }, slots: [], hidden: new Set(), geometry: new Map(), assets: new Map(), packagePath: '/srv/match.zip' };
 
 test('a picked flag plane stands upright and reads unmirrored from the picking side', () => {
@@ -190,16 +190,27 @@ test('the overall list summarises each local placement and says why it cannot be
     detail: '振幅 0.32 m · 频率 1.35 · 速度 1× · 简易光照', material: '/srv/flags/a.png', problem: undefined });
   assert.equal(localRow({ ...flag, materialPath: undefined }, confirmed).problem, '未设置图片');
   const model = { ...local, id: 'm', type: '3D', plane: wall, scale: 1.5, yaw: 30, materialPath: '/srv/car.glb' };
-  assert.deepEqual([localRow(model).size, localRow(model).detail], ['底面 4 × 2 m', '缩放 ×1.5 · 朝向 30°']);
+  assert.deepEqual([localRow(model, noCloud).size, localRow(model, noCloud).detail], ['底面 4 × 2 m', '缩放 ×1.5 · 朝向 30°']);
   // A material chosen on this computer has no server path for chr-server.
   const chosen = { ...local, id: 'i', type: '2D', plane: wall, material: new File([new Uint8Array(1)], 'logo.png') };
-  assert.equal(localRow(chosen).problem, '未设置服务器路径');
-  assert.equal(localRow(chosen).material, 'logo.png（仅本机，未设置服务器路径）');
-  assert.equal(localRow({ ...chosen, materialPath: '/srv/logo.webp' }).problem, '渲染器只读取 PNG / JPEG 图片');
-  const cloud = { ...model, space: 'cloud', cloudId: 'c1' };
-  assert.equal(localRow(cloud).problem, '所在点云未导入，无法换算为球场坐标');
-  assert.equal(localRow(cloud, { id: 'c1', aligned: false }).problem, '点云未确认与球场同坐标');
-  assert.equal(localRow(cloud, { id: 'c1', aligned: true }).problem, undefined);
+  assert.equal(localRow(chosen, noCloud).problem, '未设置服务器路径');
+  assert.equal(localRow(chosen, noCloud).material, 'logo.png（未设置服务器路径）');
+  assert.equal(localRow({ ...chosen, materialPath: '/srv/logo.webp' }, noCloud).problem, '渲染器只读取 PNG / JPEG 图片');
+});
+
+test("a point-cloud placement is sendable once its cloud was confirmed, without loading the cloud", () => {
+  const cloud = { ...local, ...onCloud, id: 'm', type: '3D', plane: wall, materialPath: '/srv/car.glb' };
+  // Loaded and confirmed: sendable, editable here.
+  assert.deepEqual([localRow(cloud, confirmed).problem, localRow(cloud, confirmed).note], [undefined, undefined]);
+  // Confirmed earlier (saved with the session), not loaded now: still sendable, with a note.
+  const saved = localRow(cloud, { alignment: { c1: true } });
+  assert.deepEqual([saved.problem, saved.note], [undefined, '点云已确认同坐标（未载入，可发送；编辑需载入点云）']);
+  // Never confirmed, un-ticked, or loaded but not confirmed: not sendable.
+  assert.equal(localRow(cloud, noCloud).problem, '所在点云未确认与球场同坐标（请载入该点云并确认）');
+  assert.equal(localRow(cloud, { alignment: { c1: false } }).problem, '点云未确认与球场同坐标');
+  assert.equal(localRow(cloud, { loadedId: 'c1', alignment: {} }).problem, '点云未确认与球场同坐标');
+  // Another cloud's answer does not count.
+  assert.ok(localRow(cloud, { loadedId: 'c2', alignment: { c2: true } }).problem);
 });
 
 test('local placements can be sent without an offline ZIP; Fusion placements need it', () => {

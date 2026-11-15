@@ -31,9 +31,12 @@ export interface LocalAd {
   scale: number;
   yaw: number;
   visible: boolean;
+  /** The material loaded for the preview; not stored, it is read back from `materialPath`. */
   material?: File;
-  /** Absolute path of `material` on the onsite server, where chr-server reads it; unset for a file chosen locally. */
+  /** Absolute path of the material on the onsite server, where chr-server reads it; a file chosen locally is uploaded to the studio store. */
   materialPath?: string;
+  /** The material's original file name, shown to the operator. */
+  materialName?: string;
   /** Present exactly for flags. */
   flag?: FlagSettings;
 }
@@ -72,7 +75,8 @@ export function validLocalAd(value: unknown): value is LocalAd {
     && [ad.plane.width, ad.plane.height, ad.scale].every((x) => Number.isFinite(x) && x >= 0.01 && x <= 1000)
     && Number.isFinite(ad.offset) && Math.abs(ad.offset) <= 1000
     && Number.isFinite(ad.yaw) && Math.abs(ad.yaw) <= 360
-    && [1, -1].includes(ad.normalSign) && (ad.material === undefined || ad.material instanceof File) && validPath(ad.materialPath);
+    && [1, -1].includes(ad.normalSign) && (ad.material === undefined || ad.material instanceof File) && validPath(ad.materialPath)
+    && (ad.materialName === undefined || (typeof ad.materialName === 'string' && ad.materialName.length <= 255));
 }
 
 /** Flags are placed on point-cloud planes only; early records may still hold pitch flags. */
@@ -95,64 +99,16 @@ export function validatePitchAd(ad: LocalAd, field: FieldDimensions) {
   }
 }
 
-export class LocalAdRepository {
-  private database?: Promise<IDBDatabase>;
-  private open() {
-    return this.database ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('liveshow.local-advertising.v1', 1);
-      request.onupgradeneeded = () => request.result.createObjectStore('matches');
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(new Error(`无法打开本地广告素材存储：${request.error?.message}`));
-      request.onblocked = () => reject(new Error('本地广告存储被其他页面阻塞，请关闭旧页面后重试。'));
-    });
-  }
-  async read(id: string): Promise<LocalAd[]> {
-    const database = await this.open();
-    return new Promise((resolve, reject) => {
-      const request = database.transaction('matches').objectStore('matches').get(id);
-      request.onerror = () => reject(new Error(`读取本地广告失败：${request.error?.message}`));
-      request.onsuccess = () => {
-        const ads: unknown = request.result ?? [];
-        if (!Array.isArray(ads) || ads.length > 200 || !ads.every(validLocalAd) || new Set(ads.map((ad) => ad.id)).size !== ads.length) {
-          reject(new Error('本地广告数据损坏，未覆盖原记录。'));
-        } else resolve(ads.map(upgradeLocalAd));
-      };
-    });
-  }
-  async write(id: string, ads: LocalAd[], space: AdSpace) {
-    if (ads.length > 200 || !ads.every((ad) => validLocalAd(ad) && (ad.space ?? 'cloud') === space)) throw new Error('本地广告参数无效或超过 200 个。');
-    const database = await this.open();
-    return new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction('matches', 'readwrite');
-      const store = transaction.objectStore('matches');
-      const request = store.get(id);
-      let validationError: Error;
-      request.onsuccess = () => {
-        const saved: unknown = request.result ?? [];
-        if (!Array.isArray(saved) || !saved.every(validLocalAd)) {
-          validationError = new Error('本地广告数据损坏，未覆盖原记录。');
-        } else {
-          // Merge inside one transaction so the independent editors cannot overwrite each other.
-          const merged = [...saved.filter((ad) => (ad.space ?? 'cloud') !== space), ...ads];
-          if (merged.length > 200 || new Set(merged.map((ad) => ad.id)).size !== merged.length) {
-            validationError = new Error('本地广告超过 200 个或包含重复 ID，未覆盖原记录。');
-          } else store.put(merged, id);
-        }
-        if (validationError) transaction.abort();
-      };
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = () => reject(validationError ?? new Error(`本地广告保存失败（可能存储空间不足）：${transaction.error?.message}`));
-      transaction.onerror = () => reject(new Error(`本地广告保存失败：${transaction.error?.message}`));
-    });
-  }
+export const MAX_LOCAL_ADS = 200;
 
-  async remove(id: string) {
-    const database = await this.open();
-    return new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction('matches', 'readwrite');
-      transaction.objectStore('matches').delete(id);
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = transaction.onerror = () => reject(new Error(`删除本地广告及素材失败：${transaction.error?.message}`));
-    });
-  }
+/** A match's local placements as stored on the server: valid, unique and without loaded material files. */
+export function validateStoredLocalAds(data: unknown): LocalAd[] {
+  if (!Array.isArray(data) || data.length > MAX_LOCAL_ADS || !data.every((ad) => validLocalAd(ad) && ad.material === undefined)
+    || new Set(data.map((ad: LocalAd) => ad.id)).size !== data.length) throw new Error(`本地广告位数据无效、重复或超过 ${MAX_LOCAL_ADS} 个。`);
+  return data;
+}
+
+/** An ad as stored: the material file stays on the server, only its path and name are kept. */
+export function storedLocalAd({ material, ...ad }: LocalAd): LocalAd {
+  return { ...ad, ...(material ? { materialName: material.name } : {}) };
 }

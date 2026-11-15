@@ -120,7 +120,10 @@ GLB), frames go out as clean feed or repeats, as during any worker restart.
 ## From the pitch-studio client
 
 `client/pitch-studio` converts the current match's Fusion placement draft and
-its local placements (both kept in the browser):
+its local placements, both kept in the studio store on the onsite server
+(`STUDIO_DATA_DIR`, see [development](../../docs/development.md)); placements
+made onsite are stored per match, apart from the Fusion package, so importing a
+newer package keeps them:
 
 - **Fusion 3D placements:** `fitFusionModel` on the loaded GLB's three.js bounds.
   In chr's basis, the preview's centring becomes the translation `(-cx, -cz,
@@ -147,19 +150,20 @@ its local placements (both kept in the browser):
     are removed when a match loads, and the page says how many.
 
   chr-server reads local materials from their server paths (inside its
-  `--asset-root`); a material chosen on the operator's computer is previewed but
-  not sent. Each distinct material is one asset (`LOCAL-` or, for flags, `FLAG-`
-  plus the first 16 hex of its SHA-256), hashed (and a GLB measured) as the page
-  server reads it when sending. A point-cloud placement is sent only while its
-  cloud is loaded and confirmed to share pitch coordinates; placements that
-  cannot be sent are left out and the page says why.
+  `--asset-root`); a material chosen on the operator's computer is uploaded to
+  the studio store and read from there. Each distinct material is one asset
+  (`LOCAL-` or, for flags, `FLAG-` plus the first 16 hex of its SHA-256), hashed
+  (and a GLB measured) as the page server reads it when sending. A point-cloud
+  placement is sent once its cloud (by the PLY's SHA-256) has been confirmed to
+  share pitch coordinates, also without loading that cloud again; editing it needs
+  the cloud. Placements that cannot be sent are left out and the page says why.
 - **Disabled placements:** become `visible: false`.
 - **Blended GLBs:** a GLB with BLEND materials gets `blend_as: "mask"`, and the
   page lists those materials after sending.
 - **Fusion asset sources:** assets are entries of the offline ZIP, read by the
-  server from the ZIP's onsite path. The path is remembered when the ZIP was
-  imported by path or last sent; otherwise type it. Matches from the Fusion API
-  are not supported yet.
+  server from the ZIP's onsite path: the path it was imported from, or its copy
+  in the studio store for a ZIP chosen on the operator's computer. Matches from
+  the Fusion API are not supported yet.
 - More than 63 instances are refused before sending.
 
 **场次配置广告位** lists every placement: Fusion, 球场本地 (2D, 3D) and 点云本地
@@ -172,12 +176,25 @@ animated wave and saved with **保存旗帜属性**. Both editors have undo and 
 and **保存并发送到渲染器**; sending or exporting with unsaved edits asks to save
 them first.
 
-A page reload keeps the session: the browser remembers, per match, the point
-cloud, result folder and reference video imported by server path (and re-reads
-them on reload, saying which could not be read), each point cloud's
+A page reload keeps the session: the store remembers, per match, the point
+cloud, result folder and reference video imported by server path (and the page
+re-reads them on reload, saying which could not be read), each point cloud's
 same-coordinates answer and the selected placements; files chosen locally are
-named for selecting again. The page asks before leaving only while an edit, a
-drawing or a send is unfinished.
+named for selecting again. Another page or browser sees the same data; if it
+saved first, a write is refused and the page reloads and says so. The page asks
+before leaving only while an edit, a drawing or a send is unfinished. Data of
+earlier versions, kept in the browser, is moved to the store once and left in
+the browser as a backup.
+
+**导出现场广告位** writes a match's onsite placements (pitch and point-cloud,
+with their properties, material server paths, each cloud's PLY SHA-256, its
+same-coordinates answer and, if known, its PLY path; no Fusion package data) as
+`chr-studio-local-placements-v1` JSON: a download, and a copy in the store under
+`matches/<matchId>/exports/`. **导入现场广告位** reads such a file, or a store's
+`local-ads.json`, chosen locally or by server path, validates it and asks whether
+to merge (same placement id replaced, others kept) or replace all local
+placements; it is saved like any edit. Point-cloud placements of another PLY
+are imported too and show and send once that PLY is loaded or confirmed.
 
 The renderer bar sits on both the **广告位预览** and **导入结果与微调** tabs; both
 share one path and state. Fusion placements are sent only for an offline-ZIP

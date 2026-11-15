@@ -284,6 +284,20 @@ Server paths are read by the same process under `/local-files/`, only for
 requests to a loopback host (use an SSH port forward from another machine), and
 only inside `LOCAL_FILES_ROOTS` (`:`-separated; the home directory by default),
 never hidden files or symlinks that leave those folders.
+
+The studio keeps all of its data on the onsite server, not in the browser, in
+one directory: `STUDIO_DATA_DIR` (`output/pitch-studio` in the repository for
+`npm run dev` / `vite preview`, or under the working directory for the
+`pitch-studio` launcher; the stack's `studio_data_dir`). The same process serves
+it under `/studio-store/`, for loopback hosts only: `matches.json` (the match
+library and Fusion drafts), `package-paths.json` (offline ZIP paths),
+`matches/<matchId>/local-ads.json` and `session.json` (placements made onsite and
+the operator's session, kept apart from the Fusion package),
+`matches/<matchId>/exports/` (exported onsite placements), and
+`files/<sha256>.<ext>` (uploaded materials up to 64 MB and offline ZIPs up to 1
+GB). Each document carries a revision; a write based on an older one is refused
+with 409, so two pages cannot overwrite each other. Keep the directory inside
+chr-server's `--asset-root` so the uploaded files can be sent to the renderer.
 To run Rust checks directly, enter `nix develop` at the root, then:
 
 ```sh

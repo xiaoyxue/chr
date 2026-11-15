@@ -1,11 +1,16 @@
-import { FusionGateway, MatchRepository, validatePlacement, validateScanFile } from '../matches/match-domain.ts';
+import { FusionGateway, validatePlacement, validateScanFile } from '../matches/match-domain.ts';
 import { HttpFusionAdapter } from '../matches/fusion-client.ts';
-import { offlinePackages, parseOfflinePackage } from '../matches/offline-package.ts';
+import { offlineAsset, parseOfflinePackage, setOfflineAssetFiles, storeOfflineAssets } from '../matches/offline-package.ts';
 import { importPlyFile } from '../analysis/ply-import.ts';
 import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
-import { LocalAdRepository, validatePitchAd, type LocalAd } from '../placements/local-ad.ts';
-import { localProblem, localRow, sendScope, type LocalRow } from '../placements/placement-list.ts';
+import { validatePitchAd, type LocalAd } from '../placements/local-ad.ts';
+import { localAdStore } from '../placements/local-ad-store.ts';
+import { exportLocalPlacements, importedAlignment, mergeLocalPlacements, parseLocalPlacements, waitingForCloud, type ImportMode } from '../placements/local-export.ts';
+import { StoreConflict, StoredDocument, connectStore, readServerFile, removeMatchDocuments, storeExport, uploadFile } from '../shared/studio-store.ts';
+import { validateMatchLibrary, validatePackagePaths } from '../shared/store-documents.ts';
+import { migrateBrowserData } from './browser-migration.ts';
+import { localProblem, localRow, sendScope, type CloudState, type LocalRow } from '../placements/placement-list.ts';
 import { glbBounds } from '../placements/local-ad-scene.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import { fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
@@ -22,7 +27,10 @@ import type { LocalAnalysis } from '../analysis/ply-result.ts';
 
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
 const gateway = new FusionGateway(new HttpFusionAdapter());
-let repository: MatchRepository;
+/** The match library and Fusion drafts, in the studio store on the onsite server. */
+const library = new StoredDocument('matches', validateMatchLibrary);
+/** Offline package id → the ZIP path chr-server reads its materials from. */
+const packagePathDocument = new StoredDocument('package-paths', validatePackagePaths);
 const scanFiles = new Map<string, File>();
 const analysisResults = new Map<string, LocalAnalysis>();
 let analysisImport: { matchId: string; controller: AbortController };
@@ -48,7 +56,7 @@ let anchor: Anchor = 'top-left';
 let keepAspect = true;
 let axesVisible = true;
 const undo = new UndoStack(renderUndo);
-const sessions = new SessionStore(localStorage);
+const sessions = new SessionStore((error) => showError(error));
 /** Remembers what the operator imported or selected in the current match, for a reload. */
 function remember(kind: SourceKind, source?: SessionSource, matchId = currentId) {
   if (matchId) sessions.update(matchId, (session) => ({ ...session, sources: { ...session.sources, [kind]: source } }));
@@ -103,12 +111,30 @@ resultReview.onSource = (matchId, source) => remember('result', source, matchId)
 const htmlEscapes: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHTML = (value: unknown) => String(value).replace(/[&<>"']/g, (char) => htmlEscapes[char]);
 const current = () => records?.find((record) => record.match.id === currentId);
-// Onsite-server paths of offline packages imported by path, which chr-server reads assets from.
-const PACKAGE_PATHS_KEY = 'liveshow.onsite.package-paths.v1';
-const packagePaths = (): Record<string, string> => {
-  try { return JSON.parse(localStorage.getItem(PACKAGE_PATHS_KEY) ?? '{}') as Record<string, string>; }
-  catch { return {}; }
-};
+// Onsite-server paths of offline ZIPs, which chr-server reads their materials from.
+const packagePaths = (): Record<string, string> => packagePathDocument.data ?? {};
+function rememberPackagePath(packageId: string, path: string) {
+  if (packagePaths()[packageId] === path) return;
+  packagePathDocument.data = { ...packagePaths(), [packageId]: path };
+  void packagePathDocument.update((paths) => ({ ...paths, [packageId]: path })).catch(showError);
+}
+setOfflineAssetFiles((packageId, assetId) => records?.find((record) => record.match.offlinePackageId === packageId)?.assetFiles?.[assetId]);
+
+/**
+ * Saves the match library. The page shows the change at once; if another page
+ * saved first, the latest library is loaded instead and the operator is told.
+ */
+async function saveLibrary(next: MatchRecord[]) {
+  records = next;
+  try { await library.save(() => ({ version: 1, records: next })); }
+  catch (error) {
+    if (!(error instanceof StoreConflict)) throw error;
+    records = (await library.load())?.records ?? [];
+    renderMatches();
+    void renderRoute(true);
+    throw new Error('另一个页面修改了比赛数据，已载入服务器上的最新版本；刚才的修改未保存，请重新操作。');
+  }
+}
 const selected = () => current()?.draft.find((slot) => slot.id === selectedId);
 
 function showError(error: unknown) {
@@ -125,7 +151,7 @@ function renderMatches() {
       <h2>${escapeHTML(match.name)}</h2><code>${escapeHTML(match.id)}</code>
       <p class="on-sub">${escapeHTML(match.date.replace('T', ' '))}　·　${escapeHTML(match.venue)}</p>
       <div class="on-match-foot"><span class="on-help">${draft.length} 个广告位 · ${analysisResults.has(match.id) ? '已导入本地点云' : '等待场地分析'}</span>
-        <div class="on-match-actions"><button type="button" class="on-button on-delete-match" data-delete-match="${escapeHTML(match.id)}" aria-label="删除比赛 ${escapeHTML(match.name)}（仅本机）" ${libraryBusy ? 'disabled' : ''}>${deletingMatchId === match.id ? '删除中…' : '删除'}</button>
+        <div class="on-match-actions"><button type="button" class="on-button on-delete-match" data-delete-match="${escapeHTML(match.id)}" aria-label="删除比赛 ${escapeHTML(match.name)}（仅删除工作室存储中的记录）" ${libraryBusy ? 'disabled' : ''}>${deletingMatchId === match.id ? '删除中…' : '删除'}</button>
         <a class="on-button primary" href="#match/${encodeURIComponent(match.id)}/preview">进入场次 →</a></div></div>
     </article>`).join('') : `<div class="on-card on-empty"><h2>${records ? '还没有添加比赛' : '本地记录读取失败'}</h2><p>${records ? '输入 Fusion 比赛 ID，或导入离线 ZIP（本地或服务器路径）。' : '为避免覆盖原记录，已停止写入。请查看页面上方错误信息。'}</p></div>`;
 }
@@ -141,7 +167,7 @@ function setLibraryBusy(busy: boolean) {
 async function deleteMatch(id: string) {
   const record = records?.find((item) => item.match.id === id);
   if (!record || libraryBusy) return;
-  if (!window.confirm(`删除本机保存的比赛“${record.match.name}”？\n\n本地广告位、素材及导入结果也会移除，此操作不可撤销。\n不会删除 Fusion 上的比赛，也不会删除原始视频、PLY 或结果文件夹。`)) return;
+  if (!window.confirm(`删除现场服务器上保存的比赛“${record.match.name}”？\n\n本地广告位、素材及导入结果也会移除，此操作不可撤销。\n不会删除 Fusion 上的比赛，也不会删除原始视频、PLY 或结果文件夹。`)) return;
   clearError();
   deletingMatchId = id;
   setLibraryBusy(true);
@@ -151,12 +177,11 @@ async function deleteMatch(id: string) {
   let removed = false;
   try {
     const next = records.filter((item) => item.match.id !== id);
-    repository.write(next);
-    records = next;
+    await saveLibrary(next);
     removed = true;
     scanFiles.delete(id);
     analysisResults.delete(id);
-    sessions.remove(id);
+    sessions.forget(id);
     if (analysisImport?.matchId === id) cancelAnalysisImport();
     if (analysisNotice?.matchId === id) analysisNotice = undefined;
     if (engineReadyMatchId === id) engineReadyMatchId = undefined;
@@ -171,18 +196,11 @@ async function deleteMatch(id: string) {
     }
     await resultReview.removeMatch(id);
     renderMatches();
-    const cleanup = [new LocalAdRepository().remove(id)];
-    if (record.match.offlinePackageId && !next.some((item) => item.match.offlinePackageId === record.match.offlinePackageId)) {
-      cleanup.push(offlinePackages.remove(record.match.offlinePackageId));
-    }
-    const results = await Promise.allSettled(cleanup);
-    const errors = results.flatMap((result) => result.status === 'rejected'
-      ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []);
-    if (errors.length) throw new Error(errors.join('；'));
-    status.textContent = `已删除本机比赛“${record.match.name}”及相关本地数据；Fusion 和原始文件未改变。`;
+    await removeMatchDocuments(id);
+    status.textContent = `已删除比赛“${record.match.name}”及其本地广告位和会话；Fusion、原始文件和已存储的素材文件未改变。`;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    status.textContent = `${removed ? '比赛已从本机列表移除，但关联数据清理未完成。' : '删除失败，比赛记录未改变。'} ${detail}`;
+    status.textContent = `${removed ? '比赛已从列表移除，但关联数据清理未完成。' : '删除失败，比赛记录未改变。'} ${detail}`;
     showError(new Error(status.textContent));
   } finally {
     deletingMatchId = undefined;
@@ -217,16 +235,14 @@ function renderLists() {
 
 /** The match's local placements of both spaces, in the order the renderer receives them. */
 const matchLocals = (): LocalAd[] => [...pitchEditor.allAds, ...localEditor.allAds];
-const loadedCloud = () => {
-  const analysis = analysisResults.get(currentId);
-  return analysis && { id: analysis.cloud.id, aligned: analysis.aligned };
-};
+/** The current match's clouds for sending: their saved same-coordinates answers, and the loaded one. */
+const cloudState = (): CloudState => ({ loadedId: analysisResults.get(currentId)?.cloud.id, alignment: currentId ? sessions.get(currentId).alignment : {} });
 
 function localRowMarkup(row: LocalRow, toggle: boolean) {
   const key = escapeHTML(`${row.space}:${row.id}`);
   return `<div class="on-slot-row ${row.visible ? '' : 'is-hidden'}" data-local-row="${key}">
     <button type="button" class="on-slot" data-local-select="${key}" title="${toggle ? '在编辑器中编辑' : '返回广告位预览编辑'}">
-      <span class="on-badge ${row.type === 'flag' ? 'flag' : row.type === '3D' ? 'amber' : ''}">${row.badge}</span><span><strong>${escapeHTML(row.name)}</strong><small>${row.place} · ${row.size}${row.detail ? `<br />${row.detail}` : ''}<br />素材：${escapeHTML(row.material)}${row.problem ? `<br /><em class="on-slot-problem">无法发送：${row.problem}</em>` : ''}</small></span>
+      <span class="on-badge ${row.type === 'flag' ? 'flag' : row.type === '3D' ? 'amber' : ''}">${row.badge}</span><span><strong>${escapeHTML(row.name)}</strong><small>${row.place} · ${row.size}${row.detail ? `<br />${row.detail}` : ''}<br />素材：${escapeHTML(row.material)}${row.problem ? `<br /><em class="on-slot-problem">无法发送：${row.problem}</em>` : row.note ? `<br /><em>${row.note}</em>` : ''}</small></span>
     </button>
     ${toggle ? `<button type="button" class="on-visibility-toggle" role="switch" aria-checked="${row.visible}" aria-label="启用 ${escapeHTML(row.name)}" title="${row.visible ? '停用：不在预览和渲染器中显示' : '启用'}" data-local-visibility="${key}">
       <span class="on-toggle-track" aria-hidden="true"></span><span>${row.visible ? '启用' : '停用'}</span></button>` : ''}
@@ -240,7 +256,7 @@ function localRowMarkup(row: LocalRow, toggle: boolean) {
 function renderLocalLists() {
   const record = current();
   if (!record) return;
-  const rows = matchLocals().map((ad) => localRow(ad, loadedCloud()));
+  const rows = matchLocals().map((ad) => localRow(ad, cloudState()));
   const pitch = rows.filter((row) => row.space === 'pitch'), cloud = rows.filter((row) => row.space === 'cloud');
   const group = (title: string, items: LocalRow[], toggle: boolean) =>
     items.length ? `<p class="on-list-group">${title}</p>${items.map((row) => localRowMarkup(row, toggle)).join('')}` : '';
@@ -253,6 +269,98 @@ function renderLocalLists() {
   $('#placement-count').textContent = `${record.draft.length + rows.length}${rows.length ? `（Fusion ${record.draft.length} · 球场本地 ${pitch.length} · 点云本地 ${cloud.length}）` : ''}`;
   renderRendererBars();
 }
+
+/** Exports the match's onsite placements: a download, and a copy kept in the store under the match. */
+async function exportOnsitePlacements() {
+  const record = current(), status = $('#local-transfer-status');
+  if (!record) return;
+  status.classList.remove('on-form-error');
+  try {
+    await saveLocalEdits();
+    const session = sessions.get(record.match.id), analysis = analysisResults.get(record.match.id);
+    const cloudPaths = analysis && session.sources.cloud?.path ? { [analysis.cloud.id]: session.sources.cloud.path } : {};
+    const file = exportLocalPlacements(record.match.id, matchLocals(), session.alignment, cloudPaths);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `local-placements-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${file.exportedAt.replace(/[:.]/g, '-')}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const path = await storeExport(record.match.id, file);
+    status.textContent = `已导出 ${file.placements.length} 个现场广告位（${file.clouds.length} 个点云）：已下载，并保存到服务器 ${path}。`;
+  } catch (error) {
+    status.textContent = `导出失败：${error instanceof Error ? error.message : String(error)}`;
+    status.classList.add('on-form-error');
+  }
+}
+
+/** Asks whether imported placements merge into the match's or replace them all; undefined when cancelled. */
+function askImportMode(summary: string): Promise<ImportMode | undefined> {
+  const dialog = $<HTMLDialogElement>('#local-import-dialog');
+  $('#local-import-summary').textContent = summary;
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise((resolve) => dialog.addEventListener('close', () => {
+    resolve(dialog.returnValue === 'merge' || dialog.returnValue === 'replace' ? dialog.returnValue : undefined);
+  }, { once: true }));
+}
+
+/**
+ * Imports onsite placements from an export file or a store's local-ads.json,
+ * chosen locally or by server path. Everything is validated first; the result is
+ * saved through the store like any edit, so a page that saved first wins.
+ */
+async function importOnsitePlacements(source: File | string) {
+  const record = current(), status = $('#local-transfer-status');
+  if (!record) return;
+  status.classList.remove('on-form-error');
+  try {
+    await saveLocalEdits();
+    if (pitchEditor.editing || localEditor.editing) throw new Error('正在绘制或拖动本地广告位，请完成后再导入。');
+    const file = typeof source === 'string' ? await readServerFile(source) : source;
+    let data: unknown;
+    try { data = JSON.parse(await file.text()); } catch { throw new Error(`${file.name} 不是有效的 JSON 文件。`); }
+    const parsed = parseLocalPlacements(data);
+    if (!parsed.placements.length) throw new Error('文件中没有现场广告位。');
+    for (const ad of parsed.placements.filter((item) => item.space === 'pitch')) {
+      try { validatePitchAd(ad, record.match.field); }
+      catch (error) { throw new Error(`球场广告位“${ad.name}”不适合本场次的球场：${error instanceof Error ? error.message : String(error)}`); }
+    }
+    const existing = matchLocals(), same = parsed.placements.filter((ad) => existing.some((item) => item.id === ad.id)).length;
+    let mode: ImportMode = 'merge';
+    if (existing.length) {
+      mode = await askImportMode(`文件中有 ${parsed.placements.length} 个现场广告位${parsed.matchId && parsed.matchId !== record.match.id ? `（来自场次 ${parsed.matchId}）` : ''}，本场次已有 ${existing.length} 个，其中 ${same} 个 ID 相同。
+合并：相同 ID 的由导入的替换，其余保留。
+替换全部本地广告位：只保留导入的。`);
+      if (!mode) { status.textContent = '已取消导入，现场广告位未改变。'; return; }
+    }
+    await localAdStore.save(record.match.id, (saved) => mergeLocalPlacements(saved, parsed.placements, mode));
+    sessions.update(record.match.id, (session) => ({ ...session, alignment: importedAlignment(session.alignment, parsed.clouds) }));
+    await Promise.all([pitchEditor.reload(), localEditor.reload()]);
+    const { loadedId, alignment } = cloudState();
+    const waiting = waitingForCloud(parsed.placements, loadedId, alignment);
+    const hidden = parsed.placements.filter((ad) => ad.space !== 'pitch' && ad.cloudId !== loadedId && alignment[ad.cloudId] === true);
+    const missing = parsed.placements.filter((ad) => !ad.materialPath);
+    const plyPaths = parsed.clouds.flatMap((cloud) => cloud.path && cloud.id !== loadedId ? [cloud.path] : []);
+    if (plyPaths.length && !$<HTMLInputElement>('#analysis-path').value) $<HTMLInputElement>('#analysis-path').value = plyPaths[0];
+    status.textContent = [`已${mode === 'merge' ? '合并' : '替换'}导入 ${parsed.placements.length} 个现场广告位，已保存到服务器。`,
+      parsed.droppedPitchFlags ? `已忽略 ${parsed.droppedPitchFlags} 个球场旗帜（旗帜只能放在点云上）。` : '',
+      hidden.length ? `${hidden.length} 个点云广告位的点云已确认同坐标：可发送，载入同一 PLY 后才会在点云中显示和编辑。` : '',
+      waiting.length ? `${waiting.length} 个点云广告位属于未载入、未确认的点云（${[...new Set(waiting.map((ad) => ad.cloudId.slice(0, 12)))].join('、')}…）：载入并确认同一 PLY 后才会显示和发送。` : '',
+      plyPaths.length ? `文件记录的 PLY：${plyPaths.join('、')}。` : '',
+      missing.length ? `${missing.length} 个广告位缺少素材，列表中标出原因。` : ''].filter(Boolean).join(' ');
+  } catch (error) {
+    status.textContent = `导入失败：${error instanceof Error ? error.message : String(error)}`;
+    status.classList.add('on-form-error');
+  }
+}
+$('#export-local-placements').addEventListener('click', () => { void exportOnsitePlacements(); });
+$('#import-local-placements').addEventListener('click', () => $<HTMLInputElement>('#local-placements-file').click());
+$<HTMLInputElement>('#local-placements-file').addEventListener('change', (event) => {
+  const input = event.target as HTMLInputElement, file = input.files[0];
+  input.value = '';
+  if (file) void importOnsitePlacements(file);
+});
 
 /** Selects a local placement in its own editor, on the preview tab, and brings that editor into view. */
 function selectLocal(key: string) {
@@ -404,8 +512,8 @@ function renderRecord() {
   $('#field-size').textContent = `${match.field.length} × ${match.field.width} m`;
   $('#draft-badge').textContent = record.updatedAt ? '本地草稿已保存' : '场次初始配置';
   $('#save-status').textContent = record.updatedAt
-    ? `本机保存于 ${new Date(record.updatedAt).toLocaleTimeString('zh-CN')}；未回传 Fusion，也未触发播出。`
-    : '草稿仅保存在本机，不会回传 Fusion。';
+    ? `已保存到现场服务器 ${new Date(record.updatedAt).toLocaleTimeString('zh-CN')}；未回传 Fusion，也未触发播出。`
+    : '草稿保存在现场服务器的 studio 存储中，不会回传 Fusion。';
   renderLists();
   renderInspector();
   renderAnalysis();
@@ -497,6 +605,8 @@ async function selectAnalysisFile(source: File | string): Promise<boolean> {
     if (!cloudEngine.isAvailable) throw new Error('点云预览不可用，请刷新页面并检查硬件加速。');
     // A cloud confirmed (or un-ticked) before keeps that answer, also after a reload.
     const aligned = cloudAligned(sessions.get(job.matchId), cloud.id, cloud.declaredPitchCoordinates);
+    // The answer is saved per cloud: its placements are then sendable without loading it again.
+    sessions.update(job.matchId, (session) => withAlignment(session, cloud.id, aligned));
     analysisResults.set(job.matchId, { cloud, aligned, pointSize: 0.15, importedAt: new Date().toISOString() });
     remember('cloud', typeof source === 'string' ? { path: serverPath(source), name: file.name } : { name: file.name }, job.matchId);
     renderRecord();
@@ -527,9 +637,7 @@ function selectSlot(id: string) {
 }
 
 function replaceRecord(nextRecord: MatchRecord) {
-  const next = records.map((record) => record.match.id === nextRecord.match.id ? nextRecord : record);
-  repository.write(next);
-  records = next;
+  void saveLibrary(records.map((record) => record.match.id === nextRecord.match.id ? nextRecord : record)).catch(showError);
 }
 
 function togglePlacementVisibility(id: string) {
@@ -658,7 +766,13 @@ async function renderRoute(refresh = false) {
   if (sameMatch && !refresh) { setActiveTab(parts[2]); return; }
   const version = ++matchLoadVersion;
   clearError();
-  if (!sameMatch) cancelAnalysisImport();
+  if (!sameMatch) {
+    cancelAnalysisImport();
+    // The remembered selections and sources come from the server before the match opens.
+    try { await sessions.load(record.match.id); }
+    catch (error) { showError(error); }
+    if (version !== matchLoadVersion) return;
+  }
   // Loading (or refreshing) a match replaces its draft, so earlier steps no longer apply.
   undo.clear();
   unlockedId = undefined;
@@ -727,7 +841,7 @@ async function renderRoute(refresh = false) {
       renderAnalysis();
       $('#pitch-mount').hidden = false;
       $('#pitch-mount').inert = false;
-      $('#configuration-status').textContent = offline ? 'Offline match and materials loaded from this browser. Import a newer ZIP to update; no Fusion requests were made.'
+      $('#configuration-status').textContent = offline ? 'Offline match and materials loaded from the onsite server store. Import a newer ZIP to update; no Fusion requests were made.'
         : `Updated from Fusion at ${new Date().toLocaleTimeString()}. Refresh replaces local adjustments.`;
       $('#engine-status').textContent = offline ? 'Offline placements, images and models loaded. No Fusion connection is required.'
         : 'Fusion placements and materials loaded. 视频和分析结果仅本地使用，不会提交 Fusion。';
@@ -832,24 +946,19 @@ async function importOfflinePackage(source: File | string) {
     $('#offline-package-status').textContent = 'Verifying the complete match package and material checksums...';
     const packageData = await parseOfflinePackage(file);
     const previous = records.find((item) => item.match.id === packageData.match.id);
-    if (previous && !window.confirm('Replace this match configuration and its local placement adjustments with the imported offline package?')) {
+    if (previous && !window.confirm('用导入的离线包替换该场次的 Fusion 配置和草稿调整？\n\n现场创建的球场本地 / 点云广告位、旗帜和会话单独保存，保留不变。')) {
       $('#offline-package-status').textContent = 'Import cancelled. Previous configuration and materials were retained.';
       return;
     }
-    await offlinePackages.write(packageData);
-    if (typeof source === 'string')
-      localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [packageData.id]: serverPath(source) }));
-    const next = [...records.filter((item) => item.match.id !== packageData.match.id),
-      { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [] }];
-    try { repository.write(next); }
-    catch (error) {
-      try { await offlinePackages.remove(packageData.id); }
-      catch (cleanup) { console.error('Unable to remove the uncommitted offline package.', cleanup); }
-      throw error;
-    }
-    records = next;
+    $('#offline-package-status').textContent = 'Storing the materials on the onsite server...';
+    const assetFiles = await storeOfflineAssets(packageData);
+    // A ZIP chosen on this computer is stored too, so chr-server can read its materials.
+    const zipPath = typeof source === 'string' ? serverPath(source) : await uploadFile(file, `${packageData.id}.zip`);
+    await saveLibrary([...records.filter((item) => item.match.id !== packageData.match.id),
+      { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [], assetFiles }]);
+    rememberPackagePath(packageData.id, zipPath);
     renderMatches();
-    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${packageData.assets.size} materials. Saved in this browser; no Fusion API is used.`;
+    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${packageData.assets.size} materials. Saved on the onsite server (${zipPath}); no Fusion API is used.`;
     if (location.hash === startingRoute || currentId === packageData.match.id) {
       const route = `#match/${encodeURIComponent(packageData.match.id)}/preview`;
       if (location.hash !== route) history.pushState(null, '', route);
@@ -857,10 +966,6 @@ async function importOfflinePackage(source: File | string) {
       await renderRoute();
     }
     await engineQueue;
-    if (previous?.match.offlinePackageId && previous.match.offlinePackageId !== packageData.id) {
-      try { await offlinePackages.remove(previous.match.offlinePackageId); }
-      catch (error) { showError(error); }
-    }
   } catch (error) {
     $('#offline-package-status').textContent = `Package import failed. Previous configuration was retained. ${error instanceof Error ? error.message : String(error)}`;
     showError(error);
@@ -891,19 +996,13 @@ $<HTMLFormElement>('#match-lookup-form').addEventListener('submit', async (event
     const next = [...records.filter((record) => record.match.id !== match.id),
       { match, draft: structuredClone(match.placements),
         hiddenPlacementIds: previous?.hiddenPlacementIds?.filter((id) => match.placements.some((slot) => slot.id === id)) }];
-    repository.write(next);
-    records = next;
+    await saveLibrary(next);
     $('#lookup-status').textContent = `Loaded ${match.placements.length} configured placements from Fusion.`;
     renderMatches();
     currentId = undefined;
     const route = `#match/${encodeURIComponent(match.id)}/preview`;
     if (location.hash === route) void renderRoute();
     else location.hash = route;
-    if (previous?.match.offlinePackageId) {
-      await engineQueue;
-      try { await offlinePackages.remove(previous.match.offlinePackageId); }
-      catch (error) { showError(error); }
-    }
   } catch (error) { $('#lookup-status').textContent = error.message; showError(error); }
   finally { setLibraryBusy(false); }
 });
@@ -994,6 +1093,7 @@ const loadScanPath = async (path: string) => {
 bindServerPath('#scan-path', '#load-scan-path', loadScanPath);
 bindServerPath('#cloud-video-path', '#load-cloud-video-path', loadScanPath);
 bindServerPath('#analysis-path', '#load-analysis-path', async (path) => { await selectAnalysisFile(path); });
+bindServerPath('#local-placements-path', '#load-local-placements-path', (path) => importOnsitePlacements(path));
 $('#viewport').addEventListener('rectangledrawcancel', () => pitchEditor.cancelDrawing());
 $('#viewport').addEventListener('rectangledrawmiss', () => { $('#pitch-local-draw-status').textContent = '请从草坪内拖出矩形，长宽至少 0.1 米。'; });
 $('#cloud-viewport').addEventListener('pointpickcancel', () => localEditor.cancelDrawing());
@@ -1167,7 +1267,7 @@ function rendererScope() {
   const fusionProblem = record.match.mode !== 'offline' || !record.match.offlinePackageId ? 'Fusion 广告位仅能从离线 ZIP 导入的场次发送'
     : !isServerPath(rendererPaths[0].value) ? '未填写 chr-server 可读取的离线 ZIP 路径（--asset-root 之内）' : undefined;
   const waiting = enginePending || engineReadyMatchId !== record.match.id ? '等待球场预览加载素材后可发送到渲染器…' : undefined;
-  const locals = matchLocals().filter((ad) => !localProblem(ad, loadedCloud())).length;
+  const locals = matchLocals().filter((ad) => !localProblem(ad, cloudState())).length;
   return sendScope({ fusionProblem, waiting, placements: record.draft.length, locals });
 }
 
@@ -1207,14 +1307,14 @@ async function renderLocals() {
   const locals: DescribedLocal[] = [], skipped: string[] = [], masked: string[] = [];
   const files = new Map<string, Promise<Omit<DescribedLocal, 'ad'>>>();
   const read = async (ad: LocalAd): Promise<Omit<DescribedLocal, 'ad'>> => {
-    const file = await fetchServerFile(ad.materialPath);
+    const file = await readServerFile(ad.materialPath);
     if (ad.type !== '3D') return { sha256: await sha256(file) };
     const blended = blendedMaterials(new Uint8Array(await file.arrayBuffer()));
     if (blended.length) masked.push(`${ad.name}（${blended.join('、')}）`);
     return { sha256: await sha256(file), bounds: await glbBounds(file), ...(blended.length ? { blendAs: 'mask' as const } : {}) };
   };
   for (const ad of matchLocals()) {
-    const problem = localProblem(ad, loadedCloud());
+    const problem = localProblem(ad, cloudState());
     if (problem) { skipped.push(`${ad.name}（${problem}）`); continue; }
     const key = `${ad.type === '3D' ? 'glb' : 'image'}:${ad.materialPath}`;
     if (!files.has(key)) files.set(key, read(ad));
@@ -1250,7 +1350,7 @@ async function renderScene() {
     if (!slot.asset || assets.has(slot.asset.id)) continue;
     const entry = MATERIAL_ENTRY[slot.asset.contentType];
     if (!entry) throw new Error(`The renderer cannot draw ${slot.asset.contentType} material ${slot.asset.name}.`);
-    const blob = await offlinePackages.asset(slot.asset);
+    const blob = await offlineAsset(slot.asset);
     const blended = entry.kind === 'glb' ? blendedMaterials(new Uint8Array(await blob.arrayBuffer())) : [];
     if (blended.length) masked.push(`${slot.asset.name}（${blended.join('、')}）`);
     assets.set(slot.asset.id, { kind: entry.kind, entry: `assets/${slot.asset.id}${entry.extension}`, sha256: await sha256(blob),
@@ -1282,7 +1382,7 @@ const sendToRenderer = () => rendererAction('正在发送到 chr-server…', asy
   const { scene, masked, skipped, fusion } = await renderScene();
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
   const { loaded, sdi } = await sendDescription(url, scene);
-  if (fusion) localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [record.match.offlinePackageId]: serverPath(rendererPaths[0].value) }));
+  if (fusion) rememberPackagePath(record.match.offlinePackageId, serverPath(rendererPaths[0].value));
   return `已发送 ${scene.instances.length} 个广告位（含本地和旗帜）到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
     + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '') + skipped;
 }, '发送失败');
@@ -1321,7 +1421,32 @@ window.addEventListener('pagehide', (event) => {
   cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); cloudEngine?.dispose(); resultReview.dispose();
 });
 
-try { repository = new MatchRepository(localStorage); records = repository.read(); }
-catch (error) { showError(error); $<HTMLButtonElement>('#match-lookup-submit').disabled = true; $<HTMLButtonElement>('#import-offline-package').disabled = true; }
-renderMatches();
-void renderRoute();
+localAdStore.onConflict = (matchId) => {
+  if (matchId === currentId) void Promise.all([pitchEditor.reload(), localEditor.reload()]).catch(showError);
+};
+
+/** Everything lives in the studio store on the onsite server; without it the page does not fall back to the browser. */
+async function start() {
+  // Nothing can be imported or looked up until the library has come from the server.
+  for (const selector of ['#match-lookup-submit', '#import-offline-package', '#replace-offline-package']) $<HTMLButtonElement>(selector).disabled = true;
+  $('#lookup-status').textContent = '正在从现场服务器读取比赛库…';
+  try {
+    await connectStore();
+    const migrated = await migrateBrowserData(library, packagePathDocument);
+    records = (await library.load())?.records ?? [];
+    await packagePathDocument.load();
+    if (migrated) {
+      $('#match-delete-status').hidden = false;
+      $('#match-delete-status').textContent = migrated;
+    }
+  } catch (error) {
+    records = null;
+    showError(error);
+    $<HTMLButtonElement>('#match-lookup-submit').disabled = true;
+    $<HTMLButtonElement>('#import-offline-package').disabled = true;
+  }
+  $('#lookup-status').textContent = '';
+  setLibraryBusy(false);
+  void renderRoute();
+}
+void start();

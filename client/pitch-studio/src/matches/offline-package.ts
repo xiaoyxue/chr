@@ -1,5 +1,6 @@
 import { unzip } from 'fflate';
 import { mapFusionMatch } from './fusion-client.ts';
+import { readServerFile, uploadFile } from '../shared/studio-store.ts';
 import type { FusionAsset, Match } from '../shared/types.ts';
 
 const MAX_MATERIAL_BYTES = 256 * 1024 * 1024;
@@ -93,66 +94,30 @@ export async function parseOfflinePackage(file: Blob): Promise<OfflinePackage> {
   return { id, match, assets };
 }
 
-export class OfflinePackageRepository {
-  private database?: Promise<IDBDatabase>;
-  private open() {
-    return this.database ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open('liveshow.fusion-offline.v1', 1);
-      request.onupgradeneeded = () => {
-        request.result.createObjectStore('packages');
-        request.result.createObjectStore('assets');
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(new Error(`Unable to open offline package storage: ${request.error?.message}`));
-      request.onblocked = () => reject(new Error('Offline storage is blocked. Close older tabs and retry.'));
-    });
-  }
-  async write(packageData: OfflinePackage) {
-    const database = await this.open();
-    return new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(['packages', 'assets'], 'readwrite');
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = transaction.onerror = () => reject(new Error(`Offline package was not saved. Check browser storage and available disk space: ${transaction.error?.message}`));
-      try {
-        transaction.objectStore('packages').put(packageData.match, packageData.id);
-        for (const [id, blob] of packageData.assets) transaction.objectStore('assets').put(blob, `${packageData.id}/${id}`);
-      } catch (error) {
-        transaction.abort();
-        reject(new Error('Offline package was not saved. Check browser storage and available disk space.', { cause: error }));
-      }
-    });
-  }
-  async remove(id: string) {
-    const database = await this.open();
-    return new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(['packages', 'assets'], 'readwrite');
-      transaction.objectStore('packages').delete(id);
-      transaction.objectStore('assets').delete(IDBKeyRange.bound(`${id}/`, `${id}/\uffff`));
-      transaction.oncomplete = () => resolve();
-      transaction.onabort = transaction.onerror = () => reject(new Error(`Unable to remove the previous offline package: ${transaction.error?.message}`));
-    });
-  }
-  async asset(asset: FusionAsset): Promise<Blob> {
-    const path = offlinePath.exec(asset.url);
-    if (!path || path[2] !== asset.id) throw new Error('Invalid offline material reference.');
-    const database = await this.open();
-    return new Promise((resolve, reject) => {
-      const request = database.transaction('assets').objectStore('assets').get(`${path[1]}/${path[2]}`);
-      request.onerror = () => reject(new Error(`Unable to read offline material: ${request.error?.message}`));
-      request.onsuccess = () => {
-        const blob: unknown = request.result;
-        if (!(blob instanceof Blob) || !blob.size || blob.type !== asset.contentType)
-          reject(new Error('An offline material is missing or damaged. Import the original Fusion ZIP again.'));
-        else resolve(blob);
-      };
-    });
-  }
+/** The stored file of an offline package's material, from the match library; set by the page. */
+let storedAsset: (packageId: string, assetId: string) => string | undefined = () => undefined;
+export function setOfflineAssetFiles(lookup: typeof storedAsset) { storedAsset = lookup; }
+
+/** Stores each material of a parsed package on the server; resolves with material id → stored file. */
+export async function storeOfflineAssets(packageData: OfflinePackage): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  for (const [id, blob] of packageData.assets) files[id] = await uploadFile(blob, `${id}${EXTENSIONS[blob.type]}`);
+  return files;
 }
 
-export const offlinePackages = new OfflinePackageRepository();
+/** An offline match's material, read back from the studio store. */
+export async function offlineAsset(asset: FusionAsset): Promise<Blob> {
+  const path = offlinePath.exec(asset.url);
+  if (!path || path[2] !== asset.id) throw new Error('Invalid offline material reference.');
+  const file = storedAsset(path[1], path[2]);
+  if (!file) throw new Error('离线素材不在服务器存储中：请重新导入原始 Fusion ZIP。');
+  const blob = await readServerFile(file, asset.name, asset.contentType);
+  if (!blob.size) throw new Error('An offline material is missing or damaged. Import the original Fusion ZIP again.');
+  return blob;
+}
+
 export async function resolveFusionAsset(asset: FusionAsset): Promise<{ url: string; release: () => void }> {
   if (asset.url.startsWith('/fusion-api/matches/')) return { url: asset.url, release: () => {} };
-  const blob = await offlinePackages.asset(asset);
-  const url = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(await offlineAsset(asset));
   return { url, release: () => URL.revokeObjectURL(url) };
 }

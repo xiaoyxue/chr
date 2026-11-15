@@ -32,4 +32,8 @@ webrtc_tcp = "127.0.0.1:8790"
 # Set a port to 0 to leave that component out.
 srt_relay_port = 0         # SRT -> TCP relay on 127.0.0.1, for ffplay through SSH
 pitch_studio_port = 4173   # built pitch-studio under vite preview (send to renderer)
+# Where pitch-studio stores matches, placements, sessions and uploaded materials and
+# ZIPs (the "studio store"). Put it inside asset_root so chr-server can read the
+# uploads; without it the studio uses the repository's ignored output/pitch-studio.
+# studio_data_dir = "/path/to/packages/studio"
 monitor_page_port = 5173   # read-only program monitor page
