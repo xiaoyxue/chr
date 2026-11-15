@@ -123,8 +123,10 @@ def components(config: Config) -> list[Component]:
         ("monitor-page", "client/example/render-harness", config.monitor_page_port, {}),
     ):
         if port:
+            # A built site under `vite preview`: the dev server's HMR client reloads the
+            # page whenever its socket drops (an SSH tunnel blip), losing the session.
             script = (f"cd {directory} && {{ [ -d node_modules ] || npm ci --no-audit --no-fund; }} && "
-                      f"exec npx vite --host 127.0.0.1 --port {port} --strictPort")
+                      f"npx vite build && exec npx vite preview --host 127.0.0.1 --port {port} --strictPort")
             stack.append(Component(name, ["nix", "develop", ".#default", "--command", "bash", "-c", script], env,
                                    [(name, "127.0.0.1", port)]))
     return stack
@@ -470,8 +472,8 @@ def runs(component: str, config: Config) -> str:
     return {
         "render": f"run-tracked.sh: chr-server with its {workers}, chr-tracking-sim, chr-monitor",
         "srt-relay": "SRT-to-TCP relay",
-        "pitch-studio": "Vite server for client/pitch-studio",
-        "monitor-page": "Vite server for client/example/render-harness",
+        "pitch-studio": "built client/pitch-studio served by vite preview",
+        "monitor-page": "built client/example/render-harness served by vite preview",
     }[component]
 
 

@@ -31,5 +31,5 @@ webrtc_tcp = "127.0.0.1:8790"
 
 # Set a port to 0 to leave that component out.
 srt_relay_port = 0         # SRT -> TCP relay on 127.0.0.1, for ffplay through SSH
-pitch_studio_port = 4173   # pitch-studio dev server (send to renderer)
+pitch_studio_port = 4173   # built pitch-studio under vite preview (send to renderer)
 monitor_page_port = 5173   # read-only program monitor page
