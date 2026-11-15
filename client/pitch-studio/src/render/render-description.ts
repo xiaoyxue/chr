@@ -222,9 +222,19 @@ export function rendererFailure(method: string, error: unknown): string {
 type Call = (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>;
 
 /** Runs `run` on one connection to chr-server through the page's /chr-render WebSocket proxy. */
-async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise<T> {
+/** One open control connection per page, kept between sends: through a port forward or an SSH
+ * tunnel, opening a new WebSocket can take far longer than the calls themselves. */
+let connection: { url: string; ready: Promise<Call> } | undefined;
+
+function connect(url: string): Promise<Call> {
   const socket = new WebSocket(url);
-  await new Promise<void>((resolve, reject) => {
+  const pending = new Map<number, { method: string; resolve: (value: unknown) => void; reject: (error: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
+  let next = 0;
+  const failAll = (error: Error) => {
+    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error); }
+    pending.clear();
+  };
+  const opened = new Promise<void>((resolve, reject) => {
     const unreachable = async (reason: string) => {
       socket.close();
       let target = '';
@@ -237,12 +247,6 @@ async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise
     socket.onopen = () => { clearTimeout(timer); socket.onerror = null; resolve(); };
     socket.onerror = () => { clearTimeout(timer); void unreachable('连接被拒绝'); };
   });
-  const pending = new Map<number, { method: string; resolve: (value: unknown) => void; reject: (error: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
-  let next = 0;
-  const failAll = (error: Error) => {
-    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error); }
-    pending.clear();
-  };
   socket.onmessage = (event) => {
     const message = JSON.parse(String(event.data)) as { id?: number; result?: unknown; error?: { code: number; message?: string } };
     const request = pending.get(message.id);
@@ -252,7 +256,10 @@ async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise
     if (message.error) request.reject(new RpcError(message.error.code, message.error.message ?? '未知错误'));
     else request.resolve(message.result);
   };
-  socket.onclose = () => failAll(new Error('chr-server 断开了连接（可能正在重启）；请确认它已恢复后重试。'));
+  socket.onclose = () => {
+    if (connection?.url === url) connection = undefined;
+    failAll(new Error('chr-server 断开了连接（可能正在重启）；请确认它已恢复后重试。'));
+  };
   const call: Call = (method, params, timeoutMs = 5000) => new Promise((resolve, reject) => {
     const id = ++next;
     const timer = setTimeout(() => {
@@ -264,8 +271,17 @@ async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise
         ? NO_TRACKER : rendererFailure(method, error))), timer });
     socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }));
   });
-  try { return await run(call); }
-  finally { socket.onclose = null; failAll(new Error('connection closed')); socket.close(); }
+  return opened.then(() => call);
+}
+
+/** Runs `run` on the page's control connection, opening it when there is none. */
+async function session<T>(url: string, run: (call: Call) => Promise<T>): Promise<T> {
+  if (connection?.url !== url) {
+    const ready = connect(url);
+    connection = { url, ready };
+    ready.catch(() => { if (connection?.ready === ready) connection = undefined; });
+  }
+  return run(await connection.ready);
 }
 
 /**

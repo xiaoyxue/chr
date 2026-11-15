@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
-const { RpcError, blendedMaterials, describeScene, glbModel, localGlbModel, localQuadModel, quadModel, rendererFailure, trackerProblem, workerProblem } = await server.ssrLoadModule('/src/render/render-description.ts');
+const { RpcError, blendedMaterials, describeScene, sendDescription, glbModel, localGlbModel, localQuadModel, quadModel, rendererFailure, trackerProblem, workerProblem } = await server.ssrLoadModule('/src/render/render-description.ts');
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
 const { flagDraft, flagDraftChanged, flagModel, orientFlagPlane, parseFlagDraft } = await server.ssrLoadModule('/src/placements/flag.ts');
 const { localRow, sendScope } = await server.ssrLoadModule('/src/placements/placement-list.ts');
@@ -305,4 +305,37 @@ test('sending is refused with a reason until the tracking worker is ready', () =
   assert.equal(trackerProblem(status), undefined);
   assert.match(trackerProblem({ ...status, state: 'starting' }), /跟踪 worker 正在启动/);
   assert.match(trackerProblem({ ...status, state: 'backoff', restarts: 2, last_error: 'exited' }), /已重启 2 次.*exited/);
+});
+
+test('sends reuse one control connection and reopen it after it drops', async () => {
+  const sockets = [];
+  const results = {
+    'render.get_worker_status': { state: 'ready', pid: 1, restarts: 0 },
+    'tracking.get_worker_status': { state: 'ready', pid: 2, restarts: 0 },
+    'sdi.get_status': { video_mode: '1280x720p30' },
+    'description.load': { scene_revision: '0', assets_imported: 0, assets_reused: 1 },
+  };
+  class FakeSocket {
+    constructor(url) { this.url = url; sockets.push(this); setTimeout(() => this.onopen?.(), 0); }
+    send(text) {
+      const { id, method } = JSON.parse(text);
+      setTimeout(() => this.onmessage?.({ data: JSON.stringify({ jsonrpc: '2.0', id, result: results[method] }) }), 0);
+    }
+    close() { setTimeout(() => this.onclose?.(), 0); }
+  }
+  const original = globalThis.WebSocket;
+  globalThis.WebSocket = FakeSocket;
+  try {
+    const scene = { ground: { pitch_m: [105, 68] }, assets: [], instances: [] };
+    await sendDescription('ws://studio/chr-render', scene);
+    await sendDescription('ws://studio/chr-render', scene);
+    assert.equal(sockets.length, 1, 'the second send reuses the open connection');
+    sockets[0].close();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const { loaded } = await sendDescription('ws://studio/chr-render', scene);
+    assert.equal(sockets.length, 2, 'a dropped connection is opened again');
+    assert.equal(loaded.assets_reused, 1);
+  } finally {
+    globalThis.WebSocket = original;
+  }
 });
