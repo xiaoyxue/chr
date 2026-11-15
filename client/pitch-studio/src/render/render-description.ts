@@ -159,11 +159,6 @@ export function describeScene(options: {
   return scene;
 }
 
-export async function sha256(blob: Blob): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()));
-  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
 /** A JSON-RPC error answer from chr-server. */
 export class RpcError extends Error {
   constructor(readonly code: number, message: string) { super(message); }

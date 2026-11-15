@@ -5,7 +5,7 @@ import { createServer } from 'vite';
 // The module has no dependencies to pre-bundle; skip the scan that would outlive the server.
 const server = await createServer({ configFile: false, server: { middlewareMode: true }, optimizeDeps: { noDiscovery: true } });
 after(() => server.close());
-const { SESSION_KEY, SessionStore, cloudAligned, emptySession, parseSessions, restorePlan, withAlignment } = await server.ssrLoadModule('/src/app/session.ts');
+const { cloudAligned, emptySession, parseSessions, restorePlan, validateSession, withAlignment } = await server.ssrLoadModule('/src/app/session.ts');
 
 const cloudId = 'a'.repeat(64);
 
@@ -52,14 +52,11 @@ test("a cloud keeps the operator's alignment answer, else what the file declares
   assert.equal(Object.keys(many.alignment).at(-1), (5).toString(16).padStart(64, '0'));
 });
 
-test('the session store writes only changes and forgets a deleted match', () => {
-  const items = new Map(), writes = [];
-  const storage = { getItem: (key) => items.get(key) ?? null, setItem: (key, value) => { writes.push(key); items.set(key, value); } };
-  const store = new SessionStore(storage);
-  store.update('M1', (session) => withAlignment(session, cloudId, true));
-  store.update('M1', (session) => withAlignment(session, cloudId, true));
-  assert.deepEqual(writes, [SESSION_KEY]);
-  assert.equal(new SessionStore(storage).get('M1').alignment[cloudId], true);
-  store.remove('M1');
-  assert.deepEqual(new SessionStore(storage).get('M1'), emptySession());
+test('a session written to the server must be exactly valid', () => {
+  const session = { sources: { cloud: { path: '/srv/cloud.ply', name: 'cloud.ply' } }, alignment: { [cloudId]: true }, selection: { fusion: 'PLC-1' },
+    exportPath: '/srv/exports/' };
+  assert.deepEqual(validateSession(session), session);
+  for (const bad of [{ ...session, alignment: { x: true } }, { ...session, exportPath: 'exports/' }, { ...session, sources: { cloud: { path: 'cloud.ply', name: 'cloud.ply' } } }, { ...session, extra: 1 }, null]) {
+    assert.throws(() => validateSession(bad), /会话记录无效/);
+  }
 });

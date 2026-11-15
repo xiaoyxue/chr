@@ -2,9 +2,12 @@
 // pitch; images, models and flags on point-cloud planes. Both spaces share the inspector: position, size and
 // material are protected by the lock and saved as soon as a field changes; a
 // flag's wave is editable while locked and saved explicitly.
-import { LocalAdRepository, withoutPitchFlags } from './local-ad.ts';
+import { withoutPitchFlags } from './local-ad.ts';
+import { localAdStore } from './local-ad-store.ts';
+import { serverSha256, uploadFile } from '../shared/studio-store.ts';
+import { materialFacts } from '../render/send-materials.ts';
 import { fetchServerFile, serverPath } from '../shared/server-files.ts';
-import { planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
+import { glbBounds, planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
 import { parseAspect, type Anchor } from './ground-edit.ts';
 import { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } from './plane-edit.ts';
 import { DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, flagDraft, flagDraftChanged, orientFlagPlane, parseFlagDraft, type FlagDraft } from './flag.ts';
@@ -77,7 +80,7 @@ function editorMarkup(space: AdSpace, prefix: string) {
 }
 
 export class LocalAdEditor {
-  private repository = new LocalAdRepository();
+  private repository = localAdStore;
   private matchId?: string;
   private version = 0;
   private cloudId?: string;
@@ -362,6 +365,13 @@ export class LocalAdEditor {
     await this.publish();
   }
 
+  /** Reads the match's placements again, such as after another page changed them. */
+  async reload() {
+    const id = this.matchId;
+    this.matchId = undefined;
+    await this.setMatch(id);
+  }
+
   async setMatch(id?: string) {
     if (this.matchId === id) return;
     const version = ++this.version;
@@ -377,8 +387,11 @@ export class LocalAdEditor {
     await this.publish();
     if (!id) return;
     try {
-      let ads = (await this.repository.read(id)).filter((ad) => (ad.space ?? 'cloud') === this.options.space);
+      const stored = await this.repository.read(id);
+      let ads = stored.ads.filter((ad) => (ad.space ?? 'cloud') === this.options.space);
       if (version !== this.version) return;
+      const missing = stored.missing.filter((text) => ads.some((ad) => text.startsWith(`${ad.name}（`)));
+      if (missing.length) this.loadNotice = `无法从服务器读取以下素材，预览中显示占位区域：${missing.join('、')}。`;
       const { kept, removed } = withoutPitchFlags(ads);
       if (removed) {
         // Flags are point-cloud only now; storing the rest says so only once.
@@ -509,7 +522,6 @@ export class LocalAdEditor {
     this.render();
     try {
       if (selected.type === 'flag') {
-        if (!path) throw new Error('旗帜图片需填写 chr-server 可读取的服务器绝对路径（--asset-root 之内），再按路径加载。');
         if (!/\.(png|jpe?g)$/i.test(file.name) || file.size > 20 * 1024 * 1024 || !file.size) throw new Error('旗帜图片需为不超过 20 MB 的 PNG / JPEG。');
       }
       if (selected.type !== '3D') {
@@ -524,9 +536,14 @@ export class LocalAdEditor {
         if (buffer.byteLength < 20 || view.getUint32(0, true) !== 0x46546c67 || view.getUint32(4, true) !== 2 || view.getUint32(8, true) !== buffer.byteLength) throw new Error('不是有效的 GLB 2.0 文件。');
         await validateLocalAdMaterial({ ...selected, material: file });
       }
+      // A file chosen on this computer is stored on the onsite server, where chr-server can read it.
+      const materialPath = path ?? await uploadFile(file, file.name);
+      // Noted now, so a send describes the material without downloading it.
+      const facts = await materialFacts(selected.type, file, await serverSha256(materialPath), { bounds: glbBounds });
       if (version !== this.version) return;
       this.busy = false;
-      await this.commit(this.items.map((ad) => ad.id !== selected.id ? ad : { ...ad, material: file, materialPath: path }), selected.id, `更换素材 ${selected.name}`);
+      await this.commit(this.items.map((ad) => ad.id !== selected.id ? ad
+        : { ...ad, material: file, materialPath, materialName: file.name, ...facts }), selected.id, `更换素材 ${selected.name}`);
     } catch (error) { this.options.error(error); }
     finally { if (version === this.version) { this.busy = false; this.render(); } }
   }
@@ -616,8 +633,8 @@ export class LocalAdEditor {
       : this.loadNotice ? this.loadNotice
       : selected && !selected.visible ? `此广告位已停用，不在预览中显示；启用并解锁后才能修改位置、尺寸和素材${flag ? '，旗帜飘动属性仍可修改并保存' : ''}。`
       : selected && this.locked ? `位置、尺寸和素材已锁定，解锁后修改，按 Enter 或离开输入框即保存${flag ? '；旗帜飘动属性无需解锁，修改后点“保存旗帜属性”' : ''}。`
-      : pitch ? '几何与素材按场次保存于本机，不回传 Fusion；无需 PLY 即可恢复。'
-        : '几何与素材按场次保存于本机，不回传 Fusion；确认点云坐标后才能发送到渲染器。刷新后重新导入相同 PLY 可恢复。';
+      : pitch ? '几何与素材按场次保存在现场服务器，不回传 Fusion；无需 PLY 即可恢复。'
+        : '几何与素材按场次保存在现场服务器，不回传 Fusion；确认点云坐标后才能发送到渲染器。重新导入相同 PLY 即可恢复。';
     if (!selected) return;
     const enabled = this.element<HTMLButtonElement>('local-ad-enabled');
     enabled.disabled = !ready || Boolean(this.drawing);
@@ -672,15 +689,13 @@ export class LocalAdEditor {
     this.renderSaveState();
     const input = this.element<HTMLInputElement>('local-ad-material');
     input.accept = selected.type === '3D' ? '.glb' : flag ? '.png,.jpg,.jpeg' : '.png,.jpg,.jpeg,.webp';
-    this.element('choose-local-ad-material').hidden = flag;
-    this.element('local-ad-material-label').textContent = flag ? '旗帜图片（PNG / JPEG，chr-server 可读取的服务器路径）'
-      : `${selected.type === '3D' ? 'GLB 模型' : '图片（PNG / JPEG）'}的服务器路径（chr-server 从这里读取；本地选择仅供预览）`;
+    this.element('local-ad-material-label').textContent = `${flag ? '旗帜图片（PNG / JPEG）' : selected.type === '3D' ? 'GLB 模型' : '图片（PNG / JPEG）'}：填写服务器路径，或选择本地文件（上传到服务器存储）`;
     const path = this.element<HTMLInputElement>('local-ad-material-path');
     path.placeholder = flag ? '/srv/flags/team.png（--asset-root 之内）' : selected.type === '3D' ? '/srv/models/car.glb（--asset-root 之内）' : '/srv/ads/logo.png（--asset-root 之内）';
     if (document.activeElement !== path) path.value = selected.materialPath ?? '';
     this.element('local-ad-material-name').textContent = selected.materialPath
-      ? `${selected.material?.name ?? '未载入预览'} · 渲染器读取 ${selected.materialPath}`
-      : selected.material ? `${selected.material.name}（仅本机预览；未设置服务器路径，不会发送到渲染器）`
-      : flag ? '请填写旗帜图片的服务器路径并按路径加载' : selected.type === '2D' ? '请填写图片的服务器路径并按路径加载' : '请填写内嵌贴图的 GLB 的服务器路径并按路径加载';
+      ? `${selected.material?.name ?? selected.materialName ?? '未载入预览'} · 渲染器读取 ${selected.materialPath}`
+      : selected.material ? `${selected.material.name}（未设置服务器路径，不会发送到渲染器）`
+      : `请填写${flag ? '旗帜图片' : selected.type === '2D' ? '图片' : '内嵌贴图的 GLB'}的服务器路径，或选择本地文件`;
   }
 }

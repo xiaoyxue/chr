@@ -181,7 +181,9 @@
               share=$out/share/pitch-studio
               mkdir -p $share
               cp -r dist scripts node_modules package.json vite.config.ts $share/
+              # The studio store defaults to output/pitch-studio under the working directory.
               makeWrapper ${pkgs.nodejs}/bin/node $out/bin/pitch-studio \
+                --run 'export STUDIO_DATA_DIR="''${STUDIO_DATA_DIR:-$PWD/output/pitch-studio}"' \
                 --add-flags "$share/node_modules/vite/bin/vite.js preview" \
                 --add-flags "--config $share/vite.config.ts --configLoader runner --outDir $share/dist"
               runHook postInstall

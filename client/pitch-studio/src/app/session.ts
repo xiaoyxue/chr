@@ -2,9 +2,10 @@
 // reload (an SSH tunnel drop, a discarded tab) restores it: the files imported by
 // server path (re-read from the onsite server), the names of files chosen locally
 // (which cannot be re-read), each point cloud's alignment confirmation and the
-// selected placements. Local placements and offline packages have their own stores.
-import type { StorageAdapter } from '../shared/types.ts';
+// selected placements. It is stored on the server per match, like the placements.
+import { StoredDocument } from '../shared/studio-store.ts';
 
+/** Where earlier versions kept every match's session in the browser. */
 export const SESSION_KEY = 'liveshow.onsite.session.v1';
 export const SOURCE_KINDS = ['cloud', 'result', 'video'] as const;
 export type SourceKind = typeof SOURCE_KINDS[number];
@@ -16,6 +17,8 @@ export interface MatchSession {
   /** Point-cloud id (SHA-256 of the PLY) → whether it is confirmed to be in pitch coordinates. */
   alignment: Record<string, boolean>;
   selection: { fusion?: string; pitch?: string; cloud?: string };
+  /** The server folder or `.json` file the operator last exported to. */
+  exportPath?: string;
 }
 const MAX_ALIGNMENTS = 20;
 
@@ -30,6 +33,13 @@ function parseSource(value: unknown): SessionSource | undefined {
   return path === undefined ? { name } : { path, name };
 }
 
+/** One stored session, validated strictly before it is written. */
+export function validateSession(value: unknown): MatchSession {
+  const parsed = parseSessions(JSON.stringify({ match: value })).match;
+  if (!parsed || JSON.stringify(parsed) !== JSON.stringify(value)) throw new Error('会话记录无效。');
+  return parsed;
+}
+
 /** Sessions read back from storage; anything malformed is dropped rather than trusted. */
 export function parseSessions(text: string | null): Record<string, MatchSession> {
   let raw: unknown;
@@ -38,7 +48,7 @@ export function parseSessions(text: string | null): Record<string, MatchSession>
   const sessions: Record<string, MatchSession> = {};
   for (const [matchId, value] of Object.entries(raw)) {
     if (!isText(matchId) || !value || typeof value !== 'object') continue;
-    const { sources, alignment, selection } = value as Partial<MatchSession>;
+    const { sources, alignment, selection, exportPath } = value as Partial<MatchSession>;
     const session = emptySession();
     for (const kind of SOURCE_KINDS) {
       const source = parseSource(sources?.[kind]);
@@ -50,6 +60,7 @@ export function parseSessions(text: string | null): Record<string, MatchSession>
     for (const key of ['fusion', 'pitch', 'cloud'] as const) {
       if (isText(selection?.[key])) session.selection[key] = selection[key];
     }
+    if (isText(exportPath, 4096) && exportPath.startsWith('/')) session.exportPath = exportPath;
     sessions[matchId] = session;
   }
   return sessions;
@@ -80,25 +91,27 @@ export function restorePlan(session: MatchSession, loaded: ReadonlySet<SourceKin
   return { load, reselect };
 }
 
+/**
+ * The sessions of the matches this page opened, kept on the server. Reads come
+ * from the loaded copy; a change is applied at once and saved in the background,
+ * re-applied on the latest version if another page saved first.
+ */
 export class SessionStore {
-  private sessions: Record<string, MatchSession>;
-  constructor(private storage: StorageAdapter) { this.sessions = parseSessions(storage.getItem(SESSION_KEY)); }
-  get(matchId: string): MatchSession { return this.sessions[matchId] ?? emptySession(); }
+  private documents = new Map<string, StoredDocument<MatchSession>>();
+  constructor(private onError: (error: unknown) => void) {}
+  private document(matchId: string) {
+    let document = this.documents.get(matchId);
+    if (!document) this.documents.set(matchId, document = new StoredDocument(`matches/${encodeURIComponent(matchId)}/session`, validateSession));
+    return document;
+  }
+  load(matchId: string) { return this.document(matchId).load(); }
+  get(matchId: string): MatchSession { return this.documents.get(matchId)?.data ?? emptySession(); }
   update(matchId: string, change: (session: MatchSession) => MatchSession) {
-    const next = change(this.get(matchId));
-    if (JSON.stringify(next) === JSON.stringify(this.sessions[matchId])) return;
-    this.sessions = { ...this.sessions, [matchId]: next };
-    this.save();
+    const document = this.document(matchId), current = this.get(matchId), next = change(current);
+    if (JSON.stringify(next) === JSON.stringify(current)) return;
+    // Every change sets values, so applying it again to the saved copy is harmless.
+    document.data = next;
+    void document.update((session) => change(session ?? emptySession())).catch(this.onError);
   }
-  remove(matchId: string) {
-    if (!(matchId in this.sessions)) return;
-    this.sessions = { ...this.sessions };
-    delete this.sessions[matchId];
-    this.save();
-  }
-  private save() {
-    // Losing the session (storage full or blocked) only means re-importing by hand after a reload.
-    try { this.storage.setItem(SESSION_KEY, JSON.stringify(this.sessions)); }
-    catch (error) { console.warn('Unable to remember the studio session.', error); }
-  }
+  forget(matchId: string) { this.documents.delete(matchId); }
 }

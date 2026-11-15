@@ -8,6 +8,7 @@ const { RpcError, blendedMaterials, describeScene, glbModel, localGlbModel, loca
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
 const { flagDraft, flagDraftChanged, flagModel, orientFlagPlane, parseFlagDraft } = await server.ssrLoadModule('/src/placements/flag.ts');
 const { localRow, sendScope } = await server.ssrLoadModule('/src/placements/placement-list.ts');
+const { fusionAssets, localMaterials } = await server.ssrLoadModule('/src/render/send-materials.ts');
 
 const apply = (rows, [x, y, z]) => rows.slice(0, 3).map((row) => row[0] * x + row[1] * y + row[2] * z + row[3]);
 const close = (actual, expected) => actual.forEach((value, i) => assert.ok(Math.abs(value - expected[i]) < 1e-9, `${actual} vs ${expected}`));
@@ -71,7 +72,7 @@ const wall = { origin: [50, -2, -3], u: [0, 1, 0], v: [0, 0, 1], width: 4, heigh
 const flagSettings = { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' };
 const local = { name: 'ad', space: 'pitch', normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
 // Flags exist on point-cloud planes only.
-const onCloud = { space: 'cloud', cloudId: 'c1' }, confirmed = { id: 'c1', aligned: true };
+const onCloud = { space: 'cloud', cloudId: 'c1' }, confirmed = { loadedId: 'c1', alignment: { c1: true } }, noCloud = { alignment: {} };
 const options = { field: { length: 105, width: 68 }, slots: [], hidden: new Set(), geometry: new Map(), assets: new Map(), packagePath: '/srv/match.zip' };
 
 test('a picked flag plane stands upright and reads unmirrored from the picking side', () => {
@@ -184,22 +185,83 @@ test('local materials become one asset per kind and content, read from their ser
   ]);
 });
 
+/** Material access that answers hashes by path and records every download. */
+function materialAccess(hashes, files = {}) {
+  const reads = [];
+  return { reads, sha256: async (path) => hashes[path], bounds: async () => ({ min: [-2, 0, -2], max: [2, 3, 2] }),
+    read: async (path) => { reads.push(path); return new File([files[path]], path.split('/').pop()); } };
+}
+const blendedGlb = (() => {
+  const json = new TextEncoder().encode(JSON.stringify({ materials: [{ name: 'glass', alphaMode: 'BLEND' }] }));
+  const glb = new Uint8Array(20 + json.length);
+  new DataView(glb.buffer).setUint32(12, json.length, true);
+  glb.set(json, 20);
+  return glb;
+})();
+
+test('a send describes Fusion materials from their stored hashes and noted blending, reading no file', async () => {
+  const logo = { id: 'A1', name: 'logo', contentType: 'image/png', url: '/x' }, car = { id: 'A2', name: 'car', contentType: 'model/gltf-binary', url: '/y' };
+  const slots = [{ ...pose, id: 'p1', asset: logo }, { ...pose, id: 'p2', asset: car }, { ...pose, id: 'p3', asset: logo }];
+  const files = { A1: '/data/files/' + 'a1'.repeat(32) + '.png', A2: '/data/files/' + 'b2'.repeat(32) + '.glb' };
+  const hashes = { [files.A1]: 'a1'.repeat(32), [files.A2]: 'b2'.repeat(32) }, access = materialAccess(hashes);
+  const sent = await fusionAssets(slots, files, { A2: ['glass'] }, access);
+  assert.deepEqual(access.reads, []);
+  assert.equal(sent.assetBlended, undefined);
+  assert.deepEqual([...sent.assets], [['A1', { kind: 'image_quad', entry: 'assets/A1.png', sha256: 'a1'.repeat(32) }],
+    ['A2', { kind: 'glb', entry: 'assets/A2.glb', sha256: 'b2'.repeat(32), blendAs: 'mask' }]]);
+  assert.deepEqual(sent.masked, ['car（glass）']);
+  // A match imported before blending was noted reads its GLB once and returns the note to keep.
+  const older = materialAccess(hashes, { [files.A2]: blendedGlb });
+  const filled = await fusionAssets(slots, files, undefined, older);
+  assert.deepEqual(older.reads, [files.A2]);
+  assert.deepEqual(filled.assetBlended, { A2: ['glass'] });
+});
+
+test('a send describes local materials by their current server hash and reuses noted GLB facts only while it matches', async () => {
+  const plane = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], width: 2, height: 1 };
+  const image = { ...local, id: 'i1', type: '2D', plane, materialPath: '/srv/a.png' };
+  const noted = { materialSha256: 'cd'.repeat(32), materialBounds: { min: [-1, 0, -1], max: [1, 1, 1] }, materialBlended: [] };
+  const model = { ...local, id: 'm1', type: '3D', plane, materialPath: '/srv/car.glb', ...noted };
+  const access = materialAccess({ '/srv/a.png': 'ab'.repeat(32), '/srv/car.glb': 'cd'.repeat(32) }, { '/srv/car.glb': blendedGlb });
+  const { locals } = await localMaterials([image, model, { ...image, id: 'i2' }], access);
+  assert.deepEqual(access.reads, []);
+  assert.deepEqual(locals.map(({ ad, ...facts }) => [ad.id, facts]), [['i1', { sha256: 'ab'.repeat(32) }],
+    ['m1', { sha256: 'cd'.repeat(32), bounds: noted.materialBounds }], ['i2', { sha256: 'ab'.repeat(32) }]]);
+  // The GLB changed on disk since it was chosen: its facts come from the file as it is now.
+  const changed = materialAccess({ '/srv/car.glb': 'ee'.repeat(32) }, { '/srv/car.glb': blendedGlb });
+  const after = await localMaterials([model, { ...model, id: 'm2' }], changed);
+  assert.deepEqual(changed.reads, ['/srv/car.glb']);
+  assert.deepEqual(after.locals[1], { ad: { ...model, id: 'm2' }, sha256: 'ee'.repeat(32), bounds: { min: [-2, 0, -2], max: [2, 3, 2] }, blendAs: 'mask' });
+  assert.deepEqual(after.masked, ['ad（glass）', 'ad（glass）']);
+});
+
 test('the overall list summarises each local placement and says why it cannot be sent', () => {
   const flag = { ...local, ...onCloud, id: 'f1', name: '主旗', type: 'flag', plane: wall, flag: flagSettings, materialPath: '/srv/flags/a.png' };
   assert.deepEqual(localRow(flag, confirmed), { id: 'f1', space: 'cloud', type: 'flag', badge: '旗帜', name: '主旗', visible: true, place: '点云', size: '4 × 2 m',
     detail: '振幅 0.32 m · 频率 1.35 · 速度 1× · 简易光照', material: '/srv/flags/a.png', problem: undefined });
   assert.equal(localRow({ ...flag, materialPath: undefined }, confirmed).problem, '未设置图片');
   const model = { ...local, id: 'm', type: '3D', plane: wall, scale: 1.5, yaw: 30, materialPath: '/srv/car.glb' };
-  assert.deepEqual([localRow(model).size, localRow(model).detail], ['底面 4 × 2 m', '缩放 ×1.5 · 朝向 30°']);
+  assert.deepEqual([localRow(model, noCloud).size, localRow(model, noCloud).detail], ['底面 4 × 2 m', '缩放 ×1.5 · 朝向 30°']);
   // A material chosen on this computer has no server path for chr-server.
   const chosen = { ...local, id: 'i', type: '2D', plane: wall, material: new File([new Uint8Array(1)], 'logo.png') };
-  assert.equal(localRow(chosen).problem, '未设置服务器路径');
-  assert.equal(localRow(chosen).material, 'logo.png（仅本机，未设置服务器路径）');
-  assert.equal(localRow({ ...chosen, materialPath: '/srv/logo.webp' }).problem, '渲染器只读取 PNG / JPEG 图片');
-  const cloud = { ...model, space: 'cloud', cloudId: 'c1' };
-  assert.equal(localRow(cloud).problem, '所在点云未导入，无法换算为球场坐标');
-  assert.equal(localRow(cloud, { id: 'c1', aligned: false }).problem, '点云未确认与球场同坐标');
-  assert.equal(localRow(cloud, { id: 'c1', aligned: true }).problem, undefined);
+  assert.equal(localRow(chosen, noCloud).problem, '未设置服务器路径');
+  assert.equal(localRow(chosen, noCloud).material, 'logo.png（未设置服务器路径）');
+  assert.equal(localRow({ ...chosen, materialPath: '/srv/logo.webp' }, noCloud).problem, '渲染器只读取 PNG / JPEG 图片');
+});
+
+test("a point-cloud placement is sendable once its cloud was confirmed, without loading the cloud", () => {
+  const cloud = { ...local, ...onCloud, id: 'm', type: '3D', plane: wall, materialPath: '/srv/car.glb' };
+  // Loaded and confirmed: sendable, editable here.
+  assert.deepEqual([localRow(cloud, confirmed).problem, localRow(cloud, confirmed).note], [undefined, undefined]);
+  // Confirmed earlier (saved with the session), not loaded now: still sendable, with a note.
+  const saved = localRow(cloud, { alignment: { c1: true } });
+  assert.deepEqual([saved.problem, saved.note], [undefined, '点云已确认同坐标（未载入，可发送；编辑需载入点云）']);
+  // Never confirmed, un-ticked, or loaded but not confirmed: not sendable.
+  assert.equal(localRow(cloud, noCloud).problem, '所在点云未确认与球场同坐标（请载入该点云并确认）');
+  assert.equal(localRow(cloud, { alignment: { c1: false } }).problem, '点云未确认与球场同坐标');
+  assert.equal(localRow(cloud, { loadedId: 'c1', alignment: {} }).problem, '点云未确认与球场同坐标');
+  // Another cloud's answer does not count.
+  assert.ok(localRow(cloud, { loadedId: 'c2', alignment: { c2: true } }).problem);
 });
 
 test('local placements can be sent without an offline ZIP; Fusion placements need it', () => {
