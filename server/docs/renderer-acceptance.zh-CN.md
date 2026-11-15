@@ -25,6 +25,7 @@
 | 面光源阴影 | 扩展，带标签的近似 | `area-shadow-pcss-v1`：中心立方体阴影图 + PCSS；半影不随光源轮廓变化，也不按光滑 BRDF 加权 |
 | 阴影接收面（shadow catcher） | 扩展 | 按亮度计算有/无阴影的光照比例，叠加到素材上；无线协议字段 |
 | 地面贴花（ground decal，#113） | 扩展 | 不受光照，按预乘 alpha 叠加在不透明 CG 上，按实例顺序绘制，并先于阴影接收面绘制，因此 CG 阴影会压暗贴花；不写深度、不投影；在场景 tone map 之前的线性光照中精确；无线协议字段 |
+| 飘动旗帜（#126） | 扩展 | SimpleWave 闭式曲面，共享 96x60 网格：中线固定，无旗杆、无布料求解；compute pass 按媒体时间逐帧求值（相位在 f64 中取模），主 pass 与阴影 pass 共用；`simple`（固定主光）或 `pbr` 外观；实例上可选的线协议字段 `flag` |
 | 点光源/聚光灯的 PCSS 光源半径 | 预览近似 | 只是软阴影的光源尺寸，不是有限面积着色 |
 | 物理大气（#28）、天空可见性（#29） | 可选（所有者决定） | 本次验收不要求 |
 | Brown-Conrady 切向畸变 | 延后 | 已改用原生像素径向模型 |
@@ -38,6 +39,7 @@
 | 跨功能矩阵、确定性、状态隔离、预算 | `acceptance_gpu`：五类光源配合硬阴影/PCF/PCSS，变换与镜像实例，多种材质，针孔/正交/畸变三种相机；重复渲染逐字节一致，渲染其他场景后结果不变，预算与非法输入明确报错并可恢复 |
 | 坐标保持、相机等价 | `camera`、`mesh_gpu`、`orthographic_gpu` |
 | 模型变换、GLB | `scene`、`glb`、`mesh_gpu` |
+| 飘动旗帜 | `scene::flag` 单元测试（中线固定、法线、包围盒、相位取模），`flag::tests` compute 回读与 CPU 参考对比，`flag_gpu`（媒体时间、阴影重绘、simple 与 PBR 外观），runtime `description` |
 | 畸变 | `distortion_gpu`（恒等、两种模型下标记点误差 < 0.3 px、素材不被扭曲、无原像像素、guard band 预算、输出缩放），`distortion` 单元测试，CPU 参考 `distortion_reference` |
 | 深度与合成 | `composition_gpu`、`distortion_gpu`、`shadow_catcher_gpu`、`decal_gpu` |
 | 直接光源、PBR | `pbr_gpu` |

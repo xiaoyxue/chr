@@ -1,5 +1,5 @@
-//! Reads and imports the assets of a render description: a GLB or an image quad,
-//! from a file or a ZIP package entry, verified by SHA-256.
+//! Reads and imports the assets of a render description: a GLB, an image quad or
+//! flag artwork, from a file or a ZIP package entry, verified by SHA-256.
 
 use std::{
     fs::File,
@@ -67,12 +67,13 @@ pub fn import(asset: &Asset, bytes: &[u8]) -> Result<GlbAsset, Error> {
             }
             Ok(glb)
         }
-        AssetKind::ImageQuad if asset.blend_as.is_some() => Err(format!(
+        AssetKind::ImageQuad | AssetKind::Flag if asset.blend_as.is_some() => Err(format!(
             "asset {}: blend_as applies to glb assets only",
             asset.id.as_str()
         )
         .into()),
         AssetKind::ImageQuad => image_quad(bytes),
+        AssetKind::Flag => flag(bytes),
     }
 }
 
@@ -141,15 +142,7 @@ fn hex(bytes: &[u8]) -> String {
 /// texel at (-0.5, -0.5), so the image reads upright in a top view with +Y down. It is
 /// an unlit ground decal blended by the image's alpha.
 fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
-    let image = image::load_from_memory(bytes)?.into_rgba8();
-    let extent = ImageExtent::new(image.width(), image.height())?;
-    let texture = TextureData::new(extent, image.into_raw())?.with_sampler(TextureSampler {
-        wrap_u: Wrap::Clamp,
-        wrap_v: Wrap::Clamp,
-        mag: Filter::Linear,
-        min: Filter::Linear,
-        mip: Some(Filter::Linear),
-    });
+    let texture = image_texture(bytes)?;
     let mesh = MeshData::new(
         vec![
             [-0.5, -0.5, 0.],
@@ -181,6 +174,42 @@ fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
         }],
         warnings: Vec::new(),
     })
+}
+
+/// Flag artwork on the shared flag grid: UV (0, 0) is the image's top-left texel at
+/// the flag-local origin. Instances supply the size and motion; texels with alpha
+/// below 0.5 are cut out, and both sides show the image.
+fn flag(bytes: &[u8]) -> Result<GlbAsset, Error> {
+    Ok(GlbAsset {
+        mesh: MeshData::flag_grid(),
+        materials: vec![ImportedMaterial {
+            factors: PbrMaterial {
+                roughness: 0.8,
+                alpha_cutoff: Some(0.5),
+                double_sided: true,
+                ..Default::default()
+            },
+            maps: MaterialMaps {
+                base_color: Some(Arc::new(image_texture(bytes)?)),
+                ..Default::default()
+            },
+        }],
+        warnings: Vec::new(),
+    })
+}
+
+fn image_texture(bytes: &[u8]) -> Result<TextureData, Error> {
+    let image = image::load_from_memory(bytes)?.into_rgba8();
+    let extent = ImageExtent::new(image.width(), image.height())?;
+    Ok(
+        TextureData::new(extent, image.into_raw())?.with_sampler(TextureSampler {
+            wrap_u: Wrap::Clamp,
+            wrap_v: Wrap::Clamp,
+            mag: Filter::Linear,
+            min: Filter::Linear,
+            mip: Some(Filter::Linear),
+        }),
+    )
 }
 
 #[cfg(test)]

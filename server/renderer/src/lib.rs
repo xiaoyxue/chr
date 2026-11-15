@@ -8,6 +8,7 @@ pub mod distortion;
 pub use diagnostics::{DiagnosticOverlays, DiagnosticView, RenderSettings};
 mod environment;
 pub mod exr;
+mod flag;
 pub use environment::EnvironmentSettings;
 pub mod glb;
 mod gpu;

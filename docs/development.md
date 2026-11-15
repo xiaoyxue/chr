@@ -153,7 +153,9 @@ reloaded.
 `uv run server/scripts/stack.py start|stop|restart|status` starts and stops the
 whole local development stack (tracked simulation, pitch-studio client, program
 monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see
-`server/README.md`.
+`server/README.md`. It builds both pages and serves them with `vite preview`, so a
+dropped SSH tunnel does not reload them; restart the stack after client changes.
+Use `npm run dev` for hot reload while developing a client.
 
 The stack's processes and how they connect:
 

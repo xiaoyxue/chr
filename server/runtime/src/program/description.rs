@@ -223,10 +223,14 @@ fn scene_state(
         "model": [[length * 1.5, 0, 0, 0], [0, width * 1.5, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
     })];
     instances.extend(scene.instances.iter().map(|instance| {
-        json!({
+        let mut native = json!({
             "instance_id": instance.id, "asset_ref": instance.asset, "model": instance.model,
             "visible": instance.visible, "material_overrides": [],
-        })
+        });
+        if let Some(flag) = &instance.flag {
+            native["flag"] = json!(flag);
+        }
+        native
     }));
     Ok(serde_json::from_value(json!({
         "world": world, "configuration_id": configuration_id,

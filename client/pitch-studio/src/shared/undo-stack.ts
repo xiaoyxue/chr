@@ -3,40 +3,58 @@ export interface UndoEntry {
   label: string;
   /** Restores the state from before the step; throws if it cannot right now. */
   restore: () => void | Promise<void>;
+  /** Makes the step again after it was undone; throws if it cannot right now. */
+  reapply: () => void | Promise<void>;
 }
 
-/** Undo history of draft edits. Only the newest entries up to `limit` are kept. */
+/** Undo and redo history of draft edits. Only the newest entries up to `limit` are kept; a new step clears redo. */
 export class UndoStack {
   private entries: UndoEntry[] = [];
+  private undone: UndoEntry[] = [];
   private running = false;
 
   constructor(private readonly onChange: () => void = () => {}, private readonly limit = 100) {}
 
   get size() { return this.entries.length; }
   get label() { return this.entries.at(-1)?.label; }
+  get redoLabel() { return this.undone.at(-1)?.label; }
   get canUndo() { return !this.running && this.entries.length > 0; }
+  get canRedo() { return !this.running && this.undone.length > 0; }
 
   push(entry: UndoEntry) {
     this.entries.push(entry);
     if (this.entries.length > this.limit) this.entries.shift();
+    this.undone = [];
     this.onChange();
   }
 
   clear() {
     this.entries = [];
+    this.undone = [];
     this.onChange();
   }
 
   /** Restores the newest step; it stays on the stack if restoring fails. */
   async undo() {
     if (!this.canUndo) return;
-    const entry = this.entries.pop();
+    await this.move(this.entries, this.undone, (entry) => entry.restore());
+  }
+
+  /** Makes the newest undone step again; it stays undone if that fails. */
+  async redo() {
+    if (!this.canRedo) return;
+    await this.move(this.undone, this.entries, (entry) => entry.reapply());
+  }
+
+  private async move(from: UndoEntry[], to: UndoEntry[], run: (entry: UndoEntry) => void | Promise<void>) {
+    const entry = from.pop();
     this.running = true;
     this.onChange();
     try {
-      await entry.restore();
+      await run(entry);
+      to.push(entry);
     } catch (error) {
-      this.entries.push(entry);
+      from.push(entry);
       throw error;
     } finally {
       this.running = false;

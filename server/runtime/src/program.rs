@@ -35,6 +35,8 @@ pub struct Frame<'a> {
     pub key: &'a w::FrameKey,
     /// The frame's own warp of a tracked program (`frame_warp` of its `ti_c` geometry).
     pub frame_warp: Option<[[f64; 3]; 3]>,
+    /// Media time of the frame on its timeline; animates flags reproducibly.
+    pub seconds: f64,
 }
 
 impl<'a> Frame<'a> {
@@ -46,8 +48,17 @@ impl<'a> Frame<'a> {
             pixels: execution.input.pixels()?,
             key: &execution.provenance.input.frame,
             frame_warp: frame_warp(&execution.provenance.input.geometry),
+            seconds: media_seconds(
+                execution.input.metadata().timeline.time_base,
+                execution.input.metadata().position.ticks.get(),
+            ),
         })
     }
+}
+
+/// Seconds of `ticks` on a timeline with `time_base` seconds per tick.
+pub fn media_seconds(time_base: w::TimeBase, ticks: u64) -> f64 {
+    ticks as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
 }
 
 /// The warp a frame's geometry carries, if any.
@@ -309,6 +320,7 @@ impl ProgramRenderer {
             }
             (None, None) => &CameraModel::Pinhole,
         };
+        compositor.set_animation_time(frame.seconds);
         compositor.prepare_model(
             gpu,
             frame.scene.scene(),

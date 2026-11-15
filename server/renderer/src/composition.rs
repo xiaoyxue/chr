@@ -618,6 +618,11 @@ impl FrameCompositor {
         Ok(())
     }
 
+    /// Media time of the next prepared frame in seconds; animates flags.
+    pub fn set_animation_time(&mut self, seconds: f64) {
+        self.renderer.set_animation_time(seconds);
+    }
+
     pub fn prepare(
         &mut self,
         gpu: &Gpu,

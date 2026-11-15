@@ -265,6 +265,76 @@ async fn description_load_replaces_the_scene_with_reused_and_packaged_assets() {
 }
 
 #[tokio::test]
+async fn flag_instances_need_flag_assets_and_flag_parameters() {
+    let fixture = Fixture::new("flag");
+    let path = fixture.description(json!([]));
+    let (program, adapter) = description::load(&path, MODE, runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let loader = Loader::new(
+        &program,
+        control.clone(),
+        vec![fixture.root()],
+        WorkerAssets::default(),
+        fixture.dir.join("store"),
+    )
+    .unwrap();
+    let artwork = json!({"id": "flag", "kind": "flag", "source": {"path": fixture.dir.join("ad.png")},
+        "sha256": sha(&png([255, 0, 0, 255]))});
+    // Upright, facing -Y, its top-left corner 4 m up.
+    let flag = |asset: &str, motion: Option<Value>| {
+        let mut instance = json!({"id": "f", "asset": asset,
+            "model": [[1, 0, 0, -1.6], [0, 0, -1, 0], [0, 1, 0, -4], [0, 0, 0, 1]]});
+        if let Some(motion) = motion {
+            instance["flag"] = motion;
+        }
+        instance
+    };
+    let motion = json!({"width_m": 3.2, "height_m": 2.0, "amplitude_m": 0.32, "frequency": 1.35,
+        "speed": 1.0, "material": "pbr"});
+    loader
+        .load(scene(
+            &fixture,
+            json!([artwork]),
+            json!([flag("flag", Some(motion.clone()))]),
+        ))
+        .await
+        .unwrap();
+    let state = control
+        .call(
+            w::SCENE_GET,
+            Some(json!({"runtime_id": program.configuration.runtime_id, "scene_id": program.scene_id})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state["state"]["instances"][1]["flag"], motion);
+
+    let mut flat = motion.clone();
+    flat["width_m"] = json!(0);
+    for (case, instance) in [
+        ("a flag without motion", flag("flag", None)),
+        (
+            "an image quad with motion",
+            flag("ad", Some(motion.clone())),
+        ),
+        ("a zero-width flag", flag("flag", Some(flat))),
+    ] {
+        let error = loader
+            .load(scene(&fixture, json!([]), json!([instance])))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            w::RejectionKind::IncompatibleInput.code(),
+            "{case}"
+        );
+    }
+    assert_eq!(instances(&control, &program).await[1].1, "flag");
+    drop((control, loader));
+    owner.await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires a native hardware GPU"]
 async fn gpu_described_image_quads_are_drawn_unlit_through_the_tracked_camera() {
     let gpu = Gpu::request(&Gpu::instance(), None).await.unwrap();

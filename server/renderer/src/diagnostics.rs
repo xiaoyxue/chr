@@ -164,10 +164,7 @@ impl Overlays {
         }
         if settings.bounds {
             for (_, instance) in scene.instances().filter(|(_, i)| i.visible()) {
-                let bounds = scene
-                    .mesh(instance.mesh())?
-                    .bounds()
-                    .transformed(instance.model())?;
+                let bounds = instance.bounds();
                 let corners: [[f64; 3]; 8] = std::array::from_fn(|corner| {
                     std::array::from_fn(|axis| {
                         if corner & (1 << axis) == 0 {

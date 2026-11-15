@@ -61,10 +61,15 @@ export class PitchPreview {
   private onMove: (slot: Placement) => void;
   private available = true;
   private renderRequest = 0;
+  private waveRequest = 0;
   private readonly localAds = new LocalAdScene(true);
   private draw?: (plane: AdPlane) => void;
   private rectangle?: { id: number; start: THREE.Vector3; plane?: AdPlane };
   private draft?: THREE.LineLoop;
+  /** Whether a Fusion placement is being dragged and not yet saved. */
+  get dragging() { return this.drag?.kind === 'placement'; }
+  /** A click in the top view hit a visible local ad or flag. */
+  onLocalAdSelect?: (id: string) => void;
 
   constructor(private readonly viewport: HTMLElement, cameraList: HTMLElement, onError: (error: Error) => void) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -249,11 +254,20 @@ export class PitchPreview {
     this.viewport.dataset.cameraId = this.cameraId;
     this.viewport.dataset.previewMode = 'free';
     this.renderer.domElement.setAttribute('aria-label', `${preset.name} · 球场 2D / 3D 广告位预览`);
+    this.renderMain();
+  }
+
+  /** Renders the active camera; while a flag is visible it keeps doing so every frame, without the thumbnails. */
+  private renderMain() {
+    if (!this.available || !this.dimensions || !this.viewport.clientWidth || !this.viewport.clientHeight) return;
     this.configureCamera(this.camera, this.cameraId);
     this.axes.visible = this.showAxes && this.cameraId === 'top';
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(Math.max(this.viewport.clientWidth, 1), Math.max(this.viewport.clientHeight, 1), false);
+    const waving = this.localAds.animate(performance.now() / 1000);
     this.renderer.render(this.scene, this.camera);
+    // A hidden tab has no size and returns above, which stops the loop until the next refresh.
+    if (waving && !this.waveRequest) this.waveRequest = requestAnimationFrame(() => { this.waveRequest = 0; this.renderMain(); });
   }
 
   dispose() {
@@ -261,6 +275,7 @@ export class PitchPreview {
     this.resetDrag();
     this.resizeObserver.disconnect();
     cancelAnimationFrame(this.renderRequest);
+    cancelAnimationFrame(this.waveRequest);
     this.creatives?.dispose();
     this.localAds.dispose();
     this.cancelGroundRectangle();
@@ -347,6 +362,15 @@ export class PitchPreview {
       : [...this.slots].reverse().find((item) => item.type === '2D' && !this.hiddenIds.has(item.id) && containsGroundPlacement(item, point));
   }
 
+  /** The visible local ad under the ray `groundPoint` last cast; they lie above the Fusion areas. */
+  private localAdAt(): string | undefined {
+    for (const hit of this.raycaster.intersectObject(this.localAds.group, true)) {
+      let root = hit.object;
+      while (root.parent && root.parent !== this.localAds.group) root = root.parent;
+      if (root.visible) return root.userData.localAdId as string;
+    }
+  }
+
   private hover(event: PointerEvent) {
     if (!this.dimensions) return;
     const readout = this.viewport.parentElement.querySelector('#pointer-coordinates');
@@ -405,6 +429,8 @@ export class PitchPreview {
         const point = this.groundPoint(event);
         if (!point) return;
         const corner = this.cornerAt(event);
+        const local = corner ? undefined : this.localAdAt();
+        if (local) { this.onLocalAdSelect?.(local); return; }
         const slot = corner ? this.slots.find((item) => item.id === this.unlockedId) : this.placementAt(point);
         if (!slot) return;
         if (slot.id !== this.selectedId) this.onSelect(slot.id);

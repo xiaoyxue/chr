@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::scene_frame::{Id, Lighting, Matrix4, ShadowMode, U64};
+use crate::scene_frame::{Flag, Id, Lighting, Matrix4, ShadowMode, U64};
 
 pub const PROFILE: &str = "chr-render-description-v1";
 
@@ -106,7 +106,7 @@ pub struct Asset {
     pub sha256: String,
     /// `"mask"` imports a `glb`'s `alphaMode: BLEND` materials as alpha masks
     /// (cutoff 0.5) instead of rejecting the asset; the renderer has no translucent
-    /// pass. Not allowed for `image_quad`.
+    /// pass. Only allowed for `glb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend_as: Option<BlendAs>,
 }
@@ -126,6 +126,11 @@ pub enum AssetKind {
     /// edge at -Y, its left edge at -X, facing up (-Z). Unlit; texels with
     /// alpha below 0.5 are cut out. Scale, rotation and position are the instance's.
     ImageQuad,
+    /// A PNG/JPEG image as the artwork of a waving flag. Its instances carry the
+    /// flag's size and motion (`Instance::flag`); the image's top-left texel is at
+    /// the flag-local origin and it reads upright from the flag's -Z side. Texels
+    /// with alpha below 0.5 are cut out.
+    Flag,
 }
 
 /// Where the server reads an asset: a file, or an entry of a ZIP package such as
@@ -158,11 +163,15 @@ pub struct FilePath {
 pub struct Instance {
     pub id: Id,
     pub asset: Id,
-    /// Asset coordinates (the `glb` importer's -Z-up basis, or the image quad) to
-    /// world metres, forward row-major.
+    /// Asset coordinates (the `glb` importer's -Z-up basis, the image quad, or the
+    /// flag-local frame) to world metres, forward row-major.
     pub model: Matrix4,
     #[serde(default = "visible")]
     pub visible: bool,
+    /// Size and motion of a `flag` asset's instance; required for flags and
+    /// rejected for other assets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<Flag>,
 }
 
 fn visible() -> bool {
@@ -208,6 +217,20 @@ mod tests {
         assert!(matches!(scene.assets[1].source, AssetSource::File(_)));
         assert!(scene.instances[0].visible);
         assert_eq!((scene.lighting, scene.shadow_mode), (None, None));
+        let flag: Instance = serde_json::from_value(json!({"id": "f1", "asset": "flag",
+            "model": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "flag": {"width_m": 3.2, "height_m": 2, "amplitude_m": 0.32, "frequency": 1.35,
+                     "speed": 1, "material": "simple"}}))
+        .unwrap();
+        assert_eq!(flag.flag.unwrap().width_m.get(), 3.2);
+        let flag = json!({"width_m": 1, "height_m": 1, "amplitude_m": 0, "frequency": 1,
+                          "speed": 1, "material": "simple"});
+        assert!(serde_json::from_value::<Flag>(flag.clone()).is_ok());
+        for (key, value) in [("pole", json!(true)), ("material", json!("cloth"))] {
+            let mut bad = flag.clone();
+            bad[key] = value;
+            assert!(serde_json::from_value::<Flag>(bad).is_err(), "{key}");
+        }
         for bad in [
             json!({"path": "a.png", "entry": "x"}),
             json!({"package": "/m.zip"}),

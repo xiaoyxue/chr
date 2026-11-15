@@ -95,6 +95,9 @@ struct Triangle {
 struct Program {
     adapter: SceneAdapter,
     renderer: ProgramRenderer,
+    /// Seconds per tick of request positions: the server's program frames tick at
+    /// the output rate.
+    time_base: w::TimeBase,
     /// The last bound scene; reused while requests carry the same snapshot.
     scene: Option<Arc<BoundScene>>,
 }
@@ -157,6 +160,7 @@ fn start(input: &mut impl BufRead) -> Result<Worker, Error> {
             Renderer::Program(Box::new(Program {
                 adapter: installed.adapter,
                 renderer,
+                time_base: installed.program.configuration.output_rate,
                 scene: None,
             }))
         }
@@ -247,6 +251,7 @@ impl Worker {
         let Program {
             adapter,
             renderer,
+            time_base,
             scene,
         } = &mut **program;
         let input = self.input.as_ref().ok_or("no input ring")?;
@@ -283,6 +288,7 @@ impl Worker {
                 pixels: &self.payload,
                 key: &frame.frame,
                 frame_warp: crate::program::frame_warp(&frame.geometry),
+                seconds: crate::program::media_seconds(*time_base, frame.position.ticks.get()),
             },
         )?;
         Ok(())

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chr_renderer::{
     coordinates::ImageExtent,
     scene::{
-        AreaShape, EnvironmentMap, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene,
-        SceneError, SkyLight,
+        AreaShape, EnvironmentMap, FLAG_VERTICES, Flag, FlagShading, Light, Lighting, MeshData,
+        ModelMatrix, PbrMaterial, Scene, SceneError, SkyLight,
     },
 };
 
@@ -159,6 +159,70 @@ fn invalid_updates_leave_the_scene_unchanged() {
     assert_eq!(
         scene.snapshot().instance(instance).unwrap().model(),
         ModelMatrix::IDENTITY
+    );
+}
+
+#[test]
+fn flags_wave_only_the_shared_grid_and_widen_their_bounds() {
+    let mut scene = Scene::new().unwrap();
+    let grid = MeshData::flag_grid();
+    assert!(grid.is_flag_grid() && !mesh().is_flag_grid());
+    assert_eq!(grid.positions().len(), FLAG_VERTICES as usize);
+    assert_eq!(
+        MeshData::flag_grid().positions().as_ptr(),
+        grid.positions().as_ptr()
+    );
+    let material = scene.add_material(PbrMaterial::default()).unwrap();
+    let grid = scene.add_mesh(grid).unwrap();
+    let other = scene.add_mesh(mesh()).unwrap();
+    let model = ModelMatrix::new([
+        [1.0, 0.0, 0.0, 10.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0, -4.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+    .unwrap();
+    let flag_id = scene.add_instance(grid, vec![material], model).unwrap();
+    let other_id = scene
+        .add_instance(other, vec![material, material], model)
+        .unwrap();
+    let flat = scene.snapshot();
+    let flag = Flag {
+        width: 3.2,
+        height: 2.0,
+        amplitude: 0.5,
+        frequency: 1.35,
+        speed: 1.0,
+        shading: FlagShading::Pbr,
+    };
+    assert_eq!(
+        scene.set_flag(other_id, Some(flag)),
+        Err(SceneError::FlagMesh)
+    );
+    let invalid = Flag {
+        height: -1.0,
+        ..flag
+    };
+    assert_eq!(
+        scene.set_flag(flag_id, Some(invalid)),
+        Err(SceneError::InvalidFlag)
+    );
+    scene.set_flag(flag_id, Some(flag)).unwrap();
+    let waving = scene.snapshot();
+    let instance = waving.instance(flag_id).unwrap();
+    assert_eq!(instance.flag(), Some(flag));
+    // Local X 0..3.2 to world X, local Y (sag included) down to world Z, and the
+    // 1.53 m-per-metre normal reach to world -Y.
+    let bounds = instance.bounds();
+    assert_eq!(bounds.min(), [10.0, -0.765, -4.0]);
+    let max = bounds.max();
+    assert!((max[0] - 13.2).abs() < 1e-6 && (max[1] - 0.765).abs() < 1e-6);
+    assert!((max[2] - (-4.0 + 2.0 + 0.22 * 0.5)).abs() < 1e-6);
+    assert_eq!(flat.instance(flag_id).unwrap().flag(), None);
+    scene.set_flag(flag_id, None).unwrap();
+    assert_eq!(
+        scene.snapshot().instance(flag_id).unwrap().bounds().max()[0],
+        11.0
     );
 }
 

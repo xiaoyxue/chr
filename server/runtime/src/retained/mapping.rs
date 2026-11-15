@@ -156,6 +156,11 @@ impl Registrations {
             let asset = self.models.get(&instance.asset_ref).ok_or_else(|| {
                 reject(w::RejectionKind::NotFound, "model asset is not registered")
             })?;
+            if asset.mesh.is_flag_grid() != instance.flag.is_some() {
+                return Err(incompatible(
+                    "flag assets need flag parameters, which other assets do not take",
+                ));
+            }
             let model = ModelMatrix::new(instance.model.map(|r| r.map(w::Finite::get)))
                 .map_err(incompatible)?;
             for n in model
@@ -197,6 +202,11 @@ impl Registrations {
             scene
                 .set_visible(id, instance.visible)
                 .map_err(incompatible)?;
+            if let Some(flag) = &instance.flag {
+                scene
+                    .set_flag(id, Some(native_flag(flag)?))
+                    .map_err(incompatible)?;
+            }
         }
         let lights = state
             .lighting
@@ -469,6 +479,19 @@ fn float(n: f64) -> Result<f32, ErrorObject> {
 }
 fn f(n: w::Finite) -> Result<f32, ErrorObject> {
     float(n.get())
+}
+fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
+    Ok(scene::Flag {
+        width: f(flag.width_m)?,
+        height: f(flag.height_m)?,
+        amplitude: f(flag.amplitude_m)?,
+        frequency: f(flag.frequency)?,
+        speed: f(flag.speed)?,
+        shading: match flag.material {
+            w::FlagMaterial::Simple => scene::FlagShading::Simple,
+            w::FlagMaterial::Pbr => scene::FlagShading::Pbr,
+        },
+    })
 }
 fn v3(v: w::Vec3) -> Result<[f32; 3], ErrorObject> {
     Ok([f(v[0])?, f(v[1])?, f(v[2])?])

@@ -1,9 +1,13 @@
 // Converts the match's placements into a chr-render-description-v1 scene (see
 // server/docs/render-description.md) and loads it into chr-server.
-// The matrices mirror FusionCreatives.update, so the program output matches this
-// preview. They are forward row-major and act on column vectors, in chr world
+// The matrices mirror FusionCreatives.update and LocalAdScene.update, so the
+// program output matches the preview. They are forward row-major and act on column vectors, in chr world
 // coordinates: pitch-centred metres, ground Z = 0, up is negative Z.
+import * as THREE from 'three';
 import { fitFusionModel } from '../placements/fusion-creatives.ts';
+import { flagModel } from '../placements/flag.ts';
+import { adRoot, modelFit } from '../placements/local-ad-transform.ts';
+import type { LocalAd } from '../placements/local-ad.ts';
 import type { FieldDimensions, GroundPlacement, ModelPlacement, Placement } from '../shared/types.ts';
 
 export type Rows = [number, number, number, number][];
@@ -17,10 +21,59 @@ export interface DescribedAsset {
   /** Import the GLB's alpha-blended materials as masks; the renderer has no translucent pass. */
   blendAs?: 'mask';
 }
+/** A local placement (2D, 3D or flag) in chr world coordinates whose material chr-server reads at `ad.materialPath`. */
+export interface DescribedLocal {
+  ad: LocalAd;
+  /** Lowercase hex SHA-256 of the material bytes. */
+  sha256: string;
+  /** A 3D placement's GLB bounds. */
+  bounds?: GlbBounds;
+  blendAs?: 'mask';
+}
+/** `chr_common::scene_frame::Flag`: the flag's size in metres and its wave. */
+export interface FlagParameters {
+  width_m: number;
+  height_m: number;
+  amplitude_m: number;
+  frequency: number;
+  speed: number;
+  material: 'simple' | 'pbr';
+}
 export interface DescriptionScene {
   ground: { pitch_m: [number, number] };
-  assets: { id: string; kind: DescribedAsset['kind']; source: { package: string; entry: string }; sha256: string; blend_as?: 'mask' }[];
-  instances: { id: string; asset: string; model: Rows; visible: boolean }[];
+  assets: { id: string; kind: DescribedAsset['kind'] | 'flag'; source: { package: string; entry: string } | { path: string }; sha256: string; blend_as?: 'mask' }[];
+  instances: { id: string; asset: string; model: Rows; visible: boolean; flag?: FlagParameters }[];
+}
+/** chr-server places at most this many instances per description. */
+export const MAX_INSTANCES = 63;
+/** One asset per distinct local material and kind: flags `FLAG-`, images and models `LOCAL-`. */
+export const localAssetId = (ad: LocalAd, sha256: string) => `${ad.type === 'flag' ? 'FLAG' : 'LOCAL'}-${sha256.slice(0, 16)}`;
+const LOCAL_KIND = { '2D': 'image_quad', '3D': 'glb', flag: 'flag' } as const;
+
+const rows = (matrix: THREE.Matrix4): Rows => [0, 1, 2, 3].map((i) => [0, 1, 2, 3].map((j) => matrix.elements[j * 4 + i])) as Rows;
+
+/**
+ * A local 2D ad: chr's unit image quad (top-left texel at (-0.5, -0.5)) stretched
+ * over the rectangle like the preview's plane: columns u · width, v · height, the
+ * normal u × v, and the rectangle's centre lifted as in the preview.
+ */
+export function localQuadModel(ad: LocalAd): Rows {
+  return rows(adRoot(ad).multiply(new THREE.Matrix4().makeScale(ad.plane.width, ad.plane.height, 1)));
+}
+
+/**
+ * A local 3D ad, placed like the preview: the glTF scene centred on its footprint
+ * and standing on the rectangle, turned by yaw and fitted (modelFit). chr's GLB
+ * basis is glTF (x, y, z) -> (x, z, -y), so it is first turned back to glTF.
+ */
+export function localGlbModel(ad: LocalAd, bounds: GlbBounds): Rows {
+  const [minX, minY, minZ] = bounds.min, [maxX, , maxZ] = bounds.max;
+  const fit = modelFit(ad, [Math.max(maxX - minX, 0.001), Math.max(maxZ - minZ, 0.001)]);
+  const toGltf = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
+  return rows(adRoot(ad)
+    .multiply(new THREE.Matrix4().compose(new THREE.Vector3(), new THREE.Quaternion().setFromEuler(fit.rotation), new THREE.Vector3().setScalar(fit.scale)))
+    .multiply(new THREE.Matrix4().makeTranslation(-(minX + maxX) / 2, -minY, -(minZ + maxZ) / 2))
+    .multiply(toGltf));
 }
 
 /** Names of a GLB's materials with `alphaMode: BLEND`. */
@@ -64,6 +117,7 @@ export function quadModel(slot: GroundPlacement, image: { width: number; height:
 /**
  * Placements with a loaded asset become instances; each asset is listed once, read
  * by chr-server from `packagePath` (a ZIP on the onsite server) at its entry.
+ * Local placements follow, their materials read from their server paths.
  */
 export function describeScene(options: {
   field: FieldDimensions;
@@ -72,6 +126,7 @@ export function describeScene(options: {
   geometry: ReadonlyMap<string, SlotGeometry>;
   assets: ReadonlyMap<string, DescribedAsset>;
   packagePath: string;
+  locals?: readonly DescribedLocal[];
 }): DescriptionScene {
   const scene: DescriptionScene = { ground: { pitch_m: [options.field.length, options.field.width] }, assets: [], instances: [] };
   for (const slot of options.slots) {
@@ -87,6 +142,20 @@ export function describeScene(options: {
         sha256: asset.sha256, ...(asset.blendAs ? { blend_as: asset.blendAs } : {}) });
     scene.instances.push({ id: slot.id, asset: slot.asset.id, model, visible: !options.hidden.has(slot.id) });
   }
+  for (const { ad, sha256, bounds, blendAs } of options.locals ?? []) {
+    const asset = localAssetId(ad, sha256);
+    if (!scene.assets.some((listed) => listed.id === asset))
+      scene.assets.push({ id: asset, kind: LOCAL_KIND[ad.type], source: { path: ad.materialPath }, sha256, ...(blendAs ? { blend_as: blendAs } : {}) });
+    if (ad.type === 'flag') {
+      const { width, height } = ad.plane, { amplitude, frequency, speed, material } = ad.flag;
+      scene.instances.push({ id: `flag-${ad.id}`, asset, model: flagModel(ad.plane, ad.offset), visible: ad.visible,
+        flag: { width_m: width, height_m: height, amplitude_m: amplitude, frequency, speed, material } });
+    } else {
+      scene.instances.push({ id: `local-${ad.id}`, asset, model: ad.type === '2D' ? localQuadModel(ad) : localGlbModel(ad, bounds), visible: ad.visible });
+    }
+  }
+  if (scene.instances.length > MAX_INSTANCES)
+    throw new Error(`chr-server 每个场景最多放置 ${MAX_INSTANCES} 个实例，当前有 ${scene.instances.length} 个（含停用的广告位）；请删除部分后再发送。`);
   return scene;
 }
 

@@ -8,6 +8,8 @@ after(() => server.close());
 const { anchorPoint, moveAnchor, parseAspect, planeRectangle, rectanglePlane, resizeFromCorner, resizeSide, uniformScale, withAspect } =
   await server.ssrLoadModule('/src/placements/ground-edit.ts');
 const { UndoStack } = await server.ssrLoadModule('/src/shared/undo-stack.ts');
+const { upgradeLocalAd, validLocalAd, validatePitchAd, withoutPitchFlags } = await server.ssrLoadModule('/src/placements/local-ad.ts');
+const { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } = await server.ssrLoadModule('/src/placements/plane-edit.ts');
 
 const near = (actual, expected) => {
   for (const [key, value] of Object.entries(expected)) assert.ok(Math.abs(actual[key] - value) < 1e-9, `${key}: ${actual[key]} vs ${value}`);
@@ -83,12 +85,12 @@ test('undo restores the newest step first and keeps a step whose restore fails',
   const state = [];
   let changes = 0;
   const stack = new UndoStack(() => { changes += 1; }, 2);
-  for (const name of ['a', 'b', 'c']) stack.push({ label: name, restore: () => { state.push(name); } });
+  for (const name of ['a', 'b', 'c']) stack.push({ label: name, restore: () => { state.push(name); }, reapply: () => {} });
   assert.equal(stack.size, 2);
   assert.equal(stack.label, 'c');
   await stack.undo();
   assert.deepEqual(state, ['c']);
-  stack.push({ label: 'busy', restore: () => { throw new Error('busy'); } });
+  stack.push({ label: 'busy', restore: () => { throw new Error('busy'); }, reapply: () => {} });
   await assert.rejects(stack.undo(), /busy/);
   assert.equal(stack.label, 'busy');
   stack.clear();
@@ -96,4 +98,64 @@ test('undo restores the newest step first and keeps a step whose restore fails',
   await stack.undo();
   assert.deepEqual(state, ['c']);
   assert.ok(changes > 0);
+});
+
+test('stored flags must carry valid wave settings; older ads stay loadable', () => {
+  const ad = { id: 'a', name: 'a', type: '2D', space: 'pitch', plane: { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], width: 2, height: 1 },
+    normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
+  const legacyCloud = { ...ad, type: '3D', space: undefined, cloudId: 'cloud' };
+  const flag = { ...ad, type: 'flag', space: 'cloud', cloudId: 'cloud', flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' } };
+  for (const valid of [ad, legacyCloud, flag, { ...flag, flag: { ...flag.flag, material: 'pbr', artworkPath: '/srv/flag.png' } }]) assert.ok(validLocalAd(valid));
+  for (const [key, value] of [['amplitude', 0.8], ['frequency', Number.NaN], ['speed', -1], ['material', 'cloth'], ['artworkPath', 'flag.png']]) {
+    assert.equal(validLocalAd({ ...flag, flag: { ...flag.flag, [key]: value } }), false, key);
+  }
+  assert.equal(validLocalAd({ ...flag, flag: undefined }), false);
+  assert.equal(validLocalAd({ ...ad, flag: flag.flag }), false);
+  assert.ok(validLocalAd({ ...ad, materialPath: '/srv/logo.png' }));
+  assert.equal(validLocalAd({ ...ad, materialPath: 'logo.png' }), false);
+  // An early flag's artwork path becomes its material path.
+  const early = { ...flag, flag: { ...flag.flag, artworkPath: '/srv/flag.png' } };
+  assert.deepEqual(upgradeLocalAd(early), { ...flag, materialPath: '/srv/flag.png' });
+  assert.equal(upgradeLocalAd(ad), ad);
+});
+
+test('flags are point-cloud only: stored pitch flags are dropped on load and refused on save', () => {
+  const plane = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], width: 2, height: 1 };
+  const ad = { id: 'a', name: 'a', type: '2D', space: 'pitch', plane, normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
+  const pitchFlag = { ...ad, id: 'f', type: 'flag', flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' } };
+  // An early record stays readable, so the store does not look corrupt.
+  assert.ok(validLocalAd(pitchFlag));
+  assert.deepEqual(withoutPitchFlags([ad, pitchFlag, { ...pitchFlag, id: 'g' }]), { kept: [ad], removed: 2 });
+  assert.throws(() => validatePitchAd(pitchFlag, { length: 105, width: 68 }), /旗帜只能放在点云平面上/);
+  validatePitchAd(ad, { length: 105, width: 68 });
+});
+
+test('a rectangle on any plane moves and resizes about its anchor, keeping its axes', () => {
+  // A wall rectangle: u along +Y, v down (+Z).
+  const plane = { origin: [50, -2, -3], u: [0, 1, 0], v: [0, 0, 1], width: 4, height: 2 };
+  assert.deepEqual(planeAnchor(plane, 'centre'), [50, 0, -2]);
+  assert.deepEqual(movePlaneAnchor(plane, 'centre', [50, 1, -2]).origin, [50, -1, -3]);
+  const wider = resizePlane(plane, 'centre', 'width', 8, true);
+  assert.deepEqual([wider.width, wider.height, planeAnchor(wider, 'centre')], [8, 4, [50, 0, -2]]);
+  const fixed = resizePlane(plane, 'top-left', 'height', 3, false);
+  assert.deepEqual([fixed.origin, fixed.width, fixed.height], [plane.origin, 4, 3]);
+  assert.deepEqual(planeWithAspect(plane, 'top-left', 1).height, 4);
+});
+
+test('redo makes an undone step again, and a new step clears what can be redone', async () => {
+  const state = [];
+  const stack = new UndoStack();
+  const step = (name) => ({ label: name, restore: () => { state.push(`undo ${name}`); }, reapply: () => { state.push(`redo ${name}`); } });
+  stack.push(step('a'));
+  stack.push(step('b'));
+  await stack.undo();
+  assert.equal(stack.redoLabel, 'b');
+  await stack.redo();
+  assert.deepEqual(state, ['undo b', 'redo b']);
+  assert.equal(stack.label, 'b');
+  await stack.undo();
+  stack.push(step('c'));
+  assert.equal(stack.canRedo, false);
+  await stack.redo();
+  assert.deepEqual(state, ['undo b', 'redo b', 'undo b']);
 });

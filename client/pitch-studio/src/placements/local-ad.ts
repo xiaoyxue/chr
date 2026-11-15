@@ -1,3 +1,4 @@
+import { FLAG_LIMITS } from './flag.ts';
 import type { FieldDimensions } from '../shared/types.ts';
 
 export type Vector3Tuple = [number, number, number];
@@ -9,10 +10,19 @@ export interface AdPlane {
   width: number;
   height: number;
 }
+/** A flag's wave and look; its size is the plane rectangle (see flag.ts). */
+export interface FlagSettings {
+  /** Wave coefficient in metres; the peak displacement is at most 1.53 times this. */
+  amplitude: number;
+  /** Primary wave cycles from the centre line to either edge. */
+  frequency: number;
+  speed: number;
+  material: 'simple' | 'pbr';
+}
 export interface LocalAd {
   id: string;
   name: string;
-  type: '2D' | '3D';
+  type: '2D' | '3D' | 'flag';
   space?: AdSpace;
   cloudId?: string;
   plane: AdPlane;
@@ -22,25 +32,57 @@ export interface LocalAd {
   yaw: number;
   visible: boolean;
   material?: File;
+  /** Absolute path of `material` on the onsite server, where chr-server reads it; unset for a file chosen locally. */
+  materialPath?: string;
+  /** Present exactly for flags. */
+  flag?: FlagSettings;
 }
 
-function valid(value: unknown): value is LocalAd {
+const validPath = (path: unknown) => path === undefined || (typeof path === 'string' && path.startsWith('/'));
+
+/** Early flag records kept their server path as `flag.artworkPath`. */
+type StoredFlag = FlagSettings & { artworkPath?: string };
+
+function validFlag(flag: StoredFlag) {
+  return Boolean(flag) && typeof flag === 'object'
+    && (['amplitude', 'frequency', 'speed'] as const).every((key) => Number.isFinite(flag[key])
+      && flag[key] >= FLAG_LIMITS[key][0] && flag[key] <= FLAG_LIMITS[key][1])
+    && ['simple', 'pbr'].includes(flag.material) && validPath(flag.artworkPath);
+}
+
+/** A stored record in the current shape: an early flag's `artworkPath` becomes its `materialPath`. */
+export function upgradeLocalAd(ad: LocalAd): LocalAd {
+  if (!ad.flag || !('artworkPath' in ad.flag)) return ad;
+  const { artworkPath, ...flag } = ad.flag as StoredFlag;
+  return { ...ad, materialPath: ad.materialPath ?? artworkPath, flag };
+}
+
+/** Whether a stored record is a well-formed local ad; records from before flags stay valid. */
+export function validLocalAd(value: unknown): value is LocalAd {
   if (!value || typeof value !== 'object') return false;
   const ad = value as LocalAd;
   const vector = (point: number[]) => Array.isArray(point) && point.length === 3 && point.every((x) => Number.isFinite(x) && Math.abs(x) <= 1e6);
   return typeof ad.id === 'string' && typeof ad.name === 'string'
     && (ad.space === 'pitch' ? ad.cloudId === undefined : (ad.space === undefined || ad.space === 'cloud') && typeof ad.cloudId === 'string')
-    && ['2D', '3D'].includes(ad.type) && typeof ad.visible === 'boolean' && Boolean(ad.plane)
+    && ['2D', '3D', 'flag'].includes(ad.type) && (ad.type === 'flag' ? validFlag(ad.flag) : ad.flag === undefined)
+    && typeof ad.visible === 'boolean' && Boolean(ad.plane)
     && vector(ad.plane.origin) && vector(ad.plane.u) && vector(ad.plane.v)
     && [ad.plane.u, ad.plane.v].every((axis) => Math.abs(axis.reduce((sum, x) => sum + x * x, 0) - 1) < 1e-5)
     && Math.abs(ad.plane.u.reduce((sum, x, i) => sum + x * ad.plane.v[i], 0)) < 1e-5
     && [ad.plane.width, ad.plane.height, ad.scale].every((x) => Number.isFinite(x) && x >= 0.01 && x <= 1000)
     && Number.isFinite(ad.offset) && Math.abs(ad.offset) <= 1000
     && Number.isFinite(ad.yaw) && Math.abs(ad.yaw) <= 360
-    && [1, -1].includes(ad.normalSign) && (ad.material === undefined || ad.material instanceof File);
+    && [1, -1].includes(ad.normalSign) && (ad.material === undefined || ad.material instanceof File) && validPath(ad.materialPath);
+}
+
+/** Flags are placed on point-cloud planes only; early records may still hold pitch flags. */
+export function withoutPitchFlags(ads: LocalAd[]) {
+  const kept = ads.filter((ad) => !(ad.space === 'pitch' && ad.type === 'flag'));
+  return { kept, removed: ads.length - kept.length };
 }
 
 export function validatePitchAd(ad: LocalAd, field: FieldDimensions) {
+  if (ad.type === 'flag') throw new Error('旗帜只能放在点云平面上。');
   const { origin, u, v, width, height } = ad.plane;
   if (u[2] !== 0 || v[2] !== 0 || (ad.type === '2D' && origin[2] !== 0) || ad.offset !== 0 || ad.normalSign !== -1) {
     throw new Error('球场广告的底面应平行地面；2D 广告必须贴地，3D 高度使用 Z 调整。');
@@ -71,14 +113,14 @@ export class LocalAdRepository {
       request.onerror = () => reject(new Error(`读取本地广告失败：${request.error?.message}`));
       request.onsuccess = () => {
         const ads: unknown = request.result ?? [];
-        if (!Array.isArray(ads) || ads.length > 200 || !ads.every(valid) || new Set(ads.map((ad) => ad.id)).size !== ads.length) {
+        if (!Array.isArray(ads) || ads.length > 200 || !ads.every(validLocalAd) || new Set(ads.map((ad) => ad.id)).size !== ads.length) {
           reject(new Error('本地广告数据损坏，未覆盖原记录。'));
-        } else resolve(ads);
+        } else resolve(ads.map(upgradeLocalAd));
       };
     });
   }
   async write(id: string, ads: LocalAd[], space: AdSpace) {
-    if (ads.length > 200 || !ads.every((ad) => valid(ad) && (ad.space ?? 'cloud') === space)) throw new Error('本地广告参数无效或超过 200 个。');
+    if (ads.length > 200 || !ads.every((ad) => validLocalAd(ad) && (ad.space ?? 'cloud') === space)) throw new Error('本地广告参数无效或超过 200 个。');
     const database = await this.open();
     return new Promise<void>((resolve, reject) => {
       const transaction = database.transaction('matches', 'readwrite');
@@ -87,7 +129,7 @@ export class LocalAdRepository {
       let validationError: Error;
       request.onsuccess = () => {
         const saved: unknown = request.result ?? [];
-        if (!Array.isArray(saved) || !saved.every(valid)) {
+        if (!Array.isArray(saved) || !saved.every(validLocalAd)) {
           validationError = new Error('本地广告数据损坏，未覆盖原记录。');
         } else {
           // Merge inside one transaction so the independent editors cannot overwrite each other.

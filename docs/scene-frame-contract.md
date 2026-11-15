@@ -231,6 +231,15 @@ type RenderInstance = {
     part: number;
     factors: RenderPbrFactors;
   }[];
+  // Extension (#126): required for flag assets, rejected for others; may be omitted.
+  flag?: {
+    width_m: number;
+    height_m: number;
+    amplitude_m: number;
+    frequency: number;
+    speed: number;
+    material: "simple" | "pbr";
+  };
 };
 type RenderLight = {
   light_id: RenderId;
