@@ -782,7 +782,14 @@ uv run server/scripts/stack.py start     # waits until video flows through both 
 uv run server/scripts/stack.py status
 uv run server/scripts/stack.py stop
 uv run server/scripts/stack.py restart
+uv run server/scripts/stack.py restart pitch-studio   # only the named components
 ```
+
+Naming components (`render`, `srt-relay`, `pitch-studio`, `monitor-page`) limits
+`start`, `stop` and `restart` to them, for example to rebuild the pages after a
+client update without interrupting the program output. See the
+[operations guide](../docs/operations.md) for onsite launching, remote access and
+file locations.
 
 Each component runs detached in its own process group, logs to
 `output/stack/<name>.log` and is recorded in `output/stack/<name>.pid` with its

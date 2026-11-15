@@ -9,6 +9,7 @@
 | Layer | Document | Owns |
 | --- | --- | --- |
 | Development | [Development environment](development.md) | 已有目录职责、工具链和开发命令。 |
+| Operations | [Onsite operations guide](operations.md) | 现场启动与运维、远程访问、studio 操作流程、运行时文件位置规则和故障排查。 |
 | Product | [Business workflow](business-workflow.md) | 四阶段业务流程、参与方、交接和阶段出口。 |
 | Architecture | [System architecture](system-architecture.md) | 产品边界、逻辑模块、数据流及现有实现与目标的区别。 |
 | Responsibilities | [Component responsibilities](component-responsibilities.md) | 各功能的操作、配置、执行和反馈归属。 |

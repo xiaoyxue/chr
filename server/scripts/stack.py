@@ -15,7 +15,11 @@ Each component runs detached in its own process group, logs to
 output/stack/<name>.log and is recorded in output/stack/<name>.pid, so `stop`
 only signals processes this script started.
 
-    uv run server/scripts/stack.py start|stop|restart|status [--config FILE]
+    uv run server/scripts/stack.py start|stop|restart|status [COMPONENT...] [--config FILE]
+
+COMPONENT limits start, stop and restart to the named components (render, srt-relay,
+pitch-studio, monitor-page), for example `restart pitch-studio` after a client update
+without interrupting the program output.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import sys
 import threading
 import time
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -414,7 +419,9 @@ def report(config: Config) -> str:
                      f"&ws=ws://{config.server_ws}&monitor=ws://{config.monitor_ws}")
     lines.append(f"  SRT player        srt://{config.srt}" + (f"  or tcp://127.0.0.1:{config.srt_relay_port}" if config.srt_relay_port else ""))
     forwards = " ".join(f"-L {port}:127.0.0.1:{port}" for port in forwarded_ports(config))
-    lines.append(f"from another machine: ssh -N {forwards} {getpass.getuser()}@{socket.gethostname()}")
+    # Keepalives keep the network from dropping an idle tunnel and the pages' open connections.
+    lines.append(f"from another machine: ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 "
+                 f"{forwards} {getpass.getuser()}@{socket.gethostname()}")
     lines.append(f"  (ICE-TCP {config.webrtc_tcp} and up listen only while a WebRTC viewer is connected)")
     return "\n".join(lines)
 
@@ -537,9 +544,9 @@ def log_tail(name: str, lines: int = 5) -> list[str]:
         return []
 
 
-def start(config: Config, wait_s: float) -> None:
+def start(config: Config, wait_s: float, names: Sequence[str] = ()) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
-    stack = components(config)
+    stack = [component for component in components(config) if not names or component.name in names]
     started = []
     for component in stack:
         if pgid := running(component.name):
@@ -581,11 +588,11 @@ def start(config: Config, wait_s: float) -> None:
     print(report(config))
 
 
-def stop() -> list[tuple[str, int, str, str]]:
-    """Stops every recorded component: TERM to its process group, then KILL to what is
-    left after STOP_TIMEOUT_S. Prints and returns every process it stopped, as
-    (component, pid, name, outcome)."""
-    names = sorted(path.stem for path in STATE.glob("*.pid")) if STATE.exists() else []
+def stop(only: Sequence[str] = ()) -> list[tuple[str, int, str, str]]:
+    """Stops every recorded component, or only those named: TERM to its process group,
+    then KILL to what is left after STOP_TIMEOUT_S. Prints and returns every process it
+    stopped, as (component, pid, name, outcome)."""
+    names = sorted(path.stem for path in STATE.glob("*.pid") if not only or path.stem in only) if STATE.exists() else []
     groups = {name: pid for name in names if (pid := running(name))}
     if not groups:
         print("nothing running")
@@ -671,15 +678,19 @@ def main() -> None:
     if options.command == "relay":
         relay(options.args[0], int(options.args[1]))
         return
-    if options.command == "stop":
+    names = options.args
+    if options.command == "stop" and not names:
         stop()
         return
     config = load_config(options.config)
-    if options.command == "restart":
-        stop()
+    unknown = sorted(set(names) - {component.name for component in components(config)})
+    if unknown:
+        raise SystemExit(f"unknown or disabled components: {', '.join(unknown)}")
+    if options.command in ("stop", "restart"):
+        stop(names)
     if options.command in ("start", "restart"):
-        start(config, options.wait)
-    else:
+        start(config, options.wait, names)
+    elif options.command == "status":
         status(config)
 
 

@@ -92,6 +92,24 @@ Viewers only ever see what the SDI port sent. Ports are the defaults of
 `server/scripts/stack.example.toml`; `stack.py start` and `status` print the ports
 each running process actually holds.
 
+## Operating the onsite stack
+
+From the main checkout, outside a Nix shell, after copying
+`server/scripts/stack.example.toml` to `output/stack/stack.toml`:
+
+```sh
+uv run server/scripts/stack.py start                      # build, start, wait until frames flow
+uv run server/scripts/stack.py status                     # health, URLs and the ssh -L forwards
+uv run server/scripts/stack.py restart pitch-studio       # one component; the output keeps running
+uv run server/scripts/stack.py stop
+```
+
+Runtime data lives outside the repository, under chr-server's asset root
+(`asset_root`): Fusion offline ZIPs, logo, flag and model files, and the studio
+store (`studio_data_dir`), which holds matches, onsite placements and uploads.
+The [operations guide](docs/operations.md) covers configuration, launching,
+remote access, the studio workflow, every file location and troubleshooting.
+
 ## Design Documentation
 
 See [product and system design](docs/README.md) for the evolving business
