@@ -35,7 +35,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       fusionApi(env.FUSION_API_URL ?? '', env.FUSION_API_KEY ?? ''),
-      localFiles(env.LOCAL_FILES_ROOTS ?? ''),
+      localFiles(env.LOCAL_FILES_ROOTS ?? '', env.STUDIO_DATA_DIR || DEFAULT_STUDIO_DATA_DIR),
       studioStore(env.STUDIO_DATA_DIR || DEFAULT_STUDIO_DATA_DIR),
       renderTarget(env.CHR_RENDER_URL),
       {

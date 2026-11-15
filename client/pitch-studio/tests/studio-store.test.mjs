@@ -23,11 +23,14 @@ async function start(directory, limits) {
   const server = createHttpServer((req, res) => middleware(req, res, () => res.writeHead(404).end()));
   servers.push(server);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${server.address().port}/studio-store`;
+  const origin = `http://127.0.0.1:${server.address().port}`, base = `${origin}/studio-store`;
+  // As the studio page sends them: from its own origin, with the body type each request expects.
+  const pageHeaders = (method = 'GET') => ({ Origin: origin,
+    ...(method === 'PUT' ? { 'Content-Type': 'application/json' } : method === 'POST' ? { 'Content-Type': 'application/octet-stream' } : {}) });
   return {
-    port: server.address().port,
-    call: async (path, init) => {
-      const response = await fetch(`${base}/${path}`, init);
+    port: server.address().port, base, origin,
+    call: async (path, init = {}) => {
+      const response = await fetch(`${base}/${path}`, { ...init, headers: { ...pageHeaders(init.method), ...init.headers } });
       return { status: response.status, body: response.headers.get('content-type')?.includes('json') ? await response.json() : Buffer.from(await response.arrayBuffer()) };
     },
   };
@@ -66,6 +69,28 @@ test('invalid documents are refused', async () => {
   }
   assert.equal((await store.call('docs/matches', { method: 'PUT', body: 'not json' })).status, 400);
   assert.equal((await store.call('docs/matches/M2/session')).body.revision, 0);
+});
+
+test('changes come only from the studio page: same origin, expected body type; reads stay open', async () => {
+  const data = await start(join(root, 'csrf'));
+  const send = (path, init) => fetch(`${data.base}/${path}`, init).then((response) => response.status);
+  const library = JSON.stringify({ revision: 0, data: { version: 1, records: [] } });
+  // Another website open in the operator's browser: no or a foreign Origin, or a form's text/plain body.
+  for (const headers of [{ 'Content-Type': 'application/json' }, { Origin: 'http://example.com', 'Content-Type': 'application/json' },
+    { Origin: 'null', 'Content-Type': 'application/json' }, { 'Sec-Fetch-Site': 'cross-site', 'Content-Type': 'application/json' }]) {
+    assert.equal(await send('docs/matches', { method: 'PUT', headers, body: library }), 403, JSON.stringify(headers));
+    assert.equal(await send('files?name=a.png', { method: 'POST', headers, body: 'png' }), 403);
+    assert.equal(await send('matches/M1', { method: 'DELETE', headers }), 403);
+  }
+  assert.equal(await send('docs/matches', { method: 'PUT', headers: { Origin: data.origin, 'Content-Type': 'text/plain' }, body: library }), 415);
+  assert.equal(await send('files?name=a.png', { method: 'POST', headers: { Origin: data.origin, 'Content-Type': 'text/plain' }, body: 'png' }), 415);
+  assert.equal((await data.call('docs/matches')).body.revision, 0);
+  assert.deepEqual(await readdir(join(root, 'csrf', 'files')), []);
+  // The page itself: its Origin, or a same-origin fetch that names no Origin.
+  assert.equal(await send('docs/matches', { method: 'PUT', headers: { Origin: data.origin, 'Content-Type': 'application/json; charset=utf-8' }, body: library }), 200);
+  assert.equal(await send('files?name=a.png', { method: 'POST', headers: { 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/octet-stream' }, body: 'png' }), 200);
+  assert.equal(await send('matches/M1', { method: 'DELETE', headers: { Origin: data.origin } }), 200);
+  assert.equal(await send('info'), 200);
 });
 
 test('paths outside the store, hidden or relative, are refused', async () => {
@@ -113,20 +138,6 @@ test('re-importing the Fusion package of a match keeps its onsite placements and
   assert.equal((await store.call('docs/matches', put(library + 1, { version: 1, records: [offline('P2')] }))).status, 200);
   assert.deepEqual((await store.call('docs/matches/M3/local-ads')).body, { revision: 1, data: [ad, flag] });
   assert.deepEqual((await store.call('docs/matches/M3/session')).body, { revision: 1, data: session });
-});
-
-test('an export of onsite placements is validated and kept under its match, never overwritten', async () => {
-  const exported = { format: 'chr-studio-local-placements-v1', matchId: 'M4', exportedAt: '2026-11-15T12:00:00.000Z', placements: [ad], clouds: [] };
-  const first = await store.call('matches/M4/exports', { method: 'POST', body: JSON.stringify(exported) });
-  const second = await store.call('matches/M4/exports', { method: 'POST', body: JSON.stringify(exported) });
-  assert.match(first.body.path, new RegExp(`^${dataDir}/matches/M4/exports/.+\\.json$`));
-  assert.notEqual(first.body.path, second.body.path);
-  assert.deepEqual((await store.call(`file?path=${encodeURIComponent(first.body.path)}`)).body, exported);
-  // A Fusion library, or a file of another format, is not an export.
-  for (const bad of [{ version: 1, records: [] }, { ...exported, format: 'other' }, { ...exported, match: {} }]) {
-    assert.equal((await store.call('matches/M4/exports', { method: 'POST', body: JSON.stringify(bad) })).status, 400);
-  }
-  assert.equal((await store.call('matches/..%2F..%2Fx/exports', { method: 'POST', body: JSON.stringify(exported) })).status, 400);
 });
 
 test("migration moves only the browser's matches the server does not have", () => {

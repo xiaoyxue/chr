@@ -37,6 +37,14 @@ export interface LocalAd {
   materialPath?: string;
   /** The material's original file name, shown to the operator. */
   materialName?: string;
+  /**
+   * What a render description needs from the material, noted when it was chosen so a send
+   * downloads nothing: its SHA-256 and, for a 3D placement's GLB, the model's bounds and
+   * alpha-blended material names. A send uses them only while the server file still has this hash.
+   */
+  materialSha256?: string;
+  materialBounds?: { min: Vector3Tuple; max: Vector3Tuple };
+  materialBlended?: string[];
   /** Present exactly for flags. */
   flag?: FlagSettings;
 }
@@ -76,7 +84,11 @@ export function validLocalAd(value: unknown): value is LocalAd {
     && Number.isFinite(ad.offset) && Math.abs(ad.offset) <= 1000
     && Number.isFinite(ad.yaw) && Math.abs(ad.yaw) <= 360
     && [1, -1].includes(ad.normalSign) && (ad.material === undefined || ad.material instanceof File) && validPath(ad.materialPath)
-    && (ad.materialName === undefined || (typeof ad.materialName === 'string' && ad.materialName.length <= 255));
+    && (ad.materialName === undefined || (typeof ad.materialName === 'string' && ad.materialName.length <= 255))
+    && (ad.materialSha256 === undefined || (ad.materialPath !== undefined && typeof ad.materialSha256 === 'string' && /^[0-9a-f]{64}$/.test(ad.materialSha256)))
+    && (ad.materialBounds === undefined || (ad.type === '3D' && Boolean(ad.materialBounds) && vector(ad.materialBounds.min) && vector(ad.materialBounds.max)))
+    && (ad.materialBlended === undefined || (ad.type === '3D' && Array.isArray(ad.materialBlended) && ad.materialBlended.length <= 1000
+      && ad.materialBlended.every((name) => typeof name === 'string' && name.length <= 255)));
 }
 
 /** Flags are placed on point-cloud planes only; early records may still hold pitch flags. */

@@ -5,6 +5,7 @@
 // is no longer used; a marker stops this from running again in this browser.
 import { validateLibrary } from '../matches/match-domain.ts';
 import { storedLocalAd, upgradeLocalAd, validLocalAd, validateStoredLocalAds, type LocalAd } from '../placements/local-ad.ts';
+import { blendedMaterials } from '../render/render-description.ts';
 import { StoredDocument, uploadFile } from '../shared/studio-store.ts';
 import { validatePackagePaths, type MatchLibrary } from '../shared/store-documents.ts';
 import { SESSION_KEY, parseSessions, validateSession } from './session.ts';
@@ -72,14 +73,15 @@ export async function migrateBrowserData(library: StoredDocument<MatchLibrary>, 
     try {
       let next = record;
       if (match.mode === 'offline') {
-        const assetFiles: Record<string, string> = {};
+        const assetFiles: Record<string, string> = {}, assetBlended: Record<string, string[]> = {};
         for (const slot of match.placements) {
           if (!slot.asset || assetFiles[slot.asset.id]) continue;
           const blob = assets.get(`${match.offlinePackageId}/${slot.asset.id}`);
           if (!(blob instanceof Blob) || !blob.size) throw new Error(`离线素材 ${slot.asset.name} 不在浏览器中`);
           assetFiles[slot.asset.id] = await uploadFile(blob, `${slot.asset.id}${EXTENSIONS[slot.asset.contentType]}`);
+          if (slot.asset.contentType === 'model/gltf-binary') assetBlended[slot.asset.id] = blendedMaterials(new Uint8Array(await blob.arrayBuffer()));
         }
-        next = { ...record, assetFiles };
+        next = { ...record, assetFiles, assetBlended };
       }
       const ads = localAds.get(match.id);
       if (Array.isArray(ads) && ads.length) {

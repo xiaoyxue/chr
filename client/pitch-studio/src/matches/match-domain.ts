@@ -152,8 +152,12 @@ export function validateLibrary(data: unknown): MatchRecord[] {
         || Object.entries(assetFiles).some(([id, path]) => !used.has(id) || typeof path !== 'string' || !path.startsWith('/') || path.split('/').some((part) => part.startsWith('.')))
         || [...used].some((id) => !(id in assetFiles))) throw new Error('离线素材文件记录无效。');
     }
+    const assetBlended = record.assetBlended;
+    if (assetBlended !== undefined && (!assetFiles || !isRecord(assetBlended) || Object.entries(assetBlended).some(([id, names]) => !(id in (assetFiles as object))
+      || !Array.isArray(names) || names.length > 1000 || names.some((name) => typeof name !== 'string' || name.length > 255)))) throw new Error('离线素材的半透明材质记录无效。');
     return { match, draft, hiddenPlacementIds: [...new Set(hiddenPlacementIds)],
-      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined, ...(assetFiles ? { assetFiles: assetFiles as Record<string, string> } : {}) };
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined, ...(assetFiles ? { assetFiles: assetFiles as Record<string, string> } : {}),
+      ...(assetBlended ? { assetBlended: assetBlended as Record<string, string[]> } : {}) };
   });
   if (new Set(records.map((record) => record.match.id)).size !== records.length) throw new Error('比赛记录中有重复的场次。');
   return records;

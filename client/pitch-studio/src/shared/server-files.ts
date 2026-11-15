@@ -6,6 +6,13 @@ const MAX_FOLDER_BYTES = 1024 * 1024 * 1024;
 export const serverPath = (value: string) => value.replace(/^[\s"']+|[\s"']+$/g, '');
 export const isServerPath = (value: string) => serverPath(value).startsWith('/');
 
+/** Where an export goes: a `.json` path as typed, else `name` inside the typed folder (or `folder` when nothing is typed). */
+export function exportTarget(typed: string, folder: string, name: string) {
+  const path = serverPath(typed) || folder;
+  if (!path.startsWith('/')) throw new Error('导出路径须为现场服务器上的绝对路径，如 /home/…/exports/。');
+  return /\.json$/i.test(path) ? path : `${path.replace(/\/+$/, '')}/${name}`;
+}
+
 async function request(endpoint: string, path: string, signal?: AbortSignal) {
   const response = await fetch(`/local-files/${endpoint}?path=${encodeURIComponent(serverPath(path))}`, { cache: 'no-store', signal });
   if (!response.ok) {

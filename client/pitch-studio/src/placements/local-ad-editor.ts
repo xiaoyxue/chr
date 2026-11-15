@@ -4,9 +4,10 @@
 // flag's wave is editable while locked and saved explicitly.
 import { withoutPitchFlags } from './local-ad.ts';
 import { localAdStore } from './local-ad-store.ts';
-import { uploadFile } from '../shared/studio-store.ts';
+import { serverSha256, uploadFile } from '../shared/studio-store.ts';
+import { materialFacts } from '../render/send-materials.ts';
 import { fetchServerFile, serverPath } from '../shared/server-files.ts';
-import { planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
+import { glbBounds, planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
 import { parseAspect, type Anchor } from './ground-edit.ts';
 import { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } from './plane-edit.ts';
 import { DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, flagDraft, flagDraftChanged, orientFlagPlane, parseFlagDraft, type FlagDraft } from './flag.ts';
@@ -537,9 +538,12 @@ export class LocalAdEditor {
       }
       // A file chosen on this computer is stored on the onsite server, where chr-server can read it.
       const materialPath = path ?? await uploadFile(file, file.name);
+      // Noted now, so a send describes the material without downloading it.
+      const facts = await materialFacts(selected.type, file, await serverSha256(materialPath), { bounds: glbBounds });
       if (version !== this.version) return;
       this.busy = false;
-      await this.commit(this.items.map((ad) => ad.id !== selected.id ? ad : { ...ad, material: file, materialPath, materialName: file.name }), selected.id, `更换素材 ${selected.name}`);
+      await this.commit(this.items.map((ad) => ad.id !== selected.id ? ad
+        : { ...ad, material: file, materialPath, materialName: file.name, ...facts }), selected.id, `更换素材 ${selected.name}`);
     } catch (error) { this.options.error(error); }
     finally { if (version === this.version) { this.busy = false; this.render(); } }
   }

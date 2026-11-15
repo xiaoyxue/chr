@@ -1,5 +1,6 @@
 import { unzip } from 'fflate';
 import { mapFusionMatch } from './fusion-client.ts';
+import { blendedMaterials } from '../render/render-description.ts';
 import { readServerFile, uploadFile } from '../shared/studio-store.ts';
 import type { FusionAsset, Match } from '../shared/types.ts';
 
@@ -98,15 +99,22 @@ export async function parseOfflinePackage(file: Blob): Promise<OfflinePackage> {
 let storedAsset: (packageId: string, assetId: string) => string | undefined = () => undefined;
 export function setOfflineAssetFiles(lookup: typeof storedAsset) { storedAsset = lookup; }
 
-/** Stores each material of a parsed package on the server; resolves with material id → stored file. */
-export async function storeOfflineAssets(packageData: OfflinePackage): Promise<Record<string, string>> {
-  const files: Record<string, string> = {};
-  for (const [id, blob] of packageData.assets) files[id] = await uploadFile(blob, `${id}${EXTENSIONS[blob.type]}`);
-  return files;
+/**
+ * Stores each material of a parsed package on the server, content-addressed, so a stored
+ * file's name is the SHA-256 the package declared; also notes each GLB's alpha-blended
+ * materials, so a send needs neither file again.
+ */
+export async function storeOfflineAssets(packageData: OfflinePackage) {
+  const assetFiles: Record<string, string> = {}, assetBlended: Record<string, string[]> = {};
+  for (const [id, blob] of packageData.assets) {
+    assetFiles[id] = await uploadFile(blob, `${id}${EXTENSIONS[blob.type]}`);
+    if (blob.type === 'model/gltf-binary') assetBlended[id] = blendedMaterials(new Uint8Array(await blob.arrayBuffer()));
+  }
+  return { assetFiles, assetBlended };
 }
 
 /** An offline match's material, read back from the studio store. */
-export async function offlineAsset(asset: FusionAsset): Promise<Blob> {
+async function offlineAsset(asset: FusionAsset): Promise<Blob> {
   const path = offlinePath.exec(asset.url);
   if (!path || path[2] !== asset.id) throw new Error('Invalid offline material reference.');
   const file = storedAsset(path[1], path[2]);

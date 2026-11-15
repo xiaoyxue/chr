@@ -1,20 +1,21 @@
 import { FusionGateway, validatePlacement, validateScanFile } from '../matches/match-domain.ts';
 import { HttpFusionAdapter } from '../matches/fusion-client.ts';
-import { offlineAsset, parseOfflinePackage, setOfflineAssetFiles, storeOfflineAssets } from '../matches/offline-package.ts';
+import { parseOfflinePackage, setOfflineAssetFiles, storeOfflineAssets } from '../matches/offline-package.ts';
 import { importPlyFile } from '../analysis/ply-import.ts';
 import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
 import { validatePitchAd, type LocalAd } from '../placements/local-ad.ts';
 import { localAdStore } from '../placements/local-ad-store.ts';
 import { exportLocalPlacements, importedAlignment, mergeLocalPlacements, parseLocalPlacements, waitingForCloud, type ImportMode } from '../placements/local-export.ts';
-import { StoreConflict, StoredDocument, connectStore, readServerFile, removeMatchDocuments, storeExport, uploadFile } from '../shared/studio-store.ts';
+import { StoreConflict, StoredDocument, connectStore, readServerFile, removeMatchDocuments, serverSha256, storeDirectory, uploadFile, writeServerJson } from '../shared/studio-store.ts';
 import { validateMatchLibrary, validatePackagePaths } from '../shared/store-documents.ts';
 import { migrateBrowserData } from './browser-migration.ts';
 import { localProblem, localRow, sendScope, type CloudState, type LocalRow } from '../placements/placement-list.ts';
 import { glbBounds } from '../placements/local-ad-scene.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
-import { fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
-import { blendedMaterials, describeScene, sendDescription, sha256, type DescribedAsset, type DescribedLocal } from '../render/render-description.ts';
+import { exportTarget, fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
+import { describeScene, sendDescription } from '../render/render-description.ts';
+import { fusionAssets, localMaterials, type MaterialAccess } from '../render/send-materials.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
@@ -270,27 +271,65 @@ function renderLocalLists() {
   renderRendererBars();
 }
 
-/** Exports the match's onsite placements: a download, and a copy kept in the store under the match. */
+/** The export / import row's status, the same on both tabs. */
+function transferStatus(text: string, failed = false) {
+  document.querySelectorAll('[data-transfer-status]').forEach((element) => {
+    element.textContent = text;
+    element.classList.toggle('on-form-error', failed);
+  });
+}
+
+const exportPaths = [...document.querySelectorAll<HTMLInputElement>('[data-export-path]')];
+const exportDownloads = [...document.querySelectorAll<HTMLInputElement>('[data-export-download]')];
+const fileStem = (matchId: string) => matchId.replace(/[^a-zA-Z0-9_-]/g, '_');
+/** The match's export folder in the store, the default target of every export. */
+const defaultExportFolder = (matchId: string) => `${storeDirectory()}/matches/${encodeURIComponent(matchId)}/exports/`;
+
+/** Shows the match's last export path, or its default folder, in both export rows. */
+function renderExportPath(matchId: string) {
+  const path = sessions.get(matchId).exportPath ?? defaultExportFolder(matchId);
+  for (const input of exportPaths) input.value = path;
+}
+
+/**
+ * Writes an export as JSON to the typed server folder (under `name`) or `.json` file,
+ * asking before it replaces a file; with 同时下载到本机 the browser also downloads it.
+ * Resolves with the written server path.
+ */
+async function exportToServer(matchId: string, name: string, data: unknown) {
+  const typed = serverPath(exportPaths[0].value), target = exportTarget(typed, defaultExportFolder(matchId), name);
+  const text = JSON.stringify(data, null, 2);
+  let path = await writeServerJson(target, text);
+  if (!path) {
+    if (!window.confirm(`文件已存在，覆盖？\n\n${target}`)) throw new Error(`${target} 已存在，未覆盖。`);
+    path = await writeServerJson(target, text, true);
+  }
+  if (typed) sessions.update(matchId, (session) => ({ ...session, exportPath: typed }));
+  if (exportDownloads[0].checked) {
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = path.split('/').pop();
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return path + (exportDownloads[0].checked ? '（也已下载到本机）' : '');
+}
+
+/** Exports the match's onsite placements to the export path on the onsite server. */
 async function exportOnsitePlacements() {
-  const record = current(), status = $('#local-transfer-status');
+  const record = current();
   if (!record) return;
-  status.classList.remove('on-form-error');
+  transferStatus('');
   try {
     await saveLocalEdits();
     const session = sessions.get(record.match.id), analysis = analysisResults.get(record.match.id);
     const cloudPaths = analysis && session.sources.cloud?.path ? { [analysis.cloud.id]: session.sources.cloud.path } : {};
     const file = exportLocalPlacements(record.match.id, matchLocals(), session.alignment, cloudPaths);
-    const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `local-placements-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${file.exportedAt.replace(/[:.]/g, '-')}.json`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    const path = await storeExport(record.match.id, file);
-    status.textContent = `已导出 ${file.placements.length} 个现场广告位（${file.clouds.length} 个点云）：已下载，并保存到服务器 ${path}。`;
+    const path = await exportToServer(record.match.id, `local-placements-${fileStem(record.match.id)}-${file.exportedAt.replace(/[:.]/g, '-')}.json`, file);
+    transferStatus(`已导出 ${file.placements.length} 个现场广告位（${file.clouds.length} 个点云）到服务器 ${path}。`);
   } catch (error) {
-    status.textContent = `导出失败：${error instanceof Error ? error.message : String(error)}`;
-    status.classList.add('on-form-error');
+    transferStatus(`导出失败：${error instanceof Error ? error.message : String(error)}`, true);
   }
 }
 
@@ -311,9 +350,9 @@ function askImportMode(summary: string): Promise<ImportMode | undefined> {
  * saved through the store like any edit, so a page that saved first wins.
  */
 async function importOnsitePlacements(source: File | string) {
-  const record = current(), status = $('#local-transfer-status');
+  const record = current();
   if (!record) return;
-  status.classList.remove('on-form-error');
+  transferStatus('');
   try {
     await saveLocalEdits();
     if (pitchEditor.editing || localEditor.editing) throw new Error('正在绘制或拖动本地广告位，请完成后再导入。');
@@ -332,7 +371,7 @@ async function importOnsitePlacements(source: File | string) {
       mode = await askImportMode(`文件中有 ${parsed.placements.length} 个现场广告位${parsed.matchId && parsed.matchId !== record.match.id ? `（来自场次 ${parsed.matchId}）` : ''}，本场次已有 ${existing.length} 个，其中 ${same} 个 ID 相同。
 合并：相同 ID 的由导入的替换，其余保留。
 替换全部本地广告位：只保留导入的。`);
-      if (!mode) { status.textContent = '已取消导入，现场广告位未改变。'; return; }
+      if (!mode) { transferStatus('已取消导入，现场广告位未改变。'); return; }
     }
     await localAdStore.save(record.match.id, (saved) => mergeLocalPlacements(saved, parsed.placements, mode));
     sessions.update(record.match.id, (session) => ({ ...session, alignment: importedAlignment(session.alignment, parsed.clouds) }));
@@ -343,24 +382,56 @@ async function importOnsitePlacements(source: File | string) {
     const missing = parsed.placements.filter((ad) => !ad.materialPath);
     const plyPaths = parsed.clouds.flatMap((cloud) => cloud.path && cloud.id !== loadedId ? [cloud.path] : []);
     if (plyPaths.length && !$<HTMLInputElement>('#analysis-path').value) $<HTMLInputElement>('#analysis-path').value = plyPaths[0];
-    status.textContent = [`已${mode === 'merge' ? '合并' : '替换'}导入 ${parsed.placements.length} 个现场广告位，已保存到服务器。`,
+    transferStatus([`已${mode === 'merge' ? '合并' : '替换'}导入 ${parsed.placements.length} 个现场广告位，已保存到服务器。`,
       parsed.droppedPitchFlags ? `已忽略 ${parsed.droppedPitchFlags} 个球场旗帜（旗帜只能放在点云上）。` : '',
       hidden.length ? `${hidden.length} 个点云广告位的点云已确认同坐标：可发送，载入同一 PLY 后才会在点云中显示和编辑。` : '',
       waiting.length ? `${waiting.length} 个点云广告位属于未载入、未确认的点云（${[...new Set(waiting.map((ad) => ad.cloudId.slice(0, 12)))].join('、')}…）：载入并确认同一 PLY 后才会显示和发送。` : '',
       plyPaths.length ? `文件记录的 PLY：${plyPaths.join('、')}。` : '',
-      missing.length ? `${missing.length} 个广告位缺少素材，列表中标出原因。` : ''].filter(Boolean).join(' ');
+      missing.length ? `${missing.length} 个广告位缺少素材，列表中标出原因。` : ''].filter(Boolean).join(' '));
   } catch (error) {
-    status.textContent = `导入失败：${error instanceof Error ? error.message : String(error)}`;
-    status.classList.add('on-form-error');
+    transferStatus(`导入失败：${error instanceof Error ? error.message : String(error)}`, true);
   }
 }
-$('#export-local-placements').addEventListener('click', () => { void exportOnsitePlacements(); });
-$('#import-local-placements').addEventListener('click', () => $<HTMLInputElement>('#local-placements-file').click());
-$<HTMLInputElement>('#local-placements-file').addEventListener('change', (event) => {
-  const input = event.target as HTMLInputElement, file = input.files[0];
-  input.value = '';
-  if (file) void importOnsitePlacements(file);
-});
+
+/** Downloads the Fusion placement draft as JSON. */
+async function exportPlacementJson() {
+  const record = current();
+  if (!record) return;
+  const data = { version: 1, matchId: record.match.id, venueId: record.match.venueId, units: 'metres', coordinateSystem: 'pitch-centre-X-length-Y-main-stand-Z-down', rotation: 'XYZ-degrees', savedToFusion: false, placements: record.draft };
+  transferStatus('');
+  try {
+    const path = await exportToServer(record.match.id, `placements-${fileStem(record.match.id)}.json`, data);
+    transferStatus(`已导出 ${record.draft.length} 个 Fusion 广告位的位置到服务器 ${path}。`);
+  } catch (error) {
+    transferStatus(`导出失败：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+// Both workspace tabs carry the same export / import row, apart from the renderer bar.
+for (const bar of document.querySelectorAll<HTMLElement>('[data-transfer-bar]')) {
+  const file = bar.querySelector<HTMLInputElement>('[data-local-file]'), path = bar.querySelector<HTMLInputElement>('[data-local-path]');
+  bar.querySelector('[data-renderer-export]').addEventListener('click', () => {
+    transferStatus('');
+    void exportDescription().then(({ text, failed }) => transferStatus(text, failed));
+  });
+  bar.querySelector('[data-export-placements]').addEventListener('click', () => { void exportPlacementJson(); });
+  const exportPath = bar.querySelector<HTMLInputElement>('[data-export-path]'), download = bar.querySelector<HTMLInputElement>('[data-export-download]');
+  exportPath.addEventListener('input', () => { for (const other of exportPaths) if (other !== exportPath) other.value = exportPath.value; });
+  download.addEventListener('change', () => { for (const other of exportDownloads) other.checked = download.checked; });
+  bar.querySelector('[data-export-local]').addEventListener('click', () => { void exportOnsitePlacements(); });
+  bar.querySelector('[data-import-local]').addEventListener('click', () => file.click());
+  file.addEventListener('change', () => {
+    const chosen = file.files[0];
+    file.value = '';
+    if (chosen) void importOnsitePlacements(chosen);
+  });
+  const importPath = () => {
+    path.value = serverPath(path.value);
+    if (path.value) void importOnsitePlacements(path.value);
+  };
+  bar.querySelector('[data-load-local-path]').addEventListener('click', importPath);
+  path.addEventListener('keydown', (event) => { if (event.key === 'Enter') importPath(); });
+}
 
 /** Selects a local placement in its own editor, on the preview tab, and brings that editor into view. */
 function selectLocal(key: string) {
@@ -777,6 +848,7 @@ async function renderRoute(refresh = false) {
   undo.clear();
   unlockedId = undefined;
   currentId = record.match.id;
+  renderExportPath(currentId);
   const previousSelection = selectedId, remembered = sessions.get(currentId).selection.fusion;
   selectedId = record.draft.find((slot) => slot.id === remembered)?.id ?? record.draft[0]?.id;
   enginePending = true;
@@ -951,11 +1023,11 @@ async function importOfflinePackage(source: File | string) {
       return;
     }
     $('#offline-package-status').textContent = 'Storing the materials on the onsite server...';
-    const assetFiles = await storeOfflineAssets(packageData);
+    const { assetFiles, assetBlended } = await storeOfflineAssets(packageData);
     // A ZIP chosen on this computer is stored too, so chr-server can read its materials.
     const zipPath = typeof source === 'string' ? serverPath(source) : await uploadFile(file, `${packageData.id}.zip`);
     await saveLibrary([...records.filter((item) => item.match.id !== packageData.match.id),
-      { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [], assetFiles }]);
+      { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [], assetFiles, assetBlended }]);
     rememberPackagePath(packageData.id, zipPath);
     renderMatches();
     $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${packageData.assets.size} materials. Saved on the onsite server (${zipPath}); no Fusion API is used.`;
@@ -1093,7 +1165,6 @@ const loadScanPath = async (path: string) => {
 bindServerPath('#scan-path', '#load-scan-path', loadScanPath);
 bindServerPath('#cloud-video-path', '#load-cloud-video-path', loadScanPath);
 bindServerPath('#analysis-path', '#load-analysis-path', async (path) => { await selectAnalysisFile(path); });
-bindServerPath('#local-placements-path', '#load-local-placements-path', (path) => importOnsitePlacements(path));
 $('#viewport').addEventListener('rectangledrawcancel', () => pitchEditor.cancelDrawing());
 $('#viewport').addEventListener('rectangledrawmiss', () => { $('#pitch-local-draw-status').textContent = '请从草坪内拖出矩形，长宽至少 0.1 米。'; });
 $('#cloud-viewport').addEventListener('pointpickcancel', () => localEditor.cancelDrawing());
@@ -1179,16 +1250,6 @@ for (const type of ['dragleave', 'drop']) $('#scan-dropzone').addEventListener(t
 $<HTMLButtonElement>('#submit-scan').addEventListener('click', async () => {
   try { await gateway.submitScan({ match: current().match, file: scanFiles.get(currentId) }); }
   catch (error) { showError(error); }
-});
-$<HTMLButtonElement>('#export-placements').addEventListener('click', () => {
-  const record = current();
-  const data = { version: 1, matchId: record.match.id, venueId: record.match.venueId, units: 'metres', coordinateSystem: 'pitch-centre-X-length-Y-main-stand-Z-down', rotation: 'XYZ-degrees', savedToFusion: false, placements: record.draft };
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `placements-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 /**
  * After a reload (or on opening a match), re-imports what the operator last
@@ -1280,9 +1341,9 @@ function renderRendererBars() {
     for (const input of rendererPaths) input.value = remembered;
   }
   const { blocker, note } = rendererScope();
+  document.querySelectorAll<HTMLButtonElement>('[data-renderer-export]').forEach((button) => { button.disabled = Boolean(rendererBusy || blocker); });
   for (const bar of rendererBars) {
     bar.querySelector<HTMLButtonElement>('[data-renderer-send]').disabled = Boolean(rendererBusy || blocker);
-    bar.querySelector<HTMLButtonElement>('[data-renderer-export]').disabled = Boolean(rendererBusy || blocker);
     const status = bar.querySelector('[data-renderer-status]');
     const message = rendererMessage && note && !rendererMessage.includes(note) ? `${rendererMessage} ${note}` : rendererMessage || note;
     status.textContent = rendererBusy
@@ -1291,36 +1352,22 @@ function renderRendererBars() {
   }
 }
 
-const MATERIAL_ENTRY: Record<string, { kind: DescribedAsset['kind']; extension: string }> = {
-  'model/gltf-binary': { kind: 'glb', extension: '.glb' },
-  'image/png': { kind: 'image_quad', extension: '.png' },
-  'image/jpeg': { kind: 'image_quad', extension: '.jpg' },
-};
+/** How a send learns about materials: hashes from the server, files only when nothing was noted. */
+const materialAccess: MaterialAccess = { sha256: serverSha256, read: (path) => readServerFile(path), bounds: glbBounds };
 
 /**
- * The match's local placements that the renderer can draw, and why the others are
- * left out. A point-cloud placement is in pitch coordinates only while its cloud
- * is loaded and confirmed to share them. Each material is hashed (and a GLB
- * measured) as the server holds it now, once per path.
+ * The match's local placements that the renderer can draw, and why the others are left
+ * out. A point-cloud placement is in pitch coordinates once its cloud is confirmed to
+ * share them. Each material is described as the server holds it now, from its hash.
  */
 async function renderLocals() {
-  const locals: DescribedLocal[] = [], skipped: string[] = [], masked: string[] = [];
-  const files = new Map<string, Promise<Omit<DescribedLocal, 'ad'>>>();
-  const read = async (ad: LocalAd): Promise<Omit<DescribedLocal, 'ad'>> => {
-    const file = await readServerFile(ad.materialPath);
-    if (ad.type !== '3D') return { sha256: await sha256(file) };
-    const blended = blendedMaterials(new Uint8Array(await file.arrayBuffer()));
-    if (blended.length) masked.push(`${ad.name}（${blended.join('、')}）`);
-    return { sha256: await sha256(file), bounds: await glbBounds(file), ...(blended.length ? { blendAs: 'mask' as const } : {}) };
-  };
+  const sendable: LocalAd[] = [], skipped: string[] = [];
   for (const ad of matchLocals()) {
     const problem = localProblem(ad, cloudState());
-    if (problem) { skipped.push(`${ad.name}（${problem}）`); continue; }
-    const key = `${ad.type === '3D' ? 'glb' : 'image'}:${ad.materialPath}`;
-    if (!files.has(key)) files.set(key, read(ad));
-    try { locals.push({ ad, ...await files.get(key) }); }
-    catch (error) { throw new Error(`读取“${ad.name}”的素材 ${ad.materialPath} 失败：${error instanceof Error ? error.message : String(error)}`); }
+    if (problem) skipped.push(`${ad.name}（${problem}）`);
+    else sendable.push(ad);
   }
+  const { locals, masked } = await localMaterials(sendable, materialAccess);
   return { locals, masked, skipped: skipped.length ? ` 未发送的本地广告位：${skipped.join('；')}。` : '' };
 }
 
@@ -1344,18 +1391,9 @@ async function renderScene() {
   if (scope.blocker) throw new Error(scope.blocker);
   await saveLocalEdits();
   const packagePath = scope.fusion ? serverPath(rendererPaths[0].value) : '';
-  const assets = new Map<string, DescribedAsset>();
-  const masked: string[] = [];
-  for (const slot of scope.fusion ? record.draft : []) {
-    if (!slot.asset || assets.has(slot.asset.id)) continue;
-    const entry = MATERIAL_ENTRY[slot.asset.contentType];
-    if (!entry) throw new Error(`The renderer cannot draw ${slot.asset.contentType} material ${slot.asset.name}.`);
-    const blob = await offlineAsset(slot.asset);
-    const blended = entry.kind === 'glb' ? blendedMaterials(new Uint8Array(await blob.arrayBuffer())) : [];
-    if (blended.length) masked.push(`${slot.asset.name}（${blended.join('、')}）`);
-    assets.set(slot.asset.id, { kind: entry.kind, entry: `assets/${slot.asset.id}${entry.extension}`, sha256: await sha256(blob),
-      ...(blended.length ? { blendAs: 'mask' as const } : {}) });
-  }
+  const { assets, masked, assetBlended } = await fusionAssets(scope.fusion ? record.draft : [], record.assetFiles ?? {}, record.assetBlended, materialAccess);
+  // Older matches did not note their blended GLB materials; keep them now, so later sends read nothing.
+  if (assetBlended) void saveLibrary(records.map((item) => item.match.id === record.match.id ? { ...item, assetBlended } : item)).catch(showError);
   const local = await renderLocals();
   return { masked: [...masked, ...local.masked], skipped: (scope.note ? ` ${scope.note}` : '') + local.skipped, fusion: scope.fusion,
     scene: describeScene({ field: record.match.field, slots: scope.fusion ? record.draft : [], hidden: new Set(record.hiddenPlacementIds),
@@ -1377,9 +1415,16 @@ async function rendererAction(busy: string, action: () => Promise<string>, failu
   return { text: rendererMessage, failed: rendererFailed };
 }
 
-const sendToRenderer = () => rendererAction('正在发送到 chr-server…', async () => {
+/** Names the step a running renderer action has reached. */
+function rendererProgress(step: string) {
+  rendererBusy = step;
+  renderRendererBars();
+}
+
+const sendToRenderer = () => rendererAction('正在检查素材…', async () => {
   const record = current();
   const { scene, masked, skipped, fusion } = await renderScene();
+  rendererProgress('正在发送到 chr-server…');
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
   const { loaded, sdi } = await sendDescription(url, scene);
   if (fusion) rememberPackagePath(record.match.offlinePackageId, serverPath(rendererPaths[0].value));
@@ -1387,16 +1432,12 @@ const sendToRenderer = () => rendererAction('正在发送到 chr-server…', asy
     + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '') + skipped;
 }, '发送失败');
 
-const exportDescription = () => rendererAction('正在生成渲染描述…', async () => {
+const exportDescription = () => rendererAction('正在检查素材…', async () => {
   const record = current();
   const { scene, skipped } = await renderScene();
-  const url = URL.createObjectURL(new Blob([JSON.stringify({ scene }, null, 2)], { type: 'application/json' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `render-scene-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return `已导出渲染描述的 scene 部分；启动文件还需要 camera 部分。${skipped}`;
+  rendererProgress('正在写入服务器…');
+  const path = await exportToServer(record.match.id, `render-scene-${fileStem(record.match.id)}.json`, { scene });
+  return `已把渲染描述的 scene 部分导出到服务器 ${path}；启动文件还需要 camera 部分。${skipped}`;
 }, '导出失败');
 
 for (const bar of rendererBars) {
@@ -1411,7 +1452,6 @@ for (const bar of rendererBars) {
   });
   input.addEventListener('keydown', (event) => { if (event.key === 'Enter') void sendToRenderer(); });
   bar.querySelector('[data-renderer-send]').addEventListener('click', () => { void sendToRenderer(); });
-  bar.querySelector('[data-renderer-export]').addEventListener('click', () => { void exportDescription(); });
 }
 renderRendererBars();
 window.addEventListener('hashchange', () => { void renderRoute(); });

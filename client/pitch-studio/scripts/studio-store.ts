@@ -6,18 +6,19 @@ import { extname, join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Connect, Plugin } from 'vite';
+import { writeProblem } from './request-guard.ts';
 import { FILE_LIMITS, MATCH_ID, documentValidator } from '../src/shared/store-documents.ts';
-import { validateLocalPlacementsFile } from '../src/placements/local-export.ts';
 
 // The studio's data on the onsite server, in one directory (STUDIO_DATA_DIR):
 //   matches.json                      the match library and Fusion drafts
 //   package-paths.json                offline package → ZIP path chr-server reads
 //   matches/<matchId>/local-ads.json  local placements and flags
 //   matches/<matchId>/session.json    the operator's session
-//   matches/<matchId>/exports/*.json  exported onsite placements (chr-studio-local-placements-v1)
+//   matches/<matchId>/exports/        the default folder for the studio's exports (written via /local-files/write)
 //   files/<sha256>.<ext>              uploaded materials and offline ZIPs
 // Documents hold `{ revision, data }`; a write names the revision it was based on
-// and is refused (409) if another page saved in between. Loopback hosts only.
+// and is refused (409) if another page saved in between. Loopback hosts only; changes only
+// from the studio page itself (see request-guard.ts).
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MB = 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 16 * MB;
@@ -117,17 +118,6 @@ export function studioStoreMiddleware(directory: string, limits: Readonly<Record
     } finally { await rm(temporary, { force: true }); }
   };
 
-  /** Keeps an onsite-placements export under the match; never replaces an earlier one. */
-  const exportPlacements = async (req: IncomingMessage, matchId: string) => {
-    if (!MATCH_ID.test(matchId)) throw new Failure(400, '场次 ID 无效。');
-    let file: unknown;
-    try { file = validateLocalPlacementsFile(JSON.parse(await readBody(req, MAX_DOCUMENT_BYTES))); }
-    catch (error) { throw error instanceof Failure ? error : new Failure(400, error instanceof Error ? error.message : String(error)); }
-    const path = join(await ready, 'matches', matchId, 'exports', `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}.json`);
-    await writeAtomically(path, JSON.stringify(file, null, 2));
-    return { path };
-  };
-
   /** Any regular file inside the data directory, by absolute path; never a hidden one. */
   const readStored = async (raw: string | null) => {
     const root = await ready;
@@ -147,8 +137,12 @@ export function studioStoreMiddleware(directory: string, limits: Readonly<Record
       res.writeHead(status, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify(body));
     const host = (req.headers.host ?? '').replace(/:\d+$/, '');
     if (!LOOPBACK.has(host)) return reply(403, { error: 'The studio store is only available through localhost.' });
+    const route = url.pathname.slice('/studio-store/'.length);
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const problem = writeProblem(req, route === 'files' ? 'application/octet-stream' : req.method === 'DELETE' ? undefined : 'application/json');
+      if (problem) return reply(problem.status, { error: problem.message });
+    }
     void (async () => {
-      const route = url.pathname.slice('/studio-store/'.length);
       let segments: string[];
       try { segments = route.split('/').map(decodeURIComponent); }
       catch { throw new Failure(400, 'Invalid path.'); }
@@ -161,8 +155,6 @@ export function studioStoreMiddleware(directory: string, limits: Readonly<Record
         return reply(200, {});
       }
       if (route === 'files' && req.method === 'POST') return reply(200, await upload(req, url.searchParams.get('name')));
-      if (segments[0] === 'matches' && segments[2] === 'exports' && segments.length === 3 && req.method === 'POST')
-        return reply(200, await exportPlacements(req, segments[1]));
       if (route === 'file' && req.method === 'GET') {
         const { path, size } = await readStored(url.searchParams.get('path'));
         res.writeHead(200, { ...headers, 'Content-Type': TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream', 'Content-Length': size });

@@ -1,7 +1,9 @@
 // A match's local placements (both spaces) as one document of the studio store,
 // shared by the pitch and point-cloud editors so their saves never overwrite each
 // other. Material files stay on the server; reading the placements loads them back.
-import { StoreConflict, StoredDocument, readServerFile } from '../shared/studio-store.ts';
+import { StoreConflict, StoredDocument, readServerFile, serverSha256 } from '../shared/studio-store.ts';
+import { materialFacts } from '../render/send-materials.ts';
+import { glbBounds } from './local-ad-scene.ts';
 import { storedLocalAd, upgradeLocalAd, validateStoredLocalAds, type AdSpace, type LocalAd } from './local-ad.ts';
 
 export class LocalAdStore {
@@ -18,11 +20,21 @@ export class LocalAdStore {
   /** The match's placements with their materials read back; `missing` names the materials that could not be read. */
   async read(matchId: string): Promise<{ ads: LocalAd[]; missing: string[] }> {
     const ads = ((await this.document(matchId).load()) ?? []).map(upgradeLocalAd), missing: string[] = [];
+    const noted = new Map<string, { path: string; facts: Partial<LocalAd> }>();
     const loaded = await Promise.all(ads.map(async (ad) => {
       if (!ad.materialPath) return ad;
-      try { return { ...ad, material: await readServerFile(ad.materialPath, ad.materialName) }; }
+      let material: File;
+      try { material = await readServerFile(ad.materialPath, ad.materialName); }
       catch { missing.push(`${ad.name}（${ad.materialPath}）`); return ad; }
+      if (ad.materialSha256 && (ad.type !== '3D' || ad.materialBounds)) return { ...ad, material };
+      // Placements from before materials were noted get their facts once, from the file just read.
+      const facts = await serverSha256(ad.materialPath).then((sha256) => materialFacts(ad.type, material, sha256, { bounds: glbBounds }))
+        .catch(() => ({}));
+      if ('materialSha256' in facts) noted.set(ad.id, { path: ad.materialPath, facts });
+      return { ...ad, material, ...facts };
     }));
+    if (noted.size) await this.save(matchId, (saved) => saved.map((ad) => noted.get(ad.id)?.path === ad.materialPath
+      ? { ...ad, ...noted.get(ad.id).facts } : ad)).catch((error: unknown) => console.warn('[local-ads] material facts not saved', error));
     return { ads: loaded, missing };
   }
 

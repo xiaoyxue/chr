@@ -27,6 +27,25 @@ export async function connectStore() {
   return dataDir;
 }
 
+/** The store's data directory on the onsite server. */
+export const storeDirectory = () => dataDir;
+
+/**
+ * Writes a JSON export to a server path (see scripts/local-files.ts); resolves with the
+ * written file's path, or undefined when the file exists and `overwrite` was not given.
+ */
+export async function writeServerJson(path: string, text: string, overwrite = false): Promise<string | undefined> {
+  let response: Response;
+  try {
+    response = await fetch(`/local-files/write?path=${encodeURIComponent(path)}${overwrite ? '&overwrite=1' : ''}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+  } catch { throw new Error('无法连接现场服务器：请确认页面服务仍在运行，SSH 隧道未断开；文件未导出。'); }
+  if (response.status === 409) return undefined;
+  const body = await response.json().catch((): null => null) as { path?: string; error?: string } | null;
+  if (!response.ok) throw new Error(`现场服务器未写入 ${path}：${body?.error ?? `HTTP ${response.status}`}`);
+  return body.path;
+}
+
 const isStoredFile = (path: string) => Boolean(dataDir) && path.startsWith(`${dataDir}/`);
 
 /** A file of the studio store, or any other server file (through /local-files), as a browser File. */
@@ -37,6 +56,19 @@ export async function readServerFile(path: string, name = path.split('/').pop(),
   return new File([blob], name, { type: type ?? blob.type });
 }
 
+/**
+ * A server file's SHA-256 without downloading it: a stored file is named by its hash; any
+ * other file is hashed by the page server, which hashes it again whenever it changes on disk.
+ */
+export async function serverSha256(path: string): Promise<string> {
+  path = serverPath(path);
+  const stored = path.startsWith(`${dataDir}/files/`) && /\/([0-9a-f]{64})\.[a-z0-9]+$/.exec(path);
+  if (stored) return stored[1];
+  const { sha256 } = await (await request(`/local-files/sha256?path=${encodeURIComponent(path)}`)).json() as { sha256: unknown };
+  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error(`服务器没有给出 ${path} 的 SHA-256。`);
+  return sha256;
+}
+
 /** Stores a file chosen in the browser on the server, content-addressed; resolves with its absolute server path. */
 export async function uploadFile(file: Blob, name: string): Promise<string> {
   const limit = FILE_LIMITS[name.slice(name.lastIndexOf('.')).toLowerCase()];
@@ -44,13 +76,6 @@ export async function uploadFile(file: Blob, name: string): Promise<string> {
   if (file.size > limit) throw new Error(`${name} 超过 ${limit / 1024 / 1024} MB 上限，未上传。`);
   const response = await request(`/studio-store/files?name=${encodeURIComponent(name)}`, { method: 'POST', body: file,
     headers: { 'Content-Type': 'application/octet-stream' } });
-  return ((await response.json()) as { path: string }).path;
-}
-
-/** Keeps an onsite-placements export under the match in the store; resolves with its server path. */
-export async function storeExport(matchId: string, file: unknown): Promise<string> {
-  const response = await request(`/studio-store/matches/${encodeURIComponent(matchId)}/exports`, { method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(file) });
   return ((await response.json()) as { path: string }).path;
 }
 

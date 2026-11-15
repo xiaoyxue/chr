@@ -53,9 +53,10 @@ test("a cloud keeps the operator's alignment answer, else what the file declares
 });
 
 test('a session written to the server must be exactly valid', () => {
-  const session = { sources: { cloud: { path: '/srv/cloud.ply', name: 'cloud.ply' } }, alignment: { [cloudId]: true }, selection: { fusion: 'PLC-1' } };
+  const session = { sources: { cloud: { path: '/srv/cloud.ply', name: 'cloud.ply' } }, alignment: { [cloudId]: true }, selection: { fusion: 'PLC-1' },
+    exportPath: '/srv/exports/' };
   assert.deepEqual(validateSession(session), session);
-  for (const bad of [{ ...session, alignment: { x: true } }, { ...session, sources: { cloud: { path: 'cloud.ply', name: 'cloud.ply' } } }, { ...session, extra: 1 }, null]) {
+  for (const bad of [{ ...session, alignment: { x: true } }, { ...session, exportPath: 'exports/' }, { ...session, sources: { cloud: { path: 'cloud.ply', name: 'cloud.ply' } } }, { ...session, extra: 1 }, null]) {
     assert.throws(() => validateSession(bad), /会话记录无效/);
   }
 });

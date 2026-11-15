@@ -17,6 +17,8 @@ export interface MatchSession {
   /** Point-cloud id (SHA-256 of the PLY) → whether it is confirmed to be in pitch coordinates. */
   alignment: Record<string, boolean>;
   selection: { fusion?: string; pitch?: string; cloud?: string };
+  /** The server folder or `.json` file the operator last exported to. */
+  exportPath?: string;
 }
 const MAX_ALIGNMENTS = 20;
 
@@ -46,7 +48,7 @@ export function parseSessions(text: string | null): Record<string, MatchSession>
   const sessions: Record<string, MatchSession> = {};
   for (const [matchId, value] of Object.entries(raw)) {
     if (!isText(matchId) || !value || typeof value !== 'object') continue;
-    const { sources, alignment, selection } = value as Partial<MatchSession>;
+    const { sources, alignment, selection, exportPath } = value as Partial<MatchSession>;
     const session = emptySession();
     for (const kind of SOURCE_KINDS) {
       const source = parseSource(sources?.[kind]);
@@ -58,6 +60,7 @@ export function parseSessions(text: string | null): Record<string, MatchSession>
     for (const key of ['fusion', 'pitch', 'cloud'] as const) {
       if (isText(selection?.[key])) session.selection[key] = selection[key];
     }
+    if (isText(exportPath, 4096) && exportPath.startsWith('/')) session.exportPath = exportPath;
     sessions[matchId] = session;
   }
   return sessions;

@@ -8,6 +8,7 @@ const { RpcError, blendedMaterials, describeScene, glbModel, localGlbModel, loca
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
 const { flagDraft, flagDraftChanged, flagModel, orientFlagPlane, parseFlagDraft } = await server.ssrLoadModule('/src/placements/flag.ts');
 const { localRow, sendScope } = await server.ssrLoadModule('/src/placements/placement-list.ts');
+const { fusionAssets, localMaterials } = await server.ssrLoadModule('/src/render/send-materials.ts');
 
 const apply = (rows, [x, y, z]) => rows.slice(0, 3).map((row) => row[0] * x + row[1] * y + row[2] * z + row[3]);
 const close = (actual, expected) => actual.forEach((value, i) => assert.ok(Math.abs(value - expected[i]) < 1e-9, `${actual} vs ${expected}`));
@@ -182,6 +183,56 @@ test('local materials become one asset per kind and content, read from their ser
   assert.deepEqual(scene.instances.map(({ id, asset }) => [id, asset]), [
     ['local-i1', 'LOCAL-cdcdcdcdcdcdcdcd'], ['local-i2', 'LOCAL-cdcdcdcdcdcdcdcd'], ['local-m1', 'LOCAL-efefefefefefefef'], ['flag-f1', 'FLAG-cdcdcdcdcdcdcdcd'],
   ]);
+});
+
+/** Material access that answers hashes by path and records every download. */
+function materialAccess(hashes, files = {}) {
+  const reads = [];
+  return { reads, sha256: async (path) => hashes[path], bounds: async () => ({ min: [-2, 0, -2], max: [2, 3, 2] }),
+    read: async (path) => { reads.push(path); return new File([files[path]], path.split('/').pop()); } };
+}
+const blendedGlb = (() => {
+  const json = new TextEncoder().encode(JSON.stringify({ materials: [{ name: 'glass', alphaMode: 'BLEND' }] }));
+  const glb = new Uint8Array(20 + json.length);
+  new DataView(glb.buffer).setUint32(12, json.length, true);
+  glb.set(json, 20);
+  return glb;
+})();
+
+test('a send describes Fusion materials from their stored hashes and noted blending, reading no file', async () => {
+  const logo = { id: 'A1', name: 'logo', contentType: 'image/png', url: '/x' }, car = { id: 'A2', name: 'car', contentType: 'model/gltf-binary', url: '/y' };
+  const slots = [{ ...pose, id: 'p1', asset: logo }, { ...pose, id: 'p2', asset: car }, { ...pose, id: 'p3', asset: logo }];
+  const files = { A1: '/data/files/' + 'a1'.repeat(32) + '.png', A2: '/data/files/' + 'b2'.repeat(32) + '.glb' };
+  const hashes = { [files.A1]: 'a1'.repeat(32), [files.A2]: 'b2'.repeat(32) }, access = materialAccess(hashes);
+  const sent = await fusionAssets(slots, files, { A2: ['glass'] }, access);
+  assert.deepEqual(access.reads, []);
+  assert.equal(sent.assetBlended, undefined);
+  assert.deepEqual([...sent.assets], [['A1', { kind: 'image_quad', entry: 'assets/A1.png', sha256: 'a1'.repeat(32) }],
+    ['A2', { kind: 'glb', entry: 'assets/A2.glb', sha256: 'b2'.repeat(32), blendAs: 'mask' }]]);
+  assert.deepEqual(sent.masked, ['car（glass）']);
+  // A match imported before blending was noted reads its GLB once and returns the note to keep.
+  const older = materialAccess(hashes, { [files.A2]: blendedGlb });
+  const filled = await fusionAssets(slots, files, undefined, older);
+  assert.deepEqual(older.reads, [files.A2]);
+  assert.deepEqual(filled.assetBlended, { A2: ['glass'] });
+});
+
+test('a send describes local materials by their current server hash and reuses noted GLB facts only while it matches', async () => {
+  const plane = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], width: 2, height: 1 };
+  const image = { ...local, id: 'i1', type: '2D', plane, materialPath: '/srv/a.png' };
+  const noted = { materialSha256: 'cd'.repeat(32), materialBounds: { min: [-1, 0, -1], max: [1, 1, 1] }, materialBlended: [] };
+  const model = { ...local, id: 'm1', type: '3D', plane, materialPath: '/srv/car.glb', ...noted };
+  const access = materialAccess({ '/srv/a.png': 'ab'.repeat(32), '/srv/car.glb': 'cd'.repeat(32) }, { '/srv/car.glb': blendedGlb });
+  const { locals } = await localMaterials([image, model, { ...image, id: 'i2' }], access);
+  assert.deepEqual(access.reads, []);
+  assert.deepEqual(locals.map(({ ad, ...facts }) => [ad.id, facts]), [['i1', { sha256: 'ab'.repeat(32) }],
+    ['m1', { sha256: 'cd'.repeat(32), bounds: noted.materialBounds }], ['i2', { sha256: 'ab'.repeat(32) }]]);
+  // The GLB changed on disk since it was chosen: its facts come from the file as it is now.
+  const changed = materialAccess({ '/srv/car.glb': 'ee'.repeat(32) }, { '/srv/car.glb': blendedGlb });
+  const after = await localMaterials([model, { ...model, id: 'm2' }], changed);
+  assert.deepEqual(changed.reads, ['/srv/car.glb']);
+  assert.deepEqual(after.locals[1], { ad: { ...model, id: 'm2' }, sha256: 'ee'.repeat(32), bounds: { min: [-2, 0, -2], max: [2, 3, 2] }, blendAs: 'mask' });
+  assert.deepEqual(after.masked, ['ad（glass）', 'ad（glass）']);
 });
 
 test('the overall list summarises each local placement and says why it cannot be sent', () => {
