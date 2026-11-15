@@ -15,6 +15,7 @@ import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
 import { anchorPoint, moveAnchor, parseAspect, resizeSide, uniformScale, withAspect, type Anchor } from '../placements/ground-edit.ts';
 import { UndoStack } from '../shared/undo-stack.ts';
+import { SOURCE_LABEL, SessionStore, cloudAligned, restorePlan, withAlignment, type SessionSource, type SourceKind } from './session.ts';
 import type { MatchRecord, Placement } from '../shared/types.ts';
 import type { PitchPreview } from '../scene/pitch-preview.ts';
 import type { LocalAnalysis } from '../analysis/ply-result.ts';
@@ -47,6 +48,14 @@ let anchor: Anchor = 'top-left';
 let keepAspect = true;
 let axesVisible = true;
 const undo = new UndoStack(renderUndo);
+const sessions = new SessionStore(localStorage);
+/** Remembers what the operator imported or selected in the current match, for a reload. */
+function remember(kind: SourceKind, source?: SessionSource, matchId = currentId) {
+  if (matchId) sessions.update(matchId, (session) => ({ ...session, sources: { ...session.sources, [kind]: source } }));
+}
+function rememberSelection(key: 'fusion' | 'pitch' | 'cloud', id?: string) {
+  if (currentId && id) sessions.update(currentId, (session) => ({ ...session, selection: { ...session.selection, [key]: id } }));
+}
 const resultReview = new ResultReview(showError, clearError);
 const pitchEditor = new LocalAdEditor({
   root: $('#pitch-local-editor'),
@@ -54,8 +63,10 @@ const pitchEditor = new LocalAdEditor({
   space: 'pitch',
   update: async (ads, selectedId) => {
     renderLocalLists();
+    rememberSelection('pitch', selectedId);
     await Promise.all([engine?.setLocalAds(ads, selectedId), resultReview.setPitchAds(ads)]);
   },
+  preferredSelection: () => currentId && sessions.get(currentId).selection.pitch,
   pick: () => {
     try { engine.startGroundRectangle((plane) => { void pitchEditor.finishPlane(plane); }); }
     catch (error) { pitchEditor.cancelDrawing(); showError(error); }
@@ -72,6 +83,7 @@ const localEditor = new LocalAdEditor({
   space: 'cloud',
   update: async (ads, selectedId) => {
     renderLocalLists();
+    rememberSelection('cloud', selectedId);
     await Promise.all([cloudEngine?.setLocalAds(ads, selectedId), resultReview.setLocalAds(ads, analysisResults.get(currentId)?.aligned ?? false)]);
   },
   pick: () => {
@@ -80,11 +92,13 @@ const localEditor = new LocalAdEditor({
   },
   cancelPick: () => { cloudEngine?.cancelPlanePick(); cloudEngine?.cancelAdDrag(); },
   manipulationAvailable: (available, locked) => cloudEngine?.setAdEditingEnabled(available, locked),
+  preferredSelection: () => currentId && sessions.get(currentId).selection.cloud,
   error: showError,
   recordUndo: (label, restore, reapply) => undo.push({ label, restore, reapply }),
   send: () => sendToRenderer(),
 });
 resultReview.onChange = () => renderAnalysis();
+resultReview.onSource = (matchId, source) => remember('result', source, matchId);
 
 const htmlEscapes: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHTML = (value: unknown) => String(value).replace(/[&<>"']/g, (char) => htmlEscapes[char]);
@@ -142,6 +156,7 @@ async function deleteMatch(id: string) {
     removed = true;
     scanFiles.delete(id);
     analysisResults.delete(id);
+    sessions.remove(id);
     if (analysisImport?.matchId === id) cancelAnalysisImport();
     if (analysisNotice?.matchId === id) analysisNotice = undefined;
     if (engineReadyMatchId === id) engineReadyMatchId = undefined;
@@ -452,10 +467,11 @@ function renderAnalysis() {
   void resultReview.setLocalAds(localEditor.ads, result?.aligned ?? false).catch(showError);
 }
 
-async function selectAnalysisFile(source: File | string) {
+/** Imports a PLY point cloud into the current match; resolves whether it was imported. */
+async function selectAnalysisFile(source: File | string): Promise<boolean> {
   if (!current()) {
     showError(new Error('请先选择比赛场次。'));
-    return;
+    return false;
   }
   cancelAnalysisImport();
   const job = { matchId: currentId, controller: new AbortController() };
@@ -466,7 +482,7 @@ async function selectAnalysisFile(source: File | string) {
   try {
     const file = typeof source === 'string' ? await fetchServerFile(source, job.controller.signal) : source;
     const cloud = await importPlyFile(file, job.controller.signal);
-    if (job.controller.signal.aborted || currentId !== job.matchId) return;
+    if (job.controller.signal.aborted || currentId !== job.matchId) return false;
     if (!cloudEngine) {
       cloudEngine = new PointCloudPreview($('#cloud-viewport'), (error) => {
         $('#cloud-engine-status').textContent = error.message;
@@ -479,13 +495,18 @@ async function selectAnalysisFile(source: File | string) {
       cloudEngine.onAdEditEnd = (cancelled) => { void localEditor.finishPlaneEdit(cancelled).catch(showError); };
     }
     if (!cloudEngine.isAvailable) throw new Error('点云预览不可用，请刷新页面并检查硬件加速。');
-    analysisResults.set(job.matchId, { cloud, aligned: cloud.declaredPitchCoordinates, pointSize: 0.15, importedAt: new Date().toISOString() });
+    // A cloud confirmed (or un-ticked) before keeps that answer, also after a reload.
+    const aligned = cloudAligned(sessions.get(job.matchId), cloud.id, cloud.declaredPitchCoordinates);
+    analysisResults.set(job.matchId, { cloud, aligned, pointSize: 0.15, importedAt: new Date().toISOString() });
+    remember('cloud', typeof source === 'string' ? { path: serverPath(source), name: file.name } : { name: file.name }, job.matchId);
     renderRecord();
     renderMatches();
+    return true;
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') return;
+    if (error instanceof DOMException && error.name === 'AbortError') return false;
     analysisNotice = { matchId: job.matchId, failed: true, text: `${error instanceof Error ? error.message : String(error)}${analysisResults.has(job.matchId) ? ' 已保留之前导入的结果。' : ''}` };
     showError(error);
+    return false;
   } finally {
     if (analysisImport === job) {
       analysisImport = undefined;
@@ -499,6 +520,7 @@ function selectSlot(id: string) {
   if (!current()?.draft.some((slot) => slot.id === id)) return;
   if (id !== selectedId) unlockedId = undefined;
   selectedId = id;
+  rememberSelection('fusion', id);
   renderLists();
   renderInspector();
   syncEngine();
@@ -641,8 +663,8 @@ async function renderRoute(refresh = false) {
   undo.clear();
   unlockedId = undefined;
   currentId = record.match.id;
-  const previousSelection = selectedId;
-  selectedId = record.draft[0]?.id;
+  const previousSelection = selectedId, remembered = sessions.get(currentId).selection.fusion;
+  selectedId = record.draft.find((slot) => slot.id === remembered)?.id ?? record.draft[0]?.id;
   enginePending = true;
   engineReadyMatchId = undefined;
   void Promise.all([resultReview.setMatch(currentId), pitchEditor.setMatch(currentId), localEditor.setMatch(currentId)]).catch(showError);
@@ -653,6 +675,7 @@ async function renderRoute(refresh = false) {
   resetScanPreview();
   const savedFile = scanFiles.get(currentId);
   if (savedFile) void selectScanFile(savedFile);
+  if (!sameMatch) void restoreSession(currentId);
   $('#pitch-mount').inert = true;
   if (!sameMatch) $('#pitch-mount').hidden = true;
   const refreshButton = $<HTMLButtonElement>('#refresh-configuration');
@@ -747,7 +770,8 @@ function resetScanPreview() {
   $('#cloud-video-area').hidden = true;
 }
 
-async function selectScanFile(file: File) {
+/** Previews a reference video; `path` is where the onsite server holds it, so a reload can read it again. */
+async function selectScanFile(file: File, path?: string) {
   const matchId = currentId;
   try { validateScanFile(file); }
   catch (error) { $('#scan-status').textContent = error.message; showError(error); return; }
@@ -779,9 +803,10 @@ async function selectScanFile(file: File) {
     if (signal.aborted || currentId !== matchId) return;
     if (!Number.isFinite(video.duration) || video.duration <= 0 || !video.videoWidth) throw new Error('视频没有有效画面或时长，未作为扫描文件使用。');
     scanFiles.set(matchId, file);
+    remember('video', path ? { path, name: file.name } : { name: file.name }, matchId);
     $('#scan-file-meta').textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · ${video.videoWidth} × ${video.videoHeight} · ${Math.round(video.duration)} 秒`;
     $('#scan-step').textContent = '已选择 · 未上传';
-    $('#scan-status').textContent = '本地视频可预览，无需提交 Fusion。可直接导入结果文件夹；点云 PLY 请在“广告位预览”选择。刷新后需重新选择视频。';
+    $('#scan-status').textContent = `本地视频可预览，无需提交 Fusion。可直接导入结果文件夹；点云 PLY 请在“广告位预览”选择。${path ? '刷新页面后会从服务器路径自动重新读取。' : '刷新后需重新选择视频。'}`;
     $<HTMLVideoElement>('#cloud-preview-video').src = scanURL;
     $('#cloud-video-area').hidden = false;
     $('#cloud-video-name').textContent = `${file.name} · 仅参考，与结果包原视频分开；不会自动估计点云或相机。`;
@@ -963,12 +988,12 @@ function bindServerPath(input: string, button: string, load: (path: string) => P
 }
 const loadScanPath = async (path: string) => {
   $('#scan-status').textContent = '正在从现场服务器读取视频…';
-  try { await selectScanFile(await fetchServerFile(path)); }
+  try { await selectScanFile(await fetchServerFile(path), path); }
   catch (error) { $('#scan-status').textContent = error.message; throw error; }
 };
 bindServerPath('#scan-path', '#load-scan-path', loadScanPath);
 bindServerPath('#cloud-video-path', '#load-cloud-video-path', loadScanPath);
-bindServerPath('#analysis-path', '#load-analysis-path', selectAnalysisFile);
+bindServerPath('#analysis-path', '#load-analysis-path', async (path) => { await selectAnalysisFile(path); });
 $('#viewport').addEventListener('rectangledrawcancel', () => pitchEditor.cancelDrawing());
 $('#viewport').addEventListener('rectangledrawmiss', () => { $('#pitch-local-draw-status').textContent = '请从草坪内拖出矩形，长宽至少 0.1 米。'; });
 $('#cloud-viewport').addEventListener('pointpickcancel', () => localEditor.cancelDrawing());
@@ -999,6 +1024,7 @@ $<HTMLButtonElement>('#cancel-analysis').addEventListener('click', () => {
 $<HTMLButtonElement>('#remove-analysis').addEventListener('click', () => {
   cancelAnalysisImport();
   analysisResults.delete(currentId);
+  remember('cloud');
   analysisNotice = undefined;
   renderRecord();
   renderMatches();
@@ -1007,6 +1033,7 @@ $<HTMLInputElement>('#analysis-aligned').addEventListener('change', (event) => {
   const result = analysisResults.get(currentId);
   if (!result || !(event.target instanceof HTMLInputElement)) return;
   result.aligned = event.target.checked;
+  sessions.update(currentId, (session) => withAlignment(session, result.cloud.id, result.aligned));
   renderAnalysis();
 });
 $<HTMLInputElement>('#cloud-point-size').addEventListener('input', (event) => {
@@ -1063,6 +1090,64 @@ $<HTMLButtonElement>('#export-placements').addEventListener('click', () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+/**
+ * After a reload (or on opening a match), re-imports what the operator last
+ * imported by server path and names the locally chosen files to select again.
+ * A path that is gone is reported and the rest still restores.
+ */
+const PATH_FIELDS: Record<SourceKind, string[]> = { cloud: ['#analysis-path'], result: ['#result-folder-path'], video: ['#scan-path', '#cloud-video-path'] };
+async function restoreSession(matchId: string) {
+  const loaded = new Set<SourceKind>([
+    ...(analysisResults.has(matchId) ? ['cloud' as const] : []),
+    ...(resultReview.hasResultFor(matchId) ? ['result' as const] : []),
+    ...(scanFiles.has(matchId) ? ['video' as const] : []),
+  ]);
+  const { load, reselect } = restorePlan(sessions.get(matchId), loaded);
+  const status = $('#session-status');
+  if (!load.length && !reselect.length) { status.hidden = true; return; }
+  const loaders: Record<SourceKind, (path: string) => Promise<boolean>> = {
+    cloud: (path) => selectAnalysisFile(path),
+    result: (path) => resultReview.importPath(path),
+    video: async (path) => { await loadScanPath(path); return scanFiles.has(matchId); },
+  };
+  const restored: string[] = [], failed: string[] = [];
+  const reselectText = reselect.length ? `刷新前从本机选择的文件无法自动重新读取，请重新选择：${reselect.map(({ kind, name }) => `${SOURCE_LABEL[kind]} ${name}`).join('、')}。` : '';
+  status.hidden = false;
+  status.classList.remove('on-form-error');
+  for (const { kind, path } of load) {
+    if (currentId !== matchId) return;
+    status.textContent = `正在恢复上次会话：从服务器路径读取${SOURCE_LABEL[kind]} ${path}…`;
+    for (const field of PATH_FIELDS[kind]) $<HTMLInputElement>(field).value = path;
+    let ok = false;
+    try { ok = await loaders[kind](path); }
+    catch (error) { console.warn(`Unable to restore ${kind} from ${path}.`, error); }
+    (ok ? restored : failed).push(`${SOURCE_LABEL[kind]} ${path}`);
+  }
+  if (currentId !== matchId) return;
+  status.textContent = [restored.length ? `已恢复上次会话：${restored.join('、')}。` : '',
+    failed.length ? `无法从服务器路径恢复（文件不存在或无法读取，详见各区域提示）：${failed.join('、')}。` : '', reselectText].filter(Boolean).join(' ');
+  status.classList.toggle('on-form-error', Boolean(failed.length || reselect.length));
+}
+
+/** Why leaving the page now would lose work, or undefined when everything is saved. */
+function unsavedWork(): string | undefined {
+  if (rendererBusy) return rendererBusy;
+  for (const editor of [pitchEditor, localEditor]) {
+    if (editor.editing) return '正在绘制或拖动本地广告位';
+    const name = editor.unsavedChanges;
+    if (name) return `“${name}”有未保存的修改`;
+  }
+  if (engine?.dragging) return '正在拖动场次广告位';
+  const typed = [...document.querySelectorAll<HTMLInputElement>('#placement-fields input')].find((input) => input.value !== input.defaultValue && input.type !== 'radio' && input.type !== 'checkbox');
+  if (typed) return '场次广告位有未保存的修改';
+}
+// Browsers show their own leave-page dialog; it appears only while something is unsaved.
+window.addEventListener('beforeunload', (event) => {
+  if (!unsavedWork()) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
+
 // Both workspace tabs carry the same renderer bar; they share one package path and state.
 const rendererBars = [...document.querySelectorAll<HTMLElement>('[data-renderer-bar]')];
 const rendererPaths = rendererBars.map((bar) => bar.querySelector<HTMLInputElement>('[data-renderer-path]'));
@@ -1230,7 +1315,11 @@ for (const bar of rendererBars) {
 }
 renderRendererBars();
 window.addEventListener('hashchange', () => { void renderRoute(); });
-window.addEventListener('beforeunload', () => { cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); cloudEngine?.dispose(); resultReview.dispose(); });
+// After `beforeunload`, which the operator may cancel: only a page that is really going away releases its GPU resources.
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) return;
+  cancelAnalysisImport(); if (scanURL) URL.revokeObjectURL(scanURL); engine?.dispose(); cloudEngine?.dispose(); resultReview.dispose();
+});
 
 try { repository = new MatchRepository(localStorage); records = repository.read(); }
 catch (error) { showError(error); $<HTMLButtonElement>('#match-lookup-submit').disabled = true; $<HTMLButtonElement>('#import-offline-package').disabled = true; }

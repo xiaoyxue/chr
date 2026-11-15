@@ -172,6 +172,13 @@ animated wave and saved with **保存旗帜属性**. Both editors have undo and 
 and **保存并发送到渲染器**; sending or exporting with unsaved edits asks to save
 them first.
 
+A page reload keeps the session: the browser remembers, per match, the point
+cloud, result folder and reference video imported by server path (and re-reads
+them on reload, saying which could not be read), each point cloud's
+same-coordinates answer and the selected placements; files chosen locally are
+named for selecting again. The page asks before leaving only while an edit, a
+drawing or a send is unfinished.
+
 The renderer bar sits on both the **广告位预览** and **导入结果与微调** tabs; both
 share one path and state. Fusion placements are sent only for an offline-ZIP
 match whose preview has loaded its materials and that has a server path; without

@@ -8,11 +8,14 @@ import { RadialResultPass } from './radial-result-pass.ts';
 import type { BundleFile, ResultBundle, ResultFrame, ResultShot } from './bundle-result.ts';
 import type { LocalAd } from '../placements/local-ad.ts';
 import type { Placement } from '../shared/types.ts';
+import type { SessionSource } from '../app/session.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 export class ResultReview {
   onChange?: () => void;
+  /** The match's result folder was imported (by server path, or chosen locally) or removed. */
+  onSource?: (matchId: string, source?: SessionSource) => void;
   private bundles = new Map<string, ResultBundle>();
   private matchId?: string;
   private importing?: AbortController;
@@ -75,6 +78,7 @@ export class ResultReview {
     });
     $('remove-result-folder').addEventListener('click', () => {
       this.cancelImport();
+      this.onSource?.(this.matchId);
       this.bundles.delete(this.matchId);
       this.clearVideo();
       this.bundle = undefined;
@@ -125,6 +129,9 @@ export class ResultReview {
   }
 
   get hasResult() { return Boolean(this.bundle); }
+  hasResultFor(matchId: string) { return this.bundles.has(matchId); }
+  /** Imports the current match's result folder from a server path; resolves whether it was imported. */
+  importPath(path: string) { return this.import(path); }
   async removeMatch(id: string) {
     this.bundles.delete(id);
     if (this.matchId === id) await this.setMatch();
@@ -204,8 +211,8 @@ export class ResultReview {
     $<HTMLButtonElement>('remove-result-folder').disabled = false;
   }
   private status(text: string) { $('result-folder-status').textContent = text; }
-  private async import(source: BundleFile[] | string) {
-    if (!this.matchId) return;
+  private async import(source: BundleFile[] | string): Promise<boolean> {
+    if (!this.matchId) return false;
     this.cancelImport();
     this.clearError();
     const controller = new AbortController(), id = this.matchId;
@@ -221,15 +228,19 @@ export class ResultReview {
       }
       this.status('正在本地校验文件并读取投影参数 / 帧映射，不会上传文件…');
       const bundle = await importResultFolder(files, controller.signal);
-      if (controller.signal.aborted || id !== this.matchId) return;
+      if (controller.signal.aborted || id !== this.matchId) return false;
       this.bundles.set(id, bundle);
+      this.onSource?.(id, typeof source === 'string' ? { path: source, name: source.split('/').filter(Boolean).pop() ?? source }
+        : { name: source[0].path.split('/')[0] || bundle.name });
       this.bundle = bundle;
       this.render();
       await this.load(bundle.shots[0]);
+      return true;
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (error instanceof DOMException && error.name === 'AbortError') return false;
       this.status(`${error instanceof Error ? error.message : String(error)}${this.bundle ? ' 已保留导入的结果。' : ''}`);
       this.showError(error);
+      return this.bundles.has(id);
     } finally { if (this.importing === controller) this.cancelImport(); }
   }
 

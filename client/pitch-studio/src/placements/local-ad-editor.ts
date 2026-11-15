@@ -116,6 +116,8 @@ export class LocalAdEditor {
     recordUndo?: (label: string, restore: () => Promise<void>, reapply: () => Promise<void>) => void;
     /** Runs the renderer bar's send action and resolves with its status message. */
     send?: () => Promise<{ text: string; failed: boolean }>;
+    /** The ad to select when the match or point cloud loads, such as the one selected before a reload. */
+    preferredSelection?: () => string | undefined;
   }) {
     options.root.innerHTML = editorMarkup(options.space, options.prefix);
     this.element('draw-local-2d').addEventListener('click', () => this.start('2D'));
@@ -218,6 +220,12 @@ export class LocalAdEditor {
   private get flagDirty() {
     const flag = this.flagDraft && this.items.find((ad) => ad.id === this.flagDraft.id);
     return Boolean(flag && flagDraftChanged(this.flagDraft, flag.flag));
+  }
+  /** Whether a drawing, a plane pick or a drag is in progress. */
+  get editing() { return Boolean(this.drawing || this.planeEdit); }
+  private initialSelection() {
+    const preferred = this.options.preferredSelection?.();
+    return this.ads.find((ad) => ad.id === preferred)?.id ?? this.ads[0]?.id;
   }
   /** The name of the ad with unsaved edits, if any. */
   get unsavedChanges(): string | undefined {
@@ -381,7 +389,7 @@ export class LocalAdEditor {
       }
       this.items = ads;
       this.loaded = true;
-      this.selectedId = this.ads[0]?.id;
+      this.selectedId = this.initialSelection();
       this.render();
       await this.publish();
     } catch (error) {
@@ -400,7 +408,7 @@ export class LocalAdEditor {
     this.cancelDrawing();
     this.cloudId = id;
     this.flagDraft = undefined;
-    this.selectedId = this.ads[0]?.id;
+    this.selectedId = this.initialSelection();
     this.unlocked = false;
     this.render();
     void this.publish().catch(this.options.error);

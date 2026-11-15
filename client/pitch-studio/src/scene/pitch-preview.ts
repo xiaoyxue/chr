@@ -66,6 +66,8 @@ export class PitchPreview {
   private draw?: (plane: AdPlane) => void;
   private rectangle?: { id: number; start: THREE.Vector3; plane?: AdPlane };
   private draft?: THREE.LineLoop;
+  /** Whether a Fusion placement is being dragged and not yet saved. */
+  get dragging() { return this.drag?.kind === 'placement'; }
   /** A click in the top view hit a visible local ad or flag. */
   onLocalAdSelect?: (id: string) => void;
 
