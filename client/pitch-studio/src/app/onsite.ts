@@ -1422,13 +1422,16 @@ function rendererProgress(step: string) {
 }
 
 const sendToRenderer = () => rendererAction('正在检查素材…', async () => {
-  const record = current();
+  const record = current(), started = performance.now();
   const { scene, masked, skipped, fusion } = await renderScene();
+  const checked = performance.now();
   rendererProgress('正在发送到 chr-server…');
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
   const { loaded, sdi } = await sendDescription(url, scene);
+  const seconds = (from: number, to: number) => ((to - from) / 1000).toFixed(1);
+  const timing = `检查素材 ${seconds(started, checked)} 秒，发送 ${seconds(checked, performance.now())} 秒`;
   if (fusion) rememberPackagePath(record.match.offlinePackageId, serverPath(rendererPaths[0].value));
-  return `已发送 ${scene.instances.length} 个广告位（含本地和旗帜）到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
+  return `已发送 ${scene.instances.length} 个广告位（含本地和旗帜）到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}；${timing}）。`
     + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '') + skipped;
 }, '发送失败');
 
