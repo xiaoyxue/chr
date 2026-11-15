@@ -154,8 +154,10 @@ reloaded.
 whole local development stack (tracked simulation, pitch-studio client, program
 monitor page, optional SRT relay) from a local `output/stack/stack.toml`; see
 `server/README.md`. It builds both pages and serves them with `vite preview`, so a
-dropped SSH tunnel does not reload them; restart the stack after client changes.
-Use `npm run dev` for hot reload while developing a client.
+dropped SSH tunnel does not reload them; after client changes restart only the pages
+(`stack.py restart pitch-studio monitor-page`). Use `npm run dev` for hot reload
+while developing a client. The [operations guide](operations.md) covers onsite
+launching, remote access and where runtime data lives (asset root, studio store).
 
 The stack's processes and how they connect:
 

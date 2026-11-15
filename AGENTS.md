@@ -12,6 +12,7 @@
   live in `server/docs/`.
 - `reference/`: All reference materials belong here at the repository root. These materials are private and local-only; never stage or upload them.
 - `output/`: Generated runtime artifacts, ignored by Git. Renderer PNGs belong in `output/renderer/`.
+- Onsite runtime data (Fusion offline ZIPs, logo/flag/model files and the pitch-studio store) lives outside the repository, under chr-server's asset root; `docs/operations.md` defines these locations and how to launch and operate the stack.
 
 ## Development Environment
 

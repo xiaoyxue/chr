@@ -192,6 +192,21 @@ class StopTests(unittest.TestCase):
             self.assertEqual(sorted(by_component["stubborn"]), [("sh", "killed (SIGKILL)"), ("sleep", "killed (SIGKILL)")])
             self.assertEqual(list(Path(directory).glob("*.pid")), [])
 
+    def test_stops_only_the_named_components(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(stack, "STATE", Path(directory)):
+            kept = self.start(directory, "kept", "sleep 30")
+            gone = self.start(directory, "gone", "sleep 30")
+            try:
+                with mock.patch("builtins.print"):
+                    stopped = stack.stop(["gone"])
+                self.assertEqual({component for component, *_ in stopped}, {"gone"})
+                self.assertEqual(stack.running("kept"), kept.pid)
+                self.assertEqual([path.name for path in Path(directory).glob("*.pid")], ["kept.pid"])
+            finally:
+                for process in (kept, gone):
+                    process.kill()
+                    process.wait()
+
 
 class RecordTests(unittest.TestCase):
     def test_a_reused_pid_is_not_ours(self):
