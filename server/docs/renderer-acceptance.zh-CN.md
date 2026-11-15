@@ -42,7 +42,7 @@
 | 飘动旗帜 | `scene::flag` 单元测试（中线固定、法线、包围盒、相位取模），`flag::tests` compute 回读与 CPU 参考对比，`flag_gpu`（媒体时间、阴影重绘、simple 与 PBR 外观），runtime `description` |
 | 畸变 | `distortion_gpu`（恒等、两种模型下标记点误差 < 0.3 px、素材不被扭曲、无原像像素、guard band 预算、输出缩放），`distortion` 单元测试，CPU 参考 `distortion_reference` |
 | 深度与合成 | `composition_gpu`、`distortion_gpu`、`shadow_catcher_gpu`、`decal_gpu` |
-| 直接光源、PBR | `pbr_gpu` |
+| 直接光源、PBR | `pbr_gpu`、`texture_filtering_gpu`（掠射角下的各向异性细节） |
 | 面光源 | `area_light_gpu`（固定候选值、参考对比在标准内、单双面、尺寸/功率、轨迹连续性）；评估见 `area-light-evaluation.md` |
 | 阴影、PCF、PCSS、级联、立方体贴图 | `shadow_gpu`、`area_shadow_gpu`、`shadow_catcher_gpu`（spot 近平面回归） |
 | 天空（无遮挡 IBL） | `environment_gpu`、`exr_import` |
