@@ -553,6 +553,27 @@ pose, with a diagnostic that clips are not played; do not sample an arbitrary
 animation frame. Assets requiring skinning or morph deformation are reported as
 unsupported rather than silently presented as equivalent static models.
 
+### Waving flags (#126)
+
+A flag instance uses the shared unit grid `MeshData::flag_grid()` (96 x 60 cells)
+and carries a `Flag`: width and height in metres, amplitude, frequency, speed and
+a `simple` or `pbr` look. Its surface is the closed-form SimpleWave superposition:
+the centre line stays pinned and wavefronts, the iso-lines of the distance `r` from
+it, travel outwards on both halves. There is no pole, gravity or cloth solver.
+
+Flag-local metres run X along the width from the left edge and Y down from the top
+edge, Z = X x Y; the artwork reads upright from the -Z side, like an image quad. The
+instance model should be rigid so the amplitude stays in metres.
+
+Once per frame a compute pass (`flag.wgsl`) writes every visible flag's flag-local
+positions, normals and tangents into its storage buffer. Flag vertex stages
+(`flag_surface.wgsl`) read it by vertex index for the main, wireframe and shadow
+passes, so shadows follow the surface. `pbr` uses the mesh fragment stage; `simple`
+lights the artwork under a fixed key light above the viewer. Time is the frame's
+media time (`MeshRenderer::set_animation_time`); phases are reduced modulo 2 pi in
+f64 so long-running clocks keep precision. Moving flags redraw cached shadow maps;
+a flat or stopped flag keeps them. Bounds cover every phase.
+
 ### Mesh storage reference and adaptation
 
 Also reference `xiaoyxue/Gyunity` at `7361064`, specifically

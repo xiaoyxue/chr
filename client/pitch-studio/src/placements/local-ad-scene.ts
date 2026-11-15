@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { flagWave } from './flag.ts';
+import { adRoot, modelFit } from './local-ad-transform.ts';
+import type { GlbBounds } from '../render/render-description.ts';
 import type { AdPlane, LocalAd, Vector3Tuple } from './local-ad.ts';
 
 export function planeFromPoints(points: Vector3Tuple[]): AdPlane {
@@ -34,36 +37,88 @@ export function disposeLocalObject(root: THREE.Object3D) {
   root.removeFromParent();
 }
 
+const FLAG_COLUMNS = 96, FLAG_ROWS = 60;
+
+/** A flag grid of 97 × 61 vertices; its texture v runs down from the image's top row. */
+function flagGeometry() {
+  const uvs: number[] = [], indices: number[] = [];
+  for (let j = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++) uvs.push(i / FLAG_COLUMNS, j / FLAG_ROWS);
+  for (let j = 0; j < FLAG_ROWS; j++) for (let i = 0; i < FLAG_COLUMNS; i++) {
+    const a = j * (FLAG_COLUMNS + 1) + i, b = a + FLAG_COLUMNS + 1;
+    indices.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(uvs.length / 2 * 3), 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  return geometry;
+}
+
+/** Moves the flag's vertices to the renderer's wave after `seconds`, in flag-local metres. */
+function waveFlag(geometry: THREE.BufferGeometry, ad: LocalAd, seconds: number) {
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute, { width, height } = ad.plane;
+  for (let j = 0, k = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++, k++) {
+    position.setXYZ(k, ...flagWave(i / FLAG_COLUMNS, j / FLAG_ROWS, width, height, ad.flag, ad.flag.speed * seconds));
+  }
+  position.needsUpdate = true;
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+}
+
+async function parseGlb(file: File) {
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    if (/^(blob:|data:)/.test(url)) return url;
+    throw new Error('GLB 必须内嵌所有素材，不允许加载外部资源。');
+  });
+  const gltf = await new GLTFLoader(manager).parseAsync(await file.arrayBuffer(), '');
+  const bounds = new THREE.Box3().setFromObject(gltf.scene), size = bounds.getSize(new THREE.Vector3());
+  if (![...bounds.min, ...bounds.max].every(Number.isFinite) || size.x + size.z <= 0) {
+    disposeLocalObject(gltf.scene);
+    throw new Error('3D 素材缺少有效的底面尺寸。');
+  }
+  return { scene: gltf.scene, bounds };
+}
+
+/** A GLB's bounds in its own Y-up glTF space, as the preview fits it. */
+export async function glbBounds(file: File): Promise<GlbBounds> {
+  const { scene, bounds } = await parseGlb(file);
+  disposeLocalObject(scene);
+  return { min: bounds.min.toArray(), max: bounds.max.toArray() };
+}
+
+async function loadTexture(file: File) {
+  const url = URL.createObjectURL(file);
+  let texture: THREE.Texture;
+  try { texture = await new THREE.TextureLoader().loadAsync(url); }
+  finally { URL.revokeObjectURL(url); }
+  texture.colorSpace = THREE.SRGBColorSpace;
+  // Texture v then runs down the image, from its top row, like the plane's v axis.
+  texture.flipY = false;
+  return texture;
+}
+
 async function createContent(ad: LocalAd, placeholders: boolean) {
   const group = new THREE.Group();
-  if (ad.type === '2D') {
-    let texture: THREE.Texture;
-    if (ad.material) {
-      const url = URL.createObjectURL(ad.material);
-      try { texture = await new THREE.TextureLoader().loadAsync(url); }
-      finally { URL.revokeObjectURL(url); }
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.flipY = false;
+  if (ad.type === 'flag') {
+    const texture = ad.material && await loadTexture(ad.material);
+    if (texture || placeholders) {
+      const flag = new THREE.Mesh(flagGeometry(), new THREE.MeshLambertMaterial({ ...(texture ? { map: texture } : {}), color: texture ? '#ffffff' : '#f5bc50',
+        transparent: true, opacity: texture ? 1 : 0.5, side: THREE.DoubleSide }));
+      flag.name = 'flag';
+      group.add(flag);
     }
+  } else if (ad.type === '2D') {
+    const texture = ad.material && await loadTexture(ad.material);
     if (texture || placeholders) group.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
       new THREE.MeshBasicMaterial({ map: texture, color: texture ? '#ffffff' : '#f5bc50', transparent: true,
         opacity: texture ? 1 : 0.35, side: THREE.DoubleSide, toneMapped: false,
         polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })));
   } else if (ad.material) {
-    const manager = new THREE.LoadingManager();
-    manager.setURLModifier((url) => {
-      if (/^(blob:|data:)/.test(url)) return url;
-      throw new Error('GLB 必须内嵌所有素材，不允许加载外部资源。');
-    });
-    const gltf = await new GLTFLoader(manager).parseAsync(await ad.material.arrayBuffer(), '');
-    const bounds = new THREE.Box3().setFromObject(gltf.scene), size = bounds.getSize(new THREE.Vector3()), centre = bounds.getCenter(new THREE.Vector3());
-    if (![...bounds.min, ...bounds.max].every(Number.isFinite) || size.x + size.z <= 0) {
-      disposeLocalObject(gltf.scene);
-      throw new Error('3D 素材缺少有效的底面尺寸。');
-    }
-    gltf.scene.position.set(-centre.x, -bounds.min.y, -centre.z);
+    const { scene, bounds } = await parseGlb(ad.material), size = bounds.getSize(new THREE.Vector3()), centre = bounds.getCenter(new THREE.Vector3());
+    scene.position.set(-centre.x, -bounds.min.y, -centre.z);
     const model = new THREE.Group();
-    model.add(gltf.scene);
+    model.add(scene);
     group.add(model);
     group.userData.footprint = [Math.max(size.x, 0.001), Math.max(size.z, 0.001)];
   } else if (placeholders) {
@@ -84,7 +139,21 @@ export class LocalAdScene {
   readonly group = new THREE.Group();
   private entries = new Map<string, { ad: LocalAd; root: THREE.Group }>();
   private version = 0;
+  private seconds = 0;
   constructor(private placeholders: boolean) { this.group.name = 'local-advertisements'; }
+
+  /** Waves the visible flags to `seconds` (scaled by each flag's speed); false when there is none to animate. */
+  animate(seconds: number) {
+    this.seconds = seconds;
+    let animated = false;
+    for (const { ad, root } of this.entries.values()) {
+      const flag = ad.type === 'flag' && ad.visible ? root.getObjectByName('flag') as THREE.Mesh | undefined : undefined;
+      if (!flag) continue;
+      waveFlag(flag.geometry, ad, seconds);
+      animated = true;
+    }
+    return animated;
+  }
 
   async update(ads: LocalAd[], selectedId?: string) {
     const version = ++this.version;
@@ -105,19 +174,26 @@ export class LocalAdScene {
         this.entries.set(ad.id, entry);
       }
       entry.ad = ad;
-      const { plane } = ad, u = new THREE.Vector3(...plane.u), v = new THREE.Vector3(...plane.v), normal = new THREE.Vector3().crossVectors(u, v).normalize();
-      entry.root.position.copy(new THREE.Vector3(...plane.origin).addScaledVector(u, plane.width / 2).addScaledVector(v, plane.height / 2).addScaledVector(normal, ad.offset + 0.015 * ad.normalSign));
-      entry.root.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(u, v, normal));
+      const { plane } = ad;
+      adRoot(ad).decompose(entry.root.position, entry.root.quaternion, entry.root.scale);
       entry.root.visible = ad.visible;
-      if (ad.type === '2D') {
+      if (ad.type === 'flag') {
+        const flag = entry.root.getObjectByName('flag') as THREE.Mesh | undefined;
+        if (flag) {
+          waveFlag(flag.geometry, ad, this.seconds);
+          // The flag-local origin sits at the top-left corner moved `offset` along the normal, as in flagModel.
+          flag.position.set(-plane.width / 2, -plane.height / 2, -0.015 * ad.normalSign);
+        }
+      } else if (ad.type === '2D') {
         entry.root.children[0]?.scale.set(plane.width, plane.height, 1);
       } else {
         const content = entry.root.children[0];
         if (content) {
           const footprint: number[] = entry.root.userData.footprint;
           if (footprint) {
-            content.rotation.set(ad.normalSign * Math.PI / 2, ad.yaw * Math.PI / 180, 0);
-            content.scale.setScalar(Math.min(plane.width / footprint[0], plane.height / footprint[1]) * ad.scale);
+            const fit = modelFit(ad, footprint as [number, number]);
+            content.rotation.copy(fit.rotation);
+            content.scale.setScalar(fit.scale);
           } else {
             content.scale.set(plane.width, plane.height, Math.min(plane.width, plane.height) * ad.scale);
             content.position.z = Math.min(plane.width, plane.height) * ad.scale / 2 * ad.normalSign;

@@ -111,7 +111,10 @@ export class PointCloudPreview {
 
   resetView() { this.cancelAdDrag(); this.fitCameras(); this.refresh(); }
 
-  setAdEditingEnabled(enabled: boolean) { this.adControls.setEnabled(enabled && this.available && Boolean(this.cloud)); }
+  setAdEditingEnabled(enabled: boolean, locked: boolean) {
+    this.adControls.setEnabled(enabled && this.available && Boolean(this.cloud));
+    this.adControls.setHandlesVisible(!locked);
+  }
   cancelAdDrag() { this.adControls.cancel(); }
 
   startPlanePick(progress: (count: number) => void, complete: (points: Vector3Tuple[], normalSign: number) => void) {
@@ -150,7 +153,10 @@ export class PointCloudPreview {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(this.viewport.clientWidth, this.viewport.clientHeight, false);
     this.adControls.refresh();
+    const waving = this.localAds.animate(performance.now() / 1000);
     this.renderer.render(this.scene, camera);
+    // Flags wave continuously; a hidden tab has no size, returns above and so stops the loop.
+    if (waving) this.requestRefresh();
   }
 
   private fitCameras() {

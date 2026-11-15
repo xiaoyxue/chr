@@ -27,6 +27,7 @@ not frame-rate promises.
 | Area-light shadows | Extension, labelled approximation | `area-shadow-pcss-v1`: centre cubemap + PCSS; penumbra ignores emitter outline and glossy weighting |
 | Shadow catcher | Extension | Luminance ratio of shadowed/unshadowed light over footage; no wire field |
 | Ground decal (#113) | Extension | Unlit, premultiplied-alpha blend over opaque CG in instance order, before shadow catchers so CG shadows darken it; no depth write, no cast shadow; exact in linear light before the scene tone map; no wire field |
+| Waving flag (#126) | Extension | SimpleWave closed-form surface on a shared 96x60-cell grid: centre line pinned, no pole or cloth solver; a compute pass evaluates it per frame from media time (phases reduced in f64) for the main and shadow passes; `simple` (fixed key light) or `pbr` look; optional wire `flag` on instances |
 | Point/spot PCSS source radius | Preview approximation | Soft-shadow source size, not finite-emitter shading |
 | Physical atmosphere (#28), sky visibility (#29) | Optional (owner decision) | Not required for this acceptance |
 | Brown-Conrady tangential distortion | Deferred | Native-pixel radial model selected instead |
@@ -40,6 +41,7 @@ not frame-rate promises.
 | Cross-feature matrix, determinism, state isolation, budgets | `acceptance_gpu`: all five light families with Hard/PCF/PCSS, transformed/mirrored instances, material variants, pinhole/orthographic/distorted cameras; byte-identical repeats, unchanged after another scene, explicit budget and invalid-input errors with recovery |
 | Coordinate preservation, camera equivalence | `camera`, `mesh_gpu`, `orthographic_gpu` |
 | Model transforms, GLB | `scene`, `glb`, `mesh_gpu` |
+| Waving flags | `scene::flag` unit tests (pinned centre, normals, bounds, phase wrap), `flag::tests` compute readback against the CPU reference, `flag_gpu` (media time, shadow redraw, simple and PBR looks), runtime `description` |
 | Distortion | `distortion_gpu` (identity, sub-0.3 px markers for both models, unwarped footage, non-invertible pixels, guard-band budget, output resizing), unit tests in `distortion`, CPU reference `distortion_reference` |
 | Depth and composition | `composition_gpu`, `distortion_gpu`, `shadow_catcher_gpu`, `decal_gpu` |
 | Direct lights, PBR | `pbr_gpu` |

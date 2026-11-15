@@ -24,11 +24,16 @@ with which lens, independent of any client's own scene model. The schema lives i
       {"id": "ASSET-car", "kind": "glb", "sha256": "…", "blend_as": "mask",
        "source": {"package": "/srv/match.fusion.zip", "entry": "assets/ASSET-car.glb"}},
       {"id": "ASSET-ad", "kind": "image_quad", "sha256": "…",
-       "source": {"path": "/srv/ads/ad.png"}}
+       "source": {"path": "/srv/ads/ad.png"}},
+      {"id": "ASSET-flag", "kind": "flag", "sha256": "…",
+       "source": {"path": "/srv/flags/club.png"}}
     ],
     "instances": [
       {"id": "PLC-1", "asset": "ASSET-car", "model": [[...], [...], [...], [0, 0, 0, 1]]},
-      {"id": "PLC-2", "asset": "ASSET-ad", "model": [[...], [...], [...], [0, 0, 0, 1]], "visible": true}
+      {"id": "PLC-2", "asset": "ASSET-ad", "model": [[...], [...], [...], [0, 0, 0, 1]], "visible": true},
+      {"id": "FLAG-1", "asset": "ASSET-flag", "model": [[...], [...], [...], [0, 0, 0, 1]],
+       "flag": {"width_m": 3.2, "height_m": 2.0, "amplitude_m": 0.32, "frequency": 1.35,
+                "speed": 1.0, "material": "simple"}}
     ]
   }
 }
@@ -55,7 +60,30 @@ are shared.
 | `kind` | Asset coordinates | Material |
 | --- | --- | --- |
 | `glb` | The importer's basis: glTF +Y-up turned to -Z-up, `(x, y, z) -> (x, z, -y)`, node transforms baked | As authored. `alphaMode: BLEND` is rejected unless `blend_as: "mask"`, which imports it as an alpha mask (cutoff 0.5) and logs a warning. The renderer has no translucent pass. |
+| `flag` (PNG, JPEG) | Flag-local metres: X along the width from the left edge, Y down from the top edge, Z = X × Y. The image's top-left texel is at the origin and reads upright from the -Z side, mirrored from the other. Size comes from the instance's `flag` | Double-sided artwork; texels with alpha below 0.5 are cut out. `material: "simple"` lights it like SimpleWave under a fixed key light above the viewer; `"pbr"` uses the scene's lights, environment and shadows. It casts shadows that follow the wave |
 | `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended by the image's alpha over the opaque CG (`alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
+
+### Flags
+
+A `flag` asset is only the artwork; each instance carries its own `flag` object,
+which is required for flag assets and rejected for every other asset. Two instances
+can share one artwork with different sizes and waves, and editing a flag never
+re-registers its asset.
+
+| Field | Meaning |
+| --- | --- |
+| `width_m`, `height_m` | Flag size in metres, positive |
+| `amplitude_m` | Wave coefficient in metres; the surface leaves its plane by at most 1.53 times this |
+| `frequency` | Primary wave cycles from the pinned centre line to either free edge |
+| `speed` | Time scale; 0 freezes the wave |
+| `material` | `"simple"` or `"pbr"` |
+
+As in [Simulation-SimpleWave](https://github.com/xiaoyxue/Simulation-SimpleWave),
+there is no pole: the centre line stays pinned and both halves wave outwards. Make
+`model` rigid, with columns `[u, v, u × v, origin]`: unit width axis, unit axis down
+the flag, their cross product, and the top-left corner. Size then stays in `flag`,
+not in the matrix. The wave's time is each frame's media time, so a still render of
+`--frame <n>` is reproducible.
 
 `source` is either `{"path": …}` or `{"package": <zip>, "entry": <name>}`, such
 as a Fusion offline package. `sha256` (lowercase hex of the source bytes) is
@@ -91,26 +119,66 @@ GLB), frames go out as clean feed or repeats, as during any worker restart.
 
 ## From the pitch-studio client
 
-`client/pitch-studio` converts the current match's placement draft:
+`client/pitch-studio` converts the current match's Fusion placement draft and
+its local placements (both kept in the browser):
 
-- **3D placements:** `fitFusionModel` on the loaded GLB's three.js bounds. In
-  chr's basis, the preview's centring becomes the translation `(-cx, -cz,
+- **Fusion 3D placements:** `fitFusionModel` on the loaded GLB's three.js bounds.
+  In chr's basis, the preview's centring becomes the translation `(-cx, -cz,
   min_y)`, followed by the placement's translation (Z −0.015), yaw and uniform
   scale.
-- **2D placements:** the preview's contain fit of the image in its area,
+- **Fusion 2D placements:** the preview's contain fit of the image in its area,
   rotated by `rz + assetRotation`, at Z −0.02.
+- **Local placements:** drawn in the studio on the pitch (2D, 3D) or on a
+  point-cloud plane (2D, 3D, flags). Each lies on a rectangle with unit axes `u`
+  (image right) and `v` (image down) and normal `u × v`; the preview and the
+  description share one transform (`local-ad-transform.ts`), lifted 15 mm off
+  the surface towards the side it was drawn from, plus the normal offset.
+  - **2D** → `image_quad` with `model` `[u · width, v · height, u × v, centre]`,
+    so the quad's top-left texel lands on the rectangle's top-left corner.
+  - **3D** → `glb`: the glTF scene centred on its footprint, stood up out of the
+    plane, turned by its yaw and fitted to the rectangle, then expressed in chr's
+    GLB basis.
+  - **Flags** (point cloud only): **选面放旗帜** picks three points; the plane is
+    turned so that, seen from the picking side, `u` points right and `v` down
+    (world +Z) and `u × v` points away from the viewer; the default normal offset
+    is -0.5 m, towards the viewer, so the wave (up to 1.53 × amplitude) clears the
+    surface. The instance's rigid `model` is `[u, v, u × v, top-left + offset ·
+    (u × v)]` with its own `flag` size and wave. Pitch flags of earlier versions
+    are removed when a match loads, and the page says how many.
+
+  chr-server reads local materials from their server paths (inside its
+  `--asset-root`); a material chosen on the operator's computer is previewed but
+  not sent. Each distinct material is one asset (`LOCAL-` or, for flags, `FLAG-`
+  plus the first 16 hex of its SHA-256), hashed (and a GLB measured) as the page
+  server reads it when sending. A point-cloud placement is sent only while its
+  cloud is loaded and confirmed to share pitch coordinates; placements that
+  cannot be sent are left out and the page says why.
 - **Disabled placements:** become `visible: false`.
 - **Blended GLBs:** a GLB with BLEND materials gets `blend_as: "mask"`, and the
   page lists those materials after sending.
-- **Asset sources:** assets are entries of the offline ZIP, read by the server
-  from the ZIP's onsite path. The path is remembered when the ZIP was imported
-  by path or last sent; otherwise type it. Matches from the Fusion API are not
-  supported yet.
+- **Fusion asset sources:** assets are entries of the offline ZIP, read by the
+  server from the ZIP's onsite path. The path is remembered when the ZIP was
+  imported by path or last sent; otherwise type it. Matches from the Fusion API
+  are not supported yet.
+- More than 63 instances are refused before sending.
+
+**场次配置广告位** lists every placement: Fusion, 球场本地 (2D, 3D) and 点云本地
+(2D, 3D, flags), each with its size, material and, when it cannot be sent, the
+reason; a row selects the placement in its editor, and its switch enables it. The
+pitch and point-cloud editors share one inspector: position, size and material
+are locked until **🔒 已锁定** is unlocked and save as a field changes; a flag's
+wave (three sliders) stays editable while locked, is previewed live as an
+animated wave and saved with **保存旗帜属性**. Both editors have undo and redo
+and **保存并发送到渲染器**; sending or exporting with unsaved edits asks to save
+them first.
 
 The renderer bar sits on both the **广告位预览** and **导入结果与微调** tabs; both
-share one path and state. Its buttons are enabled only for an offline-ZIP match
-whose preview has loaded its materials and that has a server path, and stay
-disabled while an action runs, so repeated clicks do not queue repeated loads.
+share one path and state. Fusion placements are sent only for an offline-ZIP
+match whose preview has loaded its materials and that has a server path; without
+the ZIP or its path, sendable local placements are sent alone and the status
+says which placements were left out and that the send replaces the whole scene.
+The buttons stay disabled while an action runs, so repeated clicks do not queue
+repeated loads.
 **发送到渲染器** calls `description.load` through the page's `/chr-render`
 WebSocket proxy (`CHR_RENDER_URL`, default `ws://127.0.0.1:8787`), so one tunnel
 to the page is enough. Before loading, it checks on the same connection that
@@ -139,6 +207,7 @@ the client.
 cargo test --locked -p chr-runtime --test description
 cargo test --locked -p chr-runtime --test description -- --ignored   # hardware GPU
 cargo test --locked -p chr-renderer --test glb
+cargo test --locked -p chr-renderer --test flag_gpu -- --ignored   # hardware GPU
 npm --prefix client/pitch-studio run test:offline
 ```
 
@@ -149,7 +218,8 @@ The tests cover:
 - reuse, conflict, unknown assets and restoring the previous scene;
 - the `blend_as` opt-in;
 - an unlit quad drawn through the tracked camera on the GPU;
-- the client's quad, GLB and asset conversion.
+- flag parameters required for flag assets and rejected for others;
+- the client's quad, GLB and asset conversion, including local placements and flags.
 
 Recorded on the Linux RTX 3090 host: the Fusion package from the client
 conversion loaded at runtime with 3 assets (two PNG ads and a 27 MB GLB whose

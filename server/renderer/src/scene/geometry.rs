@@ -170,6 +170,7 @@ pub struct MeshData {
     parts: Arc<[Range<u32>]>,
     bounds: Aabb,
     attributes: Arc<MeshAttributes>,
+    pub(super) flag_grid: bool,
 }
 
 /// Optional per-vertex surface attributes. Empty arrays mean the attribute is absent.
@@ -236,6 +237,7 @@ impl MeshData {
             parts: parts.into(),
             bounds,
             attributes: Arc::new(MeshAttributes::default()),
+            flag_grid: false,
         })
     }
 

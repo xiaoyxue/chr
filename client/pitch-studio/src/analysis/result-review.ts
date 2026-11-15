@@ -369,6 +369,9 @@ export class ResultReview {
         : this.shot.projection ? ' 诊断投影仅显示支持域内可渲染片段，域外省略；看台 / 棚顶可启用点云广告实验性外推，高度精度未经验证。' : '');
     this.local.group.visible = this.localAligned;
     if (this.enabled && available) {
+      const seconds = performance.now() / 1000;
+      this.local.animate(seconds);
+      this.pitchLocal.animate(seconds);
       try {
         if (this.shot.projection) {
           this.radialPass ??= new RadialResultPass();

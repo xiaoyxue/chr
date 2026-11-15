@@ -126,9 +126,29 @@ object!(MaterialOverride {
     part: u32,
     factors: PbrFactors
 });
+strings!(FlagMaterial { Simple => "simple", Pbr => "pbr" });
+object!(
+    /// SimpleWave flag motion of an instance whose asset is a flag. The flag-local
+    /// frame is metres: X along the width from the left edge, Y down from the top
+    /// edge and Z their cross product; the instance `model` maps it to the world and
+    /// should be rigid. The artwork reads upright from the -Z side and mirrored from
+    /// the other. The centre line stays pinned; both halves wave outwards.
+    Flag {
+    width_m: Finite, height_m: Finite,
+    /// Wave coefficient, not the peak displacement (at most 1.53 times this).
+    amplitude_m: Finite,
+    /// Primary wave cycles from the centre line to either free edge.
+    frequency: Finite,
+    /// Time scale of the wave.
+    speed: Finite,
+    material: FlagMaterial,
+});
 object!(Instance {
     instance_id: Id, asset_ref: Id, model: Matrix4, visible: bool,
     material_overrides: Vec<MaterialOverride>,
+    /// Required for flag assets and rejected for every other asset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flag: Option<Flag>,
 });
 
 // Keep common fields on each variant: flatten + deny_unknown_fields is not a

@@ -13,6 +13,8 @@ export class LocalAdDragControls {
   private ads: LocalAd[] = [];
   private selectedId?: string;
   private enabled = false;
+  /** Resize handles show only while the selected ad is unlocked; clicks still select. */
+  private handlesShown = false;
   private frame = 0;
   private drag?: {
     pointerId: number;
@@ -74,6 +76,11 @@ export class LocalAdDragControls {
     this.callbacks.refresh();
   }
 
+  setHandlesVisible(visible: boolean) {
+    this.handlesShown = visible;
+    this.callbacks.refresh();
+  }
+
   setAds(ads: LocalAd[], selectedId?: string) {
     if (this.drag && (selectedId !== this.drag.original.id || !ads.some((ad) => ad.id === selectedId && ad.visible))) this.cancel();
     this.ads = ads;
@@ -82,7 +89,7 @@ export class LocalAdDragControls {
 
   refresh() {
     const ad = this.ads.find((item) => item.id === this.selectedId && item.visible);
-    this.group.visible = Boolean(this.enabled && ad);
+    this.group.visible = Boolean(this.enabled && ad && this.handlesShown);
     if (!ad) return;
     const camera = this.camera();
     camera.updateMatrixWorld();
@@ -112,7 +119,7 @@ export class LocalAdDragControls {
     this.refresh();
     const selected = this.ads.find((ad) => ad.id === this.selectedId && ad.visible);
     const rect = this.canvas.getBoundingClientRect();
-    if (selected) {
+    if (selected && this.handlesShown) {
       let closest = 11, anchor: readonly [number, number] | undefined;
       for (const [index, handle] of this.handles.entries()) {
         if (!handle.visible) continue;

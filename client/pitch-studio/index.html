@@ -40,7 +40,7 @@
             <section id="pitch-ad-workspace" aria-labelledby="pitch-ad-heading">
             <div class="on-section-heading"><div><p class="on-eyebrow">PITCH ADVERTISING</p><h2 id="pitch-ad-heading">球场广告 · 2D / 3D 预览</h2><p class="on-help">俯视图与主看台预览场次广告和本地新增广告，不依赖下方点云。</p></div></div>
             <div class="on-work-grid"><section class="on-card on-preview-card"><div class="on-card-head"><div><h2>俯视图 / 主看台</h2><p class="on-help">右侧可新增 2D 图片广告或 3D 模型广告，并分别上传素材。</p></div><span id="field-size" class="on-badge"></span></div>
-              <div class="on-edit-toolbar" role="toolbar" aria-label="球场编辑工具"><button class="on-button on-undo" type="button" data-undo disabled>↶ 撤销</button><span class="on-help" data-undo-label>没有可撤销的操作</span><button id="toggle-axes" class="on-button" type="button" aria-pressed="true" title="在俯视图显示以球场中心为原点的世界坐标轴（X / Y，米）">坐标轴</button></div>
+              <div class="on-edit-toolbar" role="toolbar" aria-label="球场编辑工具"><button class="on-button on-undo" type="button" data-undo disabled>↶ 撤销</button><button class="on-button on-undo" type="button" data-redo disabled>↷ 重做</button><span class="on-help" data-undo-label>没有可撤销的操作</span><button id="toggle-axes" class="on-button" type="button" aria-pressed="true" title="在俯视图显示以球场中心为原点的世界坐标轴（X / Y，米）">坐标轴</button></div>
               <div id="pitch-mount"><div class="preview">
                 <div class="preview-header"><span>PITCH PREVIEW</span><span id="pointer-coordinates" class="pointer-coordinates"></span><span class="model-badge">球场广告 · 仅本地预览</span></div>
                 <div id="viewport"><div id="loading" class="feed-loading" role="status">正在加载场次广告位…</div></div>
@@ -54,7 +54,7 @@
                 <div class="on-card-head"><div class="on-inspector-title"><span id="inspector-type" class="on-badge"></span><h2 id="inspector-name">广告位属性</h2></div><button id="inspector-lock" class="on-lock-toggle" type="button" aria-pressed="false" title="解锁后才能移动、调整尺寸或缩放（快捷键 L）">🔒 已锁定</button></div>
                 <form id="placement-form" class="on-card-body" novalidate><p id="inspector-state" class="on-help" role="status"></p>
                   <fieldset id="placement-edit-controls" disabled><div id="placement-fields"></div><p id="placement-error" class="on-form-error" role="alert"></p></fieldset>
-                  <div class="on-action-row"><button class="on-button on-undo" type="button" data-undo disabled>↶ 撤销</button><button id="reset-placement" class="on-text-button" type="button" disabled>恢复此点位的场次配置</button></div>
+                  <div class="on-action-row"><button class="on-button on-undo" type="button" data-undo disabled>↶ 撤销</button><button class="on-button on-undo" type="button" data-redo disabled>↷ 重做</button><button id="reset-placement" class="on-text-button" type="button" disabled>恢复此点位的场次配置</button></div>
                 </form></section></div>
               <section id="pitch-local-editor" class="on-card on-local-editor" aria-label="球场本地广告编辑"></section>
             </aside></div>

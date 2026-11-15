@@ -4,10 +4,12 @@ import { offlinePackages, parseOfflinePackage } from '../matches/offline-package
 import { importPlyFile } from '../analysis/ply-import.ts';
 import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
-import { LocalAdRepository, validatePitchAd } from '../placements/local-ad.ts';
+import { LocalAdRepository, validatePitchAd, type LocalAd } from '../placements/local-ad.ts';
+import { localProblem, localRow, sendScope, type LocalRow } from '../placements/placement-list.ts';
+import { glbBounds } from '../placements/local-ad-scene.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import { fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
-import { blendedMaterials, describeScene, sendDescription, sha256, type DescribedAsset } from '../render/render-description.ts';
+import { blendedMaterials, describeScene, sendDescription, sha256, type DescribedAsset, type DescribedLocal } from '../render/render-description.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
 import '../styles/onsite.css';
@@ -51,6 +53,7 @@ const pitchEditor = new LocalAdEditor({
   prefix: 'pitch-',
   space: 'pitch',
   update: async (ads, selectedId) => {
+    renderLocalLists();
     await Promise.all([engine?.setLocalAds(ads, selectedId), resultReview.setPitchAds(ads)]);
   },
   pick: () => {
@@ -60,13 +63,15 @@ const pitchEditor = new LocalAdEditor({
   cancelPick: () => engine?.cancelGroundRectangle(),
   validate: (ad) => validatePitchAd(ad, current().match.field),
   error: showError,
-  recordUndo: (label, restore) => undo.push({ label, restore }),
+  recordUndo: (label, restore, reapply) => undo.push({ label, restore, reapply }),
+  send: () => sendToRenderer(),
 });
 const localEditor = new LocalAdEditor({
   root: $('#cloud-local-editor'),
   prefix: '',
   space: 'cloud',
   update: async (ads, selectedId) => {
+    renderLocalLists();
     await Promise.all([cloudEngine?.setLocalAds(ads, selectedId), resultReview.setLocalAds(ads, analysisResults.get(currentId)?.aligned ?? false)]);
   },
   pick: () => {
@@ -74,8 +79,10 @@ const localEditor = new LocalAdEditor({
     catch (error) { localEditor.cancelDrawing(); showError(error); }
   },
   cancelPick: () => { cloudEngine?.cancelPlanePick(); cloudEngine?.cancelAdDrag(); },
-  manipulationAvailable: (available) => cloudEngine?.setAdEditingEnabled(available),
+  manipulationAvailable: (available, locked) => cloudEngine?.setAdEditingEnabled(available, locked),
   error: showError,
+  recordUndo: (label, restore, reapply) => undo.push({ label, restore, reapply }),
+  send: () => sendToRenderer(),
 });
 resultReview.onChange = () => renderAnalysis();
 
@@ -188,9 +195,61 @@ function renderLists() {
     </button>
   </div>`;
   }).join('');
-  $('#preview-placement-list').innerHTML = markup;
+  $('#preview-placement-list').innerHTML = `<p class="on-list-group" data-fusion-heading hidden>Fusion 场次广告位</p>${markup}`;
   $('#adjust-placement-list').innerHTML = `<label class="on-editor-select">选择广告位<select id="editor-placement-select">${record.draft.map((slot) => `<option value="${escapeHTML(slot.id)}" ${slot.id === selectedId ? 'selected' : ''}>${slot.type} · ${escapeHTML(slot.name)}${hidden.has(slot.id) ? '（已停用）' : ''}</option>`).join('')}</select></label>`;
-  $('#placement-count').textContent = String(record.draft.length);
+  renderLocalLists();
+}
+
+/** The match's local placements of both spaces, in the order the renderer receives them. */
+const matchLocals = (): LocalAd[] => [...pitchEditor.allAds, ...localEditor.allAds];
+const loadedCloud = () => {
+  const analysis = analysisResults.get(currentId);
+  return analysis && { id: analysis.cloud.id, aligned: analysis.aligned };
+};
+
+function localRowMarkup(row: LocalRow, toggle: boolean) {
+  const key = escapeHTML(`${row.space}:${row.id}`);
+  return `<div class="on-slot-row ${row.visible ? '' : 'is-hidden'}" data-local-row="${key}">
+    <button type="button" class="on-slot" data-local-select="${key}" title="${toggle ? '在编辑器中编辑' : '返回广告位预览编辑'}">
+      <span class="on-badge ${row.type === 'flag' ? 'flag' : row.type === '3D' ? 'amber' : ''}">${row.badge}</span><span><strong>${escapeHTML(row.name)}</strong><small>${row.place} · ${row.size}${row.detail ? `<br />${row.detail}` : ''}<br />素材：${escapeHTML(row.material)}${row.problem ? `<br /><em class="on-slot-problem">无法发送：${row.problem}</em>` : ''}</small></span>
+    </button>
+    ${toggle ? `<button type="button" class="on-visibility-toggle" role="switch" aria-checked="${row.visible}" aria-label="启用 ${escapeHTML(row.name)}" title="${row.visible ? '停用：不在预览和渲染器中显示' : '启用'}" data-local-visibility="${key}">
+      <span class="on-toggle-track" aria-hidden="true"></span><span>${row.visible ? '启用' : '停用'}</span></button>` : ''}
+  </div>`;
+}
+
+/**
+ * The local placements follow the Fusion placements in the overall list, grouped
+ * by space; the adjust tab shows them read-only with a jump to editing.
+ */
+function renderLocalLists() {
+  const record = current();
+  if (!record) return;
+  const rows = matchLocals().map((ad) => localRow(ad, loadedCloud()));
+  const pitch = rows.filter((row) => row.space === 'pitch'), cloud = rows.filter((row) => row.space === 'cloud');
+  const group = (title: string, items: LocalRow[], toggle: boolean) =>
+    items.length ? `<p class="on-list-group">${title}</p>${items.map((row) => localRowMarkup(row, toggle)).join('')}` : '';
+  for (const [list, toggle] of [['#preview-placement-list', true], ['#adjust-placement-list', false]] as const) {
+    const container = $(list);
+    container.querySelector('[data-local-list]')?.remove();
+    container.insertAdjacentHTML('beforeend', `<div data-local-list>${group('球场本地', pitch, toggle)}${group('点云本地', cloud, toggle)}</div>`);
+  }
+  $('#preview-placement-list').querySelector('[data-fusion-heading]')?.toggleAttribute('hidden', !rows.length);
+  $('#placement-count').textContent = `${record.draft.length + rows.length}${rows.length ? `（Fusion ${record.draft.length} · 球场本地 ${pitch.length} · 点云本地 ${cloud.length}）` : ''}`;
+  renderRendererBars();
+}
+
+/** Selects a local placement in its own editor, on the preview tab, and brings that editor into view. */
+function selectLocal(key: string) {
+  const [space, id] = key.split(/:(.*)/s), editor = space === 'pitch' ? pitchEditor : localEditor;
+  if (activeTab !== 'preview') routeToTab('preview');
+  // Wait for the tab switch so the editor can be scrolled into view.
+  setTimeout(() => {
+    void editor.selectFromList(id).then((problem) => {
+      if (problem) { showError(new Error(problem)); return; }
+      $(space === 'pitch' ? '#pitch-local-editor' : '#cloud-local-editor').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+  }, 50);
 }
 
 const metres = (value: number) => String(Math.round(value * 1000) / 1000);
@@ -294,10 +353,14 @@ function setUnlocked(id?: string) {
 }
 
 function renderUndo() {
-  const label = undo.label;
+  const label = undo.label, redoLabel = undo.redoLabel;
   document.querySelectorAll<HTMLButtonElement>('[data-undo]').forEach((button) => {
     button.disabled = !undo.canUndo;
     button.title = label ? `撤销：${label}（Ctrl+Z）` : '没有可撤销的操作';
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-redo]').forEach((button) => {
+    button.disabled = !undo.canRedo;
+    button.title = redoLabel ? `重做：${redoLabel}（Ctrl+Shift+Z / Ctrl+Y）` : '没有可重做的操作';
   });
   document.querySelectorAll('[data-undo-label]').forEach((element) => { element.textContent = label ? `上一步：${label}` : '没有可撤销的操作'; });
 }
@@ -305,6 +368,12 @@ function renderUndo() {
 async function undoLast() {
   clearError();
   try { await undo.undo(); }
+  catch (error) { showError(error); }
+}
+
+async function redoLast() {
+  clearError();
+  try { await undo.redo(); }
   catch (error) { showError(error); }
 }
 
@@ -377,7 +446,7 @@ function renderAnalysis() {
   }
   cloudEngine?.setCloud(result?.cloud, result?.pointSize ?? 0.15);
   pitchEditor.setAvailable(ready);
-  renderRendererBars();
+  renderLocalLists();
   localEditor.setCloud(result?.cloud.id);
   localEditor.setAvailable(Boolean(current() && result && cloudEngine?.isAvailable));
   void resultReview.setLocalAds(localEditor.ads, result?.aligned ?? false).catch(showError);
@@ -461,15 +530,17 @@ function togglePlacementVisibility(id: string) {
   }
 }
 
-/** Puts the draft and enabled state of `before` back when undone. */
+/** Puts the draft and enabled state of `before` back when undone, and the current ones when redone. */
 function recordUndo(label: string, before: MatchRecord) {
-  undo.push({ label, restore: () => {
+  const after = current();
+  const put = (state: MatchRecord) => {
     const record = current();
-    replaceRecord({ ...record, draft: before.draft, hiddenPlacementIds: before.hiddenPlacementIds, updatedAt: new Date().toISOString() });
-    if (before.hiddenPlacementIds?.includes(unlockedId)) unlockedId = undefined;
+    replaceRecord({ ...record, draft: state.draft, hiddenPlacementIds: state.hiddenPlacementIds, updatedAt: new Date().toISOString() });
+    if (state.hiddenPlacementIds?.includes(unlockedId)) unlockedId = undefined;
     renderRecord();
     syncEngine();
-  } });
+  };
+  undo.push({ label, restore: () => put(before), reapply: () => put(after) });
 }
 
 function commitSlot(slot: unknown, label: string) {
@@ -505,6 +576,7 @@ async function ensureEngine() {
         $('#engine-status').textContent = error.message;
         showError(error);
       });
+      engine.onLocalAdSelect = (id) => { pitchEditor.selectAd(id); };
       return engine;
     }).catch((error) => { enginePromise = undefined; throw error; });
   }
@@ -817,6 +889,14 @@ document.addEventListener('click', (event) => {
   if (deletion) { void deleteMatch(deletion.dataset.deleteMatch); return; }
   const visibility = event.target.closest<HTMLElement>('[data-visibility-id]');
   if (visibility) { togglePlacementVisibility(visibility.dataset.visibilityId); return; }
+  const localVisibility = event.target.closest<HTMLElement>('[data-local-visibility]');
+  if (localVisibility) {
+    const [space, id] = localVisibility.dataset.localVisibility.split(/:(.*)/s);
+    void (space === 'pitch' ? pitchEditor : localEditor).toggleVisible(id);
+    return;
+  }
+  const local = event.target.closest<HTMLElement>('[data-local-select]');
+  if (local) { selectLocal(local.dataset.localSelect); return; }
   const tab = event.target.closest<HTMLElement>('[data-tab],[data-go-tab]');
   if (tab) routeToTab(tab.dataset.tab ?? tab.dataset.goTab);
   const slot = event.target.closest<HTMLElement>('[data-select-id]');
@@ -847,6 +927,7 @@ $<HTMLButtonElement>('#reset-placement').addEventListener('click', () => {
 });
 $<HTMLButtonElement>('#inspector-lock').addEventListener('click', () => setUnlocked(unlockedId === selectedId ? undefined : selectedId));
 document.querySelectorAll('[data-undo]').forEach((button) => button.addEventListener('click', () => { void undoLast(); }));
+document.querySelectorAll('[data-redo]').forEach((button) => button.addEventListener('click', () => { void redoLast(); }));
 $<HTMLButtonElement>('#toggle-axes').addEventListener('click', () => {
   axesVisible = !axesVisible;
   $('#toggle-axes').setAttribute('aria-pressed', String(axesVisible));
@@ -858,6 +939,9 @@ document.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
     event.preventDefault();
     void undoLast();
+  } else if ((event.ctrlKey || event.metaKey) && ((event.shiftKey && event.key.toLowerCase() === 'z') || event.key.toLowerCase() === 'y')) {
+    event.preventDefault();
+    void redoLast();
   } else if (!event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'l' && !$<HTMLButtonElement>('#inspector-lock').disabled) {
     event.preventDefault();
     $('#inspector-lock').click();
@@ -988,13 +1072,18 @@ let rendererMessage = '';
 let rendererFailed = false;
 let rendererMatchId: string;
 
-/** Why the current draft cannot be sent yet, or undefined when it can. */
-function rendererBlocker() {
+/**
+ * What a send would include now. Fusion placements need the offline ZIP that
+ * chr-server reads from its path; flags need neither.
+ */
+function rendererScope() {
   const record = current();
-  if (!record || record.match.mode !== 'offline' || !record.match.offlinePackageId)
-    return '仅离线 ZIP 导入的场次可以发送到渲染器。';
-  if (enginePending || engineReadyMatchId !== record.match.id) return '等待球场预览加载素材后可发送到渲染器…';
-  if (!isServerPath(rendererPaths[0].value)) return '填写 chr-server 可读取的离线 ZIP 路径（--asset-root 之内）后可发送。';
+  if (!record) return { fusion: false, blocker: '请先选择比赛场次。', note: '' };
+  const fusionProblem = record.match.mode !== 'offline' || !record.match.offlinePackageId ? 'Fusion 广告位仅能从离线 ZIP 导入的场次发送'
+    : !isServerPath(rendererPaths[0].value) ? '未填写 chr-server 可读取的离线 ZIP 路径（--asset-root 之内）' : undefined;
+  const waiting = enginePending || engineReadyMatchId !== record.match.id ? '等待球场预览加载素材后可发送到渲染器…' : undefined;
+  const locals = matchLocals().filter((ad) => !localProblem(ad, loadedCloud())).length;
+  return sendScope({ fusionProblem, waiting, placements: record.draft.length, locals });
 }
 
 function renderRendererBars() {
@@ -1005,13 +1094,14 @@ function renderRendererBars() {
     const remembered = record?.match.offlinePackageId ? packagePaths()[record.match.offlinePackageId] ?? '' : '';
     for (const input of rendererPaths) input.value = remembered;
   }
-  const blocker = rendererBlocker();
+  const { blocker, note } = rendererScope();
   for (const bar of rendererBars) {
     bar.querySelector<HTMLButtonElement>('[data-renderer-send]').disabled = Boolean(rendererBusy || blocker);
     bar.querySelector<HTMLButtonElement>('[data-renderer-export]').disabled = Boolean(rendererBusy || blocker);
     const status = bar.querySelector('[data-renderer-status]');
+    const message = rendererMessage && note && !rendererMessage.includes(note) ? `${rendererMessage} ${note}` : rendererMessage || note;
     status.textContent = rendererBusy
-      || (blocker ?? (rendererMessage || '把当前广告位草稿（含启用状态）发送给 chr-server，替换其场景；发送前会检查 chr-server 和渲染 worker 是否就绪。'));
+      || (blocker ?? (message || '把全部广告位（Fusion、球场本地、点云本地和旗帜，含启用状态）发送给 chr-server，替换其场景；发送前会检查 chr-server 和渲染 worker 是否就绪。'));
     status.classList.toggle('on-form-error', !rendererBusy && !blocker && rendererFailed);
   }
 }
@@ -1022,14 +1112,56 @@ const MATERIAL_ENTRY: Record<string, { kind: DescribedAsset['kind']; extension: 
   'image/jpeg': { kind: 'image_quad', extension: '.jpg' },
 };
 
-/** The current draft as a render description scene, with assets read from the offline package. */
+/**
+ * The match's local placements that the renderer can draw, and why the others are
+ * left out. A point-cloud placement is in pitch coordinates only while its cloud
+ * is loaded and confirmed to share them. Each material is hashed (and a GLB
+ * measured) as the server holds it now, once per path.
+ */
+async function renderLocals() {
+  const locals: DescribedLocal[] = [], skipped: string[] = [], masked: string[] = [];
+  const files = new Map<string, Promise<Omit<DescribedLocal, 'ad'>>>();
+  const read = async (ad: LocalAd): Promise<Omit<DescribedLocal, 'ad'>> => {
+    const file = await fetchServerFile(ad.materialPath);
+    if (ad.type !== '3D') return { sha256: await sha256(file) };
+    const blended = blendedMaterials(new Uint8Array(await file.arrayBuffer()));
+    if (blended.length) masked.push(`${ad.name}（${blended.join('、')}）`);
+    return { sha256: await sha256(file), bounds: await glbBounds(file), ...(blended.length ? { blendAs: 'mask' as const } : {}) };
+  };
+  for (const ad of matchLocals()) {
+    const problem = localProblem(ad, loadedCloud());
+    if (problem) { skipped.push(`${ad.name}（${problem}）`); continue; }
+    const key = `${ad.type === '3D' ? 'glb' : 'image'}:${ad.materialPath}`;
+    if (!files.has(key)) files.set(key, read(ad));
+    try { locals.push({ ad, ...await files.get(key) }); }
+    catch (error) { throw new Error(`读取“${ad.name}”的素材 ${ad.materialPath} 失败：${error instanceof Error ? error.message : String(error)}`); }
+  }
+  return { locals, masked, skipped: skipped.length ? ` 未发送的本地广告位：${skipped.join('；')}。` : '' };
+}
+
+/** Asks to save typed edits first, so a send never misses them; throws when the operator declines. */
+async function saveLocalEdits() {
+  for (const editor of [pitchEditor, localEditor]) {
+    const name = editor.unsavedChanges;
+    if (!name) continue;
+    if (!window.confirm(`“${name}”有未保存的修改。先保存再继续？`))
+      throw new Error(`“${name}”有未保存的修改：请先点击“保存属性”，或用“保存并发送到渲染器”。`);
+    if (!await editor.save()) throw new Error(`“${name}”的修改未能保存，已停止。`);
+  }
+}
+
+/**
+ * The current draft as a render description scene: the Fusion placements with
+ * assets read from the offline package when it can be sent, and the local placements.
+ */
 async function renderScene() {
-  const record = current();
-  if (rendererBlocker()) throw new Error(rendererBlocker());
-  const packagePath = serverPath(rendererPaths[0].value);
+  const record = current(), scope = rendererScope();
+  if (scope.blocker) throw new Error(scope.blocker);
+  await saveLocalEdits();
+  const packagePath = scope.fusion ? serverPath(rendererPaths[0].value) : '';
   const assets = new Map<string, DescribedAsset>();
   const masked: string[] = [];
-  for (const slot of record.draft) {
+  for (const slot of scope.fusion ? record.draft : []) {
     if (!slot.asset || assets.has(slot.asset.id)) continue;
     const entry = MATERIAL_ENTRY[slot.asset.contentType];
     if (!entry) throw new Error(`The renderer cannot draw ${slot.asset.contentType} material ${slot.asset.name}.`);
@@ -1039,13 +1171,15 @@ async function renderScene() {
     assets.set(slot.asset.id, { kind: entry.kind, entry: `assets/${slot.asset.id}${entry.extension}`, sha256: await sha256(blob),
       ...(blended.length ? { blendAs: 'mask' as const } : {}) });
   }
-  return { masked, scene: describeScene({ field: record.match.field, slots: record.draft, hidden: new Set(record.hiddenPlacementIds),
-    geometry: engine.renderGeometry(), assets, packagePath }) };
+  const local = await renderLocals();
+  return { masked: [...masked, ...local.masked], skipped: (scope.note ? ` ${scope.note}` : '') + local.skipped, fusion: scope.fusion,
+    scene: describeScene({ field: record.match.field, slots: scope.fusion ? record.draft : [], hidden: new Set(record.hiddenPlacementIds),
+      geometry: scope.fusion ? engine.renderGeometry() : new Map(), assets, packagePath, locals: local.locals }) };
 }
 
-/** Runs one renderer action at a time; a second click while it runs is ignored. */
+/** Runs one renderer action at a time and resolves with its status; a second click while it runs is ignored. */
 async function rendererAction(busy: string, action: () => Promise<string>, failure: string) {
-  if (rendererBusy) return;
+  if (rendererBusy) return { text: `另一个渲染器操作正在进行：${rendererBusy}`, failed: true };
   rendererBusy = busy;
   renderRendererBars();
   rendererFailed = false;
@@ -1055,27 +1189,29 @@ async function rendererAction(busy: string, action: () => Promise<string>, failu
     rendererMessage = `${failure}：${error instanceof Error ? error.message : String(error)}`;
   }
   finally { rendererBusy = ''; renderRendererBars(); }
+  return { text: rendererMessage, failed: rendererFailed };
 }
 
 const sendToRenderer = () => rendererAction('正在发送到 chr-server…', async () => {
   const record = current();
-  const { scene, masked } = await renderScene();
+  const { scene, masked, skipped, fusion } = await renderScene();
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
   const { loaded, sdi } = await sendDescription(url, scene);
-  localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [record.match.offlinePackageId]: serverPath(rendererPaths[0].value) }));
-  return `已发送 ${scene.instances.length} 个广告位到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
-    + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '');
+  if (fusion) localStorage.setItem(PACKAGE_PATHS_KEY, JSON.stringify({ ...packagePaths(), [record.match.offlinePackageId]: serverPath(rendererPaths[0].value) }));
+  return `已发送 ${scene.instances.length} 个广告位（含本地和旗帜）到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}）。`
+    + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '') + skipped;
 }, '发送失败');
 
 const exportDescription = () => rendererAction('正在生成渲染描述…', async () => {
   const record = current();
-  const url = URL.createObjectURL(new Blob([JSON.stringify({ scene: (await renderScene()).scene }, null, 2)], { type: 'application/json' }));
+  const { scene, skipped } = await renderScene();
+  const url = URL.createObjectURL(new Blob([JSON.stringify({ scene }, null, 2)], { type: 'application/json' }));
   const link = document.createElement('a');
   link.href = url;
   link.download = `render-scene-${record.match.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return '已导出渲染描述的 scene 部分；启动文件还需要 camera 部分。';
+  return `已导出渲染描述的 scene 部分；启动文件还需要 camera 部分。${skipped}`;
 }, '导出失败');
 
 for (const bar of rendererBars) {

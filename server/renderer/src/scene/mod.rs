@@ -3,6 +3,7 @@
 //! Handles are process-local and scene-scoped, never protocol/resource IDs.
 
 mod appearance;
+mod flag;
 mod geometry;
 mod storage;
 mod texture;
@@ -17,6 +18,7 @@ use thiserror::Error;
 pub use appearance::{
     AreaShape, EnvironmentMap, Light, Lighting, PbrMaterial, ShadowMode, SkyLight,
 };
+pub use flag::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagShading};
 pub use geometry::{Aabb, MeshAttributes, MeshData, ModelMatrix};
 use storage::{Key, Store};
 pub use texture::{Filter, MaterialMaps, TextureData, TextureSampler, Wrap};
@@ -53,6 +55,10 @@ pub enum SceneError {
     InvalidLighting,
     #[error("environment dimensions and finite nonnegative RGB radiance must agree")]
     InvalidEnvironment,
+    #[error("flag size must be positive and its motion finite and nonnegative")]
+    InvalidFlag,
+    #[error("flag motion requires the flag grid mesh")]
+    FlagMesh,
     #[error("scene identity or revision exhausted")]
     IdentityExhausted,
 }
@@ -74,6 +80,7 @@ pub struct Instance {
     model: ModelMatrix,
     bounds: Aabb,
     visible: bool,
+    flag: Option<Flag>,
 }
 
 impl Instance {
@@ -95,6 +102,20 @@ impl Instance {
 
     pub fn visible(&self) -> bool {
         self.visible
+    }
+
+    pub fn flag(&self) -> Option<Flag> {
+        self.flag
+    }
+
+    /// World bounds of the geometry, or of every phase of a flag.
+    fn bounds_of(
+        mesh: &MeshData,
+        flag: Option<Flag>,
+        model: ModelMatrix,
+    ) -> Result<Aabb, SceneError> {
+        flag.map_or(Ok(mesh.bounds()), Flag::local_bounds)?
+            .transformed(model)
     }
 }
 
@@ -264,6 +285,7 @@ impl Scene {
             model,
             bounds: geometry.bounds().transformed(model)?,
             visible: true,
+            flag: None,
         };
         self.update(|state| Ok(InstanceId(state.instances.insert(instance))))
     }
@@ -274,12 +296,11 @@ impl Scene {
 
     pub fn set_model(&mut self, id: InstanceId, model: ModelMatrix) -> Result<(), SceneError> {
         let mut instance = self.state.instances.get(id.0)?.as_ref().clone();
-        instance.bounds = self
-            .state
-            .meshes
-            .get(instance.mesh.0)?
-            .bounds()
-            .transformed(model)?;
+        instance.bounds = Instance::bounds_of(
+            self.state.meshes.get(instance.mesh.0)?,
+            instance.flag,
+            model,
+        )?;
         instance.model = model;
         self.update(|state| state.instances.replace(id.0, instance))
     }
@@ -287,6 +308,22 @@ impl Scene {
     pub fn set_visible(&mut self, id: InstanceId, visible: bool) -> Result<(), SceneError> {
         let mut instance = self.state.instances.get(id.0)?.as_ref().clone();
         instance.visible = visible;
+        self.update(|state| state.instances.replace(id.0, instance))
+    }
+
+    /// Waves an instance of [`MeshData::flag_grid`] as `flag`; `None` restores the
+    /// grid's flat unit square.
+    pub fn set_flag(&mut self, id: InstanceId, flag: Option<Flag>) -> Result<(), SceneError> {
+        let mut instance = self.state.instances.get(id.0)?.as_ref().clone();
+        let mesh = self.state.meshes.get(instance.mesh.0)?;
+        if let Some(flag) = flag {
+            flag.validate()?;
+            if !mesh.is_flag_grid() {
+                return Err(SceneError::FlagMesh);
+            }
+        }
+        instance.bounds = Instance::bounds_of(mesh, flag, instance.model)?;
+        instance.flag = flag;
         self.update(|state| state.instances.replace(id.0, instance))
     }
 
