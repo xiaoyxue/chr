@@ -44,7 +44,7 @@ not frame-rate promises.
 | Waving flags | `scene::flag` unit tests (pinned centre, normals, bounds, phase wrap), `flag::tests` compute readback against the CPU reference, `flag_gpu` (media time, shadow redraw, simple and PBR looks), runtime `description` |
 | Distortion | `distortion_gpu` (identity, sub-0.3 px markers for both models, unwarped footage, non-invertible pixels, guard-band budget, output resizing), unit tests in `distortion`, CPU reference `distortion_reference` |
 | Depth and composition | `composition_gpu`, `distortion_gpu`, `shadow_catcher_gpu`, `decal_gpu` |
-| Direct lights, PBR | `pbr_gpu` |
+| Direct lights, PBR | `pbr_gpu`, `texture_filtering_gpu` (anisotropic detail at grazing angles) |
 | Area emitters | `area_light_gpu` (pinned candidate values, reference within profile, sidedness, size/power, trajectory continuity); evaluation in `area-light-evaluation.md` |
 | Shadows, PCF, PCSS, cascades, cubemaps | `shadow_gpu`, `area_shadow_gpu`, `shadow_catcher_gpu` (spot near-plane regression) |
 | Sky (unoccluded IBL) | `environment_gpu`, `exr_import` |

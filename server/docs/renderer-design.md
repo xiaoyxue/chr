@@ -52,7 +52,8 @@ height-correlated Smith visibility and Burley diffuse. It binds base-colour,
 metallic-roughness, normal and emissive maps, authored or derivative tangent
 frames, vertex colours, alpha masks and double-sided/mirrored surfaces.
 Colour textures and their mipmaps are filtered in linear light; data maps stay
-linear. Occlusion maps are retained for indirect lighting and do not darken
+linear. Trilinear samplers also filter anisotropically (16x), so ground ads seen at
+a broadcast camera's grazing angle keep their detail across the view. Occlusion maps are retained for indirect lighting and do not darken
 punctual direct light. No implicit ambient fill or fixed light rig is added.
 
 Scene directional/point/spot inputs feed unshadowed direct illumination.

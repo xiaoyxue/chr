@@ -262,6 +262,10 @@ impl MaterialMapCache {
             Filter::Linear => wgpu::FilterMode::Linear,
             Filter::Nearest => wgpu::FilterMode::Nearest,
         };
+        // wgpu accepts anisotropy only when every filter is linear.
+        let trilinear = [Some(config.mag), Some(config.min), config.mip]
+            .into_iter()
+            .all(|filter| filter == Some(Filter::Linear));
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: address(config.wrap_u),
             address_mode_v: address(config.wrap_v),
@@ -276,6 +280,9 @@ impl MaterialMapCache {
             } else {
                 0.0
             },
+            // Ground ads are seen at grazing angles; an isotropic footprint picks the
+            // mip of the compressed screen axis and blurs the other one.
+            anisotropy_clamp: if trilinear { MAX_ANISOTROPY } else { 1 },
             ..Default::default()
         });
         Ok(BoundTexture {
@@ -285,6 +292,9 @@ impl MaterialMapCache {
         })
     }
 }
+
+/// Largest anisotropy wgpu supports; trilinear material samplers use it.
+const MAX_ANISOTROPY: u16 = 16;
 
 pub(crate) fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
