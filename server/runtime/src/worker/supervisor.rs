@@ -6,17 +6,18 @@
 //! ```
 //!
 //! Nothing here blocks longer than the caller's deadline: a request that misses it
-//! stays outstanding in the worker and its late completion only frees its slot.
+//! stays outstanding in the worker and its late completion only returns its credit.
+//! At most [`CREDITS`] requests are outstanding, so a slow or stopped worker holds
+//! a bounded number of frames.
 //!
 //! Assets registered at runtime ([`WorkerAssets`]) reach a worker in its `hello`;
 //! when they change, the current worker is replaced at once, without backoff.
 
 use std::{
     collections::VecDeque,
-    io::BufReader,
-    path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex, mpsc},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -25,9 +26,13 @@ use chr_common::{
     methods::render_worker::{WorkerState, WorkerStatus},
     scene_frame as w,
 };
-use chr_shm::{Layout, Read, Reader, SlotHeader, Writer};
+use serde::{Serialize, de::DeserializeOwned};
 
-use super::protocol::{self, Output, RING_SLOTS, Reply, Request, VERSION, WorkerProgram};
+use super::{
+    protocol::{CREDITS, Output, Reply, Request, VERSION, WorkerProgram},
+    transport::{Channel, Event, Incoming, SharedPixels},
+};
+use crate::frame_resources::Pixels;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -44,10 +49,8 @@ pub struct WorkerConfig {
     pub program: WorkerProgram,
     pub runtime_id: w::Id,
     pub output: Output,
-    /// Capacity of one input slot; zero for the triangle, which has no input.
-    pub input_bytes: u64,
-    /// Private directory for the two rings; removed with the supervisor.
-    pub ring_dir: PathBuf,
+    /// Private directory for the worker's two sockets; removed with the supervisor.
+    pub socket_dir: PathBuf,
     /// The oldest outstanding request may be this old before the worker is killed.
     pub hang: Duration,
     /// Assets every worker registers after installing its program.
@@ -99,8 +102,8 @@ pub fn status_handle() -> StatusHandle {
 pub enum Miss {
     /// No ready worker.
     NotReady,
-    /// Every ring slot is held by an outstanding request.
-    NoSlot,
+    /// Every credit is held by an outstanding request.
+    NoCredit,
     /// The worker did not finish before the deadline.
     Deadline,
     /// The worker reported or caused a failure.
@@ -110,13 +113,8 @@ pub enum Miss {
 pub struct Supervisor {
     config: WorkerConfig,
     status: StatusHandle,
-    input: Option<Writer>,
-    input_path: PathBuf,
-    output_path: PathBuf,
     state: State,
-    /// Request ID holding each slot.
-    slots: [Option<u64>; RING_SLOTS as usize],
-    /// Outstanding requests in send order, with their send time.
+    /// Outstanding requests in send order, with their send time; each holds a credit.
     outstanding: VecDeque<(u64, Instant)>,
     next_id: u64,
     backoff: Duration,
@@ -127,12 +125,11 @@ pub struct Supervisor {
 
 enum State {
     Starting {
-        worker: Running,
+        worker: Running<Reply>,
         since: Instant,
     },
     Ready {
-        worker: Running,
-        output: Reader,
+        worker: Running<Reply>,
         since: Instant,
     },
     Backoff {
@@ -140,48 +137,17 @@ enum State {
     },
 }
 
-struct Running {
-    child: Child,
-    stdin: ChildStdin,
-    replies: mpsc::Receiver<Event>,
-}
-
-enum Event {
-    Reply(Reply),
-    Closed(String),
-}
-
 impl Supervisor {
-    /// Creates the rings; the first worker starts on the first [`Self::maintain`].
+    /// Creates the socket directory; the first worker starts on the first
+    /// [`Self::maintain`].
     pub fn new(config: WorkerConfig, status: StatusHandle) -> Result<Self, Error> {
-        let mut dir = std::fs::DirBuilder::new();
-        dir.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
-        dir.create(&config.ring_dir)?;
-        let input_path = config.ring_dir.join("input.ring");
-        let output_path = config.ring_dir.join("output.ring");
-        let input = (config.input_bytes > 0)
-            .then(|| {
-                Writer::create(
-                    &input_path,
-                    Layout {
-                        slot_count: RING_SLOTS,
-                        slot_bytes: config.input_bytes,
-                    },
-                )
-            })
-            .transpose()?;
+        create_private_dir(&config.socket_dir)?;
         Ok(Self {
             config,
             status,
-            input,
-            input_path,
-            output_path,
             state: State::Backoff {
                 until: Instant::now(),
             },
-            slots: [None; RING_SLOTS as usize],
             outstanding: VecDeque::new(),
             next_id: 0,
             backoff: FIRST_BACKOFF,
@@ -202,21 +168,25 @@ impl Supervisor {
         }
         let now = Instant::now();
         let mut spawn = false;
-        let reap = match &self.state {
+        let reap = match &mut self.state {
             State::Backoff { until } => {
                 spawn = now >= *until;
                 None
             }
-            State::Starting { since, .. } => (now.duration_since(*since) > STARTUP_TIMEOUT)
-                .then(|| "the worker did not become ready in time".to_owned()),
-            State::Ready { since, .. } => {
+            State::Starting { worker, since } => worker.check().or_else(|| {
+                (now.duration_since(*since) > STARTUP_TIMEOUT)
+                    .then(|| "the worker did not become ready in time".to_owned())
+            }),
+            State::Ready { worker, since } => {
                 if now.duration_since(*since) > STABLE {
                     self.backoff = FIRST_BACKOFF;
                 }
-                self.outstanding
-                    .front()
-                    .is_some_and(|(_, sent)| now.duration_since(*sent) > self.config.hang)
-                    .then(|| format!("the worker hung for more than {:?}", self.config.hang))
+                worker.check().or_else(|| {
+                    self.outstanding
+                        .front()
+                        .is_some_and(|(_, sent)| now.duration_since(*sent) > self.config.hang)
+                        .then(|| format!("the worker hung for more than {:?}", self.config.hang))
+                })
             }
         };
         if let Some(reason) = reap {
@@ -238,40 +208,32 @@ impl Supervisor {
         self.spawn();
     }
 
-    /// Renders one program frame; `pixels` is copied into the input ring before the
-    /// request is sent, so the caller may release its input afterwards.
+    /// Renders one program frame. Shared `pixels` go to the worker as they are;
+    /// owned ones are first copied into shared memory.
     pub fn render(
         &mut self,
         image: &w::ImageDescription,
-        pixels: &[u8],
+        pixels: &Pixels,
         frame: &w::FrameInput,
         scene: &w::SceneSnapshot,
         deadline: Instant,
     ) -> Result<Vec<u8>, Miss> {
-        let (id, slot) = self.reserve()?;
-        let input = self
-            .input
-            .as_mut()
-            .ok_or(Miss::Failed("no input ring".into()))?;
-        let header = SlotHeader {
-            index: id,
-            meta: [0; 4],
+        let id = self.reserve()?;
+        let memory = match pixels {
+            Pixels::Shared(shared) => shared.memory(),
+            Pixels::Owned(bytes) => SharedPixels::copy_from(bytes)
+                .map_err(|error| Miss::Failed(error.to_string()))?
+                .memory(),
         };
-        if let Err(error) = input.write(slot, header, pixels) {
-            self.slots[slot as usize] = None;
-            return Err(Miss::Failed(error.to_string()));
-        }
         self.send(
             id,
-            slot,
             &Request::Render {
                 id,
-                input_slot: slot,
-                output_slot: slot,
                 image: image.clone(),
                 frame: frame.clone(),
                 scene: Box::new(scene.clone()),
             },
+            Some(memory),
             deadline,
         )
     }
@@ -283,71 +245,62 @@ impl Supervisor {
         angle_rad: f64,
         deadline: Instant,
     ) -> Result<Vec<u8>, Miss> {
-        let (id, slot) = self.reserve()?;
+        let id = self.reserve()?;
         self.send(
             id,
-            slot,
             &Request::Triangle {
                 id,
-                output_slot: slot,
                 frame,
                 angle_rad,
             },
+            None,
             deadline,
         )
     }
 
-    fn reserve(&mut self) -> Result<(u64, u32), Miss> {
+    fn reserve(&mut self) -> Result<u64, Miss> {
         self.maintain();
         if !self.is_ready() {
             return Err(Miss::NotReady);
         }
-        let slot = self
-            .slots
-            .iter()
-            .position(Option::is_none)
-            .ok_or(Miss::NoSlot)?;
+        if self.outstanding.len() >= CREDITS {
+            return Err(Miss::NoCredit);
+        }
         let id = self.next_id;
         self.next_id += 1;
-        self.slots[slot] = Some(id);
-        Ok((id, slot as u32))
+        Ok(id)
     }
 
     fn send(
         &mut self,
         id: u64,
-        slot: u32,
         request: &Request,
+        payload: Option<gstreamer::Memory>,
         deadline: Instant,
     ) -> Result<Vec<u8>, Miss> {
         let State::Ready { worker, .. } = &mut self.state else {
             unreachable!("reserved while ready");
         };
-        if let Err(error) = protocol::write_line(&mut worker.stdin, request) {
+        if let Err(error) = worker.channel.send(request, payload) {
             self.reap(format!("cannot send to the worker: {error}"));
             return Err(Miss::Failed(error.to_string()));
         }
         self.outstanding.push_back((id, Instant::now()));
         loop {
             let event = match &self.state {
-                State::Ready { worker, .. } => {
-                    match worker
-                        .replies
-                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    {
-                        Ok(event) => event,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            self.status().deadline_misses += 1;
-                            return Err(Miss::Deadline);
-                        }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            Event::Closed("the worker closed its output".into())
-                        }
+                State::Ready { worker, .. } => match worker
+                    .channel
+                    .event_timeout(deadline.saturating_duration_since(Instant::now()))
+                {
+                    Some(event) => event,
+                    None => {
+                        self.status().deadline_misses += 1;
+                        return Err(Miss::Deadline);
                     }
-                }
+                },
                 _ => return Err(Miss::Failed("the worker was replaced".into())),
             };
-            if let Some(result) = self.handle(event, Some((id, slot))) {
+            if let Some(result) = self.handle(event, Some(id)) {
                 return result;
             }
         }
@@ -356,88 +309,80 @@ impl Supervisor {
     /// Applies one event. Returns the outcome when it completes `awaited`.
     fn handle(
         &mut self,
-        event: Event,
-        awaited: Option<(u64, u32)>,
+        event: Event<Reply>,
+        awaited: Option<u64>,
     ) -> Option<Result<Vec<u8>, Miss>> {
-        match event {
-            Event::Reply(Reply::Ready { adapter }) => {
+        let incoming = match event {
+            Event::Message(incoming) => incoming,
+            Event::Closed(reason) => {
+                self.reap(reason);
+                return awaited.map(|_| Err(Miss::Failed("the worker exited".into())));
+            }
+        };
+        match &incoming.message {
+            Reply::Ready { adapter } => {
                 let State::Starting { .. } = self.state else {
                     self.reap("unexpected ready".into());
                     return None;
                 };
-                match Reader::open(&self.output_path) {
-                    Ok(output) => {
-                        let State::Starting { worker, .. } = std::mem::replace(
-                            &mut self.state,
-                            State::Backoff {
-                                until: Instant::now(),
-                            },
-                        ) else {
-                            unreachable!()
-                        };
-                        log::info!("render worker {} ready on {adapter}", worker.child.id());
-                        self.state = State::Ready {
-                            worker,
-                            output,
-                            since: Instant::now(),
-                        };
-                        self.status().state = WorkerState::Ready;
-                    }
-                    Err(error) => self.reap(format!("cannot open the worker output ring: {error}")),
-                }
+                let State::Starting { worker, .. } = std::mem::replace(
+                    &mut self.state,
+                    State::Backoff {
+                        until: Instant::now(),
+                    },
+                ) else {
+                    unreachable!()
+                };
+                log::info!("render worker {} ready on {adapter}", worker.child.id());
+                self.state = State::Ready {
+                    worker,
+                    since: Instant::now(),
+                };
+                self.status().state = WorkerState::Ready;
                 None
             }
-            Event::Reply(Reply::Fatal { message }) => {
+            Reply::Fatal { message } => {
                 self.reap(format!("worker failed: {message}"));
                 None
             }
-            Event::Closed(reason) => {
-                self.reap(reason);
-                awaited.map(|_| Err(Miss::Failed("the worker exited".into())))
-            }
-            Event::Reply(Reply::Done { id }) => {
-                let result = (awaited.map(|(awaited, _)| awaited) == Some(id))
-                    .then(|| self.read_output(id, awaited.expect("awaited").1));
-                self.complete(id);
+            Reply::Done { id } => {
+                let result = (awaited == Some(*id)).then(|| self.output(&incoming));
+                self.complete(*id);
                 result
             }
-            Event::Reply(Reply::Failed { id, message }) => {
+            Reply::Failed { id, message } => {
                 log::warn!("render request {id} failed: {message}");
                 self.status().last_error = Some(message.clone());
-                self.complete(id);
-                (awaited.map(|(awaited, _)| awaited) == Some(id))
-                    .then_some(Err(Miss::Failed(message)))
+                self.complete(*id);
+                (awaited == Some(*id)).then(|| Err(Miss::Failed(message.clone())))
             }
         }
     }
 
-    fn read_output(&mut self, id: u64, slot: u32) -> Result<Vec<u8>, Miss> {
-        let State::Ready { output, .. } = &self.state else {
-            return Err(Miss::Failed("no output ring".into()));
-        };
-        let mut uyvy = Vec::new();
-        match output.read(slot, &mut uyvy) {
-            Ok(Read::Frame(header)) if header.index == id => Ok(uyvy),
-            other => Err(Miss::Failed(format!(
-                "output slot {slot} does not hold request {id}: {other:?}"
+    /// The UYVY frame of a `done` reply, copied out so its buffer goes back to
+    /// the worker.
+    fn output(&self, done: &Incoming<Reply>) -> Result<Vec<u8>, Miss> {
+        let Output { width, height, .. } = self.config.output;
+        let expected = width as usize * height as usize * 2;
+        match done.payload() {
+            Ok(uyvy) if uyvy.len() == expected => Ok(uyvy.to_vec()),
+            Ok(uyvy) => Err(Miss::Failed(format!(
+                "the worker returned {} bytes of UYVY, not {expected}",
+                uyvy.len()
             ))),
+            Err(error) => Err(Miss::Failed(error.to_string())),
         }
     }
 
     fn complete(&mut self, id: u64) {
         self.outstanding
             .retain(|(outstanding, _)| *outstanding != id);
-        for slot in &mut self.slots {
-            if *slot == Some(id) {
-                *slot = None;
-            }
-        }
     }
 
-    fn try_event(&self) -> Option<Event> {
+    fn try_event(&self) -> Option<Event<Reply>> {
         match &self.state {
             State::Starting { worker, .. } | State::Ready { worker, .. } => {
-                worker.replies.try_recv().ok()
+                worker.channel.try_event()
             }
             State::Backoff { .. } => None,
         }
@@ -463,54 +408,21 @@ impl Supervisor {
         }
     }
 
-    fn start(&mut self) -> Result<Running, Error> {
-        let _ = std::fs::remove_file(&self.output_path);
-        let mut child = Command::new(&self.config.executable)
-            .arg("worker")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (sender, replies) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("chr-worker-replies".into())
-            .spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let event = match protocol::read_line::<Reply>(&mut reader) {
-                        Ok(Some(reply)) => Event::Reply(reply),
-                        Ok(None) => Event::Closed("the worker exited".into()),
-                        Err(error) => Event::Closed(format!("invalid worker output: {error}")),
-                    };
-                    let closed = matches!(event, Event::Closed(_));
-                    if sender.send(event).is_err() || closed {
-                        return;
-                    }
-                }
-            })?;
+    fn start(&mut self) -> Result<Running<Reply>, Error> {
         let assets = self.config.assets.snapshot();
         self.assets_sent = assets.len();
-        let hello = Request::Hello {
-            version: VERSION,
-            program: self.config.program.clone(),
-            runtime_id: self.config.runtime_id.clone(),
-            output: self.config.output,
-            input_ring: self.input.as_ref().map(|_| self.input_path.clone()),
-            output_ring: self.output_path.clone(),
-            assets,
-        };
-        if let Err(error) = protocol::write_line(&mut stdin, &hello) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error.into());
-        }
-        Ok(Running {
-            child,
-            stdin,
-            replies,
-        })
+        Running::spawn(
+            &self.config.executable,
+            &[],
+            &self.config.socket_dir,
+            &Request::Hello {
+                version: VERSION,
+                program: self.config.program.clone(),
+                runtime_id: self.config.runtime_id.clone(),
+                output: self.config.output,
+                assets,
+            },
+        )
     }
 
     /// Kills the current worker, if any, and starts the backoff.
@@ -526,12 +438,9 @@ impl Supervisor {
                 until: Instant::now(),
             },
         ) {
-            let mut child = worker.child;
-            let _ = child.kill();
-            let _ = child.wait();
+            worker.kill();
         }
-        // The worker is gone, so every slot is free again.
-        self.slots = [None; RING_SLOTS as usize];
+        // The worker is gone with its buffers, so every credit is free again.
         self.outstanding.clear();
     }
 
@@ -554,6 +463,79 @@ impl Supervisor {
     }
 }
 
+/// A started worker process and its sockets.
+pub(crate) struct Running<T> {
+    pub(crate) child: Child,
+    pub(crate) channel: Channel<T>,
+}
+
+impl<T: DeserializeOwned + Send + 'static> Running<T> {
+    /// Listens for the worker, queues `hello` and runs
+    /// `<executable> worker --input-socket <path> --output-socket <path> <args>...`.
+    /// Its stdout joins its stderr, the worker's log.
+    pub(crate) fn spawn(
+        executable: &Path,
+        args: &[String],
+        socket_dir: &Path,
+        hello: &impl Serialize,
+    ) -> Result<Self, Error> {
+        let channel = Channel::open(socket_dir)?;
+        // Waits in the socket until the worker connects.
+        channel.send(hello, None)?;
+        let child = Command::new(executable)
+            .arg("worker")
+            .args(channel.worker_args())
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(std::io::stderr())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        Ok(Self { child, channel })
+    }
+
+    /// Connects to the worker's output once it listens. Returns why the worker
+    /// must be replaced: it exited before connecting (once connected, the end of
+    /// its output reports the exit after its last messages).
+    pub(crate) fn check(&mut self) -> Option<String> {
+        if let Err(error) = self.channel.connect() {
+            return Some(format!("cannot read the worker's output: {error}"));
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) if !self.channel.is_connected() => {
+                Some(format!("the worker exited ({status})"))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<T> Running<T> {
+    /// Kills the process; its sockets close and release every buffer it held.
+    pub(crate) fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Ends the worker's input, which asks it to exit; a stuck one is killed.
+    pub(crate) fn stop(mut self) {
+        self.channel.finish();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.kill();
+    }
+}
+
+/// Creates `dir` readable by this user only.
+pub(crate) fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
 impl Drop for Supervisor {
     fn drop(&mut self) {
         if let State::Starting { worker, .. } | State::Ready { worker, .. } = std::mem::replace(
@@ -562,19 +544,9 @@ impl Drop for Supervisor {
                 until: Instant::now(),
             },
         ) {
-            // EOF on stdin asks the worker to exit; a stuck one is killed.
-            let Running {
-                mut child, stdin, ..
-            } = worker;
-            drop(stdin);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let _ = child.kill();
-            let _ = child.wait();
+            worker.stop();
         }
-        let _ = std::fs::remove_dir_all(&self.config.ring_dir);
+        let _ = std::fs::remove_dir_all(&self.config.socket_dir);
     }
 }
 
@@ -593,8 +565,7 @@ mod tests {
                 height: 16,
                 fps: 50,
             },
-            input_bytes: 0,
-            ring_dir: dir.join("rings"),
+            socket_dir: dir.join("sockets"),
             hang: Duration::from_millis(200),
             assets: Default::default(),
         }
@@ -620,8 +591,8 @@ mod tests {
         assert!(status.last_error.unwrap().contains("cannot start"));
         drop(supervisor);
         assert!(
-            !dir.join("rings").exists(),
-            "rings are removed with the supervisor"
+            !dir.join("sockets").exists(),
+            "sockets are removed with the supervisor"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -29,12 +29,14 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   calibration and associates it with frames; `src/program/` assembles demo
   scenes and bridges admitted frames into rendering; `src/worker/` supervises
   the out-of-process renderer (`chr-renderer-cli worker`), which holds the GPU
-  device, while `chr-server` holds none; `src/worker/tracking/` holds the
+  device, while `chr-server` holds none, and owns the GStreamer unixfd transport
+  both workers use (`transport.rs`); `src/worker/tracking/` holds the
   tracking worker protocol and its supervisor; `src/sdi.rs` owns the
   simulated output port and writes every transmitted slot into the shared-memory
   program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
-  encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer helpers
-  serve only the software input and remain private to it.
+  encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer media
+  helpers serve only the software input and remain private to it; the worker
+  transport is the runtime's only other GStreamer use.
   Live tracking runs in a tracking worker that `chr-server` starts, feeds and
   supervises like the render worker (`docs/tracking-worker.md`). It may hold its
   own GPU device; for now both workers share one GPU. `chr-tracking-sim-cli`

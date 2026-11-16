@@ -4,10 +4,12 @@
 [Live process architecture](live-process-architecture.md). Field names and
 defaults below are the intended first version; each step's pull request updates
 this document if they change. Steps 1 (#99), 2 (#95), 3 (#96) and 4 (#97) are
-`implemented`; step 4 is verified on Linux only.
+`implemented`; step 4 is verified on Linux only. #141 replaced step 4's worker
+rings and stdin/stdout lines with GStreamer unixfd sockets (worker protocol
+version 2).
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
-ring layout, supervision and clean feed, the monitor process, and acceptance
+ring layout (program tap and capture input ring), supervision and clean feed, the monitor process, and acceptance
 tests. Physical SDI (#80) and tracking results (#60) are excluded.
 
 **Depends on:** [Live process architecture](live-process-architecture.md),
@@ -18,7 +20,7 @@ tests. Physical SDI (#80) and tracking results (#60) are excluded.
 
 Each step is one pull request that keeps the workspace green and the existing
 demos runnable. Step 2 lands as two: `chr-shm` first, because the worker also
-needs it, then the program tap, `chr-monitor` and the harness.
+needed it (until #141), then the program tap, `chr-monitor` and the harness.
 
 | Step | Issue | Change |
 | --- | --- | --- |
@@ -176,24 +178,50 @@ SDI port in the same process; they are identical.
 
 ### Worker protocol
 
-`chr-server` starts one `chr-renderer-cli worker` (path from `--renderer-cli`,
-default: `chr-renderer-cli` next to the `chr-server` executable; the flake
-package installs both) and replaces it when it fails. stdin/stdout carry one
-JSON object per line, at most 1 MiB; stderr is the worker's log. EOF on stdin
-makes the worker exit.
+> **Changed by #141:** the worker rings and the stdin/stdout JSON lines of
+> version 1 were replaced by GStreamer `unixfdsink`/`unixfdsrc` sockets. This
+> section describes the current version 2; the measurements further down record
+> the version 1 rings. The tracking worker (#128) uses the same transport; its
+> contract, including the transport, is in
+> [tracking worker](../server/docs/tracking-worker.md#transport). vchao's
+> adapter is to speak this protocol (#140).
 
-| Direction | `type` | Fields |
-| --- | --- | --- |
-| server → worker | `hello` | `version` (1), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `input_ring`, `output_ring` |
-| worker → server | `ready` | `adapter` (logged GPU adapter) |
-| worker → server | `fatal` | `message`; the worker then exits |
-| server → worker | `render` | `id`, `input_slot`, `output_slot`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`) |
-| server → worker | `triangle` | `id`, `output_slot`, `frame`, `angle_rad` (default triangle mode) |
-| worker → server | `done` | `id` |
-| worker → server | `failed` | `id`, `message` |
+`chr-server` starts one `chr-renderer-cli worker --input-socket <path>
+--output-socket <path>` (path from `--renderer-cli`, default:
+`chr-renderer-cli` next to the `chr-server` executable; the flake package
+installs both) and replaces it when it fails. stderr is the worker's log;
+stdout joins it, stdin is unused.
+
+- **Transport** (`server/runtime/src/worker/transport.rs`): one Unix socket per
+  direction in a private 0700 directory (`$XDG_RUNTIME_DIR/chr/worker-<pid>/`,
+  otherwise the temp directory) that `chr-server` removes on shutdown.
+  `chr-server` runs `appsrc ! unixfdsink` on `input.sock` and listens before it
+  starts the worker; the worker runs `appsrc ! unixfdsink` on `output.sock` and
+  `unixfdsrc ! appsink` on `input.sock`; `chr-server` connects its
+  `unixfdsrc ! appsink` to `output.sock` once it exists. Sinks wait for their
+  client (`wait-for-connection`), so `hello` and `ready` are not lost.
+- **Messages:** every buffer is one message, held as serde JSON (tagged by
+  `type`) in the string field `json` of one `GstCustomMeta` named
+  `chr-worker-message`. Pixels are the buffer's single memory, memfd-backed
+  (GStreamer shm allocator) and passed as a file descriptor; `unixfdsink`'s own
+  copy is disabled (`min-memory-size=-1`). Control messages are buffers without
+  memory. All buffers on a socket have the caps `application/x-chr-worker`.
+- The end of the worker's input stream (EOS) or the loss of `chr-server` makes
+  the worker exit.
+
+| Direction | `type` | Payload | Fields |
+| --- | --- | --- | --- |
+| server → worker | `hello` | – | `version` (2), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `assets` |
+| worker → server | `ready` | – | `adapter` (logged GPU adapter) |
+| worker → server | `fatal` | – | `message`; the worker then exits |
+| server → worker | `render` | input image | `id`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`) |
+| server → worker | `triangle` | – | `id`, `frame`, `angle_rad` (default triangle mode) |
+| worker → server | `done` | UYVY frame | `id` |
+| worker → server | `failed` | – | `id`, `message` |
 
 - The program specification is one of `triangle`, `synthetic`,
-  `software_video`, `video_scene { path }`, `pitch_demo { path }`. The worker
+  `software_video`, `video_scene { path }`, `tracked_scene { path }`,
+  `description { path }`, `pitch_demo { path }`. The worker
   builds registrations, configuration and lens replay from it with the given
   runtime ID, so registrations and IDs match `chr-server`'s; it rejects a
   mismatch with the snapshot's configuration. It logs the GPU adapter and
@@ -201,16 +229,21 @@ makes the worker exit.
 - The worker handles requests in order and replies in order. It rebinds each
   snapshot through `SceneAdapter::bind` and the frame geometry through
   `SceneAdapter::frame_camera`, caching the bound scene for the last
-  `(scene_id, scene_revision)`, and composes with `ProgramRenderer::render_frame`
+  snapshot, and composes with `ProgramRenderer::render_frame`
   (explicit frame parts instead of an `Execution`), which keeps the compositor
-  per shadow mode as the in-process bridge does.
-- Input and output rings have 4 slots each, in a private 0700 directory
-  (`$XDG_RUNTIME_DIR/chr/worker-<pid>/`, otherwise the temp directory) that
-  `chr-server` removes on shutdown. `chr-server` creates the input ring (slot
-  capacity native width × height × 8 bytes, room for RGBA16F; none for the
-  triangle); the worker creates the output ring (one UYVY output frame per
-  slot). A slot is reused only after its request completed, failed, or the
-  worker was replaced.
+  per shadow mode as the in-process bridge does. It reads the input image in
+  place from the mapped payload and checks its size against `image`.
+- **Credits:** at most 4 requests are outstanding. Without a credit the frame is
+  clean feed (`NoCredit`); a credit returns with the request's `done` or
+  `failed`, or when the worker is replaced. `chr-server`'s `appsrc` never
+  blocks and its queue is bounded, so a stopped worker cannot grow
+  `chr-server`'s memory: it holds at most 4 input images and 4 UYVY frames.
+- **One copy per captured frame:** a tracked program's frames are copied once,
+  from the capture input ring into shared memory; the tracking worker and the
+  render worker receive that same memory. Other programs' inputs (synthetic,
+  software video) are copied into shared memory when sent, as they were copied
+  into the input ring before. The UYVY result is copied once by the worker
+  into shared memory and once by `chr-server` out of it.
 - Test-only: `CHR_WORKER_TEST_DELAY_MS` delays every worker reply by that many
   milliseconds. The worker inherits it from `chr-server`'s environment.
 
@@ -223,7 +256,7 @@ Starting ──ready──► Ready ──exit / fatal / hang──► Backoff �
 - `--render-deadline-ms` (default: 3/4 of the frame period, so the clean-feed
   conversion still fits in the frame; the wait never passes the loop's next
   frame boundary): after it, the frame is clean feed; a late completion only
-  frees its slot. A lost GPU device makes the worker exit, handled as a crash. `--worker-hang-ms`
+  returns its credit. A lost GPU device makes the worker exit, handled as a crash. `--worker-hang-ms`
   (default 2000): if the oldest outstanding request is older, the worker is
   killed (`SIGKILL`) and replaced. A worker that is not ready within 60 s is
   replaced. Backoff starts at 250 ms, doubles to 5 s and resets after 10 s in
@@ -237,9 +270,9 @@ Starting ──ready──► Ready ──exit / fatal / hang──► Backoff �
 
 ### Clean feed
 
-- On a deadline miss, worker failure, no ready worker or no free slot,
-  `chr-server` marks the execution failed (its input was already copied into
-  the ring or never sent, so no GPU access remains) and submits the clean feed
+- On a deadline miss, worker failure, no ready worker or no free credit,
+  `chr-server` marks the execution failed (a worker still rendering it holds
+  its own reference to the shared input memory) and submits the clean feed
   for that frame without a program association.
 - Conversion uses `chr_renderer::uyvy_from_bt709` on the CPU (BT.709
   RGBA8/BGRA8 → UYVY limited range, pair-mean chroma, ties-to-even), bit-identical
@@ -292,7 +325,26 @@ Measurements (release builds, same host):
 
 Ring costs are medians of 200 frames from `cargo test --release -p chr-shm
 --test copy_cost -- --ignored --nocapture`, so a 1080p-input, 720p-output frame
-adds about 2.7 ms of copies, split between the two processes. In the restart
+added about 2.7 ms of copies, split between the two processes.
+
+Since #141 (unixfd transport), a 1920x1080 RGBA8 frame costs 0.75 ms to copy
+into recycled shared memory (0.8 ms into a new `Vec`; 4.1 ms into a fresh memfd,
+which is why released memories are reused) and 0.2–0.45 ms to send, receive and
+map, from `cargo test --release -p chr-runtime --lib transfer_cost -- --ignored
+--nocapture`. Per tracked captured frame `chr-server` now makes one copy where
+it made four (input ring → `Vec`, → tracking ring, → frame pool, → render input
+ring), and the workers read the input in place instead of copying it out of a
+ring. The kill/stop/delay GPU tests and the byte-identical comparison with the
+in-process bridge pass over the new transport.
+
+End to end (release, nixGL, the onsite description at 1280x720p30 with the
+tracking worker and a 1920x1080 camera, 60 s), the unixfd build and the ring
+build both transmitted every frame with CG (no clean feed, no worker restart,
+every frame tracked, render 3.8 ms wall per frame in `chr-renderer-cli bench`).
+Over the last 40 s the unixfd build used 9 % of a core in `chr-server` (ring
+build 22 %), 13 % in the render worker (16 %) and 1 % in the tracking worker
+(4 %); resident memory was 169 / 195 / 11 MiB (211 / 213 / 34 MiB), flat over
+the run. In the restart
 measurement the input (1920x1080) differs from the output extent, so the frames
 without CG repeated the last frame instead of carrying clean feed. A rotating
 1.35M-triangle model rendered at 30 fps with 0 deadline misses after GPU mesh

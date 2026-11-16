@@ -36,6 +36,17 @@
             nodejs
             typescript
           ];
+          # chr-server talks to its workers over GStreamer unixfdsink/unixfdsrc
+          # (gst-plugins-bad); the runtime links GStreamer core, app and allocators.
+          gstreamer = [
+            pkgs.gst_all_1.gstreamer
+            pkgs.gst_all_1.gst-plugins-base
+          ];
+          workerPlugins = pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
+            (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
+            pkgs.gst_all_1.gst-plugins-base
+            pkgs.gst_all_1.gst-plugins-bad
+          ];
           mediaTools = [
             pkgs.ffmpeg
             (pkgs.python3.withPackages (ps: [ ps.pygobject3 ]))
@@ -111,7 +122,9 @@
             inherit src;
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
-            buildInputs = runtime;
+            buildInputs = runtime ++ gstreamer;
+            # The worker transport tests open unixfd sockets.
+            GST_PLUGIN_SYSTEM_PATH_1_0 = workerPlugins;
           };
           cargoArtifacts = craneLib.buildDepsOnly common;
           app = craneLib.buildPackage (
@@ -135,8 +148,10 @@
               nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               postInstall = ''
                 for program in chr-server chr-renderer-cli; do
-                  wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime}
+                  wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime} \
+                    --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
+                wrapProgram $out/bin/chr-tracking-sim-cli --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
               '';
             }
           );
@@ -198,8 +213,10 @@
               pkgs.nixfmt
             ]
             ++ clientTools
-            ++ runtime;
+            ++ runtime
+            ++ gstreamer;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
+            GST_PLUGIN_SYSTEM_PATH_1_0 = workerPlugins;
             shellHook = ''
               export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"
             '';

@@ -219,7 +219,7 @@ impl Pipeline {
     }
 
     fn render_program(&mut self, execution: Execution, deadline: Instant) {
-        let result = match execution.input.pixels() {
+        let result = match execution.input.stored() {
             Ok(pixels) => self.supervisor.render(
                 &execution.input.metadata().image,
                 pixels,
@@ -239,7 +239,8 @@ impl Pipeline {
             },
             Err(miss) => miss,
         };
-        // The input is in the ring or was never sent, so no GPU access to it remains.
+        // A worker still rendering the input holds its own reference to the
+        // shared memory, so the input can be released here.
         let clean = clean_feed(&execution, self.config.mode);
         let source_frame = execution.provenance.input.frame.sequence.get();
         if let Err(error) = execution.failed() {

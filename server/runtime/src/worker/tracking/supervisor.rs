@@ -5,27 +5,28 @@
 //! Starting ──ready──► Ready ──exit / fatal / hang──► Backoff ──timer──► Starting
 //! ```
 //!
-//! Nothing here blocks: [`Tracker::track`] writes a frame and one request line,
-//! and [`Tracker::poll`] returns the cameras answered since the last call. How
+//! Nothing here blocks: [`Tracker::track`] queues one request that carries the
+//! frame's shared memory, and [`Tracker::poll`] returns the cameras answered since
+//! the last call. At most [`CREDITS`] frames await an answer. How
 //! long a frame waits for its camera is the caller's join policy. Each request
 //! has its own ID and is answered at most once, so answers from a replaced
 //! worker or for forgotten frames are never used.
 
 use std::{
-    io::BufReader,
     path::PathBuf,
-    process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
+use super::protocol::{CREDITS, Reply, Request, VERSION};
+use crate::worker::{
+    supervisor::{Running, create_private_dir},
+    transport::{Event, SharedPixels},
+};
 use chr_common::methods::{
     render_worker::WorkerState,
     tracking::{TrackerStatus, TrackingFrame},
 };
-use chr_shm::{Layout, SlotHeader, Writer};
-
-use super::protocol::{self, RING_SLOTS, Reply, Request, VERSION};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -46,8 +47,8 @@ pub struct TrackerConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Private directory for the frame ring; removed with the tracker.
-    pub ring_dir: PathBuf,
+    /// Private directory for the worker's two sockets; removed with the tracker.
+    pub socket_dir: PathBuf,
     /// The oldest unanswered request may be this old before the worker is killed.
     pub hang: Duration,
 }
@@ -71,11 +72,9 @@ pub fn status_handle() -> StatusHandle {
 pub struct Tracker {
     config: TrackerConfig,
     status: StatusHandle,
-    ring: Writer,
-    ring_path: PathBuf,
     state: State,
-    /// The unanswered request each slot's frame belongs to.
-    slots: [Option<Pending>; RING_SLOTS as usize],
+    /// The unanswered requests, one per credit.
+    credits: [Option<Pending>; CREDITS],
     /// Cameras answered since the last [`Tracker::poll`].
     answered: Vec<TrackingFrame>,
     next_id: u64,
@@ -88,52 +87,35 @@ struct Pending {
     id: u64,
     sequence: u64,
     sent: Instant,
-    /// The frame's answer is no longer wanted; the slot stays held until it comes.
+    /// The frame's answer is no longer wanted; the credit stays held until it comes.
     forgotten: bool,
 }
 
 enum State {
-    Starting { worker: Running, since: Instant },
-    Ready { worker: Running, since: Instant },
-    Backoff { until: Instant },
-}
-
-struct Running {
-    child: Child,
-    stdin: ChildStdin,
-    replies: mpsc::Receiver<Event>,
-}
-
-enum Event {
-    Reply(Reply),
-    Closed(String),
+    Starting {
+        worker: Running<Reply>,
+        since: Instant,
+    },
+    Ready {
+        worker: Running<Reply>,
+        since: Instant,
+    },
+    Backoff {
+        until: Instant,
+    },
 }
 
 impl Tracker {
-    /// Creates the frame ring; the first worker starts on the first call.
+    /// Creates the socket directory; the first worker starts on the first call.
     pub fn new(config: TrackerConfig, status: StatusHandle) -> Result<Self, Error> {
-        let mut dir = std::fs::DirBuilder::new();
-        dir.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
-        dir.create(&config.ring_dir)?;
-        let ring_path = config.ring_dir.join("frames.ring");
-        let ring = Writer::create(
-            &ring_path,
-            Layout {
-                slot_count: RING_SLOTS,
-                slot_bytes: u64::from(config.width) * u64::from(config.height) * 4,
-            },
-        )?;
+        create_private_dir(&config.socket_dir)?;
         Ok(Self {
             config,
             status,
-            ring,
-            ring_path,
             state: State::Backoff {
                 until: Instant::now(),
             },
-            slots: [None; RING_SLOTS as usize],
+            credits: [None; CREDITS],
             answered: Vec::new(),
             next_id: 0,
             backoff: FIRST_BACKOFF,
@@ -146,43 +128,32 @@ impl Tracker {
     }
 
     /// Hands the captured frame `sequence` (RGBA8 at the configured extent) to the
-    /// worker. Without a ready worker or a free slot the frame is not sent, so it
-    /// will go without a camera.
-    pub fn track(&mut self, sequence: u64, rgba: &[u8]) {
+    /// worker: its shared memory, not a copy. Without a ready worker or a free
+    /// credit the frame is not sent, so it will go without a camera.
+    pub fn track(&mut self, sequence: u64, rgba: &SharedPixels) {
         self.maintain();
-        let slot = match &self.state {
-            State::Ready { .. } => self.slots.iter().position(Option::is_none),
+        let credit = match &self.state {
+            State::Ready { .. } => self.credits.iter().position(Option::is_none),
             _ => None,
         };
-        let Some(slot) = slot else {
+        let Some(credit) = credit else {
             self.status().not_sent += 1;
             return;
+        };
+        let State::Ready { worker, .. } = &mut self.state else {
+            unreachable!("a credit is only taken while ready")
         };
         let id = self.next_id;
         self.next_id += 1;
-        let header = SlotHeader {
-            index: id,
-            meta: [sequence, 0, 0, 0],
-        };
-        if let Err(error) = self.ring.write(slot as u32, header, rgba) {
-            self.status().not_sent += 1;
-            log::warn!("tracking frame {sequence} not sent: {error}");
-            return;
-        }
-        let State::Ready { worker, .. } = &mut self.state else {
-            unreachable!("a slot is only chosen while ready")
-        };
-        let request = Request::Track {
-            id,
-            sequence,
-            slot: slot as u32,
-        };
-        if let Err(error) = protocol::write_line(&mut worker.stdin, &request) {
+        if let Err(error) = worker
+            .channel
+            .send(&Request::Track { id, sequence }, Some(rgba.memory()))
+        {
             self.status().not_sent += 1;
             self.reap(format!("cannot send to the tracking worker: {error}"));
             return;
         }
-        self.slots[slot] = Some(Pending {
+        self.credits[credit] = Some(Pending {
             id,
             sequence,
             sent: Instant::now(),
@@ -198,10 +169,10 @@ impl Tracker {
     }
 
     /// Forgets every unanswered frame, for example after the capture restarted
-    /// its sequence numbers: their answers will be ignored. Their slots are
-    /// reused only once answered, as the worker may still be reading them.
+    /// its sequence numbers: their answers will be ignored. Their credits return
+    /// only once answered, as the worker may still be reading them.
     pub fn forget(&mut self) {
-        for pending in self.slots.iter_mut().flatten() {
+        for pending in self.credits.iter_mut().flatten() {
             pending.forgotten = true;
         }
         self.answered.clear();
@@ -215,27 +186,31 @@ impl Tracker {
         }
         let now = Instant::now();
         let mut spawn = false;
-        let reap = match &self.state {
+        let reap = match &mut self.state {
             State::Backoff { until } => {
                 spawn = now >= *until;
                 None
             }
-            State::Starting { since, .. } => (now.duration_since(*since) > STARTUP_TIMEOUT)
-                .then(|| "the tracking worker did not become ready in time".to_owned()),
-            State::Ready { since, .. } => {
+            State::Starting { worker, since } => worker.check().or_else(|| {
+                (now.duration_since(*since) > STARTUP_TIMEOUT)
+                    .then(|| "the tracking worker did not become ready in time".to_owned())
+            }),
+            State::Ready { worker, since } => {
                 if now.duration_since(*since) > STABLE {
                     self.backoff = FIRST_BACKOFF;
                 }
-                self.slots
-                    .iter()
-                    .flatten()
-                    .any(|pending| now.duration_since(pending.sent) > self.config.hang)
-                    .then(|| {
-                        format!(
-                            "the tracking worker left a frame unanswered for more than {:?}",
-                            self.config.hang
-                        )
-                    })
+                worker.check().or_else(|| {
+                    self.credits
+                        .iter()
+                        .flatten()
+                        .any(|pending| now.duration_since(pending.sent) > self.config.hang)
+                        .then(|| {
+                            format!(
+                                "the tracking worker left a frame unanswered for more than {:?}",
+                                self.config.hang
+                            )
+                        })
+                })
             }
         };
         if let Some(reason) = reap {
@@ -245,9 +220,17 @@ impl Tracker {
         }
     }
 
-    fn handle(&mut self, event: Event) {
-        match event {
-            Event::Reply(Reply::Ready { name }) => {
+    fn handle(&mut self, event: Event<Reply>) {
+        let reply = match event {
+            // The frame memory, if any, is released here.
+            Event::Message(incoming) => incoming.message,
+            Event::Closed(reason) => {
+                self.reap(reason);
+                return;
+            }
+        };
+        match reply {
+            Reply::Ready { name } => {
                 let State::Starting { .. } = self.state else {
                     self.reap("unexpected ready from the tracking worker".into());
                     return;
@@ -267,11 +250,10 @@ impl Tracker {
                 };
                 self.status().state = WorkerState::Ready;
             }
-            Event::Reply(Reply::Fatal { message }) => {
+            Reply::Fatal { message } => {
                 self.reap(format!("tracking worker failed: {message}"));
             }
-            Event::Closed(reason) => self.reap(reason),
-            Event::Reply(Reply::Camera { id, camera }) => {
+            Reply::Camera { id, camera } => {
                 let Some(pending) = self.answer(id) else {
                     return;
                 };
@@ -289,7 +271,7 @@ impl Tracker {
                 self.status().cameras += 1;
                 self.answered.push(camera);
             }
-            Event::Reply(Reply::Unavailable { id, reason }) => {
+            Reply::Unavailable { id, reason } => {
                 if let Some(pending) = self.answer(id).filter(|pending| !pending.forgotten) {
                     log::debug!("frame {} has no camera: {reason}", pending.sequence);
                     self.status().unavailable += 1;
@@ -298,19 +280,19 @@ impl Tracker {
         }
     }
 
-    /// Frees the slot of request `id`; `None` if it is not awaited (any more).
+    /// Returns the credit of request `id`; `None` if it is not awaited (any more).
     fn answer(&mut self, id: u64) -> Option<Pending> {
-        let slot = self
-            .slots
+        let credit = self
+            .credits
             .iter_mut()
-            .find(|slot| slot.is_some_and(|p| p.id == id))?;
-        slot.take()
+            .find(|credit| credit.is_some_and(|p| p.id == id))?;
+        credit.take()
     }
 
-    fn try_event(&self) -> Option<Event> {
+    fn try_event(&self) -> Option<Event<Reply>> {
         match &self.state {
             State::Starting { worker, .. } | State::Ready { worker, .. } => {
-                worker.replies.try_recv().ok()
+                worker.channel.try_event()
             }
             State::Backoff { .. } => None,
         }
@@ -336,53 +318,19 @@ impl Tracker {
         }
     }
 
-    fn start(&mut self) -> Result<Running, Error> {
-        let mut child = Command::new(&self.config.executable)
-            .arg("worker")
-            .args(&self.config.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (sender, replies) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("chr-tracking-replies".into())
-            .spawn(move || {
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let event = match protocol::read_line::<Reply>(&mut reader) {
-                        Ok(Some(reply)) => Event::Reply(reply),
-                        Ok(None) => Event::Closed("the tracking worker exited".into()),
-                        Err(error) => {
-                            Event::Closed(format!("invalid tracking worker output: {error}"))
-                        }
-                    };
-                    let closed = matches!(event, Event::Closed(_));
-                    if sender.send(event).is_err() || closed {
-                        return;
-                    }
-                }
-            })?;
-        let hello = Request::Hello {
-            version: VERSION,
-            input_ring: self.ring_path.clone(),
-            width: self.config.width,
-            height: self.config.height,
-            fps: self.config.fps,
-            calibration: self.config.calibration.clone(),
-        };
-        if let Err(error) = protocol::write_line(&mut stdin, &hello) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error.into());
-        }
-        Ok(Running {
-            child,
-            stdin,
-            replies,
-        })
+    fn start(&self) -> Result<Running<Reply>, Error> {
+        Running::spawn(
+            &self.config.executable,
+            &self.config.args,
+            &self.config.socket_dir,
+            &Request::Hello {
+                version: VERSION,
+                width: self.config.width,
+                height: self.config.height,
+                fps: self.config.fps,
+                calibration: self.config.calibration.clone(),
+            },
+        )
     }
 
     /// Kills the current worker, if any, forgets its frames and starts the backoff.
@@ -393,11 +341,10 @@ impl Tracker {
                 until: Instant::now(),
             },
         ) {
-            let mut child = worker.child;
-            let _ = child.kill();
-            let _ = child.wait();
+            worker.kill();
         }
-        self.slots = [None; RING_SLOTS as usize];
+        // The worker is gone with its buffers, so every credit is free again.
+        self.credits = [None; CREDITS];
         self.backoff(reason);
     }
 
@@ -429,18 +376,8 @@ impl Drop for Tracker {
                 until: Instant::now(),
             },
         ) {
-            // EOF on stdin asks the worker to exit; a stuck one is killed.
-            let Running {
-                mut child, stdin, ..
-            } = worker;
-            drop(stdin);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let _ = child.kill();
-            let _ = child.wait();
+            worker.stop();
         }
-        let _ = std::fs::remove_dir_all(&self.config.ring_dir);
+        let _ = std::fs::remove_dir_all(&self.config.socket_dir);
     }
 }

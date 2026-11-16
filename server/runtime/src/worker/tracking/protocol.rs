@@ -1,39 +1,36 @@
-//! Tracking worker messages: one JSON object per line, at most [`MAX_LINE_BYTES`].
+//! Tracking worker messages, each one buffer on a worker socket
+//! ([`transport`](crate::worker::transport)): a JSON object in the buffer's
+//! `chr-worker-message` meta, and for `track` the frame as the buffer's memory.
 //!
-//! | Direction | `type` | Purpose |
-//! | --- | --- | --- |
-//! | server → worker | `hello` | Version, input ring, frame extent and rate, calibration file |
-//! | worker → server | `ready` / `fatal` | Startup result |
-//! | server → worker | `track` | Frame `sequence` waits in ring slot `slot` |
-//! | worker → server | `camera` / `unavailable` | The answer to one `track` request |
+//! | Direction | `type` | Payload | Purpose |
+//! | --- | --- | --- | --- |
+//! | server → worker | `hello` | – | Version, frame extent and rate, calibration file |
+//! | worker → server | `ready` / `fatal` | – | Startup result |
+//! | server → worker | `track` | RGBA8 frame | Frame `sequence` |
+//! | worker → server | `camera` / `unavailable` | – | The answer to one `track` request |
 //!
-//! The ring holds RGBA8 BT.709 code values at the frame extent; each slot's
-//! header index is the request `id`. The server rewrites a slot only after its
-//! request was answered, or after replacing the worker. Answers may come in any
-//! order. EOF on the worker's stdin makes it exit. Matrices follow
+//! A frame is RGBA8 BT.709 code values at the `hello` extent, tightly packed, in
+//! memfd-backed memory that the render worker may be reading too: read-only.
+//! The server sends at most [`CREDITS`] unanswered frames. Answers may come in
+//! any order. The end of the worker's input stream makes it exit. Matrices follow
 //! `server/docs/coordinates.md`: `ti` is forward row-major ground XY to ideal
 //! image SNC, `camera_center` is in world metres with negative Z up.
 
-use std::{
-    io::{self, BufRead, Read, Write},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 use chr_common::methods::tracking::TrackingFrame;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
-pub const MAX_LINE_BYTES: u64 = 1 << 16;
-/// Frames that may await an answer at once.
-pub const RING_SLOTS: u32 = 8;
+pub const VERSION: u32 = 2;
+/// Frames that may await an answer at once: the server's credits.
+pub const CREDITS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Hello {
         version: u32,
-        /// Created by the server; RGBA8 frames of `width` x `height`.
-        input_ring: PathBuf,
+        /// The extent of every frame.
         width: u32,
         height: u32,
         fps: u32,
@@ -41,11 +38,8 @@ pub enum Request {
         /// result; the replay stand-in reads a `calibrated-video-v1` manifest.
         calibration: PathBuf,
     },
-    Track {
-        id: u64,
-        sequence: u64,
-        slot: u32,
-    },
+    /// The frame is the payload.
+    Track { id: u64, sequence: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,53 +64,19 @@ pub enum Reply {
     },
 }
 
-/// Writes `message` as one line and flushes it.
-pub fn write_line(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let mut line = serde_json::to_vec(message)?;
-    if line.len() as u64 >= MAX_LINE_BYTES {
-        return Err(io::Error::other("tracking message exceeds the line limit"));
-    }
-    line.push(b'\n');
-    writer.write_all(&line)?;
-    writer.flush()
-}
-
-/// Reads one line, or `None` at EOF.
-pub fn read_line<T: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<Option<T>> {
-    let mut line = Vec::new();
-    reader.take(MAX_LINE_BYTES).read_until(b'\n', &mut line)?;
-    if line.is_empty() {
-        return Ok(None);
-    }
-    if line.last() != Some(&b'\n') {
-        return Err(io::Error::other(
-            "tracking message exceeds the line limit or is truncated",
-        ));
-    }
-    serde_json::from_slice(&line)
-        .map(Some)
-        .map_err(io::Error::other)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn messages_are_tagged_json_lines() {
-        let mut buffer = Vec::new();
-        write_line(
-            &mut buffer,
-            &Request::Track {
-                id: 7,
-                sequence: 42,
-                slot: 3,
-            },
-        )
-        .unwrap();
+    fn messages_are_tagged_json() {
         assert_eq!(
-            String::from_utf8(buffer.clone()).unwrap(),
-            "{\"type\":\"track\",\"id\":7,\"sequence\":42,\"slot\":3}\n"
+            serde_json::to_string(&Request::Track {
+                id: 7,
+                sequence: 42
+            })
+            .unwrap(),
+            r#"{"type":"track","id":7,"sequence":42}"#
         );
         let reply: Reply = serde_json::from_value(serde_json::json!({
             "type": "camera", "id": 7,
@@ -128,18 +88,7 @@ mod tests {
             panic!("{reply:?}")
         };
         assert_eq!(camera.sequence.get(), 42);
-        assert_eq!(
-            read_line::<Request>(&mut io::Cursor::new(buffer))
-                .unwrap()
-                .unwrap(),
-            Request::Track {
-                id: 7,
-                sequence: 42,
-                slot: 3
-            }
-        );
-        assert!(read_line::<Reply>(&mut io::Cursor::new(b"{\"type\":\"ready\"")).is_err());
-        assert!(read_line::<Reply>(&mut io::Cursor::new(b"{\"type\":\"bogus\"}\n")).is_err());
-        assert_eq!(read_line::<Reply>(&mut io::Cursor::new(b"")).unwrap(), None);
+        assert!(serde_json::from_str::<Reply>(r#"{"type":"bogus"}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"type":"track","id":1}"#).is_err());
     }
 }

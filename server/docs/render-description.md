@@ -110,7 +110,7 @@ new scene fails, the previous scene is recreated. Assets imported before such a
 failure remain registered.
 
 `chr-server` reads and verifies each runtime asset once and keeps the verified
-bytes as a copy in a private directory beside its worker rings (mode 0700,
+bytes as a copy in a private directory beside its worker sockets (mode 0700,
 removed on shutdown). Render workers receive these copies in their `hello` and
 import them again, so later changes to the caller's files cannot break a worker
 restart. When the asset list grows, `chr-server` replaces its worker at once,

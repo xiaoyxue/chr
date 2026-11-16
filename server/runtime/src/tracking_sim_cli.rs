@@ -2,34 +2,31 @@
 //! --tracking-worker`, to be replaced by the real tracking module.
 //!
 //! It speaks the tracking worker protocol (`chr_runtime::worker::tracking::protocol`)
-//! and reads every frame from the shared ring like a real tracker would, but
+//! and maps every frame it receives like a real tracker would, but
 //! answers with the recorded camera of a calibrated clip (`TrackingReplay`): it
 //! replays, it does not estimate. Options inject delays, unavailable results, crashes and
 //! hangs to exercise chr-server's supervision and missing-camera handling.
 
-use std::{
-    error::Error,
-    io::{self, BufReader},
-    process::ExitCode,
-    time::Duration,
-};
+use std::{error::Error, path::PathBuf, process::ExitCode, time::Duration};
 
 use chr_runtime::{
     calibration::tracking::TrackingReplay,
-    worker::tracking::protocol::{self, Reply, Request, VERSION},
+    worker::{
+        tracking::protocol::{Reply, Request, VERSION},
+        transport::{self, Incoming, Receiver, Sender},
+    },
 };
-use chr_shm::{Read, Reader};
 use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "\
-Usage: chr-tracking-sim-cli worker [options]
+Usage: chr-tracking-sim-cli worker --input-socket <path> --output-socket <path> [options]
 
 Runs as chr-server's tracking worker (started by chr-server --tracking-worker;
-the protocol is JSON lines on stdin/stdout). Answers every frame with the
-recorded camera of the calibrated-video-v1 manifest named in hello: a replay,
-not an estimate.
+the protocol travels over the two GStreamer unixfd sockets chr-server names).
+Answers every frame with the recorded camera of the calibrated-video-v1
+manifest named in hello: a replay, not an estimate.
 
 Options (fault injection):
   --delay-ms <n>           Spend this long on every frame before answering
@@ -37,6 +34,13 @@ Options (fault injection):
   --exit-after <n>         Exit with status 3 on the n-th request
   --hang-after <n>         Stop answering from the n-th request on
   -h, --help               Show this help";
+
+#[derive(Debug, PartialEq)]
+struct Worker {
+    input: PathBuf,
+    output: PathBuf,
+    faults: Faults,
+}
 
 #[derive(Debug, Default, PartialEq)]
 struct Faults {
@@ -56,13 +60,19 @@ fn positive(flag: &str, value: Option<String>) -> Result<u64> {
     Ok(value)
 }
 
-fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Faults>> {
+fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Worker>> {
     match raw.next().as_deref() {
         Some("worker") => {}
         Some("-h" | "--help") | None => return Ok(None),
         Some(other) => return Err(format!("unknown command {other:?}\n\n{USAGE}").into()),
     }
+    let raw: Vec<String> = raw.collect();
+    if raw.iter().any(|arg| arg == "-h" || arg == "--help") {
+        return Ok(None);
+    }
+    let (input, output, rest) = transport::parse_worker_args(raw)?;
     let mut faults = Faults::default();
+    let mut raw = rest.into_iter();
     while let Some(flag) = raw.next() {
         match flag.as_str() {
             "--delay-ms" => {
@@ -72,17 +82,20 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Faults>> {
             "--unavailable-every" => faults.unavailable_every = Some(positive(&flag, raw.next())?),
             "--exit-after" => faults.exit_after = Some(positive(&flag, raw.next())?),
             "--hang-after" => faults.hang_after = Some(positive(&flag, raw.next())?),
-            "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
     }
-    Ok(Some(faults))
+    Ok(Some(Worker {
+        input,
+        output,
+        faults,
+    }))
 }
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let faults = match parse_args(std::env::args().skip(1)) {
-        Ok(Some(faults)) => faults,
+    let worker = match parse_args(std::env::args().skip(1)) {
+        Ok(Some(worker)) => worker,
         Ok(None) => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -92,7 +105,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match serve(faults) {
+    match serve(worker) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             log::error!("{error}");
@@ -116,32 +129,46 @@ fn load(path: &std::path::Path) -> Result<TrackingReplay> {
     TrackingReplay::new(calibration.ti, calibration.center, &calibration.frame_warps)
 }
 
-fn serve(faults: Faults) -> Result<()> {
-    let mut input = BufReader::new(io::stdin().lock());
-    let mut output = io::stdout().lock();
-    let Some(Request::Hello {
-        version,
-        input_ring,
-        calibration,
+/// How long an exiting worker waits for its last replies, such as `fatal`, to
+/// reach the server.
+const FINISH: Duration = Duration::from_secs(2);
+
+fn serve(worker: Worker) -> Result<()> {
+    let (requests, replies) = transport::worker_endpoints(&worker.input, &worker.output)?;
+    let result = serve_on(&requests, &replies, &worker.faults);
+    replies.finish(FINISH);
+    result
+}
+
+fn serve_on(requests: &Receiver, replies: &Sender, faults: &Faults) -> Result<()> {
+    let Some(Incoming {
+        message:
+            Request::Hello {
+                version,
+                width,
+                height,
+                calibration,
+                ..
+            },
         ..
-    }) = protocol::read_line(&mut input)?
+    }) = requests.recv()?
     else {
         return Err("expected hello".into());
     };
-    let started = (|| -> Result<(TrackingReplay, Reader)> {
+    let started = (|| -> Result<TrackingReplay> {
         if version != VERSION {
             return Err(format!("protocol version {version}, expected {VERSION}").into());
         }
-        Ok((load(&calibration)?, Reader::open(&input_ring)?))
+        load(&calibration)
     })();
-    let (replay, ring) = match started {
-        Ok(started) => started,
+    let replay = match started {
+        Ok(replay) => replay,
         Err(error) => {
-            protocol::write_line(
-                &mut output,
+            replies.send(
                 &Reply::Fatal {
                     message: error.to_string(),
                 },
+                None,
             )?;
             return Err(error);
         }
@@ -152,47 +179,47 @@ fn serve(faults: Faults) -> Result<()> {
         replay.warp_count()
     );
     log::info!("{name}");
-    protocol::write_line(&mut output, &Reply::Ready { name })?;
-    let mut frame = Vec::new();
-    let mut requests = 0_u64;
-    while let Some(request) = protocol::read_line::<Request>(&mut input)? {
-        let Request::Track { id, sequence, slot } = request else {
+    replies.send(&Reply::Ready { name }, None)?;
+    let frame_bytes = width as usize * height as usize * 4;
+    let mut requests_seen = 0_u64;
+    while let Some(request) = requests.recv::<Request>()? {
+        let Request::Track { id, sequence } = request.message else {
             return Err("unexpected hello".into());
         };
-        requests += 1;
-        if faults.exit_after == Some(requests) {
-            log::warn!("injected exit on request {requests}");
+        requests_seen += 1;
+        if faults.exit_after == Some(requests_seen) {
+            log::warn!("injected exit on request {requests_seen}");
             std::process::exit(3);
         }
-        if faults.hang_after.is_some_and(|n| requests >= n) {
-            log::warn!("injected hang on request {requests}");
+        if faults.hang_after.is_some_and(|n| requests_seen >= n) {
+            log::warn!("injected hang on request {requests_seen}");
             continue;
         }
         std::thread::sleep(faults.delay);
-        // A real tracker estimates from these pixels; the replay only proves they arrived.
-        let reply = match ring.read(slot, &mut frame)? {
-            Read::Frame(header) if header.index == id => {
-                if faults
-                    .unavailable_every
-                    .is_some_and(|n| (sequence + 1) % n == 0)
-                {
-                    Reply::Unavailable {
-                        id,
-                        reason: "injected by --unavailable-every".into(),
-                    }
-                } else {
-                    Reply::Camera {
-                        id,
-                        camera: replay.frame(sequence),
-                    }
-                }
-            }
-            other => Reply::Unavailable {
+        // A real tracker estimates from these pixels; the replay only checks they arrived.
+        let frame = request.payload()?;
+        let reply = if frame.len() != frame_bytes {
+            Reply::Unavailable {
                 id,
-                reason: format!("slot {slot} does not hold the frame: {other:?}"),
-            },
+                reason: format!("a frame of {} bytes, not {frame_bytes}", frame.len()),
+            }
+        } else if faults
+            .unavailable_every
+            .is_some_and(|n| (sequence + 1) % n == 0)
+        {
+            Reply::Unavailable {
+                id,
+                reason: "injected by --unavailable-every".into(),
+            }
+        } else {
+            Reply::Camera {
+                id,
+                camera: replay.frame(sequence),
+            }
         };
-        protocol::write_line(&mut output, &reply)?;
+        drop(frame);
+        drop(request);
+        replies.send(&reply, None)?;
     }
     Ok(())
 }
@@ -201,28 +228,40 @@ fn serve(faults: Faults) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn parse(args: &[&str]) -> Result<Option<Faults>> {
+    fn parse(args: &[&str]) -> Result<Option<Worker>> {
         parse_args(args.iter().map(|arg| (*arg).to_owned()))
     }
 
+    const SOCKETS: [&str; 4] = ["--input-socket", "in", "--output-socket", "out"];
+
     #[test]
     fn parses_fault_options() {
+        let args = [
+            &["worker"][..],
+            &SOCKETS,
+            &["--delay-ms", "5", "--unavailable-every", "4"],
+        ]
+        .concat();
         assert_eq!(
-            parse(&["worker", "--delay-ms", "5", "--unavailable-every", "4"])
-                .unwrap()
-                .unwrap(),
-            Faults {
-                delay: Duration::from_millis(5),
-                unavailable_every: Some(4),
-                ..Faults::default()
+            parse(&args).unwrap().unwrap(),
+            Worker {
+                input: "in".into(),
+                output: "out".into(),
+                faults: Faults {
+                    delay: Duration::from_millis(5),
+                    unavailable_every: Some(4),
+                    ..Faults::default()
+                },
             }
         );
         assert!(parse(&["--help"]).unwrap().is_none());
         for bad in [
             &["render"][..],
-            &["worker", "--exit-after", "0"],
-            &["worker", "--hang-after"],
-            &["worker", "--bogus"],
+            &["worker"],
+            &["worker", "--input-socket", "in"],
+            &[&["worker"][..], &SOCKETS, &["--exit-after", "0"]].concat(),
+            &[&["worker"][..], &SOCKETS, &["--hang-after"]].concat(),
+            &[&["worker"][..], &SOCKETS, &["--bogus"]].concat(),
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }

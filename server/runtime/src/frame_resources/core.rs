@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use super::ResourceError;
+use crate::worker::transport::SharedPixels;
 use chr_common::scene_frame::Id;
 
 const PENDING: u8 = 0;
@@ -18,6 +19,24 @@ pub enum Readiness {
     Failed,
 }
 
+/// Stored pixels: a private copy, or memfd-backed memory shared with the
+/// workers, which receive it without another copy.
+pub enum Pixels {
+    Owned(Box<[u8]>),
+    Shared(SharedPixels),
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Shared(pixels) => pixels,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct Key {
     pub slot: usize,
@@ -26,7 +45,7 @@ pub(super) struct Key {
 
 struct Entry<M> {
     metadata: M,
-    pixels: Box<[u8]>,
+    pixels: Pixels,
     ticket_id: Id,
     image_id: Id,
     readiness: AtomicU8,
@@ -90,7 +109,7 @@ impl<M: PartialEq> Pool<M> {
     pub fn reserve(
         &mut self,
         metadata: M,
-        pixels: &[u8],
+        pixels: Pixels,
         ticket_id: Id,
         image_id: Id,
     ) -> Result<(Key, ProducerGuard<M>), ResourceError> {
@@ -113,7 +132,7 @@ impl<M: PartialEq> Pool<M> {
         cell.generation += 1;
         let entry = Arc::new(Entry {
             metadata,
-            pixels: pixels.into(),
+            pixels,
             ticket_id,
             image_id,
             readiness: AtomicU8::new(PENDING),
@@ -260,6 +279,11 @@ impl<M> Lease<M> {
     }
 
     pub fn pixels(&self) -> Result<&[u8], ResourceError> {
+        self.stored().map(|pixels| &**pixels)
+    }
+
+    /// The pixels as stored, for handing them on without a copy.
+    pub fn stored(&self) -> Result<&Pixels, ResourceError> {
         match self.readiness() {
             Readiness::Ready => Ok(&self.entry.pixels),
             Readiness::Pending => Err(ResourceError::WritePending),
@@ -314,14 +338,19 @@ mod tests {
         let ticket = Id::try_from("ticket".to_owned()).unwrap();
         let image = Id::try_from("image".to_owned()).unwrap();
         let (key, producer) = pool
-            .reserve((), &[0; 4], ticket.clone(), image.clone())
+            .reserve(
+                (),
+                Pixels::Owned([0; 4].into()),
+                ticket.clone(),
+                image.clone(),
+            )
             .unwrap();
         pool.publish(key, &()).unwrap();
         producer.complete();
         assert!(pool.revoke(key, true));
         assert_eq!(pool.occupied(), 0);
         assert!(matches!(
-            pool.reserve((), &[0; 4], ticket, image),
+            pool.reserve((), Pixels::Owned([0; 4].into()), ticket, image),
             Err(ResourceError::Capacity)
         ));
         assert!(matches!(pool.acquire(key), Err(ResourceError::NotFound)));

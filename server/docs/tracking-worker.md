@@ -12,7 +12,7 @@ tracking worker as it does the render worker. The tracking worker may hold its
 own GPU device; for now both workers share one GPU.
 
 ```text
-chr-server ── frame N: chr-shm ring + `track` line ──────────► tracking worker
+chr-server ── `track` N + frame N (memfd) over unixfd ──────► tracking worker
            ◄── `camera` (Ti, C, frame_warp of frame N) | `unavailable` ──┘
 ```
 
@@ -28,8 +28,8 @@ behaviour, not a production policy (see
 
 | Executable | Role |
 | --- | --- |
-| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`, next to `chr-renderer-cli`) | Stand-in worker. It reads every frame from the ring but answers with the **recorded** camera of a `calibrated-video-v1` manifest (fixed `ti` and `center`, warp `sequence % frame_warps`). It replays; it never estimates. |
-| The real tracking module | Any executable, in any language. chr-server runs it as `<executable> worker [args]...` (`--tracking-cli <path>`, `--tracking-worker-arg <arg>`). |
+| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`, next to `chr-renderer-cli`) | Stand-in worker. It maps every frame it receives but answers with the **recorded** camera of a `calibrated-video-v1` manifest (fixed `ti` and `center`, warp `sequence % frame_warps`). It replays; it never estimates. |
+| The real tracking module | Any executable, in any language with GStreamer bindings. chr-server runs it as `<executable> worker --input-socket <path> --output-socket <path> [args]...` (`--tracking-cli <path>`, `--tracking-worker-arg <arg>`). vchao's tracking adapter is to speak this protocol (#140, #141). |
 
 `chr-tracking-sim-cli worker` options inject faults:
 - `--delay-ms <n>` spends `n` ms on every frame;
@@ -37,20 +37,57 @@ behaviour, not a production policy (see
 - `--exit-after <n>` exits on the n-th request;
 - `--hang-after <n>` stops answering from the n-th request on.
 
+## Transport
+
+Version 2 of the protocol travels over GStreamer's `unixfd` elements
+(gst-plugins-bad), the same transport as the render worker
+(`server/runtime/src/worker/transport.rs`). chr-server and the bundled workers
+need GStreamer 1.28 or later (`unixfdsink`'s `min-memory-size`) and refuse to
+start with a clear error otherwise; a third-party worker's own `unixfdsink` needs
+1.26 or later for `wait-for-connection`. There is one Unix socket per
+direction, in chr-server's private 0700 directory
+`$XDG_RUNTIME_DIR/chr/tracking-<server pid>/`, removed on shutdown:
+
+```text
+chr-server  appsrc ! unixfdsink socket-path=input.sock    ──►  unixfdsrc ! appsink   worker
+chr-server  appsink ! unixfdsrc socket-path=output.sock   ◄──  unixfdsink ! appsrc   worker
+```
+
+- The sending side listens (`unixfdsink`, `wait-for-connection=true`) and the
+  receiving side connects (`unixfdsrc`). chr-server listens on `input.sock`
+  before it starts the worker. The worker listens on `output.sock` (replacing a
+  stale file) and connects to `input.sock`; chr-server connects to
+  `output.sock` once it exists. Nothing is lost to the startup order: a sink
+  holds its buffers until a client connects.
+- **Every buffer is one message.** It carries exactly one `GstCustomMeta`
+  named `chr-worker-message` whose structure has a string field `json`: the
+  message as a JSON object tagged by `type`. Both sides must register a custom
+  meta of that name (`gst_meta_register_custom`) before receiving, or `unixfdsrc`
+  rejects the buffer.
+- A message with pixels has them as the buffer's single memory, memfd-backed
+  (GStreamer's shm allocator), passed as a file descriptor without a copy
+  (`unixfdsink` would copy other memory into a memfd; chr-server disables that
+  copy, so its payloads are always shared). A control message is a buffer
+  without memory. Every buffer on a socket has the
+  caps `application/x-chr-worker`; formats and extents come from `hello`.
+- Received memory is read-only. Dropping the buffer releases it to the sender.
+  When a process dies, its sockets close and the peer releases everything it
+  held for it.
+- The end of the worker's input stream (EOS) or the loss of chr-server asks the
+  worker to exit. stdin is not used; stdout joins stderr, the worker's log.
+
 ## Protocol
 
-One JSON object per line on the worker's stdin (requests) and stdout (replies);
-a line is at most 64 KiB. Logs go to stderr. EOF on stdin asks the worker to exit.
 The authoritative types are in `server/runtime/src/worker/tracking/protocol.rs`.
 
-| Direction | Message | Fields |
-| --- | --- | --- |
-| server → worker | `{"type": "hello", ...}` | `version` (1), `input_ring` (path), `width`, `height`, `fps`, `calibration` (path to the tracking reference) |
-| worker → server | `{"type": "ready", "name": ...}` | Sent once the reference is loaded; `name` describes the method |
-| worker → server | `{"type": "fatal", "message": ...}` | Startup failed; the worker then exits |
-| server → worker | `{"type": "track", "id": 7, "sequence": 42, "slot": 3}` | Frame `sequence` waits in ring slot `slot` |
-| worker → server | `{"type": "camera", "id": 7, "camera": {...}}` | `camera` is a `tracking.frame` object whose `sequence` is the request's (decimal string) |
-| worker → server | `{"type": "unavailable", "id": 7, "reason": ...}` | The frame has no camera |
+| Direction | Message | Payload | Fields |
+| --- | --- | --- | --- |
+| server → worker | `{"type": "hello", ...}` | – | `version` (2), `width`, `height`, `fps`, `calibration` (path to the tracking reference) |
+| worker → server | `{"type": "ready", "name": ...}` | – | Sent once the reference is loaded; `name` describes the method |
+| worker → server | `{"type": "fatal", "message": ...}` | – | Startup failed; the worker then exits |
+| server → worker | `{"type": "track", "id": 7, "sequence": 42}` | the frame | Frame `sequence` |
+| worker → server | `{"type": "camera", "id": 7, "camera": {...}}` | – | `camera` is a `tracking.frame` object whose `sequence` is the request's (decimal string) |
+| worker → server | `{"type": "unavailable", "id": 7, "reason": ...}` | – | The frame has no camera |
 
 A `camera` holds:
 - `ti`: nine numbers, forward row-major, ground XY to ideal image SNC;
@@ -63,23 +100,18 @@ each camera as it validates `tracking.frame`.
 
 Every `track` gets exactly one answer, in any order and possibly late.
 
-## Frame ring
+## Frames
 
-`input_ring` is a `chr-shm` ring that chr-server creates. Its layout and seqlock
-are described in `common/shm/src/lib.rs`: a 64-byte file header, then per slot a
-64-byte header (sequence, index, meta, len) and the payload.
+A `track` payload is RGBA8, BT.709 code values, `width` × `height` × 4 bytes,
+tightly packed. chr-server copies each captured frame once, from the capture
+input ring into shared memory, and hands that same memory to the tracking and
+the render worker: the tracking worker must only read it.
 
-| Part | Content |
-| --- | --- |
-| Slots | 8; at most 8 frames await an answer at once |
-| Payload | RGBA8, BT.709 code values, `width` × `height` × 4 bytes |
-| Header `index` | The request `id` |
-| Header `meta[0]` | The capture sequence |
-
-chr-server rewrites a slot only after its request was answered or the worker was
-replaced. A reader still checks that `index` equals the request's `id` and
-re-reads the slot sequence to detect a torn copy. It answers `unavailable` if
-the slot does not hold the frame.
+chr-server grants **8 credits**: at most 8 frames await an answer at once. Without
+a credit (or a ready worker) a frame is not sent and counts as `not_sent`. A
+worker holds at most those 8 frames; chr-server's queue towards it stays bounded
+and never blocks the capture loop. The stand-in answers `unavailable` for a payload
+of another size.
 
 ## Supervision
 
@@ -88,9 +120,11 @@ Starting ──ready──► Ready ──exit / fatal / hang──► Backoff �
 ```
 
 - **Startup:** a worker that is not `ready` within 60 s is replaced.
+- **Exit:** a worker that exits is replaced; once connected, the end of its
+  output stream reports the exit after its last messages (such as `fatal`).
 - **Hang:** a worker that leaves a frame unanswered for longer than `--worker-hang-ms`
-  (default 2000 ms) is killed and restarted, with the backoff growing from
-  250 ms to 5 s.
+  (default 2000 ms) is killed (SIGKILL) and restarted, with the backoff growing from
+  250 ms to 5 s. Its frames are released with its sockets and every credit returns.
 - **While no worker is ready:** frames are not sent, so they get no camera and are
   skipped. The SDI output continues by repeating its last frame; killing the
   stand-in at 30 fps costs about seven frames.

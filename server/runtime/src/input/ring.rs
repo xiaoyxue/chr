@@ -1,5 +1,9 @@
 //! Frames from a capture process through the shared-memory input ring
 //! ([`chr_shm::input`]), standing in for an SDI input card. No physical SDI.
+//!
+//! Each frame is copied once, straight from the ring into memfd-backed memory
+//! ([`SharedPixels`]) that the tracking and render workers then receive
+//! without another copy.
 
 use std::{
     path::{Path, PathBuf},
@@ -8,7 +12,7 @@ use std::{
 
 use chr_shm::{Read, Reader, input::SlotMeta};
 
-use crate::sdi::VideoMode;
+use crate::{sdi::VideoMode, worker::transport::SharedPixels};
 
 /// How long the ring may stay idle before the reader checks whether it was replaced.
 const REOPEN_AFTER: Duration = Duration::from_secs(1);
@@ -17,7 +21,7 @@ const REOPEN_AFTER: Duration = Duration::from_secs(1);
 #[derive(Debug, Default)]
 pub struct Polled {
     /// `(capture sequence, RGBA8 pixels)`, oldest first.
-    pub frames: Vec<(u64, Vec<u8>)>,
+    pub frames: Vec<(u64, SharedPixels)>,
     /// Frames the writer overwrote before they were read.
     pub overwritten: u64,
     /// A new ring replaced the previous one: capture sequences restart.
@@ -73,9 +77,18 @@ impl RingInput {
             self.next_write = count - slots;
         }
         let mut problem = None;
+        let frame_bytes = self.mode.width as usize * self.mode.height as usize * 4;
         for write in self.next_write..count {
-            let mut payload = Vec::new();
-            let read = reader.read((write % slots) as u32, &mut payload);
+            let slot = (write % slots) as u32;
+            let (payload, read) = match SharedPixels::filled(frame_bytes, |payload| {
+                reader.read_into(slot, payload)
+            }) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    problem = Some(format!("no shared memory for an input frame: {error}"));
+                    continue;
+                }
+            };
             // A later write that completed before the copy started passes the
             // seqlock; only the write count shows that the slot was reused.
             if reader.write_count() > write + slots {
@@ -219,7 +232,7 @@ mod tests {
         let polled = input.poll();
         let sequences: Vec<_> = polled.frames.iter().map(|(s, _)| *s).collect();
         assert_eq!(sequences, [0, 1, 3], "capture gaps keep their sequence");
-        assert_eq!(polled.frames[2].1, [3; 32]);
+        assert_eq!(*polled.frames[2].1, [3; 32]);
 
         for sequence in 10..20 {
             push(&mut writer, sequence, MODE);

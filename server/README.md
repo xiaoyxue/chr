@@ -3,13 +3,15 @@
 The live render server: a Rust + wgpu renderer and the code that runs in the
 same process with it. The live service (`chr-server`, its render worker and
 `chr-monitor`) runs on **Linux**; Windows PCs only preview its SRT output. The
-renderer and viewer also build on Windows for local development. The Cargo workspace is at the
-repository root; its server crates live here:
+renderer and viewer also build on Windows for local development; `chr-runtime`
+links GStreamer for its worker transport (`unixfdsink`/`unixfdsrc`, GStreamer 1.28
+or later, Unix only).
+The Cargo workspace is at the repository root; its server crates live here:
 
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim` simulates the camera |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim` simulates the camera |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers and the `stack.py` one-command development stack |
@@ -31,7 +33,7 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `program/description.rs`, `program/assets.rs` | Render descriptions: startup program, `description.load`, asset reading, verification and import |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
 | `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
-| `worker/` | Render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
+| `worker/` | The unixfd transport shared by both workers (`transport.rs`), the render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
 | `worker/tracking/` | Tracking worker protocol (`protocol.rs`) and its supervisor in `chr-server` (`supervisor.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker |
 | `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
@@ -671,22 +673,31 @@ cargo run --locked --release -p chr-runtime
 ### Render worker
 
 `chr-server` never creates a GPU device, including for the default triangle. It
-starts `chr-renderer-cli worker` (`--renderer-cli <path>`, default:
-`chr-renderer-cli` next to the `chr-server` executable; the package build and
-the flake package provide both, while `cargo run` builds only `chr-server`) and
-sends it one request per frame as a JSON line on its stdin; replies come back on
-its stdout and its stderr is
-`chr-server`'s log. Input images and rendered UYVY frames travel through two
-4-slot `chr-shm` rings in a private 0700 directory,
+starts `chr-renderer-cli worker --input-socket <path> --output-socket <path>`
+(`--renderer-cli <path>`, default: `chr-renderer-cli` next to the `chr-server`
+executable; the package build and the flake package provide both, while
+`cargo run` builds only `chr-server`) and sends it one request per frame over
+GStreamer `unixfdsink`/`unixfdsrc` sockets in a private 0700 directory,
 `$XDG_RUNTIME_DIR/chr/worker-<pid>/` (or the temp directory), removed on
-shutdown. The worker installs the same program with the server's runtime ID,
-logs its adapter and rejects software adapters. The protocol is in
-[Live process implementation plan](../docs/live-process-implementation.md#step-4-worker-supervision-and-clean-feed-97).
+shutdown. Each message is one buffer whose `chr-worker-message` `GstCustomMeta`
+holds the JSON; the input image and the rendered UYVY frame are the buffers'
+memfd-backed memory, passed as file descriptors. A tracked program's input is
+the very memory the tracking worker received: chr-server copies each captured
+frame once. The worker's stderr (and stdout) is `chr-server`'s log. The worker
+installs the same program with the server's runtime ID, logs its adapter and
+rejects software adapters. The protocol is in
+[Live process implementation plan](../docs/live-process-implementation.md#step-4-worker-supervision-and-clean-feed-97)
+and the transport in [tracking worker](docs/tracking-worker.md#transport).
+
+At most 4 requests are outstanding (credits); without a credit the frame is
+clean feed. The queue towards the worker never blocks the render loop, and a
+stopped worker holds at most 4 input images and 4 UYVY frames. A killed worker's
+buffers are released when its sockets close, and its credits return.
 
 - `--render-deadline-ms <n>` (default: 3/4 of the frame period, leaving time
   for the clean-feed conversion): a frame the worker has not finished by then,
   or by the render loop's next frame boundary, is sent as **clean feed**; a late
-  completion only frees its ring slot. A worker whose GPU device is lost exits
+  completion only returns its credit. A worker whose GPU device is lost exits
   and is replaced like a crash.
 - `--worker-hang-ms <n>` (default 2000): a worker whose oldest outstanding
   request is older is killed (`SIGKILL`) and replaced. Exits and fatal errors
@@ -697,7 +708,7 @@ Clean feed is the frame's input image converted to UYVY on the CPU
 (`chr_renderer::uyvy_from_bt709`, bit-identical to the GPU converter) and sent
 without CG or a program association; the submission is reported as failed. It
 is used on a deadline miss, a worker failure, when no worker is ready, or when
-no ring slot is free. Inputs that are not 8-bit BT.709 at the output extent, and
+no credit is free. Inputs that are not 8-bit BT.709 at the output extent, and
 the triangle, which has no input, repeat the last output frame instead.
 `render.get_worker_status` reports `state` (`starting`, `ready`, `backoff`),
 `pid`, `restarts`, `deadline_misses`, `clean_feed_frames`,
@@ -707,8 +718,11 @@ Hardware acceptance (`kill -9`, `SIGSTOP`, deadline misses and worker/in-process
 pixel parity) runs from the repository root:
 
 ```sh
-cargo test --locked -p chr-runtime --test render_worker -- --ignored --nocapture
+cargo test --locked -p chr-runtime --test render_worker -- --ignored --nocapture --test-threads=1
 ```
+
+The tests wait for each new worker's GPU warm-up before measuring; run them one
+at a time, as concurrent debug-build workers on one GPU can miss the deadline.
 
 ### Program monitor (chr-monitor)
 
@@ -812,7 +826,7 @@ over `<dir>/render.sock`, twice one second apart, for its health:
 
 It ends with `PROBLEM` lines when something is not working. `stop` lists every
 process it stopped or had to kill. chr-server handles SIGTERM like Ctrl-C, removing
-its workers' ring directories in `$XDG_RUNTIME_DIR/chr/`. On startup it also
+its workers' socket directories in `$XDG_RUNTIME_DIR/chr/`. On startup it also
 removes directories left there by servers that were killed. Wrappers that do no work are folded into
 one line: the `run-tracked.sh` restart loops and the npm and esbuild helpers.
 The report ends with the URLs to open and the `ssh -L` forwards a remote viewer
@@ -821,8 +835,8 @@ needs. With every component enabled the stack runs nine working processes:
 | Component | Process | Sockets |
 | --- | --- | --- |
 | render | `chr-server` | control WebSocket (`server_ws`), NativeSocket `<dir>/render.sock` |
-| render | `chr-renderer-cli worker` | none: stdin/stdout and shared memory with chr-server, holds the GPU |
-| render | `chr-tracking-sim-cli worker` | none: frames from chr-server's shared-memory ring, cameras back over stdin/stdout (`tracking = "worker"`) |
+| render | `chr-renderer-cli worker` | none listed: two unixfd sockets with chr-server (frames, replies) in `$XDG_RUNTIME_DIR/chr/worker-<pid>/`, holds the GPU |
+| render | `chr-tracking-sim-cli worker` | none listed: two unixfd sockets with chr-server in `$XDG_RUNTIME_DIR/chr/tracking-<pid>/`; frames in, cameras back (`tracking = "worker"`) |
 | render | `chr-tracking-sim` | none: input ring (shared memory); with `tracking = "external"` also chr-server's socket |
 | render | `ffmpeg` | none: decodes the clip for the simulator |
 | render | `chr-monitor` | WebSocket (`monitor_ws`), SRT listener (`srt`, UDP), ICE-TCP from `webrtc_tcp` (only while a viewer is connected) |

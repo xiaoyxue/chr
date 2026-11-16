@@ -18,8 +18,8 @@ use w::Validate;
 
 use crate::{
     frame_resources::{
-        FrameMetadata, FrameResources, Lease, Producer, ProducerGuard, Readiness, ResourceError,
-        WriteTicket,
+        FrameMetadata, FrameResources, Lease, Pixels, Producer, ProducerGuard, Readiness,
+        ResourceError, WriteTicket,
     },
     retained::{BoundSubmission, NativeSettings, RenderAdmission, reject},
 };
@@ -160,11 +160,20 @@ impl FrameSubmissions {
         metadata: FrameMetadata,
         pixels: &[u8],
     ) -> Result<(WriteTicket, ProducerGuard<FrameMetadata>), ErrorObject> {
+        self.register_pixels(metadata, Pixels::Owned(pixels.into()))
+    }
+
+    /// [`Self::register`] without a copy: the pixels are stored as they are.
+    pub fn register_pixels(
+        &self,
+        metadata: FrameMetadata,
+        pixels: Pixels,
+    ) -> Result<(WriteTicket, ProducerGuard<FrameMetadata>), ErrorObject> {
         let mut state = lock(&self.0)?;
         let producer = state.producer.clone();
         state
             .resources
-            .register(&producer, metadata, pixels)
+            .register_pixels(&producer, metadata, pixels)
             .map_err(resource_error)
     }
 

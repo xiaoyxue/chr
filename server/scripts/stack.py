@@ -172,9 +172,9 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
 PORTLESS = {
     "chr-tracking-sim": "camera: frames into the input ring (shared memory)",
     "ffmpeg": "decodes the clip in a loop for chr-tracking-sim",
-    "chr-renderer-cli worker": "GPU renderer; stdin/stdout and shared memory with chr-server",
-    "chr-tracking-sim-cli worker": "tracking worker (replays recorded cameras); frames from chr-server's"
-                                   " shared-memory ring, cameras back over stdin/stdout",
+    "chr-renderer-cli worker": "GPU renderer; frames and replies over chr-server's unixfd sockets",
+    "chr-tracking-sim-cli worker": "tracking worker (replays recorded cameras); frames from chr-server"
+                                   " and cameras back over unixfd sockets",
 }
 # Launchers and restart loops that only start and watch the processes doing the work.
 WRAPPERS = ("bash", "npm", "esbuild")
