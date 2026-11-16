@@ -117,6 +117,29 @@ store (`studio_data_dir`), which holds matches, onsite placements and uploads.
 The [operations guide](docs/operations.md) covers configuration, launching,
 remote access, the studio workflow, every file location and troubleshooting.
 
+## Status and next steps
+
+Working today:
+- **Live stack:** onsite cameras from 1080p (the onsite target) up to DCI 4K 4096x2160 (#144).
+  - At 1080p30 every frame carries CG with the onsite description and the tracking worker.
+  - 4K is accepted but not yet sustained at 30 fps with the software camera simulation.
+  - The monitor preview is at most 1080p and encoded with NVENC.
+- **Worker transport:** chr-server and its render and tracking workers exchange frames and messages over GStreamer `unixfdsink`/`unixfdsrc` (#141). Each captured frame is copied once and shared by both workers.
+- **Pitch studio:**
+  - waving flags;
+  - a server-side studio store;
+  - export/import of onsite placements;
+  - sends that reuse one control connection.
+
+Next, in order:
+
+| Issue | Work | State |
+| --- | --- | --- |
+| #146 | Enable Resizable BAR on render hosts: a second Vulkan process on the same GPU is about 1000x slower while it is off | `necessary`, host configuration; do before #140 testing, then add to the [host checklist](docs/operations.md#host-checklist) |
+| #140 | vchao's `atlas-vq-estimate` replaces the `chr-tracking-sim-cli` replay as the tracking worker, over the #141 transport | Waiting for vchao's refactor |
+| #142 | Rename the camera simulator `chr-tracking-sim` to `chr-sdi-sim`; camera sending becomes `--send-cameras` | Planned |
+| #80 | Physical SDI capture and output | Not started |
+
 ## Design Documentation
 
 See [product and system design](docs/README.md) for the evolving business
