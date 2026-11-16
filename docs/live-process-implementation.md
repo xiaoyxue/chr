@@ -335,7 +335,16 @@ map, from `cargo test --release -p chr-runtime --lib transfer_cost -- --ignored
 it made four (input ring → `Vec`, → tracking ring, → frame pool, → render input
 ring), and the workers read the input in place instead of copying it out of a
 ring. The kill/stop/delay GPU tests and the byte-identical comparison with the
-in-process bridge pass over the new transport. In the restart
+in-process bridge pass over the new transport.
+
+End to end (release, nixGL, the onsite description at 1280x720p30 with the
+tracking worker and a 1920x1080 camera, 60 s), the unixfd build and the ring
+build both transmitted every frame with CG (no clean feed, no worker restart,
+every frame tracked, render 3.8 ms wall per frame in `chr-renderer-cli bench`).
+Over the last 40 s the unixfd build used 9 % of a core in `chr-server` (ring
+build 22 %), 13 % in the render worker (16 %) and 1 % in the tracking worker
+(4 %); resident memory was 169 / 195 / 11 MiB (211 / 213 / 34 MiB), flat over
+the run. In the restart
 measurement the input (1920x1080) differs from the output extent, so the frames
 without CG repeated the last frame instead of carrying clean feed. A rotating
 1.35M-triangle model rendered at 30 fps with 0 deadline misses after GPU mesh
