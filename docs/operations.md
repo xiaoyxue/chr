@@ -88,10 +88,11 @@ the checkout.
 
 ### Video size
 
-chr-server renders and transmits at `size`, from 1080p up to 8K UHD
-(7680x4320); 4K UHD 3840x2160 and DCI 4096x2160 lie in between. Both sides must be
-even and have the camera's aspect ratio (the `width`/`height` of the description
-and the manifest). Render at the camera's own size: for the usual 1080p camera set
+chr-server renders and transmits at `size`, from 1080p up to DCI 4K
+(4096x2160, which covers 4K UHD 3840x2160); 1280x720 works too. Onsite the camera
+is 1080p. Both sides must be even and have the camera's aspect ratio (the
+`width`/`height` of the description and the manifest). Render at the camera's
+own size: for the 1080p camera set
 
 ```toml
 size = "1920x1080"
@@ -102,22 +103,22 @@ scales the composed program down. The SDI port and the program tap carry `size`;
 the monitor preview (WebRTC and SRT) is scaled down to at most 1920x1080 and
 encoded with NVENC when the GPU offers it (`stack.py` runs it through nixGL), else
 with x264. The `render` log names the choice: `monitor preview 1920x1080 of
-3840x2160p30 with nvh264enc`.
+1920x1080p30 with nvh264enc`.
 
 | Size | Camera input ring + program tap in `dir` | Each captured frame (RGBA) |
 | --- | --- | --- |
+| 1280x720 | about 44 MB | 3.7 MB |
 | 1920x1080 | about 100 MB | 8.3 MB |
 | 3840x2160 | about 400 MB | 33 MB |
-| 7680x4320 | about 1.6 GB | 133 MB |
 
 `dir` usually lives in `$XDG_RUNTIME_DIR`, a RAM-backed file system of limited
-size (`df -h $XDG_RUNTIME_DIR`); 8K needs about 1.6 GB free there and several GB
-of RAM besides (see the measurements in
+size (`df -h $XDG_RUNTIME_DIR`). 4K is accepted but not yet sustained at 30 fps
+with the software camera simulation on the development host (see the
+measurements in
 [live process implementation](live-process-implementation.md#resolutions-and-performance)).
-Run one stack per GPU: next to another Vulkan process on the same GPU, such as a
-test stack or a benchmark, a render worker's CPU access to GPU-visible memory
-(frame upload and readback) slowed down by orders of magnitude on the RTX 3090
-host without Resizable BAR (#144).
+Run one stack per GPU: while Resizable BAR is off, a second Vulkan process on the
+same GPU, such as a test stack or a benchmark, is slowed down by orders of
+magnitude in its frame uploads and readbacks (#144 follow-up).
 
 ## Launch and operate
 

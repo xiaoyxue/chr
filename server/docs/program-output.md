@@ -42,7 +42,7 @@ Never retain handles across restarts. Configuration is immutable until restart.
 The flag selects explicit integration settings, **not production defaults**:
 even native/output dimensions at most 1280×720 (a limit of this demonstration
 and `--software-video` only; the camera programs built on the same configuration
-take native and output extents up to 7680×4320), integral 1–120 FPS,
+take native and output extents up to 4096×2160), integral 1–120 FPS,
 contain fit, BT.709 display background/output, exposure multiplier 1, ACES,
 one raster sample, 256-pixel shadow maps, 9-tap PCF, one cascade, bounded
 PCSS settings, 16 MiB shadow/canvas budgets and a 1 MiB environment budget.

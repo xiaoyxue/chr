@@ -149,7 +149,7 @@ must be sent again. `--dir <path>` uses a fixed directory for the socket, ring
 and tap, kept on exit, and `--no-monitor` skips `chr-monitor` so it can run on
 its own with `--tap <dir>/program.tap` and the same `--size`/`--fps`. The output
 rate is the manifest's `fps`. `--size` sets the output (default 1280x720; even,
-up to 7680x4320, with the camera's aspect, for example the camera's own
+up to 4096x2160, with the camera's aspect, for example the camera's own
 1920x1080),
 `--sim-arg`/`--monitor-arg` pass options through, and every other option goes to
 `chr-server`. `--description <json>` draws a

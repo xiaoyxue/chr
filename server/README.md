@@ -155,7 +155,7 @@ Use the existing host-driver wrapper below if Vulkan cannot access the hardware.
 The source must be progressive, square-pixel, limited-range BT.709, with the
 same integral rate and aspect ratio as the selected output. This software-video
 demonstration keeps its own 1280x720 maximum, like `--synthetic-program`; the
-camera programs below go up to 7680x4320. A 1920x1080 source is explicitly scaled
+camera programs below go up to 4096x2160. A 1920x1080 source is explicitly scaled
 to the selected 1280x720 output; no audio is connected.
 The sample geometry is deliberately small and **not calibrated to the video**.
 The orange mesh and gray ground are separate instances. The live WebUI's
@@ -239,8 +239,8 @@ reference-native-pixel-to-frame-SNC matrix per decoded presentation frame),
 and `pitch_m` (`[length,width]`). Model height and ground placement are authored,
 not inferred. All private paths, coefficients and renders must stay local.
 
-Native images remain at calibration resolution (even, up to 7680x4320); only the
-composed output is fitted to the selected size (even, up to 7680x4320, same
+Native images remain at calibration resolution (even, up to 4096x2160); only the
+composed output is fitted to the selected size (even, up to 4096x2160, same
 aspect).
 Startup decodes/probes the clip to require an exact warp count, matching native
 extent/rate and zero-based contiguous CFR presentation timestamps. The decoder
@@ -743,12 +743,12 @@ ones. It waits for the tap if it does not exist yet and reopens it when
 serves `webrtc.offer` (previews close with that connection) and
 `monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`,
 `srt_callers`, `encoder`, `preview_width`, `preview_height`); it has no program
-control. `--size` and `--fps` must match `chr-server` (up to 7680x4320); slots in
+control. `--size` and `--fps` must match `chr-server` (up to 4096x2160); slots in
 another mode are skipped and logged.
 
 The tap stays at the program's native size. The monitor scales its preview down
-to fit 1920x1080, keeping the aspect ratio and never scaling up (7680x4320 and
-3840x2160 become 1920x1080, 4096x2160 becomes 1920x1012, 1280x720 stays), and
+to fit 1920x1080, keeping the aspect ratio and never scaling up (3840x2160 becomes
+1920x1080, 4096x2160 becomes 1920x1012, 1920x1080 and 1280x720 stay), and
 WebRTC and SRT carry that one stream. `--encoder gstreamer` scales with
 GStreamer `videoconvertscale` (bilinear, up to four threads) and encodes with
 NVENC (`nvh264enc`, Constrained Baseline, CBR, no B-frames) when it encodes a
@@ -865,10 +865,11 @@ works as well.
 ### Resolutions
 
 The camera programs (`--description`, `--tracked-scene`, `--video-scene`,
-`--pitch-demo`) take a native camera extent and an output `--size` up to 8K UHD
-(7680x4320), both even, with the camera's aspect ratio: 1080p, 4K UHD 3840x2160
-and DCI 4096x2160 lie in between. `--synthetic-program` and `--software-video`
-alone keep their 1280x720 demonstration limit. The program tap stays at the
+`--pitch-demo`) take a native camera extent and an output `--size` up to DCI 4K
+(4096x2160, which covers 4K UHD 3840x2160), both even, with the camera's aspect
+ratio. 1080p is the onsite format; 8K was evaluated in #144 and dropped.
+`--synthetic-program` and `--software-video` alone keep their 1280x720
+demonstration limit. The program tap stays at the
 output size; `chr-monitor` previews at most 1920x1080. Memory per resolution and
 measurements are in
 [live process implementation](../docs/live-process-implementation.md#resolutions-and-performance).
@@ -889,8 +890,8 @@ preview while it samples, and stops and removes everything it started. It prints
 SDI, worker and tracking counters, CPU and memory per process, the runtime
 directory's size and GPU memory. `--scene/--video/--description/--asset-root` run
 a real camera instead; `--fps` picks the synthetic camera's rate. Another Vulkan
-process on the same GPU, such as a running stack, distorts every number (see the
-upload probe below), so measure with nothing else on the GPU.
+process on the same GPU, such as a running stack, distorts every number while
+Resizable BAR is off, so measure with nothing else on the GPU.
 `cargo run --release -p chr-renderer --example upload_probe` times the CPU writes
 into wgpu's upload staging memory that slow such a second process down.
 
