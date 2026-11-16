@@ -1,42 +1,57 @@
 //! `chr-tracking-sim-cli`: a stand-in tracking worker for `chr-server
-//! --tracking-worker`, to be replaced by the real tracking module.
+//! --tracking-worker`, in place of vchao's `pitch-analysis`.
 //!
-//! It speaks the tracking worker protocol (`chr_runtime::worker::tracking::protocol`)
-//! and maps every frame it receives like a real tracker would, but
-//! answers with the recorded camera of a calibrated clip (`TrackingReplay`): it
-//! replays, it does not estimate. Options inject delays, unavailable results, crashes and
-//! hangs to exercise chr-server's supervision and missing-camera handling.
+//! It speaks the same VchaoFrame contract (`chr_runtime::worker::tracking::protocol`):
+//! it receives every frame on `--input-socket` and returns it, the same memory,
+//! in order, on `--output-socket` with `selection.pose = fresh` and the recorded
+//! `Ti` of a calibrated clip (`TrackingReplay`): it replays, it does not
+//! estimate. Options inject latency, unavailable poses, crashes and hangs to
+//! exercise chr-server's supervision and missing-camera handling.
 
-use std::{error::Error, path::PathBuf, process::ExitCode, time::Duration};
+use std::{
+    collections::VecDeque,
+    error::Error,
+    path::PathBuf,
+    process::ExitCode,
+    time::{Duration, Instant},
+};
 
 use chr_runtime::{
     calibration::tracking::TrackingReplay,
     worker::{
-        tracking::protocol::{Reply, Request, VERSION},
-        transport::{self, Incoming, Receiver, Sender},
+        tracking::protocol::{Endpoint, Pose, Received, Selection, attach, check_caps, now_ns},
+        transport::{self, Inbound, Receiver, Sender},
     },
 };
+use gstreamer as gst;
 use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "\
-Usage: chr-tracking-sim-cli worker --input-socket <path> --output-socket <path> [options]
+Usage: chr-tracking-sim-cli --manifest <json> --stream-id <id> --input-socket <path>
+                            --output-socket <path> [options]
 
-Runs as chr-server's tracking worker (started by chr-server --tracking-worker;
-the protocol travels over the two GStreamer unixfd sockets chr-server names).
-Answers every frame with the recorded camera of the calibrated-video-v1
-manifest named in hello: a replay, not an estimate.
+Runs as chr-server's tracking worker (started by chr-server --tracking-worker with
+--tracking-worker-arg --manifest --tracking-worker-arg <json>). It speaks vchao's
+VchaoFrame contract over the two GStreamer unixfd sockets, like pitch-analysis:
+it listens on --output-socket for its one consumer, connects to --input-socket,
+and returns every frame of stream <id>, in order, with the recorded Ti of the
+calibrated-video-v1 manifest as a fresh pose: a replay, not an estimate.
 
 Options (fault injection):
-  --delay-ms <n>           Spend this long on every frame before answering
-  --unavailable-every <n>  Answer every n-th frame (by sequence) as unavailable
-  --exit-after <n>         Exit with status 3 on the n-th request
-  --hang-after <n>         Stop answering from the n-th request on
+  --delay-ms <n>           Hold every frame this long before returning it, as a
+                           tracker's lookahead would (frames keep flowing)
+  --unavailable-every <n>  Return every n-th frame (by frame_id) as unavailable
+  --exit-after <n>         Exit with status 3 on the n-th frame, after the frames
+                           already returned were sent
+  --hang-after <n>         Stop returning frames from the n-th on
   -h, --help               Show this help";
 
 #[derive(Debug, PartialEq)]
 struct Worker {
+    manifest: PathBuf,
+    stream_id: String,
     input: PathBuf,
     output: PathBuf,
     faults: Faults,
@@ -60,32 +75,34 @@ fn positive(flag: &str, value: Option<String>) -> Result<u64> {
     Ok(value)
 }
 
-fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Worker>> {
-    match raw.next().as_deref() {
-        Some("worker") => {}
-        Some("-h" | "--help") | None => return Ok(None),
-        Some(other) => return Err(format!("unknown command {other:?}\n\n{USAGE}").into()),
-    }
+fn parse_args(raw: impl Iterator<Item = String>) -> Result<Option<Worker>> {
     let raw: Vec<String> = raw.collect();
-    if raw.iter().any(|arg| arg == "-h" || arg == "--help") {
+    if raw.is_empty() || raw.iter().any(|arg| arg == "-h" || arg == "--help") {
         return Ok(None);
     }
     let (input, output, rest) = transport::parse_worker_args(raw)?;
+    let (mut manifest, mut stream_id) = (None, None);
     let mut faults = Faults::default();
     let mut raw = rest.into_iter();
     while let Some(flag) = raw.next() {
+        let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
-            "--delay-ms" => {
-                let value = raw.next().ok_or("--delay-ms needs a value")?;
-                faults.delay = Duration::from_millis(value.parse()?);
+            "--manifest" => manifest = Some(PathBuf::from(value()?)),
+            "--stream-id" => stream_id = Some(value()?),
+            "--delay-ms" => faults.delay = Duration::from_millis(value()?.parse()?),
+            "--unavailable-every" => {
+                faults.unavailable_every = Some(positive(&flag, Some(value()?))?)
             }
-            "--unavailable-every" => faults.unavailable_every = Some(positive(&flag, raw.next())?),
-            "--exit-after" => faults.exit_after = Some(positive(&flag, raw.next())?),
-            "--hang-after" => faults.hang_after = Some(positive(&flag, raw.next())?),
+            "--exit-after" => faults.exit_after = Some(positive(&flag, Some(value()?))?),
+            "--hang-after" => faults.hang_after = Some(positive(&flag, Some(value()?))?),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
     }
     Ok(Some(Worker {
+        manifest: manifest.ok_or("--manifest <json> is required")?,
+        stream_id: stream_id
+            .filter(|id| !id.is_empty())
+            .ok_or("--stream-id <id> is required")?,
         input,
         output,
         faults,
@@ -105,7 +122,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match serve(worker) {
+    match serve(&worker) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             log::error!("{error}");
@@ -129,99 +146,136 @@ fn load(path: &std::path::Path) -> Result<TrackingReplay> {
     TrackingReplay::new(calibration.ti, calibration.center, &calibration.frame_warps)
 }
 
-/// How long an exiting worker waits for its last replies, such as `fatal`, to
-/// reach the server.
+/// How long an exiting worker waits for its last frames to reach the server.
 const FINISH: Duration = Duration::from_secs(2);
+/// Frames waiting for the consumer before the worker fails instead of growing.
+const OUTPUT_QUEUE: u64 = 64;
+/// How often the worker checks its input while it holds no frame.
+const IDLE: Duration = Duration::from_millis(100);
 
-fn serve(worker: Worker) -> Result<()> {
-    let (requests, replies) = transport::worker_endpoints(&worker.input, &worker.output)?;
-    let result = serve_on(&requests, &replies, &worker.faults);
-    replies.finish(FINISH);
+fn serve(worker: &Worker) -> Result<()> {
+    // The reference loads before the output socket exists, as pitch-analysis does.
+    let replay = load(&worker.manifest)?;
+    log::info!(
+        "chr-tracking-sim-cli returning the recorded Ti of {} for stream {} (a replay; no \
+         estimation, frame warps dropped)",
+        worker.manifest.display(),
+        worker.stream_id
+    );
+    // As pitch-analysis: frames are returned only to the connected consumer.
+    let output = Sender::listen_live(&worker.output, None, OUTPUT_QUEUE)?;
+    let input = Receiver::connect(&worker.input)?;
+    let result = forward(&input, &output, worker, replay.ti());
+    output.finish(FINISH);
     result
 }
 
-fn serve_on(requests: &Receiver, replies: &Sender, faults: &Faults) -> Result<()> {
-    let Some(Incoming {
-        message:
-            Request::Hello {
-                version,
-                width,
-                height,
-                calibration,
-                ..
-            },
-        ..
-    }) = requests.recv()?
-    else {
-        return Err("expected hello".into());
-    };
-    let started = (|| -> Result<TrackingReplay> {
-        if version != VERSION {
-            return Err(format!("protocol version {version}, expected {VERSION}").into());
-        }
-        load(&calibration)
-    })();
-    let replay = match started {
-        Ok(replay) => replay,
-        Err(error) => {
-            replies.send(
-                &Reply::Fatal {
-                    message: error.to_string(),
-                },
-                None,
-            )?;
-            return Err(error);
-        }
-    };
-    let name = format!(
-        "chr-tracking-sim-cli replaying the recorded cameras of {} ({} warps; no estimation)",
-        calibration.display(),
-        replay.warp_count()
-    );
-    log::info!("{name}");
-    replies.send(&Reply::Ready { name }, None)?;
-    let frame_bytes = width as usize * height as usize * 4;
-    let mut requests_seen = 0_u64;
-    while let Some(request) = requests.recv::<Request>()? {
-        let Request::Track { id, sequence } = request.message else {
-            return Err("unexpected hello".into());
-        };
-        requests_seen += 1;
-        if faults.exit_after == Some(requests_seen) {
-            log::warn!("injected exit on request {requests_seen}");
-            std::process::exit(3);
-        }
-        if faults.hang_after.is_some_and(|n| requests_seen >= n) {
-            log::warn!("injected hang on request {requests_seen}");
-            continue;
-        }
-        std::thread::sleep(faults.delay);
-        // A real tracker estimates from these pixels; the replay only checks they arrived.
-        let frame = request.payload()?;
-        let reply = if frame.len() != frame_bytes {
-            Reply::Unavailable {
-                id,
-                reason: format!("a frame of {} bytes, not {frame_bytes}", frame.len()),
+/// Returns every input frame with its pose, in order, until the input ends.
+fn forward(input: &Receiver, output: &Sender, worker: &Worker, t: [f64; 9]) -> Result<()> {
+    let reader = input.reader();
+    let faults = &worker.faults;
+    let mut held: VecDeque<(Instant, gst::Buffer)> = VecDeque::new();
+    let mut caps: Option<gst::Caps> = None;
+    let mut received = 0_u64;
+    let mut last_source_ns = None;
+    loop {
+        let timeout = held.front().map_or(IDLE, |(due, _)| {
+            due.saturating_duration_since(Instant::now())
+        });
+        match reader.recv_sample_timeout(timeout) {
+            Some(sample) => {
+                received += 1;
+                if faults.exit_after == Some(received) {
+                    log::warn!("injected exit on frame {received}");
+                    // Frames already returned reach the server before the exit.
+                    output.finish(FINISH);
+                    std::process::exit(3);
+                }
+                let frame = Received::decode(sample)?;
+                let meta = &frame.meta;
+                // pitch-analysis' input rules: one stream, no gaps, fixed caps.
+                if meta.stream_id != worker.stream_id || meta.frame_id != received - 1 {
+                    return Err(format!(
+                        "frame {} of stream {:?}: an identity gap or another stream",
+                        meta.frame_id, meta.stream_id
+                    )
+                    .into());
+                }
+                if meta.selection.is_some() || last_source_ns >= Some(meta.source_ns) {
+                    return Err("an input frame with a selection or an old source time".into());
+                }
+                last_source_ns = Some(meta.source_ns);
+                let frame_caps = frame.caps.clone().ok_or("an input frame without caps")?;
+                check_caps(&frame_caps, &worker.stream_id)?;
+                match &caps {
+                    None => {
+                        output.set_caps(&frame_caps);
+                        caps = Some(frame_caps);
+                    }
+                    Some(caps) if *caps != frame_caps => {
+                        return Err("the input caps changed mid-stream".into());
+                    }
+                    Some(_) => {}
+                }
+                if faults.hang_after.is_some_and(|n| received >= n) {
+                    if faults.hang_after == Some(received) {
+                        log::warn!("injected hang from frame {received} on");
+                    }
+                    continue;
+                }
+                held.push_back((Instant::now() + faults.delay, select(frame, t, faults)?));
             }
-        } else if faults
-            .unavailable_every
-            .is_some_and(|n| (sequence + 1) % n == 0)
-        {
-            Reply::Unavailable {
-                id,
-                reason: "injected by --unavailable-every".into(),
+            None if reader.is_eos() => break,
+            None => {
+                if let Some(error) = input.error() {
+                    return Err(format!("input lost: {error}").into());
+                }
             }
-        } else {
-            Reply::Camera {
-                id,
-                camera: replay.frame(sequence),
-            }
-        };
-        drop(frame);
-        drop(request);
-        replies.send(&reply, None)?;
+        }
+        while held.front().is_some_and(|(due, _)| *due <= Instant::now()) {
+            let (_, buffer) = held.pop_front().expect("front exists");
+            output.push(buffer)?;
+        }
+    }
+    // The input ended: every accepted frame still goes out.
+    for (_, buffer) in held {
+        output.push(buffer)?;
     }
     Ok(())
+}
+
+/// The frame's buffer, the same memory, with its selected pose.
+fn select(frame: Received, t: [f64; 9], faults: &Faults) -> Result<gst::Buffer> {
+    let Received {
+        mut meta,
+        mut buffer,
+        ..
+    } = frame;
+    let now = now_ns();
+    let pose = if faults
+        .unavailable_every
+        .is_some_and(|n| (meta.frame_id + 1) % n == 0)
+    {
+        Pose::Unavailable {}
+    } else {
+        Pose::Fresh {
+            t,
+            left: Endpoint {
+                frame_id: meta.frame_id,
+                sequence: meta.frame_id,
+                source_ns: meta.source_ns,
+                observed_ns: now,
+                t,
+            },
+        }
+    };
+    meta.selection = Some(Selection {
+        selected_ns: now,
+        overdue: false,
+        pose,
+    });
+    attach(buffer.make_mut(), &meta)?;
+    Ok(buffer)
 }
 
 #[cfg(test)]
@@ -232,19 +286,29 @@ mod tests {
         parse_args(args.iter().map(|arg| (*arg).to_owned()))
     }
 
-    const SOCKETS: [&str; 4] = ["--input-socket", "in", "--output-socket", "out"];
+    const REQUIRED: [&str; 8] = [
+        "--manifest",
+        "m.json",
+        "--stream-id",
+        "s",
+        "--input-socket",
+        "in",
+        "--output-socket",
+        "out",
+    ];
 
     #[test]
     fn parses_fault_options() {
         let args = [
-            &["worker"][..],
-            &SOCKETS,
+            &REQUIRED[..],
             &["--delay-ms", "5", "--unavailable-every", "4"],
         ]
         .concat();
         assert_eq!(
             parse(&args).unwrap().unwrap(),
             Worker {
+                manifest: "m.json".into(),
+                stream_id: "s".into(),
                 input: "in".into(),
                 output: "out".into(),
                 faults: Faults {
@@ -255,13 +319,15 @@ mod tests {
             }
         );
         assert!(parse(&["--help"]).unwrap().is_none());
+        assert!(parse(&[]).unwrap().is_none());
         for bad in [
-            &["render"][..],
-            &["worker"],
-            &["worker", "--input-socket", "in"],
-            &[&["worker"][..], &SOCKETS, &["--exit-after", "0"]].concat(),
-            &[&["worker"][..], &SOCKETS, &["--hang-after"]].concat(),
-            &[&["worker"][..], &SOCKETS, &["--bogus"]].concat(),
+            &["worker"][..],
+            &REQUIRED[2..],
+            &REQUIRED[..6],
+            &[&REQUIRED[..2], &REQUIRED[4..]].concat(),
+            &[&REQUIRED[..], &["--exit-after", "0"]].concat(),
+            &[&REQUIRED[..], &["--hang-after"]].concat(),
+            &[&REQUIRED[..], &["--bogus"]].concat(),
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }

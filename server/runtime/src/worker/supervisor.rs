@@ -15,7 +15,7 @@
 
 use std::{
     collections::VecDeque,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -26,11 +26,10 @@ use chr_common::{
     methods::render_worker::{WorkerState, WorkerStatus},
     scene_frame as w,
 };
-use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
-    protocol::{CREDITS, Output, Reply, Request, VERSION, WorkerProgram},
-    transport::{Channel, Event, Incoming, SharedPixels},
+    protocol::{CREDITS, Output, Reply, Request, TrackedLens, VERSION, WorkerProgram},
+    transport::{self, Channel, Event, Inbound, Incoming, SharedPixels},
 };
 use crate::frame_resources::Pixels;
 
@@ -55,6 +54,8 @@ pub struct WorkerConfig {
     pub hang: Duration,
     /// Assets every worker registers after installing its program.
     pub assets: WorkerAssets,
+    /// Whether a tracked program's frames go through its startup lens.
+    pub lens: TrackedLens,
 }
 
 /// Assets registered after startup, shared by the control plane and the supervisor.
@@ -125,11 +126,11 @@ pub struct Supervisor {
 
 enum State {
     Starting {
-        worker: Running<Reply>,
+        worker: Running<Incoming<Reply>>,
         since: Instant,
     },
     Ready {
-        worker: Running<Reply>,
+        worker: Running<Incoming<Reply>>,
         since: Instant,
     },
     Backoff {
@@ -309,7 +310,7 @@ impl Supervisor {
     /// Applies one event. Returns the outcome when it completes `awaited`.
     fn handle(
         &mut self,
-        event: Event<Reply>,
+        event: Event<Incoming<Reply>>,
         awaited: Option<u64>,
     ) -> Option<Result<Vec<u8>, Miss>> {
         let incoming = match event {
@@ -379,7 +380,7 @@ impl Supervisor {
             .retain(|(outstanding, _)| *outstanding != id);
     }
 
-    fn try_event(&self) -> Option<Event<Reply>> {
+    fn try_event(&self) -> Option<Event<Incoming<Reply>>> {
         match &self.state {
             State::Starting { worker, .. } | State::Ready { worker, .. } => {
                 worker.channel.try_event()
@@ -408,21 +409,31 @@ impl Supervisor {
         }
     }
 
-    fn start(&mut self) -> Result<Running<Reply>, Error> {
+    fn start(&mut self) -> Result<Running<Incoming<Reply>>, Error> {
         let assets = self.config.assets.snapshot();
         self.assets_sent = assets.len();
-        Running::spawn(
-            &self.config.executable,
-            &[],
+        transport::init()?;
+        let channel = Channel::open(
             &self.config.socket_dir,
+            Some(&gstreamer::Caps::new_empty_simple(transport::CAPS)),
+            transport::QUEUE,
+            false,
+        )?;
+        // Waits in the socket until the worker connects.
+        channel.send(
             &Request::Hello {
                 version: VERSION,
                 program: self.config.program.clone(),
                 runtime_id: self.config.runtime_id.clone(),
                 output: self.config.output,
                 assets,
+                lens: self.config.lens,
             },
-        )
+            None,
+        )?;
+        let mut command = Command::new(&self.config.executable);
+        command.arg("worker");
+        Running::spawn(command, channel)
     }
 
     /// Kills the current worker, if any, and starts the backoff.
@@ -469,23 +480,12 @@ pub(crate) struct Running<T> {
     pub(crate) channel: Channel<T>,
 }
 
-impl<T: DeserializeOwned + Send + 'static> Running<T> {
-    /// Listens for the worker, queues `hello` and runs
-    /// `<executable> worker --input-socket <path> --output-socket <path> <args>...`.
-    /// Its stdout joins its stderr, the worker's log.
-    pub(crate) fn spawn(
-        executable: &Path,
-        args: &[String],
-        socket_dir: &Path,
-        hello: &impl Serialize,
-    ) -> Result<Self, Error> {
-        let channel = Channel::open(socket_dir)?;
-        // Waits in the socket until the worker connects.
-        channel.send(hello, None)?;
-        let child = Command::new(executable)
-            .arg("worker")
+impl<M: Inbound> Running<M> {
+    /// Runs `command --input-socket <path> --output-socket <path>` on `channel`'s
+    /// sockets. Its stdout joins its stderr, the worker's log.
+    pub(crate) fn spawn(mut command: Command, channel: Channel<M>) -> Result<Self, Error> {
+        let child = command
             .args(channel.worker_args())
-            .args(args)
             .stdin(Stdio::null())
             .stdout(std::io::stderr())
             .stderr(Stdio::inherit())
@@ -568,6 +568,7 @@ mod tests {
             socket_dir: dir.join("sockets"),
             hang: Duration::from_millis(200),
             assets: Default::default(),
+            lens: TrackedLens::Program,
         }
     }
 

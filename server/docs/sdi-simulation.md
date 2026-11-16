@@ -1,25 +1,34 @@
-# Tracked camera simulation
+# SDI capture and tracked camera simulation
 
 **Status:** `implemented` opt-in simulation on Linux. It simulates the #60 tracking
 path with a replayed calibrated clip; it is not a production tracking service,
 capture card or calibration contract. The default daemon and the initial
 `scene_frame_v1` pinhole profile are unchanged.
 
-With `chr-server --tracking-worker` the simulator is the camera only
-(`--no-tracking`) and the server's [tracking worker](tracking-worker.md) supplies
-the cameras; `stack.py` runs that mode by default. This document describes the
-external mode, in which `chr-tracking-sim` sends the cameras itself.
+> **Renamed in #142:** the simulator was called `chr-tracking-sim`, and camera
+> sending was its default (`--no-tracking` turned it off). It is now
+> `chr-sdi-sim`, which feeds frames only unless given `--send-cameras`. This
+> document was `tracking-simulation.md`.
 
-`chr-tracking-sim` stands in for a camera with a tracking system. It sends every
-frame of a calibrated clip into `chr-server`, and it sends each frame's camera
-separately. `chr-server --tracked-scene` pairs both by capture sequence, renders
+`chr-sdi-sim` stands in for the SDI capture card: it decodes a calibrated clip
+in a loop and writes every frame into `chr-server`'s capture input ring. A real
+capture process (#80) will take its place. By default it feeds frames only, and
+the server's [tracking worker](tracking-worker.md) supplies the cameras over
+vchao's VchaoFrame contract; `stack.py` runs that mode by default. This document
+also describes the external mode (`chr-sdi-sim --send-cameras`), in which the
+simulator sends each frame's recorded camera itself, and the pairing both modes
+share.
+
+In the external mode `chr-sdi-sim` stands in for a camera with a tracking
+system. It sends every frame of a calibrated clip into `chr-server`, and it
+sends each frame's camera separately. `chr-server --tracked-scene` pairs both by capture sequence, renders
 the CG with that camera, and transmits the program on its simulated SDI port.
 `chr-monitor` streams that output over SRT or WebRTC, as for every other program.
 
 ```text
-chr-tracking-sim ──frames (chr-shm input ring, "SDI in")──────────┐
+chr-sdi-sim ──frames (chr-shm input ring, "SDI in")───────────────┐
    (clip + manifest)                                               ▼
-                 ──tracking.frame {sequence, Ti, C, frame_warp}──► chr-server ──worker──► SDI out
+  --send-cameras ──tracking.frame {sequence, Ti, C, frame_warp}──► chr-server ──worker──► SDI out
                    (JSON-RPC over the NativeSocket)                │                      │
                                                                    │             program tap
                                                                    ▼                      ▼
@@ -70,7 +79,7 @@ increasing.
 The server copies each frame once, straight from its slot into memfd-backed
 shared memory; the backlog holds that memory, and the tracking worker and the
 render worker receive it without another copy (the worker channels are GStreamer
-unixfd sockets, see [tracking worker](tracking-worker.md#transport)). The input
+unixfd sockets, see [tracking worker](tracking-worker.md#transport-and-startup)). The input
 ring itself stays a `chr-shm` ring: the capture process is not a supervised
 worker and never waits for the server.
 
@@ -110,25 +119,33 @@ only, never by arrival order. Once per output period the server:
 1. reads new frames from the input ring into a backlog that outlasts the wait
    (one frame per output period of the wait plus two, at least four);
 2. resolves frames oldest first: a frame with its camera is joined; a frame
-   whose wait (`--tracking-wait-ms`, default 3 frame periods, at most 500 ms)
+   whose wait (`--tracking-wait-ms`, default 3 frame periods, at most 1500 ms)
    ended without one is skipped. A frame never overtakes an older unresolved
    frame;
-3. renders the oldest joined frame. Up to 2 joined frames wait for later
-   periods, which absorbs capture bursts; older ones are dropped, so latency
-   returns to the tracking delay after a stall.
+3. outputs the oldest resolved frame that is due: a joined frame is rendered,
+   a frame without camera goes out as clean feed. In this external mode a frame
+   is due once joined; with a tracking worker, exactly the wait after its
+   capture, a constant program delay
+   ([tracking worker](tracking-worker.md#latency-and-program-delay)). Up to 2
+   due frames wait for later periods, which absorbs capture bursts; older ones
+   are dropped, so latency returns to the tracking delay after a stall.
 
-A skipped frame is never rendered with another frame's camera, and its late
-camera is rejected. The output port repeats its previous frame for that period,
-because the 1080p input does not match the 720p output for clean feed.
+A frame without its camera is never rendered with another frame's camera, and
+its late camera is rejected. It goes out as clean feed in its own output period:
+its own pixels without CG, scaled to the output size when the camera's differs
+(#148). Before #148 the output port repeated its previous frame instead.
 
 | `tracking.get_status` | Meaning |
 | --- | --- |
 | `samples_received` | Cameras accepted into the backlog |
 | `samples_late` | Cameras rejected because their frame was already rendered or skipped |
 | `frames_joined` | Frames submitted for rendering with their camera |
-| `frames_without_tracking` | Frames skipped because their camera did not arrive in time |
+| `frames_without_tracking` | Frames whose camera did not arrive in time, including frames a tracking worker returned `unavailable` or never received |
+| `frames_clean_feed` | Frames sent as clean feed because they had no camera |
 | `frames_dropped` | Joined frames given up to keep the latency bounded |
 | `frames_overwritten` | Frames the input ring overwrote before the server read them |
+| `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable` | Frames a tracking worker returned, by pose; 0 in external mode |
+| `poses_overdue` | Frames a tracking worker released by its overload rule |
 
 ## Run
 
@@ -157,9 +174,11 @@ up to 4096x2160, with the camera's aspect, for example the camera's own
 simulator still replays the manifest's cameras. View the stream with an SRT caller, for example VLC on
 `srt://<host>:9001`; the host must allow that UDP port.
 
-`chr-tracking-sim` options: `--tracking-delay-ms <n>` sends every camera that
-long after its frame, and `--drop-tracking-every <n>` withholds every n-th
-camera to exercise skipped frames. It requires the clip's decoded frame count to
+`chr-sdi-sim` options: `--send-cameras` sends the recorded cameras
+(`run-tracked.sh` passes it without `--tracking-worker`); with it,
+`--tracking-delay-ms <n>` sends every camera that long after its frame, and
+`--drop-tracking-every <n>` withholds every n-th camera to exercise frames
+without one. It requires the clip's decoded frame count to
 equal the manifest's `frame_warps`, like the calibrated replay.
 
 `chr-renderer-cli render --tracked-scene <json> --frame <n>` renders frame `n`

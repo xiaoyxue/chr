@@ -540,7 +540,7 @@ optional `frame_warp` (row-major `RenderMatrix3`, reference native pixel to fram
 SNC), omitted when absent. Only a runtime that registered a
 `radial-poly-native-px-v1` lens at startup accepts it; otherwise admission
 rejects it with `unsupported_profile`. It serves the
-[tracked camera simulation](../server/docs/tracking-simulation.md).
+[tracked camera simulation](../server/docs/sdi-simulation.md).
 
 Images and geometry may arrive independently at the runtime's join adapter.
 The adapter joins them by FrameKey **before** calling this complete-input

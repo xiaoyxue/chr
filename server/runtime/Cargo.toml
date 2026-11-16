@@ -4,7 +4,7 @@ default-run = "chr-server"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "chr runtime: the chr-server render server, its chr-renderer-cli render worker and chr-tracking-sim-cli tracking worker stand-in, the chr-tracking-sim camera simulator and their shared program logic"
+description = "chr runtime: the chr-server render server, its chr-renderer-cli render worker and chr-tracking-sim-cli tracking worker stand-in, the chr-sdi-sim SDI capture simulator and their shared program logic"
 
 [lints]
 workspace = true
@@ -18,8 +18,8 @@ name = "chr-renderer-cli"
 path = "src/renderer_cli.rs"
 
 [[bin]]
-name = "chr-tracking-sim"
-path = "src/tracking_sim.rs"
+name = "chr-sdi-sim"
+path = "src/sdi_sim.rs"
 
 [[bin]]
 name = "chr-tracking-sim-cli"
@@ -39,7 +39,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 env_logger = "0.11"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Bit-exact f64 parsing: tracking Ti crosses JSON (VchaoFrame) unchanged.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 image.workspace = true
 gstreamer.workspace = true
 gstreamer-allocators.workspace = true

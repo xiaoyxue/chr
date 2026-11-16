@@ -105,6 +105,7 @@ Edit `output/stack/stack.toml`; the example documents every key.
 | `srt` | An interface address, to let players on the LAN receive SRT directly |
 | `server_ws`, `monitor_ws`, `webrtc_tcp`, ports | Free local ports; set a page or relay port to 0 to leave it out |
 | `size` | The camera's own size, such as `1920x1080`; see [Video size](#video-size) |
+| `tracking`, `tracking_cli`, `tracking_worker_args`, `tracking_centre`, `tracking_wait_ms` | The tracking worker; see [Tracking worker](#tracking-worker) |
 
 An unknown key stops the script ("unknown keys"). This happens when a configuration
 from a newer checkout is used with an older `stack.py`: remove the key or update
@@ -145,6 +146,76 @@ same GPU, such as a test stack or a benchmark, is slowed down by orders of
 magnitude in its frame uploads and readbacks (#146; see the
 [host checklist](#host-checklist)).
 
+### Tracking worker
+
+With `tracking = "worker"` (the default), chr-server hands every camera frame
+to its tracking worker and renders each frame with the `Ti` it returns
+([tracking worker](../server/docs/tracking-worker.md)).
+
+- Without `tracking_cli`, the worker is the `chr-tracking-sim-cli` stand-in.
+  It replays the manifest's recorded `Ti`.
+- `tracking_cli` names another worker that speaks vchao's VchaoFrame contract,
+  such as vchao's `pitch-analysis`. Its `tracking_worker_args` give its map and
+  settings; `{stream_id}` in them becomes each session's stream ID, for example
+  in `--ledger`. Its `Ti` is rendered without a lens.
+- `tracking_centre` is the station's optical centre `[x, y, z]`. Without it,
+  the description's or manifest's reference camera is used.
+- `tracking_wait_ms` is the **program delay**: every frame leaves exactly this
+  long after capture, and a frame whose camera is later is not rendered.
+  - The default, three frame periods, suits the stand-in.
+  - `pitch-analysis` may hold a frame up to its 500 ms overload threshold: set
+    about 800 ms. The maximum is 1500 ms.
+  - Every waiting frame holds 8 MiB of memory at 1080p (33 MB at 4K).
+
+`stack.py status` names the worker and its current stream and counts the
+returned poses: fresh, interpolated, reused, unavailable and overdue. Frames
+without a camera, such as while the worker loads its model or restarts, go out
+as clean feed: the camera picture without CG, at the same delay.
+
+### Run with vchao tracking
+
+vchao's `pitch-analysis` estimates every frame's `Ti` from a map of the venue
+([tracking worker](../server/docs/tracking-worker.md#running-vchaos-pitch-analysis)).
+
+1. Build it once per checkout (about 7 GB in the Nix store; the first build
+   downloads PyTorch and CUDA):
+
+   ```sh
+   git submodule update --init external/vchao
+   nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
+   ```
+
+2. Put the map (`manifest.json` with its Parquet files) under `<asset-root>`
+   and create a directory for its ledgers, for example `<asset-root>/runs`.
+3. In `stack.toml` (relative paths are from the repository root):
+
+   ```toml
+   tracking = "worker"
+   # On NixOS the wrapper is not needed: name pitch-analysis directly.
+   tracking_cli = "server/scripts/with-cuda-driver.sh"
+   tracking_worker_args = [
+       "output/vchao/pitch-analysis/bin/pitch-analysis",
+       "--asset-manifest", "<asset-root>/map/manifest.json",
+       "--batch-frames", "8", "--estimate-every", "4", "--interpolation", "logh",
+       "--overload-ms", "500", "--ledger", "<asset-root>/runs/{stream_id}.arrow",
+   ]
+   tracking_centre = [14.52857216404143, 60.620266710663365, -9.91514362632655]
+   tracking_wait_ms = 800
+   nixgl = true
+   ```
+
+   `tracking_centre` is the station's optical centre of that map; the value
+   above is the SC1464 fixture's. The description must match the camera's size
+   and rate; its lens is not applied to vchao's `Ti`.
+4. `uv run server/scripts/stack.py restart render`. The worker is `ready`
+   about 10 s later (model and map loading); until then the output carries
+   clean feed. Its log lines, such as `analysis-listening` and, at stop,
+   `analysis-complete`, are in `output/stack/render.log`.
+
+The ledgers grow with every frame (about 90 bytes per frame plus about 3 KB
+per estimate) and a restarted worker starts a new pair; remove old ones from
+time to time.
+
 ## Launch and operate
 
 From the repository root of the main checkout, outside a Nix shell:
@@ -157,7 +228,7 @@ uv run server/scripts/stack.py restart
 uv run server/scripts/stack.py restart pitch-studio monitor-page   # only these components
 ```
 
-The components are `render` (chr-server, both workers, the camera simulator and
+The components are `render` (chr-server, both workers, the SDI capture simulator and
 chr-monitor), `srt-relay`, `pitch-studio` and `monitor-page`.
 - **First start:** builds the release binaries and both pages. This takes minutes; later starts reuse the builds.
 - **Readiness:** `start` prints `ready: …` as each part comes up, and `PROBLEM: …` for whatever is still wrong.
@@ -229,4 +300,6 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 | `OLD BUILD` in `status` | Restart that component to run the new binary. |
 | Many clean-feed frames or deadline misses after raising `size` | The render worker is slower than a frame at that size, or another process uses the GPU. Check `stack.py status`, stop other GPU processes, or use a smaller `size`. |
 | A benchmark or test stack is hundreds of times slower than expected | Another Vulkan process uses the same GPU while Resizable BAR is off (#146). Stop the other process or enable Resizable BAR ([host checklist](#host-checklist)). |
+| `render.log`: `with-cuda-driver.sh: no libcuda.so.1` or the estimator finds no CUDA device | `pitch-analysis` runs outside nixGL; keep `nixgl = true`, or on NixOS name `pitch-analysis` directly as `tracking_cli`. |
+| Many frames without camera, or the tracking worker restarts with "holds N frames" | The worker returns frames later than `tracking_wait_ms`. Raise `tracking_wait_ms` (at most 1500), or check the worker's log in `output/stack/render.log`. |
 | `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |

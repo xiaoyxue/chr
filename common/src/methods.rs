@@ -85,8 +85,8 @@ pub mod mesh {
 }
 
 /// Per-frame camera of a tracked program (`--tracked-scene`), sent by a tracking
-/// source such as `chr-tracking-sim`. Only `chr-server` running a tracked program
-/// answers these methods. See `server/docs/tracking-simulation.md`.
+/// source such as `chr-sdi-sim --send-cameras`. Only `chr-server` running a tracked program
+/// answers these methods. See `server/docs/sdi-simulation.md`.
 pub mod tracking {
     use super::*;
     use crate::scene_frame::{Matrix3, U64, Vec3};
@@ -123,14 +123,37 @@ pub mod tracking {
         pub samples_late: u64,
         /// Input frames submitted for rendering with their camera.
         pub frames_joined: u64,
-        /// Input frames whose camera did not arrive within the wait; not rendered.
+        /// Input frames whose camera did not arrive within the wait, including
+        /// frames a tracking worker returned `unavailable` or never received.
         pub frames_without_tracking: u64,
+        /// Input frames transmitted as clean feed: their own pixels without CG,
+        /// because they had no camera. They keep the output's cadence and delay.
+        #[serde(default)]
+        pub frames_clean_feed: u64,
         /// Input frames not rendered because the bounded input backlog was full, or
         /// because a newer frame resolved in the same output period (the output
         /// stays live instead of falling behind).
         pub frames_dropped: u64,
         /// Captured frames the input ring overwrote before the server read them.
         pub frames_overwritten: u64,
+        /// Frames a tracking worker returned with their own estimate (`fresh`).
+        /// The four `poses_*` counters cover every returned frame of every
+        /// worker session; the first three come with a camera.
+        #[serde(default)]
+        pub poses_fresh: u64,
+        /// Frames returned with a pose interpolated between two estimates.
+        #[serde(default)]
+        pub poses_interpolated: u64,
+        /// Frames returned with an earlier frame's estimate (`reused`).
+        #[serde(default)]
+        pub poses_reused: u64,
+        /// Frames a tracking worker returned without a camera (`unavailable`).
+        #[serde(default)]
+        pub poses_unavailable: u64,
+        /// Frames a tracking worker released by its overload rule (`overdue`),
+        /// whatever their pose.
+        #[serde(default)]
+        pub poses_overdue: u64,
     }
 
     /// Reads the tracking worker's supervision counters. No params. Result:
@@ -143,17 +166,26 @@ pub mod tracking {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct TrackerStatus {
         pub state: super::render_worker::WorkerState,
+        /// The worker executable's file name, for example `chr-tracking-sim-cli`
+        /// (the replay stand-in) or `pitch-analysis`.
+        #[serde(default)]
+        pub worker: String,
+        /// The VchaoFrame `stream_id` of the current worker session; every
+        /// started worker gets a new one.
+        #[serde(default)]
+        pub stream_id: Option<String>,
         /// Process ID of the current worker, if one is running.
         pub pid: Option<u32>,
         /// Workers started after the first.
         pub restarts: u64,
         /// Frames sent to the worker.
         pub requests: u64,
-        /// Cameras the worker returned.
+        /// Frames the worker returned with a camera (`fresh`, `interpolated` or `reused`).
         pub cameras: u64,
-        /// Frames the worker reported it could not track.
+        /// Frames the worker returned as `unavailable`.
         pub unavailable: u64,
-        /// Frames not sent: no ready worker, or every ring slot awaits a reply.
+        /// Frames not sent because no worker was ready, or because the worker held
+        /// as many frames as chr-server allows in flight (it is then replaced).
         pub not_sent: u64,
         pub last_error: Option<String>,
     }

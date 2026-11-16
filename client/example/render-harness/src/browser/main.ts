@@ -238,8 +238,14 @@ function showTracking(status: TrackingStatus | null): void {
     count("samples late", "tracking.late", status.samples_late, true),
     count("frames joined", "tracking.joined", status.frames_joined),
     count("without tracking", "tracking.missing", status.frames_without_tracking, true),
+    count("clean feed", "tracking.clean", status.frames_clean_feed, true),
     count("dropped", "tracking.dropped", status.frames_dropped, true),
     count("overwritten", "tracking.overwritten", status.frames_overwritten, true),
+    count("poses fresh", "tracking.fresh", status.poses_fresh),
+    count("poses interpolated", "tracking.interpolated", status.poses_interpolated),
+    count("poses reused", "tracking.reused", status.poses_reused, true),
+    count("poses unavailable", "tracking.unavailable", status.poses_unavailable, true),
+    count("poses overdue", "tracking.overdue", status.poses_overdue, true),
   ]);
 }
 

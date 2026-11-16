@@ -1,16 +1,21 @@
-//! The supervisor driving the real `chr-tracking-sim-cli` worker.
+//! The supervisor driving the real `chr-tracking-sim-cli` worker over the
+//! VchaoFrame contract, and a worker played by the test itself for malformed
+//! returns.
 
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
 
-use chr_common::methods::{render_worker::WorkerState, tracking::TrackingFrame};
+use chr_common::methods::render_worker::WorkerState;
 use chr_runtime::{
     calibration::tracking::TrackingReplay,
     worker::{
-        tracking::supervisor::{StatusHandle, Tracker, TrackerConfig, status_handle},
-        transport::SharedPixels,
+        tracking::{
+            protocol::{Endpoint, Pose, PoseStatus, Received, Selection, attach},
+            supervisor::{Answer, StatusHandle, Tracker, TrackerConfig, status_handle},
+        },
+        transport::{Inbound, Receiver, Sender, SharedPixels},
     },
 };
 
@@ -21,6 +26,7 @@ const WARPS: [[[f64; 3]; 3]; 2] = [
     [[0.001, 0., -1.], [0., 0.001, -0.5], [0., 0., 1.]],
     [[0.001, 0., -0.9], [0., 0.001, -0.5], [0., 0., 1.]],
 ];
+const CENTRE: [f64; 3] = [14.52857216404143, 60.620266710663365, -9.91514362632655];
 
 struct Fixture {
     dir: PathBuf,
@@ -30,26 +36,41 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str, args: &[&str], hang: Duration) -> Self {
+        Self::with(name, None, args, hang, 16)
+    }
+
+    /// A tracker of `executable` (default: the stand-in replaying a manifest).
+    fn with(
+        name: &str,
+        executable: Option<PathBuf>,
+        args: &[&str],
+        hang: Duration,
+        in_flight: usize,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("chr-tracking-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let calibration = dir.join("scene.json");
+        let manifest = dir.join("scene.json");
         std::fs::write(
-            &calibration,
+            &manifest,
             serde_json::json!({"ti": TI, "center": [0., 0., -10.], "frame_warps": WARPS})
                 .to_string(),
         )
         .unwrap();
+        let mut worker_args = vec!["--manifest".to_owned(), manifest.display().to_string()];
+        worker_args.extend(args.iter().map(|arg| (*arg).to_owned()));
         let status = status_handle();
         let tracker = Tracker::new(
             TrackerConfig {
-                executable: env!("CARGO_BIN_EXE_chr-tracking-sim-cli").into(),
-                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
-                calibration,
+                executable: executable
+                    .unwrap_or_else(|| env!("CARGO_BIN_EXE_chr-tracking-sim-cli").into()),
+                args: worker_args,
                 width: WIDTH,
                 height: HEIGHT,
                 fps: 50,
+                camera_center: CENTRE,
                 socket_dir: dir.join("sockets"),
                 hang,
+                in_flight,
             },
             status.clone(),
         )
@@ -69,16 +90,16 @@ impl Fixture {
         SharedPixels::copy_from(&vec![sequence as u8; (WIDTH * HEIGHT * 4) as usize]).unwrap()
     }
 
-    /// Polls until `done` holds, collecting cameras.
-    fn until(&mut self, done: impl Fn(&Self, &[TrackingFrame]) -> bool) -> Vec<TrackingFrame> {
+    /// Polls until `done` holds, collecting answers.
+    fn until(&mut self, done: impl Fn(&Self, &[Answer]) -> bool) -> Vec<Answer> {
         let deadline = Instant::now() + Duration::from_secs(10);
-        let mut cameras = Vec::new();
-        while !done(self, &cameras) {
+        let mut answers = Vec::new();
+        while !done(self, &answers) {
             assert!(Instant::now() < deadline, "timed out: {:?}", self.status());
-            cameras.extend(self.tracker().poll());
+            answers.extend(self.tracker().poll());
             std::thread::sleep(Duration::from_millis(2));
         }
-        cameras
+        answers
     }
 
     fn ready(&mut self) {
@@ -101,8 +122,12 @@ impl Drop for Fixture {
     }
 }
 
+fn sequences(answers: &[Answer]) -> Vec<u64> {
+    answers.iter().map(|answer| answer.sequence).collect()
+}
+
 #[test]
-fn every_sent_frame_gets_the_recorded_camera() {
+fn every_sent_frame_comes_back_with_the_recorded_ti_and_the_station_centre() {
     let mut fixture = Fixture::new("replay", &[], Duration::from_secs(2));
     fixture.tracker().track(0, &Fixture::frame(0));
     assert_eq!(fixture.status().not_sent, 1, "no worker is ready yet");
@@ -110,18 +135,35 @@ fn every_sent_frame_gets_the_recorded_camera() {
     for sequence in 10..14 {
         fixture.tracker().track(sequence, &Fixture::frame(sequence));
     }
-    let cameras = fixture.until(|_, cameras| cameras.len() == 4);
-    let replay = TrackingReplay::new(TI, [0., 0., -10.], &WARPS).unwrap();
-    for camera in &cameras {
-        assert_eq!(*camera, replay.frame(camera.sequence.get()));
+    let answers = fixture.until(|_, answers| answers.len() == 4);
+    assert_eq!(sequences(&answers), [10, 11, 12, 13], "in order");
+    let ti = TrackingReplay::new(TI, [0., 0., -10.], &WARPS)
+        .unwrap()
+        .ti();
+    for answer in &answers {
+        assert_eq!((answer.pose, answer.overdue), (PoseStatus::Fresh, false));
+        let camera = answer.camera.as_ref().unwrap();
+        assert_eq!(camera.sequence.get(), answer.sequence);
+        assert_eq!(camera.ti.map(|v| v.get().to_bits()), ti.map(f64::to_bits));
+        assert_eq!(
+            camera.camera_center.map(|v| v.get().to_bits()),
+            CENTRE.map(f64::to_bits),
+            "the configured station centre, not the manifest's"
+        );
+        assert_eq!(camera.frame_warp, None);
     }
     let status = fixture.status();
     assert_eq!((status.requests, status.cameras), (4, 4));
     assert_eq!(status.state, WorkerState::Ready);
+    assert_eq!(status.worker, "chr-tracking-sim-cli");
+    assert_eq!(
+        status.stream_id,
+        Some(format!("chr-{}-1", std::process::id()))
+    );
 }
 
 #[test]
-fn unavailable_frames_are_counted_and_a_crashed_worker_comes_back() {
+fn unavailable_frames_are_counted_and_a_crashed_worker_comes_back_as_a_new_stream() {
     let mut fixture = Fixture::new(
         "crash",
         &["--unavailable-every", "2", "--exit-after", "4"],
@@ -131,30 +173,44 @@ fn unavailable_frames_are_counted_and_a_crashed_worker_comes_back() {
     for sequence in 0..4 {
         fixture.tracker().track(sequence, &Fixture::frame(sequence));
     }
-    // Frames 0 and 2 get cameras, 1 is unavailable, and the 4th request crashes the worker.
-    let cameras = fixture.until(|fixture, _| {
+    // Frames 0 and 2 get cameras, 1 is unavailable, and the 4th frame crashes the worker.
+    let answers = fixture.until(|fixture, _| {
         fixture.status().restarts == 0 && fixture.status().state == WorkerState::Backoff
     });
     let status = fixture.status();
-    assert_eq!((cameras.len(), status.unavailable), (2, 1), "{status:?}");
+    assert_eq!(sequences(&answers), [0, 1, 2], "{status:?}");
+    assert_eq!(answers[1].pose, PoseStatus::Unavailable);
+    assert_eq!(answers[1].camera, None);
+    assert_eq!((status.cameras, status.unavailable), (2, 1));
     assert!(status.last_error.unwrap().contains("exited"));
     fixture.ready();
-    assert_eq!(fixture.status().restarts, 1);
+    let status = fixture.status();
+    assert_eq!(status.restarts, 1);
+    assert_eq!(
+        status.stream_id,
+        Some(format!("chr-{}-2", std::process::id()))
+    );
+    // The new stream starts at frame_id 0; its first frame is not unavailable.
     fixture.tracker().track(8, &Fixture::frame(8));
-    let cameras = fixture.until(|_, cameras| !cameras.is_empty());
-    assert_eq!(cameras[0].sequence.get(), 8, "the new worker answers");
+    let answers = fixture.until(|_, answers| !answers.is_empty());
+    assert_eq!(sequences(&answers), [8], "the new worker answers");
+    assert_eq!(answers[0].pose, PoseStatus::Fresh);
 }
 
 #[test]
-fn a_hung_worker_is_replaced_and_its_late_frames_forgotten() {
+fn a_hung_worker_is_replaced() {
     let mut fixture = Fixture::new("hang", &["--hang-after", "2"], Duration::from_millis(150));
     fixture.ready();
     fixture.tracker().track(0, &Fixture::frame(0));
     fixture.tracker().track(1, &Fixture::frame(1));
-    let cameras = fixture.until(|fixture, _| fixture.status().state == WorkerState::Backoff);
-    assert_eq!(cameras.len(), 1, "frame 1 never got its camera");
+    let answers = fixture.until(|fixture, _| fixture.status().state == WorkerState::Backoff);
+    assert_eq!(sequences(&answers), [0], "frame 1 never came back");
     assert!(
-        fixture.status().last_error.unwrap().contains("unanswered"),
+        fixture
+            .status()
+            .last_error
+            .unwrap()
+            .contains("held a frame"),
         "{:?}",
         fixture.status()
     );
@@ -163,33 +219,179 @@ fn a_hung_worker_is_replaced_and_its_late_frames_forgotten() {
 }
 
 #[test]
-fn forgotten_frames_are_never_answered() {
-    let mut fixture = Fixture::new("forget", &["--delay-ms", "50"], Duration::from_secs(2));
+fn a_worker_holding_too_many_frames_is_replaced_not_skipped() {
+    let mut fixture = Fixture::with(
+        "full",
+        None,
+        &["--hang-after", "1"],
+        Duration::from_secs(10),
+        2,
+    );
     fixture.ready();
-    fixture.tracker().track(5, &Fixture::frame(5));
-    fixture.tracker().forget();
-    fixture.tracker().track(6, &Fixture::frame(6));
-    let cameras = fixture.until(|_, cameras| !cameras.is_empty());
-    std::thread::sleep(Duration::from_millis(100));
-    let late: Vec<_> = fixture.tracker().poll();
-    let sequences: Vec<_> = cameras
-        .iter()
-        .chain(&late)
-        .map(|c| c.sequence.get())
-        .collect();
-    assert_eq!(sequences, [6], "frame 5 was forgotten after it was sent");
+    for sequence in 0..3 {
+        fixture.tracker().track(sequence, &Fixture::frame(sequence));
+    }
+    let status = fixture.status();
+    assert_eq!((status.requests, status.not_sent), (2, 1));
+    assert_eq!(status.state, WorkerState::Backoff);
+    assert!(
+        status
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("holds 2 frames"),
+        "{status:?}"
+    );
 }
 
 #[test]
-fn an_unreadable_calibration_is_fatal_and_backs_off() {
+fn delayed_frames_keep_flowing_and_forgotten_frames_are_never_answered() {
+    let mut fixture = Fixture::new("forget", &["--delay-ms", "100"], Duration::from_secs(2));
+    fixture.ready();
+    let start = Instant::now();
+    fixture.tracker().track(5, &Fixture::frame(5));
+    fixture.tracker().forget();
+    for sequence in 6..10 {
+        fixture.tracker().track(sequence, &Fixture::frame(sequence));
+    }
+    let answers = fixture.until(|_, answers| answers.len() == 4);
+    let elapsed = start.elapsed();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(fixture.tracker().poll().is_empty());
+    assert_eq!(
+        sequences(&answers),
+        [6, 7, 8, 9],
+        "frame 5 was forgotten after it was sent"
+    );
+    // Held 100 ms each but together, like a lookahead, not one after another.
+    assert!(
+        elapsed >= Duration::from_millis(100) && elapsed < Duration::from_millis(400),
+        "{elapsed:?}"
+    );
+    assert_eq!(fixture.status().requests, 5);
+}
+
+#[test]
+fn an_unreadable_manifest_exits_the_worker_and_backs_off() {
     let mut fixture = Fixture::new("fatal", &[], Duration::from_secs(2));
     std::fs::write(fixture.dir.join("scene.json"), "{}").unwrap();
     fixture.until(|fixture, _| fixture.status().last_error.is_some());
     let status = fixture.status();
     assert_eq!(status.state, WorkerState::Backoff);
     assert!(
-        status.last_error.as_ref().unwrap().contains("failed"),
+        status.last_error.as_ref().unwrap().contains("exited"),
         "{status:?}"
     );
     assert!(!fixture.tracker().is_ready());
+}
+
+/// The test plays the worker: it returns frame 0 with a fresh, overdue pose,
+/// changed by `corrupt`. Returns the answers and the status once the tracker
+/// took the frame or failed the worker.
+fn return_frame(
+    name: &str,
+    corrupt: impl FnOnce(&mut Received),
+) -> (Vec<Answer>, chr_common::methods::tracking::TrackerStatus) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("chr-tracking-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // A worker process that does nothing: the test speaks for it.
+    let idle = dir.join("idle.sh");
+    std::fs::write(&idle, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&idle, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut fixture = Fixture::with(name, Some(idle), &[], Duration::from_secs(5), 8);
+    fixture.tracker().poll();
+    let sockets = fixture.dir.join("sockets");
+    let output = Sender::listen_live(&sockets.join("output.sock"), None, 4).unwrap();
+    let input = Receiver::connect(&sockets.join("input.sock")).unwrap();
+    fixture.ready();
+    fixture.tracker().track(3, &Fixture::frame(3));
+    let mut frame = Received::decode(input.reader().recv_sample().unwrap().unwrap()).unwrap();
+    assert_eq!(
+        (frame.meta.frame_id, frame.meta.selection.clone()),
+        (0, None)
+    );
+    output.set_caps(frame.caps.as_ref().unwrap());
+    let t = [0.5, 0., 0.25, 0., 0.5, 1. / 3., 0., 0., 1.];
+    frame.meta.selection = Some(Selection {
+        selected_ns: frame.meta.source_ns + 1,
+        overdue: true,
+        pose: Pose::Fresh {
+            t,
+            left: Endpoint {
+                frame_id: 0,
+                sequence: 0,
+                source_ns: frame.meta.source_ns,
+                observed_ns: frame.meta.source_ns,
+                t,
+            },
+        },
+    });
+    corrupt(&mut frame);
+    attach(frame.buffer.make_mut(), &frame.meta).unwrap();
+    output.push(frame.buffer).unwrap();
+    let answers = fixture.until(|fixture, answers| {
+        !answers.is_empty() || fixture.status().state == WorkerState::Backoff
+    });
+    let status = fixture.status();
+    drop((input, output, fixture));
+    (answers, status)
+}
+
+#[test]
+fn a_well_formed_return_from_any_worker_becomes_a_camera() {
+    let (answers, status) = return_frame("good", |_| {});
+    assert_eq!(status.state, WorkerState::Ready, "{status:?}");
+    assert_eq!(answers.len(), 1);
+    let answer = &answers[0];
+    assert_eq!(
+        (answer.sequence, answer.pose, answer.overdue),
+        (3, PoseStatus::Fresh, true)
+    );
+    let camera = answer.camera.as_ref().unwrap();
+    assert_eq!(
+        camera.ti.map(|v| v.get().to_bits()),
+        [0.5, 0., 0.25, 0., 0.5, 1. / 3., 0., 0., 1.].map(f64::to_bits),
+        "row-major, bit for bit"
+    );
+}
+
+#[test]
+fn malformed_returns_are_worker_failures() {
+    for (name, corrupt, expected) in [
+        (
+            "wrong-id",
+            Box::new(|frame: &mut Received| {
+                frame.meta.frame_id = 7;
+                frame.buffer.make_mut().set_offset(7);
+            }) as Box<dyn FnOnce(&mut Received)>,
+            "frame 7 where frame 0 was due",
+        ),
+        (
+            "no-selection",
+            Box::new(|frame: &mut Received| frame.meta.selection = None),
+            "without a selection",
+        ),
+        (
+            "other-stream",
+            Box::new(|frame: &mut Received| frame.meta.stream_id = "someone-else".into()),
+            "of stream \"someone-else\"",
+        ),
+        (
+            "bad-version",
+            Box::new(|frame: &mut Received| frame.meta.version = 2),
+            "version 2",
+        ),
+        (
+            "bad-duration",
+            Box::new(|frame: &mut Received| frame.meta.duration_ns += 1),
+            "does not match its buffer",
+        ),
+    ] {
+        let (answers, status) = return_frame(name, corrupt);
+        assert!(answers.is_empty(), "{name}: {answers:?}");
+        assert_eq!(status.state, WorkerState::Backoff, "{name}");
+        let error = status.last_error.unwrap();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
 }

@@ -5,13 +5,16 @@
 //! Its only product is the program output in SDI form, queued for the SDI port.
 //! Everything clients see is derived from what that port transmits (the program tap
 //! read by `chr-monitor`). A frame the worker does not deliver in time is
-//! transmitted as its clean feed: the input image without CG.
+//! transmitted as its clean feed: the input image without CG, scaled to the
+//! output. A tracked frame without a camera is clean feed too ([`CleanFrame`]).
 
 use std::{
+    collections::VecDeque,
     error::Error,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc::Receiver,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -25,7 +28,10 @@ use crate::{
     frame_submissions::{Execution, FrameSubmissions},
     scene::Scene,
     sdi::{SdiFrame, SdiInput, VideoMode},
-    worker::supervisor::{Miss, StatusHandle, Supervisor, WorkerConfig},
+    worker::{
+        supervisor::{Miss, StatusHandle, Supervisor, WorkerConfig},
+        transport::SharedPixels,
+    },
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -47,6 +53,19 @@ pub enum Command {
 
 /// Bounded so a flood of commands is refused instead of growing memory.
 pub const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// A captured frame without a camera, transmitted as its clean feed in its
+/// place among the program frames.
+pub struct CleanFrame {
+    /// The program input sequence the frame takes.
+    pub sequence: u64,
+    /// RGBA8 BT.709 code values at `extent`, tightly packed.
+    pub rgba: SharedPixels,
+    pub extent: w::Extent,
+}
+
+/// Clean frames that may wait for the render loop.
+pub const CLEAN_QUEUE: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -71,19 +90,21 @@ impl RenderWorker {
         worker: WorkerConfig,
         status: StatusHandle,
     ) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, worker, status, None)
+        Self::spawn_inner(config, sdi, worker, status, None, None)
     }
 
     /// Starts the render loop for an installed program; until the worker is ready
-    /// its frames are clean feed.
+    /// its frames are clean feed. `clean` delivers the frames without a camera
+    /// of a tracked program.
     pub fn spawn_program(
         config: RenderConfig,
         sdi: SdiInput,
         worker: WorkerConfig,
         status: StatusHandle,
         scheduler: FrameSubmissions,
+        clean: Option<Receiver<CleanFrame>>,
     ) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, worker, status, Some(scheduler))
+        Self::spawn_inner(config, sdi, worker, status, Some(scheduler), clean)
     }
 
     fn spawn_inner(
@@ -92,6 +113,7 @@ impl RenderWorker {
         worker: WorkerConfig,
         status: StatusHandle,
         scheduler: Option<FrameSubmissions>,
+        clean: Option<Receiver<CleanFrame>>,
     ) -> Result<Self, BoxError> {
         let supervisor = Supervisor::new(worker, Arc::clone(&status))?;
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
@@ -105,6 +127,8 @@ impl RenderWorker {
             scene: Scene::new(config.mode.fps),
             config,
             scheduler,
+            clean,
+            clean_pending: VecDeque::new(),
         };
         let thread = std::thread::Builder::new()
             .name("chr-render".into())
@@ -138,6 +162,9 @@ struct Pipeline {
     scene: Scene,
     config: RenderConfig,
     scheduler: Option<FrameSubmissions>,
+    clean: Option<Receiver<CleanFrame>>,
+    /// Clean frames received but not transmitted yet, in sequence order.
+    clean_pending: VecDeque<CleanFrame>,
 }
 
 impl Pipeline {
@@ -209,13 +236,47 @@ impl Pipeline {
         scheduler
             .handoff(&mut self.sdi)
             .map_err(|e| e.to_string())?;
-        if let Some(execution) = scheduler.next_ready().map_err(|e| e.to_string())? {
-            self.render_program(execution, deadline);
+        if let Some(clean) = &self.clean {
+            self.clean_pending.extend(clean.try_iter());
+        }
+        // Clean frames keep their place: those before the next program frame
+        // go first, the others once no program frame waits.
+        match scheduler.next_ready().map_err(|e| e.to_string())? {
+            Some(execution) => {
+                let sequence = execution.provenance.input.frame.sequence.get();
+                self.transmit_clean(Some(sequence));
+                self.render_program(execution, deadline);
+            }
+            None => self.transmit_clean(None),
         }
         scheduler
             .handoff(&mut self.sdi)
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Transmits the pending clean frames before `before`, or all of them.
+    fn transmit_clean(&mut self, before: Option<u64>) {
+        while self
+            .clean_pending
+            .front()
+            .is_some_and(|clean| before.is_none_or(|before| clean.sequence < before))
+        {
+            let clean = self.clean_pending.pop_front().expect("front exists");
+            match clean_uyvy(
+                &clean.rgba,
+                clean.extent,
+                ChannelOrder::Rgba,
+                self.config.mode,
+            ) {
+                Some(uyvy) => self.sdi.submit(SdiFrame {
+                    source_frame: clean.sequence,
+                    uyvy: Arc::new(uyvy),
+                    program: None,
+                }),
+                None => log::warn!("clean frame {} could not be converted", clean.sequence),
+            }
+        }
     }
 
     fn render_program(&mut self, execution: Execution, deadline: Instant) {
@@ -273,8 +334,8 @@ impl Pipeline {
     }
 }
 
-/// The input image converted to the output format, when it is 8-bit BT.709 at the
-/// output extent; otherwise `None` and the port repeats its previous frame.
+/// The input image converted to the output format, when it is 8-bit BT.709;
+/// otherwise `None` and the port repeats its previous frame.
 fn clean_feed(execution: &Execution, mode: VideoMode) -> Option<Vec<u8>> {
     let image = &execution.input.metadata().image;
     let order = match image.format {
@@ -282,13 +343,104 @@ fn clean_feed(execution: &Execution, mode: VideoMode) -> Option<Vec<u8>> {
         w::ImageFormat::Bgra8Unorm => ChannelOrder::Bgra,
         w::ImageFormat::Rgba16Float => return None,
     };
-    if image.transfer != w::Transfer::Bt709
-        || (image.extent.width, image.extent.height) != (mode.width, mode.height)
-    {
+    if image.transfer != w::Transfer::Bt709 {
         return None;
     }
-    let extent = ImageExtent::new(mode.width, mode.height).ok()?;
+    clean_uyvy(execution.input.pixels().ok()?, image.extent, order, mode)
+}
+
+/// 8-bit BT.709 pixels at `extent` as UYVY at the output extent, scaled
+/// bilinearly when the extents differ (the output keeps the camera's aspect).
+fn clean_uyvy(
+    pixels: &[u8],
+    extent: w::Extent,
+    order: ChannelOrder,
+    mode: VideoMode,
+) -> Option<Vec<u8>> {
+    let scaled;
+    let pixels = if (extent.width, extent.height) == (mode.width, mode.height) {
+        pixels
+    } else {
+        scaled = resize_rgba8(pixels, extent, mode)?;
+        &scaled
+    };
     let mut uyvy = Vec::new();
-    uyvy_from_bt709(execution.input.pixels().ok()?, extent, order, &mut uyvy).ok()?;
+    uyvy_from_bt709(
+        pixels,
+        ImageExtent::new(mode.width, mode.height).ok()?,
+        order,
+        &mut uyvy,
+    )
+    .ok()?;
     Some(uyvy)
+}
+
+/// Bilinear resampling of tightly packed 8-bit four-channel pixels, sampling
+/// at output pixel centres. The clean feed is for display only, not geometry.
+fn resize_rgba8(pixels: &[u8], from: w::Extent, to: VideoMode) -> Option<Vec<u8>> {
+    let (sw, sh) = (from.width as usize, from.height as usize);
+    let (dw, dh) = (to.width as usize, to.height as usize);
+    if sw == 0 || sh == 0 || pixels.len() != sw * sh * 4 {
+        return None;
+    }
+    let taps = |dst: usize, src: usize| -> Vec<(usize, usize, f32)> {
+        let scale = src as f32 / dst as f32;
+        (0..dst)
+            .map(|i| {
+                let at = ((i as f32 + 0.5) * scale - 0.5).clamp(0.0, (src - 1) as f32);
+                let low = at as usize;
+                (low, (low + 1).min(src - 1), at - low as f32)
+            })
+            .collect()
+    };
+    let (columns, rows) = (taps(dw, sw), taps(dh, sh));
+    let mut out = Vec::with_capacity(dw * dh * 4);
+    for &(top, bottom, wy) in &rows {
+        let (top, bottom) = (&pixels[top * sw * 4..], &pixels[bottom * sw * 4..]);
+        for &(left, right, wx) in &columns {
+            for channel in 0..4 {
+                let sample = |row: &[u8], x: usize| f32::from(row[x * 4 + channel]);
+                let upper = sample(top, left) + (sample(top, right) - sample(top, left)) * wx;
+                let lower =
+                    sample(bottom, left) + (sample(bottom, right) - sample(bottom, left)) * wx;
+                out.push((upper + (lower - upper) * wy).round() as u8);
+            }
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_feed_scales_to_the_output() {
+        let from = w::Extent {
+            width: 4,
+            height: 2,
+        };
+        let mode = VideoMode {
+            width: 2,
+            height: 2,
+            fps: 30,
+        };
+        // Columns 0..4 have red 0, 100, 200, 250; the output samples between pairs.
+        let pixels: Vec<u8> = (0..2)
+            .flat_map(|_| {
+                [0_u8, 100, 200, 250]
+                    .into_iter()
+                    .flat_map(|r| [r, 0, 0, 255])
+            })
+            .collect();
+        let resized = resize_rgba8(&pixels, from, mode).unwrap();
+        assert_eq!(resized, [50, 0, 0, 255, 225, 0, 0, 255].repeat(2));
+        assert_eq!(
+            resize_rgba8(&pixels[4..], from, mode),
+            None,
+            "a short frame"
+        );
+        let uyvy = clean_uyvy(&pixels, from, ChannelOrder::Rgba, mode).unwrap();
+        assert_eq!(uyvy.len(), 2 * 2 * 2);
+    }
 }

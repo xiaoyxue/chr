@@ -5,7 +5,7 @@
 # ///
 """Starts, stops and reports the local development stack with one command.
 
-The stack is the tracked-camera simulation (chr-tracking-sim, chr-server and
+The stack is the tracked-camera simulation (chr-sdi-sim, chr-server and
 chr-monitor through run-tracked.sh, which restarts whichever exits), the
 pitch-studio client, the program monitor page and an optional SRT-to-TCP relay for
 viewers behind an SSH port forward. Machine-specific paths live in a local TOML
@@ -64,8 +64,20 @@ class Config:
     # (STUDIO_DATA_DIR); inside asset_root so chr-server can read the uploads.
     studio_data_dir: str | None = None
     monitor_page_port: int = 5173
-    # "worker": chr-server's tracking worker supplies cameras; "external": the simulator does.
+    # "worker": chr-server's tracking worker supplies cameras; "external": chr-sdi-sim
+    # sends the recorded ones (--send-cameras).
     tracking: str = "worker"
+    # Tracking worker executable (VchaoFrame contract, e.g. vchao's pitch-analysis);
+    # empty: the chr-tracking-sim-cli replay stand-in.
+    tracking_cli: str = ""
+    # Arguments of tracking_cli; "{stream_id}" is replaced by each worker session's stream ID.
+    tracking_worker_args: list[str] = field(default_factory=list)
+    # Station optical centre [x, y, z] (world metres, negative Z up); default: the
+    # reference camera of the description or manifest.
+    tracking_centre: list[float] | None = None
+    # How long a frame waits for its camera, which with a tracking worker is also the
+    # program delay; at most 1500. Default: three frame periods.
+    tracking_wait_ms: int | None = None
 
 
 def load_config(path: Path) -> Config:
@@ -81,6 +93,14 @@ def load_config(path: Path) -> Config:
         raise SystemExit(f"{path}: missing {', '.join(missing)}")
     if values.get("tracking", "worker") not in ("worker", "external"):
         raise SystemExit(f"{path}: tracking must be \"worker\" or \"external\"")
+    worker_keys = [key for key in ("tracking_cli", "tracking_worker_args", "tracking_centre") if values.get(key)]
+    if worker_keys and values.get("tracking", "worker") != "worker":
+        raise SystemExit(f"{path}: {', '.join(worker_keys)} need tracking = \"worker\"")
+    if values.get("tracking_worker_args") and not values.get("tracking_cli"):
+        raise SystemExit(f"{path}: tracking_worker_args need tracking_cli (the stand-in takes the scene)")
+    centre = values.get("tracking_centre")
+    if centre is not None and (len(centre) != 3 or not all(isinstance(v, (int, float)) for v in centre)):
+        raise SystemExit(f"{path}: tracking_centre must be [x, y, z]")
     return Config(**values)
 
 
@@ -111,7 +131,13 @@ def components(config: Config) -> list[Component]:
     if config.asset_root:
         render += ["--asset-root", config.asset_root]
     if config.tracking == "worker":
-        render += ["--tracking-worker"]
+        render += ["--tracking-cli", config.tracking_cli] if config.tracking_cli else ["--tracking-worker"]
+        for arg in config.tracking_worker_args:
+            render += ["--tracking-worker-arg", arg]
+        if config.tracking_centre:
+            render += ["--tracking-centre", *(repr(float(v)) for v in config.tracking_centre)]
+    if config.tracking_wait_ms is not None:
+        render += ["--tracking-wait-ms", str(config.tracking_wait_ms)]
     if config.nixgl:
         render = NIXGL + render
     stack = [
@@ -157,7 +183,7 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
     known = {
         f"tcp {config.server_ws}": "chr-server control JSON-RPC WebSocket (description.load, status)",
         f"unix {config.dir}/render.sock": "chr-server NativeSocket: local control"
-                                         + (", tracking.frame from chr-tracking-sim" if external_tracking else ""),
+                                         + (", tracking.frame from chr-sdi-sim" if external_tracking else ""),
         f"tcp {config.monitor_ws}": "chr-monitor WebSocket: status and WebRTC signalling",
         f"udp {config.srt}": "chr-monitor SRT listener: the program for VLC / ffplay",
         **{f"tcp {host}:{port + i}": "chr-monitor WebRTC ICE-TCP, one per open stream" for i in range(4)},
@@ -170,11 +196,13 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
 
 # Processes that hold no socket, and what they do instead.
 PORTLESS = {
-    "chr-tracking-sim": "camera: frames into the input ring (shared memory)",
-    "ffmpeg": "decodes the clip in a loop for chr-tracking-sim",
+    "chr-sdi-sim": "simulated SDI input: frames into the input ring (shared memory)",
+    "ffmpeg": "decodes the clip in a loop for chr-sdi-sim",
     "chr-renderer-cli worker": "GPU renderer; frames and replies over chr-server's unixfd sockets",
-    "chr-tracking-sim-cli worker": "tracking worker (replays recorded cameras); frames from chr-server"
-                                   " and cameras back over unixfd sockets",
+    "chr-tracking-sim-cli": "tracking worker stand-in (replays recorded Ti); VchaoFrame frames from"
+                            " chr-server and back over unixfd sockets",
+    "pitch-analysis": "tracking worker (vchao's estimator); VchaoFrame frames from chr-server and back"
+                      " over unixfd sockets",
 }
 # Launchers and restart loops that only start and watch the processes doing the work.
 WRAPPERS = ("bash", "npm", "esbuild")
@@ -340,7 +368,10 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
             problems.append(f"render worker {render['state']}: {render.get('last_error') or 'starting'}")
     tracker = second.get("tracking.get_worker_status")
     if isinstance(tracker, dict) and "error" not in tracker:
-        lines.append(f"  tracking worker   {worker(tracker)}, {tracker['cameras']}/{tracker['requests']} cameras, "
+        name = tracker.get("worker") or "tracking worker"
+        stream = f", stream {tracker['stream_id']}" if tracker.get("stream_id") else ""
+        lines.append(f"  tracking worker   {name}: {worker(tracker)}{stream}, "
+                     f"{tracker['cameras']}/{tracker['requests']} cameras, "
                      f"{tracker['unavailable']} unavailable, {tracker['not_sent']} not sent"
                      + (f"; last error: {tracker['last_error']}" if tracker.get("last_error") else ""))
         if tracker["state"] != "ready":
@@ -353,8 +384,13 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
         joined = rate("tracking.get_status", "frames_joined")
         lines.append(f"  frames + cameras  {joined:.1f} joined/s, "
                      f"{rate('tracking.get_status', 'frames_without_tracking'):.1f} without camera/s; since start "
-                     f"{join['frames_joined']} joined, {join['frames_without_tracking']} without camera, "
+                     f"{join['frames_joined']} joined, {join['frames_without_tracking']} without camera "
+                     f"({join.get('frames_clean_feed', 0)} sent as clean feed), "
                      f"{join['samples_late']} late cameras, {join['frames_dropped']} dropped")
+        if isinstance(tracker, dict) and "error" not in tracker and "poses_fresh" in join:
+            lines.append(f"  poses             {join['poses_fresh']} fresh, {join['poses_interpolated']} interpolated, "
+                         f"{join['poses_reused']} reused, {join['poses_unavailable']} unavailable, "
+                         f"{join['poses_overdue']} overdue")
         if joined == 0:
             problems.append("no frame was paired with a camera in the last second (is the camera running?)")
     lines += [f"  PROBLEM: {problem}" for problem in problems]
@@ -390,7 +426,7 @@ def report(config: Config) -> str:
             others = len(held) - len(ports)
             notes = f"up {uptime(pid)}" + (", OLD BUILD: rebuilt since it started, restart to run it" if old_build(pid) else "")
             role = "" if ports else PORTLESS.get(name, "no listening socket")
-            if name == "chr-tracking-sim" and external_tracking:
+            if name == "chr-sdi-sim" and external_tracking:
                 role += "; Ti/C to chr-server's socket (tracking.frame)"
             lines.append(f"  {name:28} pid {pid:<8} {notes:8} {role}".rstrip())
             lines += [f"      {address:40} {known[address]}" for address in ports]
@@ -481,9 +517,10 @@ def holder(host: str, port: int) -> str:
 
 def runs(component: str, config: Config) -> str:
     """What a component starts, for the start messages."""
-    workers = "render and tracking workers" if config.tracking == "worker" else "render worker"
+    tracker = Path(config.tracking_cli).name if config.tracking_cli else "chr-tracking-sim-cli"
+    workers = f"render and tracking ({tracker}) workers" if config.tracking == "worker" else "render worker"
     return {
-        "render": f"run-tracked.sh: chr-server with its {workers}, chr-tracking-sim, chr-monitor",
+        "render": f"run-tracked.sh: chr-server with its {workers}, chr-sdi-sim, chr-monitor",
         "srt-relay": "SRT-to-TCP relay",
         "pitch-studio": "built client/pitch-studio served by vite preview",
         "monitor-page": "built client/example/render-harness served by vite preview",

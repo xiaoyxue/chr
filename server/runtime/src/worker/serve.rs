@@ -15,7 +15,7 @@ use chr_renderer::{
 };
 
 use super::{
-    protocol::{Output, Reply, Request, VERSION},
+    protocol::{Output, Reply, Request, TrackedLens, VERSION},
     transport::{self, Incoming, Receiver, Sender, SharedPixels},
 };
 use crate::{
@@ -123,6 +123,7 @@ fn start(requests: &Receiver) -> Result<Worker, Error> {
                 runtime_id,
                 output,
                 assets,
+                lens,
             },
         ..
     }) = requests.recv()?
@@ -171,6 +172,9 @@ fn start(requests: &Receiver) -> Result<Worker, Error> {
             }
             let mut renderer = ProgramRenderer::new(&gpu, &installed.program.configuration)?;
             renderer.set_lenses(&installed.program);
+            if lens == TrackedLens::Identity {
+                renderer.set_tracked_lens(None);
+            }
             Renderer::Program(Box::new(Program {
                 adapter: installed.adapter,
                 renderer,

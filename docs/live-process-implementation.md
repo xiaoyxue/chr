@@ -188,10 +188,10 @@ SDI port in the same process; they are identical.
 > **Changed by #141:** the worker rings and the stdin/stdout JSON lines of
 > version 1 were replaced by GStreamer `unixfdsink`/`unixfdsrc` sockets. This
 > section describes the current version 2; the measurements further down record
-> the version 1 rings. The tracking worker (#128) uses the same transport; its
-> contract, including the transport, is in
-> [tracking worker](../server/docs/tracking-worker.md#transport). vchao's
-> adapter is to speak this protocol (#140).
+> the version 1 rings. The tracking worker (#128) uses the same sockets but,
+> since #148, not this protocol: it speaks vchao's VchaoFrame v1 raw-frame
+> contract, so vchao's `pitch-analysis` runs as the tracking worker unchanged
+> ([tracking worker](../server/docs/tracking-worker.md)).
 
 `chr-server` starts one `chr-renderer-cli worker --input-socket <path>
 --output-socket <path>` (path from `--renderer-cli`, default:
@@ -218,7 +218,7 @@ stdout joins it, stdin is unused.
 
 | Direction | `type` | Payload | Fields |
 | --- | --- | --- | --- |
-| server → worker | `hello` | – | `version` (2), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `assets` |
+| server → worker | `hello` | – | `version` (2), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `assets`, `lens` (`program` or `identity`; optional, default `program`) |
 | worker → server | `ready` | – | `adapter` (logged GPU adapter) |
 | worker → server | `fatal` | – | `message`; the worker then exits |
 | server → worker | `render` | input image | `id`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`) |
@@ -226,6 +226,9 @@ stdout joins it, stdin is unused.
 | worker → server | `done` | UYVY frame | `id` |
 | worker → server | `failed` | – | `id`, `message` |
 
+- `lens: identity` drops a tracked program's startup lens: its cameras come
+  from a VchaoFrame tracking worker whose `Ti` maps to the distorted image
+  (`chr-server --tracking-lens`, #148).
 - The program specification is one of `triangle`, `synthetic`,
   `software_video`, `video_scene { path }`, `tracked_scene { path }`,
   `description { path }`, `pitch_demo { path }`. The worker
@@ -247,7 +250,8 @@ stdout joins it, stdin is unused.
   `chr-server`'s memory: it holds at most 4 input images and 4 UYVY frames.
 - **One copy per captured frame:** a tracked program's frames are copied once,
   from the capture input ring into shared memory; the tracking worker and the
-  render worker receive that same memory. Other programs' inputs (synthetic,
+  render worker receive that same memory. The tracking worker returns it with
+  its pose; it holds at most `ceil((--tracking-wait-ms + 250 ms) × fps)` frames. Other programs' inputs (synthetic,
   software video) are copied into shared memory when sent, as they were copied
   into the input ring before. The UYVY result is copied once by the worker
   into shared memory and once by `chr-server` out of it.
@@ -408,7 +412,7 @@ recorded 1080p clip. Every run used the tracking worker and `chr-monitor
 | Deadline misses / clean feed / repeats | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 4 | 293 / 293 / 915 |
 | Frames tracked per second | 30.0 | 30.0 | 29.9 | 29.9 |
 | CPU: `chr-server` / render worker / monitor | 9 / 10 / 7 % | 13 / 16 / 14 % | 11 / 14 / 12 % | 85 / 23 / 82 % |
-| CPU: tracking worker / `chr-tracking-sim` + `ffmpeg` | 1 / 19 + 36 % | 1 / 39 + 60 % | 1 / 35 + 58 % | 1 / 195 + 249 % |
+| CPU: tracking worker / `chr-sdi-sim` + `ffmpeg` | 1 / 19 + 36 % | 1 / 39 + 60 % | 1 / 35 + 58 % | 1 / 195 + 249 % |
 | RSS: `chr-server` (shared frames) / render worker | 106 (79) / 193 MiB | 215 (178) / 208 MiB | 207 (170) / 207 MiB | 713 (633) / 291 MiB |
 | Render worker GPU memory | 463 MiB | 465 MiB | 721 MiB | 1021 MiB |
 | `dir` (tmpfs) used | 42 MiB | 95 MiB | 95 MiB | 380 MiB |
@@ -422,7 +426,7 @@ recorded 1080p clip. Every run used the tracking worker and `chr-monitor
   software camera simulation on this host**: 16 % of the frames (293 in 60 s)
   went out as clean feed and 915 slots repeated. Rendering fits (15 ms wall in
   `bench` against the 25 ms deadline); the software camera simulation
-  (`chr-tracking-sim` and its `ffmpeg` decoder, about 4.4 cores) and the CPU it
+  (`chr-sdi-sim` and its `ffmpeg` decoder, about 4.4 cores) and the CPU it
   takes from `chr-server` (85 %, partly converting clean feed) and the monitor
   (82 %, mostly the 4K-to-1080p scaling) do not. A real capture card replaces
   the simulation's decoding.
@@ -467,7 +471,7 @@ reboot, plus Re-Size BAR in the BIOS if BAR1 stays at 256 MB. Production runs a
 single render worker, so only benchmarks and test stacks next to the live stack
 are hit, and a future tracking worker that uses the GPU would be; re-check both
 after enabling Resizable BAR. #146 tracks the fix; it must be done before the vchao
-tracking worker (#140) is tested on the same GPU.
+tracking worker (`pitch-analysis`, #148 phase 2) is tested on the same GPU.
 
 ## Documentation to update with the code
 

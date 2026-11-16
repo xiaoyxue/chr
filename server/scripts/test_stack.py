@@ -34,6 +34,12 @@ class ConfigTests(unittest.TestCase):
             self.load('scene = "a"\n')
         with self.assertRaisesRegex(SystemExit, "tracking must be"):
             self.load('scene = "a"\nvideo = "b"\ntracking = "both"\n')
+        with self.assertRaisesRegex(SystemExit, "tracking_cli need tracking"):
+            self.load('scene = "a"\nvideo = "b"\ntracking = "external"\ntracking_cli = "/opt/t"\n')
+        with self.assertRaisesRegex(SystemExit, "tracking_worker_args need tracking_cli"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_worker_args = ["--x"]\n')
+        with self.assertRaisesRegex(SystemExit, "tracking_centre must be"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_centre = [1, 2]\n')
 
 
 class ComponentTests(unittest.TestCase):
@@ -50,6 +56,17 @@ class ComponentTests(unittest.TestCase):
         external = stack.Config(scene="s.json", video="v.mp4", tracking="external")
         render = next(c for c in stack.components(external) if c.name == "render").command
         self.assertNotIn("--tracking-worker", render)
+        analysis = stack.Config(scene="s.json", video="v.mp4", tracking_cli="/opt/pitch-analysis",
+                                tracking_worker_args=["--ledger", "/runs/{stream_id}.arrow"],
+                                tracking_centre=[14.5, 60.6, -9.9], tracking_wait_ms=800)
+        render = next(c for c in stack.components(analysis) if c.name == "render").command
+        self.assertEqual(render[render.index("--tracking-cli") + 1], "/opt/pitch-analysis")
+        self.assertNotIn("--tracking-worker", render, "--tracking-cli implies it in run-tracked.sh")
+        args = [render[i + 1] for i, arg in enumerate(render) if arg == "--tracking-worker-arg"]
+        self.assertEqual(args, ["--ledger", "/runs/{stream_id}.arrow"])
+        centre = render.index("--tracking-centre")
+        self.assertEqual(render[centre + 1:centre + 4], ["14.5", "60.6", "-9.9"])
+        self.assertEqual(render[render.index("--tracking-wait-ms") + 1], "800")
         # A wildcard listener is reached on loopback.
         self.assertIn("srt://127.0.0.1:9001?mode=caller&latency=120000", by_name["srt-relay"].command)
 
@@ -61,7 +78,9 @@ class ReportTests(unittest.TestCase):
 
     def test_short_names(self):
         self.assertEqual(stack.describe(["/x/target/chr-renderer-cli", "worker"]), "chr-renderer-cli worker")
-        self.assertIn(stack.describe(["/x/target/chr-tracking-sim-cli", "worker"]), stack.PORTLESS)
+        self.assertIn(stack.describe(["/x/target/chr-tracking-sim-cli", "--manifest", "m.json"]), stack.PORTLESS)
+        self.assertIn(stack.describe(["/x/target/chr-sdi-sim", "--scene", "s.json"]), stack.PORTLESS)
+        self.assertIn(stack.describe(["/nix/store/x/bin/pitch-analysis", "--input-socket", "a"]), stack.PORTLESS)
         self.assertEqual(stack.describe(["bash", "/x/server/scripts/run-tracked.sh", "--scene", "s.json"]), "bash run-tracked.sh")
         self.assertEqual(stack.describe(["python3", "server/scripts/stack.py", "relay", "srt://a:1"]), "python3 stack.py relay")
         self.assertEqual(stack.describe(["npm exec vite --host 127.0.0.1"]), "npm exec vite")
@@ -121,9 +140,12 @@ class HealthTests(unittest.TestCase):
     def test_reports_rates_and_problems(self):
         sdi = {"video_mode": "1280x720p30", "frames_output": 100, "repeated_frames": 2, "dropped_frames": 0}
         render = {"state": "ready", "pid": 5, "restarts": 0, "deadline_misses": 1, "clean_feed_frames": 0, "last_error": None}
-        tracker = {"state": "backoff", "pid": None, "restarts": 1, "requests": 50, "cameras": 49, "unavailable": 0,
-                   "not_sent": 3, "last_error": "the tracking worker exited"}
-        join = {"frames_joined": 40, "frames_without_tracking": 3, "samples_late": 0, "frames_dropped": 1}
+        tracker = {"state": "backoff", "worker": "pitch-analysis", "stream_id": None, "pid": None, "restarts": 1,
+                   "requests": 50, "cameras": 49, "unavailable": 0, "not_sent": 3,
+                   "last_error": "the tracking worker exited"}
+        join = {"frames_joined": 40, "frames_without_tracking": 3, "samples_late": 0, "frames_dropped": 1,
+                "poses_fresh": 13, "poses_interpolated": 26, "poses_reused": 10, "poses_unavailable": 1,
+                "poses_overdue": 2}
         first = {"sdi.get_status": sdi, "render.get_worker_status": render, "tracking.get_worker_status": tracker,
                  "tracking.get_status": join}
         second = {**first, "sdi.get_status": {**sdi, "frames_output": 130, "repeated_frames": 12},
@@ -131,6 +153,8 @@ class HealthTests(unittest.TestCase):
         text = "\n".join(stack.health(first, second, 1.0))
         self.assertIn("30.0 slots/s, 10.0 repeats/s", text)
         self.assertIn("PROBLEM: tracking worker backoff: the tracking worker exited", text)
+        self.assertIn("tracking worker   pitch-analysis: backoff", text)
+        self.assertIn("13 fresh, 26 interpolated, 10 reused, 1 unavailable, 2 overdue", text)
         self.assertIn("PROBLEM: no frame was paired with a camera", text)
         external = {**second, "tracking.get_worker_status": {"error": "Method not found"}}
         self.assertIn("none: cameras come from tracking.frame", "\n".join(stack.health(first, external, 1.0)))

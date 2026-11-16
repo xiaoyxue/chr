@@ -7,7 +7,7 @@
 | `client/src/` | Client-side code | Primarily TypeScript |
 | `client/pitch-studio/` | Onsite pitch client: Three.js pitch preview and read-only Fusion match data | TypeScript (Vite) |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
-| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, its render worker `chr-renderer-cli`, its tracking worker stand-in `chr-tracking-sim-cli` and the `chr-tracking-sim` camera simulator), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
+| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, its render worker `chr-renderer-cli`, its tracking worker stand-in `chr-tracking-sim-cli` and the `chr-sdi-sim` SDI capture simulator), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `monitor/` | `chr-monitor`: optional video monitor process that encodes the `chr-server` program tap for WebRTC/SRT viewers | Rust |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/`, `monitor/` and `common/` | Rust |
 | `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |
@@ -26,11 +26,11 @@ runs these processes and connections:
 ```mermaid
 flowchart LR
   subgraph camera["Camera: simulated SDI input"]
-    sim["chr-tracking-sim<br/>+ ffmpeg decoder"]
+    sim["chr-sdi-sim<br/>+ ffmpeg decoder"]
   end
   subgraph render["render component: run-tracked.sh restarts each process"]
     server["chr-server<br/>no GPU: pairs frames and cameras,<br/>output clock, SDI port"]
-    tracker["tracking worker<br/>chr-tracking-sim-cli<br/>(replays recorded cameras)"]
+    tracker["tracking worker<br/>chr-tracking-sim-cli or pitch-analysis<br/>(replay stand-in or vchao)"]
     renderer["render worker<br/>chr-renderer-cli (GPU)"]
     monitor["chr-monitor<br/>H.264 encoder"]
   end
@@ -40,8 +40,8 @@ flowchart LR
   player["VLC / ffplay"]
 
   sim -- "frames: input ring (shm)" --> server
-  server -- "track + frame N (unixfd, memfd)" --> tracker
-  tracker -- "camera N or unavailable (unixfd)" --> server
+  server -- "frame N + VchaoFrame (unixfd, memfd)" --> tracker
+  tracker -- "same frame N + selected Ti or unavailable (unixfd)" --> server
   server -- "render + same frame N memory + camera (unixfd)" --> renderer
   renderer -- "done + composed SDI frame (unixfd, memfd)" --> server
   server -- "every SDI slot: program tap (shm)" --> monitor
@@ -58,7 +58,7 @@ The same in text, with every channel:
 ```text
               camera (simulated SDI input)
   ┌───────────────────────────────────────────┐
-  │ chr-tracking-sim  ◄── ffmpeg decodes clip │
+  │ chr-sdi-sim  ◄── ffmpeg decodes clip      │
   └─────┬─────────────────────────────────────┘
   frames│ input ring (shm)
         ▼
@@ -75,7 +75,7 @@ The same in text, with every channel:
   │ (replay stand-in)    │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
   └──────────────────────┘  └──────────────────┘                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
 
-  ① `track` carrying frame N as memfd memory ▼; its camera (Ti, C, frame_warp) or `unavailable` ▲
+  ① frame N as memfd memory with vchao's VchaoFrame meta ▼; the same frame N with its selected Ti or `unavailable` ▲
   ② `render` carrying the same frame N memory and its camera ▼; `done` carrying the composed SDI frame ▲
   ①② two GStreamer unixfd sockets per worker; each message is JSON in a buffer's GstCustomMeta
   ③ every slot the SDI port sends
@@ -86,12 +86,12 @@ input and the program tap). chr-server starts, feeds and replaces both workers a
 talks to each over two GStreamer `unixfdsink`/`unixfdsrc` sockets: every message
 is JSON in a buffer's `GstCustomMeta`, and frames are memfd memory passed as file
 descriptors, so chr-server copies each captured frame once and both workers read
-that copy. Clients such as pitch-studio still talk JSON-RPC to chr-server over
-WebSocket or the NativeSocket, unchanged. `chr-tracking-sim-cli` replays the
-clip's recorded cameras and estimates nothing. The real tracking module (for
-example vchao's adapter, #140) replaces it by speaking the same protocol
-(`chr-server --tracking-cli`); see
-[tracking worker](server/docs/tracking-worker.md). With `tracking = "external"` in
+that copy. The tracking hop speaks vchao's VchaoFrame contract: each frame goes to
+the tracking worker and comes back with its `Ti`. Clients such as pitch-studio
+still talk JSON-RPC to chr-server over WebSocket or the NativeSocket, unchanged.
+`chr-tracking-sim-cli` replays the clip's recorded `Ti` and estimates nothing.
+vchao's `pitch-analysis` replaces it unchanged (`chr-server --tracking-cli`,
+#148); see [tracking worker](server/docs/tracking-worker.md). With `tracking = "external"` in
 `stack.toml`, no tracking worker runs and the simulator sends each camera as
 `tracking.frame` on `<dir>/render.sock`. `run-tracked.sh` restarts the simulator,
 chr-server and chr-monitor independently, so one exiting does not stop the others.
@@ -135,9 +135,8 @@ Next, in order:
 
 | Issue | Work | State |
 | --- | --- | --- |
-| #146 | Enable Resizable BAR on render hosts: a second Vulkan process on the same GPU is about 1000x slower while it is off | `necessary`, host configuration; do before #140 testing, then add to the [host checklist](docs/operations.md#host-checklist) |
-| #140 | vchao's `atlas-vq-estimate` replaces the `chr-tracking-sim-cli` replay as the tracking worker, over the #141 transport | Waiting for vchao's refactor |
-| #142 | Rename the camera simulator `chr-tracking-sim` to `chr-sdi-sim`; camera sending becomes `--send-cameras` | Planned |
+| #146 | Enable Resizable BAR on render hosts: a second Vulkan process on the same GPU is about 1000x slower while it is off | `necessary`, host configuration; do before #148 phase 2 testing, then add to the [host checklist](docs/operations.md#host-checklist) |
+| #148 | vchao's `pitch-analysis` (`atlas-vq-estimate`) replaces the `chr-tracking-sim-cli` replay as the tracking worker over vchao's VchaoFrame unixfd contract (supersedes #140's transport) | In progress: chr speaks VchaoFrame, frames without camera are clean feed, `pitch-analysis` (pin `f209fc9`) tracks the SC1464 fixture through chr-server ([measured](server/docs/tracking-worker.md#measured)); CG from vchao's `Ti` verified on an exclusive GPU; integration with an onsite map is next |
 | #80 | Physical SDI capture and output | Not started |
 
 ## Design Documentation

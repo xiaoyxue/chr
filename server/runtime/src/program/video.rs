@@ -33,7 +33,7 @@ pub struct Manifest {
     pub radial: Radial,
     /// Presentation-order reference-native-pixel -> frame-SNC matrices. A tracked
     /// program receives them per frame instead and ignores this list; only
-    /// `chr-tracking-sim` and still renders replay it.
+    /// `chr-sdi-sim` and still renders replay it.
     #[serde(default)]
     pub frame_warps: Vec<[[f64; 3]; 3]>,
     pub model: PathBuf,

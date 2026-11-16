@@ -75,14 +75,14 @@ language-neutral, so the real tracking module can replace the replay stand-in.
 #60 keeps the questions this does not settle: the tracking reference lifecycle
 (#59), `FrameKey` versus capture sequence, and production missing/late policy.
 An external tracker can still send cameras as `tracking.frame` when no tracking
-worker runs ([tracked camera simulation](../server/docs/tracking-simulation.md)).
+worker runs ([tracked camera simulation](../server/docs/sdi-simulation.md)).
 
 ## Repository layout
 
 | Path | Package | Contents |
 | --- | --- | --- |
 | `server/renderer/` | `chr-renderer` | GPU rendering library (unchanged) |
-| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-tracking-sim` camera simulator |
+| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-sdi-sim` SDI capture simulator |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
 | `common/shm/` | `chr-shm` | Shared-memory frame rings between processes (capture input ring, program tap); the only crate allowed to use `unsafe` |
@@ -105,7 +105,7 @@ monitor, so it lives under `common/`.
 | Channel | Between | Transport | Carries |
 | --- | --- | --- | --- |
 | Control plane | Clients ↔ `chr-server` | Existing JSON-RPC over WebSocket/NativeSocket | Commands and status, never pixels |
-| Worker messages | `chr-server` ↔ each worker | Two GStreamer unixfd sockets per worker (`unixfdsink` listens, `unixfdsrc` connects); each buffer is one message, JSON in a `chr-worker-message` `GstCustomMeta` | Startup spec, render and track requests, completions, cameras |
+| Worker messages | `chr-server` ↔ each worker | Two GStreamer unixfd sockets per worker (`unixfdsink` listens, `unixfdsrc` connects); each buffer is one message, JSON in a `GstCustomMeta`: `chr-worker-message` for the render worker, vchao's `VchaoFrame` for the tracking worker (#148) | Startup spec, render requests and completions; frames out and back with their selected `Ti` |
 | Worker pixels | `chr-server` ↔ each worker | The same buffers' memfd-backed memory, passed as file descriptors | Captured frames (one copy shared by both workers) and composited UYVY frames |
 | Capture input | Capture process → `chr-server` | One `chr-shm` ring | Captured RGBA8 frames (software stand-in for SDI in) |
 | Program tap | `chr-server` → monitor | One `chr-shm` ring | Every transmitted output slot, repeats included |
@@ -116,11 +116,12 @@ are passed to the worker on its command line. File-descriptor passing lets one
 captured frame reach both workers without further copies; at 1080p a UYVY
 frame is about 4 MB, copied once by the worker into shared memory and once by
 `chr-server` out of it, on top of the CPU upload and readback. `chr-server`
-grants each worker a fixed number of requests in flight (render 4, tracking 8),
-so a slow or stopped worker holds a bounded number of buffers. GPU-handle
+bounds what each worker holds in flight (render 4 requests; tracking
+`ceil((--tracking-wait-ms + 250 ms) × fps)` frames), so a slow or stopped worker
+holds a bounded number of buffers. GPU-handle
 sharing is not required and not claimed. The transport is specified in
-[tracking worker](../server/docs/tracking-worker.md#transport); any language
-with GStreamer bindings can implement a worker (vchao's adapter is to, #140).
+[tracking worker](../server/docs/tracking-worker.md#transport-and-startup); any language
+with GStreamer bindings can implement a worker (vchao's `pitch-analysis` does, #148).
 The program tap and the capture input stay on `chr-shm`: the monitor and the
 capture process are not supervised workers, and a ring never makes its writer
 wait.
@@ -145,9 +146,12 @@ wait.
   transmitted as its **clean feed** (the input image converted to the output
   format, without CG); its submission is reported as failed, not rendered.
   Late completions are discarded by request ID.
-- Clean feed is available when the input is 8-bit BT.709 and its extent equals
-  the output extent, which is the SDI-in/SDI-out case. Other inputs fall back to
-  repeating the last output and are counted.
+- Clean feed is available when the input is 8-bit BT.709; an input of another
+  extent (with the output's aspect) is scaled bilinearly on the CPU. Other
+  inputs fall back to repeating the last output and are counted.
+- A tracked frame without a camera (no ready tracking worker, an `unavailable`
+  pose, or a camera later than the wait) is clean feed too, at the same fixed
+  delay as its neighbours (#148).
 - Input-locked output with a fixed delay of D frames, genlock and audio
   pass-through are part of physical SDI (#80); the simulated output keeps its
   own clock until then.
