@@ -26,6 +26,7 @@ use chr_runtime::calibration::tracking::{
     CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog,
 };
 use chr_runtime::control::ControlHandler;
+use chr_runtime::frame_resources::Pixels;
 use chr_runtime::input::ring::RingInput;
 use chr_runtime::pipeline::{RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
@@ -67,8 +68,9 @@ Options:
   --tracking-worker <json> Take cameras from a supervised tracking worker that gets every
                           captured frame and this calibration file, instead of from
                           tracking.frame (requires --tracked-scene or --description)
-  --tracking-cli <path>   Tracking worker executable, run as `<path> worker`
-                          [default: chr-tracking-sim-cli next to chr-server, a replay]
+  --tracking-cli <path>   Tracking worker executable, run as `<path> worker --input-socket
+                          <path> --output-socket <path>` [default: chr-tracking-sim-cli
+                          next to chr-server, a replay]
   --tracking-worker-arg <arg> Pass one argument to the tracking worker (repeatable)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
@@ -254,8 +256,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     Ok(Some(args))
 }
 
-/// A private directory for this server's worker rings.
-fn worker_ring_dir() -> PathBuf {
+/// A private directory for this server's render worker sockets and asset copies.
+fn worker_dir() -> PathBuf {
     private_dir("worker")
 }
 
@@ -408,7 +410,7 @@ fn run(args: Args) -> Result<()> {
                         width: native.width,
                         height: native.height,
                         fps: mode.fps,
-                        ring_dir: private_dir("tracking"),
+                        socket_dir: private_dir("tracking"),
                         hang: Duration::from_millis(args.worker_hang_ms),
                     },
                     Arc::clone(&tracker_status),
@@ -472,12 +474,7 @@ fn run(args: Args) -> Result<()> {
             height: mode.height,
             fps: mode.fps,
         },
-        // Room for the widest input format, RGBA16F.
-        input_bytes: installation.as_ref().map_or(0, |(synthetic, _)| {
-            let native = synthetic.configuration.native_extent;
-            u64::from(native.width) * u64::from(native.height) * 8
-        }),
-        ring_dir: worker_ring_dir(),
+        socket_dir: worker_dir(),
         hang: Duration::from_millis(args.worker_hang_ms),
         assets: worker_assets.clone(),
     };
@@ -533,7 +530,7 @@ fn run(args: Args) -> Result<()> {
         };
         let loader = match (&synthetic, &scenes) {
             (Some(program), Some(control)) if program.described.is_some() => Some(Arc::new(
-                chr_runtime::program::description::Loader::new(program, control.clone(), asset_roots.clone(), worker_assets.clone(), worker_ring_dir().join("assets"))?,
+                chr_runtime::program::description::Loader::new(program, control.clone(), asset_roots.clone(), worker_assets.clone(), worker_dir().join("assets"))?,
             )),
             _ => None,
         };
@@ -595,7 +592,7 @@ fn run(args: Args) -> Result<()> {
                             if let Some(tracker) = tracker { accept_cameras(feed, tracker.poll()); }
                             if let Some((frame, sample)) = join.next(std::time::Instant::now()) {
                                 let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
-                                if let Err(error) = synthetic.inject_with(control, capture_offset + frame.sequence, &frame.rgba, geometry).await {
+                                if let Err(error) = synthetic.inject_pixels(control, capture_offset + frame.sequence, Pixels::Shared(frame.rgba), geometry).await {
                                     log::warn!("tracked frame {} skipped: {error}", frame.sequence);
                                 }
                             }
@@ -649,7 +646,7 @@ fn run(args: Args) -> Result<()> {
 }
 
 /// Resolves on Ctrl-C or SIGTERM (`stack.py stop`, service managers), so both shut
-/// the server down cleanly and its workers' ring directories are removed.
+/// the server down cleanly and its workers' socket directories are removed.
 async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -664,7 +661,7 @@ async fn shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-/// Removes the worker and tracking ring directories of chr-servers that are gone:
+/// Removes the worker and tracking socket directories of chr-servers that are gone:
 /// a server that was killed (SIGKILL, a crash) cannot remove its own, and they
 /// live in memory-backed `$XDG_RUNTIME_DIR`.
 fn remove_stale_private_dirs() {
@@ -777,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn only_ring_directories_of_stopped_servers_are_stale() {
+    fn only_worker_directories_of_stopped_servers_are_stale() {
         let root = std::env::temp_dir().join(format!("chr-stale-{}", std::process::id()));
         for dir in [
             "worker-1",

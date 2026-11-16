@@ -20,7 +20,7 @@ use chr_common::scene_frame::{
 use core::{Key, Pool};
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(0);
-pub use core::{Lease, ProducerGuard, Readiness, WorkGuard};
+pub use core::{Lease, Pixels, ProducerGuard, Readiness, WorkGuard};
 
 /// Native failures; mapping to shared wire rejection codes belongs to the adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -188,6 +188,16 @@ impl FrameResources {
         metadata: FrameMetadata,
         pixels: &[u8],
     ) -> Result<(WriteTicket, ProducerGuard<FrameMetadata>), ResourceError> {
+        self.register_pixels(producer, metadata, Pixels::Owned(pixels.into()))
+    }
+
+    /// [`Self::register`] without a copy: the pixels are stored as they are.
+    pub fn register_pixels(
+        &mut self,
+        producer: &Producer,
+        metadata: FrameMetadata,
+        pixels: Pixels,
+    ) -> Result<(WriteTicket, ProducerGuard<FrameMetadata>), ResourceError> {
         self.check_owner(&producer.owner)?;
         if metadata.frame.stream_id != producer.stream
             || metadata.image.extent != self.config.native_extent
@@ -197,7 +207,7 @@ impl FrameResources {
         {
             return Err(ResourceError::IncompatibleInput);
         }
-        validate_pixels(&metadata.image, pixels)?;
+        validate_pixels(&metadata.image, &pixels)?;
         let (ticket_id, image_id) = self.allocate_ids()?;
         let (key, guard) = self
             .inputs
@@ -296,9 +306,12 @@ impl FrameResources {
     ) -> Result<AssetRef, ResourceError> {
         validate_pixels(&image, pixels)?;
         let (ticket_id, image_id) = self.allocate_ids()?;
-        let (key, guard) =
-            self.assets
-                .reserve(image.clone(), pixels, ticket_id, image_id.clone())?;
+        let (key, guard) = self.assets.reserve(
+            image.clone(),
+            Pixels::Owned(pixels.into()),
+            ticket_id,
+            image_id.clone(),
+        )?;
         guard.ready()?;
         guard.complete();
         self.assets.publish(key, &image)?;

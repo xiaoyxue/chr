@@ -1,29 +1,29 @@
-//! Worker messages: one JSON object per line, at most [`MAX_LINE_BYTES`].
+//! Render worker messages, each one buffer on a worker socket
+//! ([`transport`](super::transport)): a JSON object in the buffer's meta, and
+//! for some messages a payload as the buffer's memory.
 //!
-//! | Direction | `type` | Purpose |
-//! | --- | --- | --- |
-//! | server → worker | `hello` | Program, runtime ID, output mode and ring paths |
-//! | worker → server | `ready` / `fatal` | Startup result |
-//! | server → worker | `render` / `triangle` | One frame into an output ring slot |
-//! | worker → server | `done` / `failed` | Completion of one request, in order |
+//! | Direction | `type` | Payload | Purpose |
+//! | --- | --- | --- | --- |
+//! | server → worker | `hello` | – | Program, runtime ID, output mode, assets |
+//! | worker → server | `ready` / `fatal` | – | Startup result |
+//! | server → worker | `render` | input image | One program frame |
+//! | server → worker | `triangle` | – | One frame of the default triangle |
+//! | worker → server | `done` | UYVY frame | Completion of one request, in order |
+//! | worker → server | `failed` | – | Failure of one request, in order |
 //!
-//! EOF on the worker's stdin makes it exit.
+//! The end of the worker's input stream makes it exit.
 
-use std::{
-    io::{self, BufRead, Read, Write},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 use chr_common::scene_frame as w;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
 use crate::program::spec::ProgramSpec;
 
-pub const VERSION: u32 = 1;
-pub const MAX_LINE_BYTES: u64 = 1 << 20;
-/// Slots in each ring; a slot is reused only after its request completed or
-/// failed, or the worker was replaced.
-pub const RING_SLOTS: u32 = 4;
+pub const VERSION: u32 = 2;
+/// Requests that may be outstanding at once: the server's credits. Each holds
+/// one input image in the worker and, once done, one UYVY frame.
+pub const CREDITS: usize = 4;
 
 /// What the worker renders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,26 +89,20 @@ pub enum Request {
         program: WorkerProgram,
         runtime_id: w::Id,
         output: Output,
-        /// Program input images; absent for the triangle.
-        input_ring: Option<PathBuf>,
-        /// Created by the worker; UYVY output frames.
-        output_ring: PathBuf,
         /// Assets registered after startup, as the server's private verified copies;
         /// the worker imports and registers them after installing its program.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         assets: Vec<chr_common::description::Asset>,
     },
+    /// The input image, tightly packed as `image` describes it, is the payload.
     Render {
         id: u64,
-        input_slot: u32,
-        output_slot: u32,
         image: w::ImageDescription,
         frame: w::FrameInput,
         scene: Box<w::SceneSnapshot>,
     },
     Triangle {
         id: u64,
-        output_slot: u32,
         frame: u64,
         angle_rad: f64,
     },
@@ -117,47 +111,35 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
-    Ready { adapter: String },
-    Fatal { message: String },
-    Done { id: u64 },
-    Failed { id: u64, message: String },
-}
-
-/// Writes `message` as one line and flushes it.
-pub fn write_line(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let mut line = serde_json::to_vec(message)?;
-    if line.len() as u64 >= MAX_LINE_BYTES {
-        return Err(io::Error::other("worker message exceeds the line limit"));
-    }
-    line.push(b'\n');
-    writer.write_all(&line)?;
-    writer.flush()
-}
-
-/// Reads one line, or `None` at EOF.
-pub fn read_line<T: DeserializeOwned>(reader: &mut impl BufRead) -> io::Result<Option<T>> {
-    let mut line = Vec::new();
-    reader.take(MAX_LINE_BYTES).read_until(b'\n', &mut line)?;
-    if line.is_empty() {
-        return Ok(None);
-    }
-    if line.last() != Some(&b'\n') {
-        return Err(io::Error::other(
-            "worker message exceeds the line limit or is truncated",
-        ));
-    }
-    serde_json::from_slice(&line)
-        .map(Some)
-        .map_err(io::Error::other)
+    Ready {
+        adapter: String,
+    },
+    Fatal {
+        message: String,
+    },
+    /// The UYVY frame at the output extent is the payload.
+    Done {
+        id: u64,
+    },
+    Failed {
+        id: u64,
+        message: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker::transport::{Receiver, Sender, SharedPixels};
 
     #[test]
-    fn messages_round_trip_as_lines() {
-        let messages = [
+    fn messages_cross_a_socket_in_their_meta() {
+        let dir = std::env::temp_dir().join(format!("chr-render-protocol-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("replies.sock");
+        let sender = Sender::listen(&path).unwrap();
+        let receiver = Receiver::connect(&path).unwrap();
+        let replies = [
             Reply::Ready {
                 adapter: "GPU".into(),
             },
@@ -167,31 +149,35 @@ mod tests {
                 message: "x".into(),
             },
         ];
-        let mut buffer = Vec::new();
-        for message in &messages {
-            write_line(&mut buffer, message).unwrap();
+        let uyvy = SharedPixels::copy_from(&[1, 2, 3, 4]).unwrap();
+        for reply in &replies {
+            let payload = matches!(reply, Reply::Done { .. }).then(|| uyvy.memory());
+            sender.send(reply, payload).unwrap();
         }
-        let text = String::from_utf8(buffer.clone()).unwrap();
-        assert!(
-            text.starts_with("{\"type\":\"ready\",\"adapter\":\"GPU\"}\n"),
-            "{text}"
-        );
-        let mut reader = io::Cursor::new(buffer);
-        for message in &messages {
-            assert_eq!(
-                read_line::<Reply>(&mut reader).unwrap().as_ref(),
-                Some(message)
-            );
+        for reply in &replies {
+            let incoming = receiver.recv::<Reply>().unwrap().unwrap();
+            assert_eq!(&incoming.message, reply);
+            let expected: &[u8] = if matches!(reply, Reply::Done { .. }) {
+                &[1, 2, 3, 4]
+            } else {
+                &[]
+            };
+            assert_eq!(*incoming.payload().unwrap(), *expected);
         }
-        assert_eq!(read_line::<Reply>(&mut reader).unwrap(), None);
+        drop((sender, receiver));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn rejects_oversized_truncated_and_unknown_lines() {
-        let long = vec![b'x'; MAX_LINE_BYTES as usize + 10];
-        assert!(read_line::<Reply>(&mut io::Cursor::new(long)).is_err());
-        assert!(read_line::<Reply>(&mut io::Cursor::new(b"{\"type\":\"done\",\"id\":1}")).is_err());
-        assert!(read_line::<Reply>(&mut io::Cursor::new(b"{\"type\":\"bogus\"}\n")).is_err());
+    fn messages_are_tagged_json() {
+        assert_eq!(
+            serde_json::to_value(Reply::Ready {
+                adapter: "GPU".into()
+            })
+            .unwrap(),
+            serde_json::json!({"type": "ready", "adapter": "GPU"})
+        );
+        assert!(serde_json::from_str::<Reply>(r#"{"type":"bogus"}"#).is_err());
         let program = WorkerProgram::VideoScene {
             path: "scene.json".into(),
         };

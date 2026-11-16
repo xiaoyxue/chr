@@ -115,6 +115,8 @@ pub enum Error {
     Payload { len: usize, capacity: u64 },
     #[error("slot {0} records a length beyond its capacity")]
     Corrupt(u32),
+    #[error("frame of {len} bytes read into a buffer of {expected}")]
+    Length { len: u64, expected: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -289,11 +291,18 @@ impl Reader {
     /// Copies `slot` into `payload` (resized to the frame length). `payload` is
     /// meaningful only for [`Read::Frame`].
     pub fn read(&self, slot: u32, payload: &mut Vec<u8>) -> Result<Read> {
-        self.read_with(slot, payload, || {})
+        self.read_with(slot, Target::Resize(payload), || {})
+    }
+
+    /// Copies `slot` into `payload`, which must have exactly the frame's length;
+    /// a frame of another length is [`Error::Length`]. Lets a reader copy a frame
+    /// straight into memory it shares onwards.
+    pub fn read_into(&self, slot: u32, payload: &mut [u8]) -> Result<Read> {
+        self.read_with(slot, Target::Exact(payload), || {})
     }
 
     /// `read`, running `during` after the copy and before the seqlock check.
-    fn read_with(&self, slot: u32, payload: &mut Vec<u8>, during: impl FnOnce()) -> Result<Read> {
+    fn read_with(&self, slot: u32, payload: Target<'_>, during: impl FnOnce()) -> Result<Read> {
         check_slot(self.layout, slot)?;
         let base = self.layout.slot_offset(slot);
         let sequence = self.region.load_word(base + SEQUENCE);
@@ -313,8 +322,19 @@ impl Reader {
         }
         let len = self.region.load_word(base + LEN);
         // A torn length can exceed the capacity; never copy past the slot.
-        payload.resize(len.min(self.layout.slot_bytes) as usize, 0);
-        self.region.load(base + SLOT_HEADER_BYTES as usize, payload);
+        let copied = len.min(self.layout.slot_bytes) as usize;
+        let expected = match payload {
+            Target::Resize(payload) => {
+                payload.resize(copied, 0);
+                self.region.load(base + SLOT_HEADER_BYTES as usize, payload);
+                None
+            }
+            Target::Exact(payload) if payload.len() == copied => {
+                self.region.load(base + SLOT_HEADER_BYTES as usize, payload);
+                None
+            }
+            Target::Exact(payload) => Some(payload.len()),
+        };
         during();
         fence(Ordering::Acquire);
         if self.region.load_word(base + SEQUENCE) != sequence {
@@ -323,8 +343,19 @@ impl Reader {
         if len > self.layout.slot_bytes {
             return Err(Error::Corrupt(slot));
         }
+        if let Some(expected) = expected {
+            return Err(Error::Length { len, expected });
+        }
         Ok(Read::Frame(header))
     }
+}
+
+/// Where a read copies the payload.
+enum Target<'a> {
+    /// Resized to the frame length.
+    Resize(&'a mut Vec<u8>),
+    /// Must have the frame length.
+    Exact(&'a mut [u8]),
 }
 
 fn check_slot(layout: Layout, slot: u32) -> Result<()> {
@@ -535,12 +566,32 @@ mod tests {
             .store(sequence, Ordering::Relaxed);
 
         let (newer, newer_data) = frame(2);
-        let read = reader.read_with(0, &mut payload, || {
+        let read = reader.read_with(0, Target::Resize(&mut payload), || {
             writer.write(0, newer, &newer_data).unwrap()
         });
         assert_eq!(read.unwrap(), Read::Torn);
         assert_eq!(reader.read(0, &mut payload).unwrap(), Read::Frame(newer));
         assert_eq!(payload, newer_data);
+    }
+
+    #[test]
+    fn read_into_needs_the_frame_length() {
+        let dir = TempDir::new("into");
+        let path = dir.0.join("ring");
+        let mut writer = Writer::create(&path, LAYOUT).unwrap();
+        let reader = Reader::open(&path).unwrap();
+        let (header, data) = frame(3);
+        writer.write(1, header, &data).unwrap();
+        let mut payload = vec![0; data.len()];
+        assert_eq!(
+            reader.read_into(1, &mut payload).unwrap(),
+            Read::Frame(header)
+        );
+        assert_eq!(payload, data);
+        assert!(matches!(
+            reader.read_into(1, &mut vec![0; data.len() + 1]),
+            Err(Error::Length { .. })
+        ));
     }
 
     #[test]
@@ -553,7 +604,7 @@ mod tests {
         writer.push(header, &data).unwrap();
 
         let mut payload = Vec::new();
-        let read = reader.read_with(0, &mut payload, || {
+        let read = reader.read_with(0, Target::Resize(&mut payload), || {
             for index in 1..=12 {
                 let (header, data) = frame(index);
                 writer.push(header, &data).unwrap();

@@ -60,8 +60,7 @@ async fn gpu_worker_renders_exactly_what_the_in_process_bridge_renders() {
                 height: MODE.height,
                 fps: MODE.fps,
             },
-            input_bytes: u64::from(MODE.width * MODE.height * 8),
-            ring_dir: temp_dir("parity"),
+            socket_dir: temp_dir("parity"),
             hang: Duration::from_secs(10),
             assets: Default::default(),
         },
@@ -78,7 +77,7 @@ async fn gpu_worker_renders_exactly_what_the_in_process_bridge_renders() {
         supervisor
             .render(
                 &execution.input.metadata().image,
-                execution.input.pixels().unwrap(),
+                execution.input.stored().unwrap(),
                 &execution.provenance.input,
                 execution.scene.snapshot(),
                 Instant::now() + Duration::from_secs(10),
@@ -209,6 +208,18 @@ impl Server {
         )
     }
 
+    /// Waits until the worker renders every frame: the GPU warm-up of its first
+    /// frames can outlast their deadlines.
+    async fn settle(&mut self) {
+        let until = Instant::now() + Duration::from_secs(15);
+        while self.measure(Duration::from_millis(200)).await.1 > 0 {
+            assert!(
+                Instant::now() < until,
+                "the worker never renders every frame"
+            );
+        }
+    }
+
     async fn clean_feed(&mut self) -> u64 {
         self.worker().await["clean_feed_frames"].as_u64().unwrap()
     }
@@ -248,7 +259,7 @@ async fn gpu_output_keeps_its_cadence_while_the_worker_is_killed_or_stopped() {
     // A generous deadline: this test is about failures, not render time in debug builds.
     let mut server = Server::start(&["--render-deadline-ms", "200"], &[]).await;
     let ready = server.ready_after(0).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.settle().await;
     let second = Duration::from_secs(1);
     let (slots, clean) = server.measure(second).await;
     assert!(
@@ -266,7 +277,7 @@ async fn gpu_output_keeps_its_cadence_while_the_worker_is_killed_or_stopped() {
     );
     assert!(clean > 0, "frames without a worker are clean feed");
     let restarted = server.ready_after(1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.settle().await;
     let (slots, clean) = server.measure(second).await;
     assert!(at_cadence(slots, second), "{slots} slots after the restart");
     assert_eq!(clean, 0, "CG returns after the restart");
@@ -285,7 +296,7 @@ async fn gpu_output_keeps_its_cadence_while_the_worker_is_killed_or_stopped() {
         replaced["last_error"].as_str().unwrap().contains("hung"),
         "{replaced}"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.settle().await;
     let (slots, clean) = server.measure(second).await;
     assert!(at_cadence(slots, second), "{slots} slots after the hang");
     assert_eq!(clean, 0);
@@ -296,7 +307,8 @@ async fn gpu_output_keeps_its_cadence_while_the_worker_is_killed_or_stopped() {
 #[ignore = "requires a native hardware GPU"]
 async fn gpu_frames_later_than_the_deadline_are_clean_feed() {
     // 60 ms per frame against a 20 ms deadline: every frame misses, none is dropped.
-    let mut server = Server::start(&[], &[(DELAY_ENV, "60")]).await;
+    // The hang limit leaves room for the GPU warm-up of the first frame.
+    let mut server = Server::start(&["--worker-hang-ms", "2000"], &[(DELAY_ENV, "60")]).await;
     server.ready_after(0).await;
     let second = Duration::from_secs(1);
     let (slots, clean) = server.measure(second).await;

@@ -1,7 +1,7 @@
 //! Named, trusted-local synthetic profile; none of these capacities are production defaults.
 use super::Error;
 use crate::{
-    frame_resources::{FrameMetadata, FrameResources, ResourceConfig},
+    frame_resources::{FrameMetadata, FrameResources, Pixels, ResourceConfig},
     frame_submissions::{FrameSubmissions, MonotonicClock},
     retained::{Registrations, SceneAdapter, SceneControl},
     sdi::VideoMode,
@@ -312,6 +312,19 @@ impl Synthetic {
         pixels: &[u8],
         geometry: w::FrameGeometry,
     ) -> Result<Option<w::Id>, Error> {
+        self.inject_pixels(control, sequence, Pixels::Owned(pixels.into()), geometry)
+            .await
+    }
+
+    /// [`Self::inject_with`] for pixels that are stored without another copy,
+    /// such as a captured frame already in memory shared with the workers.
+    pub async fn inject_pixels(
+        &mut self,
+        control: &SceneControl,
+        sequence: u64,
+        pixels: Pixels,
+        geometry: w::FrameGeometry,
+    ) -> Result<Option<w::Id>, Error> {
         if sequence < self.next {
             return Err("software input frame sequence went backwards".into());
         }
@@ -322,7 +335,7 @@ impl Synthetic {
     async fn inject_inner(
         &mut self,
         control: &SceneControl,
-        input: Option<(u64, &[u8])>,
+        input: Option<(u64, Pixels)>,
         geometry: w::FrameGeometry,
     ) -> Result<Option<w::Id>, Error> {
         let runtime = &self.configuration.runtime_id;
@@ -357,7 +370,7 @@ impl Synthetic {
         if self.pending.len() >= 4 {
             return Ok(None);
         }
-        let sequence = input.map_or(self.next, |(sequence, _)| sequence);
+        let sequence = input.as_ref().map_or(self.next, |(sequence, _)| *sequence);
         self.next = sequence
             .checked_add(1)
             .ok_or("synthetic sequence exhausted")?;
@@ -384,9 +397,12 @@ impl Synthetic {
         };
         let (ticket, producer) = self
             .scheduler
-            .register(
+            .register_pixels(
                 metadata.clone(),
-                input.map_or(self.pixels.as_slice(), |(_, pixels)| pixels),
+                input.map_or_else(
+                    || Pixels::Owned(self.pixels.as_slice().into()),
+                    |(_, pixels)| pixels,
+                ),
             )
             .map_err(|e| e.to_string())?;
         producer.ready()?;

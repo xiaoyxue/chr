@@ -26,7 +26,7 @@ name = "chr-tracking-sim-cli"
 path = "src/tracking_sim_cli.rs"
 
 [features]
-gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+gstreamer-media = ["dep:gstreamer-video"]
 
 [dependencies]
 chr-renderer.workspace = true
@@ -41,8 +41,9 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image.workspace = true
-gstreamer = { workspace = true, optional = true }
-gstreamer-app = { workspace = true, optional = true }
+gstreamer.workspace = true
+gstreamer-allocators.workspace = true
+gstreamer-app.workspace = true
 gstreamer-video = { workspace = true, optional = true }
 sha2 = "0.10"
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }

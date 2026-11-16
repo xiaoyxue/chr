@@ -8,7 +8,10 @@ use std::{
 use chr_common::methods::{render_worker::WorkerState, tracking::TrackingFrame};
 use chr_runtime::{
     calibration::tracking::TrackingReplay,
-    worker::tracking::supervisor::{StatusHandle, Tracker, TrackerConfig, status_handle},
+    worker::{
+        tracking::supervisor::{StatusHandle, Tracker, TrackerConfig, status_handle},
+        transport::SharedPixels,
+    },
 };
 
 const WIDTH: u32 = 4;
@@ -45,7 +48,7 @@ impl Fixture {
                 width: WIDTH,
                 height: HEIGHT,
                 fps: 50,
-                ring_dir: dir.join("rings"),
+                socket_dir: dir.join("sockets"),
                 hang,
             },
             status.clone(),
@@ -62,8 +65,8 @@ impl Fixture {
         self.tracker.as_mut().unwrap()
     }
 
-    fn frame(sequence: u64) -> Vec<u8> {
-        vec![sequence as u8; (WIDTH * HEIGHT * 4) as usize]
+    fn frame(sequence: u64) -> SharedPixels {
+        SharedPixels::copy_from(&vec![sequence as u8; (WIDTH * HEIGHT * 4) as usize]).unwrap()
     }
 
     /// Polls until `done` holds, collecting cameras.
@@ -91,8 +94,8 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         drop(self.tracker.take());
         assert!(
-            !self.dir.join("rings").exists(),
-            "the ring goes with the tracker"
+            !self.dir.join("sockets").exists(),
+            "the sockets go with the tracker"
         );
         let _ = std::fs::remove_dir_all(&self.dir);
     }

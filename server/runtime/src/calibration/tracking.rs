@@ -24,7 +24,10 @@ use chr_renderer::{
     distortion::{FrameWarp, RadialDistortion},
 };
 
-use crate::retained::{incompatible, reject};
+use crate::{
+    retained::{incompatible, reject},
+    worker::transport::SharedPixels,
+};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -210,10 +213,11 @@ impl TrackingFeed {
     }
 }
 
-/// One captured input frame: RGBA8 BT.709 code values at the native extent.
+/// One captured input frame: RGBA8 BT.709 code values at the native extent, in
+/// the memory shared with the workers.
 pub struct CapturedFrame {
     pub sequence: u64,
-    pub rgba: Vec<u8>,
+    pub rgba: SharedPixels,
     pub arrived: Instant,
 }
 
@@ -332,7 +336,7 @@ mod tests {
     fn captured(sequence: u64, arrived: Instant) -> CapturedFrame {
         CapturedFrame {
             sequence,
-            rgba: vec![sequence as u8; 4],
+            rgba: SharedPixels::copy_from(&[sequence as u8; 4]).unwrap(),
             arrived,
         }
     }

@@ -3,7 +3,8 @@
 //! `render` renders one program frame through the same installation, scene control
 //! and program bridge as `chr-server`, and writes the BT.709 RGBA composition as a
 //! PNG; `bench` times that frame through the render worker's path. `worker` is the render worker that `chr-server` starts and supervises; it
-//! speaks the protocol of `chr_runtime::worker` on stdin/stdout and logs to stderr.
+//! speaks the protocol of `chr_runtime::worker` on the two GStreamer unixfd sockets
+//! that chr-server names, and logs to stderr.
 
 use std::{
     error::Error,
@@ -26,7 +27,8 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const USAGE: &str = "\
 Usage: chr-renderer-cli render <program> --output <png> [options]
        chr-renderer-cli bench <program> [--frames <n>] [options]
-       chr-renderer-cli worker      (started by chr-server; not for interactive use)
+       chr-renderer-cli worker --input-socket <path> --output-socket <path>
+                                    (started by chr-server; not for interactive use)
 
 render: renders one frame of a chr-server program and writes the BT.709 RGBA program
 image as PNG code values, without further colour conversion.
@@ -72,7 +74,7 @@ struct RenderArgs {
 #[derive(Debug, PartialEq)]
 enum Subcommand {
     Render(RenderArgs),
-    Worker,
+    Worker { input: PathBuf, output: PathBuf },
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand>> {
@@ -80,9 +82,10 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         Some("render") => None,
         Some("bench") => Some(300),
         Some("worker") => {
-            return match raw.next() {
-                None => Ok(Some(Subcommand::Worker)),
-                Some(other) => Err(format!("worker takes no arguments, got {other:?}").into()),
+            let (input, output, rest) = chr_runtime::worker::transport::parse_worker_args(raw)?;
+            return match rest.first() {
+                None => Ok(Some(Subcommand::Worker { input, output })),
+                Some(other) => Err(format!("unknown worker argument {other:?}").into()),
             };
         }
         Some("-h" | "--help") | None => return Ok(None),
@@ -171,11 +174,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(Some(Subcommand::Worker)) => {
-            let result = chr_runtime::worker::serve::serve(
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
-            );
+        Ok(Some(Subcommand::Worker { input, output })) => {
+            let result = chr_runtime::worker::serve::serve(&input, &output);
             if let Err(error) = result {
                 log::error!("render worker: {error}");
                 std::process::exit(1);
@@ -355,7 +355,7 @@ mod tests {
         parse_args(args.iter().map(|arg| (*arg).to_owned())).map(|parsed| {
             parsed.map(|subcommand| match subcommand {
                 Subcommand::Render(args) => args,
-                Subcommand::Worker => panic!("not a render command"),
+                Subcommand::Worker { .. } => panic!("not a render command"),
             })
         })
     }
@@ -422,11 +422,30 @@ mod tests {
         assert!(!defaults.overwrite);
         assert!(parse(&[]).unwrap().is_none());
         assert!(parse(&["render", "--help"]).unwrap().is_none());
+        let worker = ["worker", "--input-socket", "in", "--output-socket", "out"];
         assert_eq!(
-            parse_args(["worker".to_owned()].into_iter()).unwrap(),
-            Some(Subcommand::Worker)
+            parse_args(worker.map(str::to_owned).into_iter()).unwrap(),
+            Some(Subcommand::Worker {
+                input: "in".into(),
+                output: "out".into()
+            })
         );
-        assert!(parse_args(["worker", "--x"].map(str::to_owned).into_iter()).is_err());
+        assert!(parse_args(["worker".to_owned()].into_iter()).is_err());
+        assert!(
+            parse_args(
+                [
+                    "worker",
+                    "--input-socket",
+                    "a",
+                    "--output-socket",
+                    "b",
+                    "--x"
+                ]
+                .map(str::to_owned)
+                .into_iter()
+            )
+            .is_err()
+        );
         for bad in [
             &["paint"][..],
             &["render", "--output", "o.png"],

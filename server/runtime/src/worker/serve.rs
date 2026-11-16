@@ -1,23 +1,23 @@
-//! The worker's side: `chr-renderer-cli worker` runs [`serve`] on its stdin/stdout.
+//! The worker's side: `chr-renderer-cli worker` runs [`serve`] on the two sockets
+//! that chr-server names on its command line.
 //!
 //! The worker holds the GPU and nothing authoritative. It installs the program
 //! from the server's specification and runtime ID, so registrations and IDs match;
 //! each request carries the bound scene snapshot and the frame, and its input
-//! image arrives through the input ring. Requests are handled in order.
+//! image is the request's payload, mapped from the server's memory without a
+//! copy. Requests are handled in order.
 
-use std::{
-    io::{BufRead, Write},
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use chr_common::scene_frame as w;
 use chr_renderer::{
     Gpu, OffscreenTarget, TriangleRenderer, UyvyConverter, coordinates::ImageExtent,
 };
-use chr_shm::{Layout, Read, Reader, SlotHeader, Writer};
 
-use super::protocol::{self, Output, RING_SLOTS, Reply, Request, VERSION};
+use super::{
+    protocol::{Output, Reply, Request, VERSION},
+    transport::{self, Incoming, Receiver, Sender, SharedPixels},
+};
 use crate::{
     program::{Frame, ProgramRenderer},
     retained::{BoundScene, SceneAdapter},
@@ -29,44 +29,59 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 /// Test-only: delays every reply by this many milliseconds.
 pub const DELAY_ENV: &str = "CHR_WORKER_TEST_DELAY_MS";
 
-/// Serves one server until EOF on `input`. Startup failures are reported as
-/// `fatal` and returned.
-pub fn serve(mut input: impl BufRead, mut output: impl Write) -> Result<(), Error> {
-    let mut worker = match start(&mut input) {
+/// How long an exiting worker waits for its last replies, such as `fatal`, to
+/// reach the server.
+const FINISH: Duration = Duration::from_secs(2);
+
+/// Serves one server until its input stream ends: requests arrive on `input`,
+/// replies leave on `output`. Startup failures are reported as `fatal` and returned.
+pub fn serve(input: &Path, output: &Path) -> Result<(), Error> {
+    let (requests, replies) = transport::worker_endpoints(input, output)?;
+    let result = serve_on(&requests, &replies);
+    replies.finish(FINISH);
+    result
+}
+
+fn serve_on(requests: &Receiver, replies: &Sender) -> Result<(), Error> {
+    let mut worker = match start(requests) {
         Ok(worker) => worker,
         Err(error) => {
-            let _ = protocol::write_line(
-                &mut output,
+            let _ = replies.send(
                 &Reply::Fatal {
                     message: error.to_string(),
                 },
+                None,
             );
             return Err(error);
         }
     };
-    protocol::write_line(
-        &mut output,
+    replies.send(
         &Reply::Ready {
             adapter: worker.adapter.clone(),
         },
+        None,
     )?;
     let delay = std::env::var(DELAY_ENV)
         .ok()
         .map(|ms| ms.parse().map(Duration::from_millis))
         .transpose()?;
-    while let Some(request) = protocol::read_line::<Request>(&mut input)? {
-        let (id, result) = worker.handle(request)?;
+    while let Some(request) = requests.recv::<Request>()? {
+        let (id, result) = worker.handle(&request)?;
+        // The input image goes back to the server before the reply does.
+        drop(request);
         if let Some(delay) = delay {
             std::thread::sleep(delay);
         }
-        let reply = match result {
-            Ok(()) => Reply::Done { id },
-            Err(error) => Reply::Failed {
-                id,
-                message: error.to_string(),
-            },
-        };
-        protocol::write_line(&mut output, &reply)?;
+        match result {
+            Ok(uyvy) => replies.send(&Reply::Done { id }, Some(uyvy.memory()))?,
+            Err(error) => replies.send(
+                &Reply::Failed {
+                    id,
+                    message: error.to_string(),
+                },
+                None,
+            )?,
+        }
     }
     Ok(())
 }
@@ -75,9 +90,6 @@ struct Worker {
     gpu: Gpu,
     adapter: String,
     renderer: Renderer,
-    input: Option<Reader>,
-    output: Writer,
-    payload: Vec<u8>,
     uyvy: Vec<u8>,
 }
 
@@ -102,16 +114,18 @@ struct Program {
     scene: Option<Arc<BoundScene>>,
 }
 
-fn start(input: &mut impl BufRead) -> Result<Worker, Error> {
-    let Some(Request::Hello {
-        version,
-        program,
-        runtime_id,
-        output,
-        input_ring,
-        output_ring,
-        assets,
-    }) = protocol::read_line(input)?
+fn start(requests: &Receiver) -> Result<Worker, Error> {
+    let Some(Incoming {
+        message:
+            Request::Hello {
+                version,
+                program,
+                runtime_id,
+                output,
+                assets,
+            },
+        ..
+    }) = requests.recv()?
     else {
         return Err("the first message must be hello".into());
     };
@@ -165,62 +179,36 @@ fn start(input: &mut impl BufRead) -> Result<Worker, Error> {
             }))
         }
     };
-    let input = match (&renderer, input_ring) {
-        (Renderer::Program(_), Some(path)) => Some(Reader::open(&path)?),
-        (Renderer::Program(_), None) => return Err("a program needs an input ring".into()),
-        (Renderer::Triangle(_), _) => None,
-    };
-    let output = Writer::create(
-        &output_ring,
-        Layout {
-            slot_count: RING_SLOTS,
-            slot_bytes: u64::from(width) * u64::from(height) * 2,
-        },
-    )?;
     Ok(Worker {
         gpu,
         adapter,
         renderer,
-        input,
-        output,
-        payload: Vec::new(),
         uyvy: Vec::new(),
     })
 }
 
 impl Worker {
-    /// Handles one request. Errors of the request are returned with its ID; an
-    /// error of this function itself ends the worker.
-    fn handle(&mut self, request: Request) -> Result<(u64, Result<(), Error>), Error> {
-        let (id, output_slot, result) = match request {
+    /// Handles one request and returns its UYVY frame in shared memory. Errors of
+    /// the request are returned with its ID; an error of this function itself ends
+    /// the worker.
+    fn handle(
+        &mut self,
+        request: &Incoming<Request>,
+    ) -> Result<(u64, Result<SharedPixels, Error>), Error> {
+        let (id, result) = match &request.message {
             Request::Hello { .. } => return Err("unexpected second hello".into()),
-            Request::Triangle {
-                id,
-                output_slot,
-                angle_rad,
-                ..
-            } => (id, output_slot, self.triangle(angle_rad)),
+            Request::Triangle { id, angle_rad, .. } => (*id, self.triangle(*angle_rad)),
             Request::Render {
                 id,
-                input_slot,
-                output_slot,
                 image,
                 frame,
                 scene,
-            } => (
-                id,
-                output_slot,
-                self.render(id, input_slot, &image, &frame, *scene),
-            ),
+            } => (*id, self.render(request, image, frame, scene)),
         };
-        let result = result.and_then(|()| {
-            let header = SlotHeader {
-                index: id,
-                meta: [0; 4],
-            };
-            Ok(self.output.write(output_slot, header, &self.uyvy)?)
-        });
-        Ok((id, result))
+        Ok((
+            id,
+            result.and_then(|()| SharedPixels::copy_from(&self.uyvy)),
+        ))
     }
 
     fn triangle(&mut self, angle_rad: f64) -> Result<(), Error> {
@@ -239,11 +227,10 @@ impl Worker {
 
     fn render(
         &mut self,
-        id: u64,
-        input_slot: u32,
+        request: &Incoming<Request>,
         image: &w::ImageDescription,
         frame: &w::FrameInput,
-        snapshot: w::SceneSnapshot,
+        snapshot: &w::SceneSnapshot,
     ) -> Result<(), Error> {
         let Renderer::Program(program) = &mut self.renderer else {
             return Err("this worker renders the triangle, not a program".into());
@@ -254,26 +241,19 @@ impl Worker {
             time_base,
             scene,
         } = &mut **program;
-        let input = self.input.as_ref().ok_or("no input ring")?;
-        match input.read(input_slot, &mut self.payload)? {
-            Read::Frame(header) if header.index == id => {}
-            other => {
-                return Err(format!(
-                    "input slot {input_slot} does not hold request {id}: {other:?}"
-                )
-                .into());
-            }
-        }
-        if self.payload.len() != image_bytes(image) {
+        let pixels = request.payload()?;
+        if pixels.len() != image_bytes(image) {
             return Err("input image size does not match its description".into());
         }
         // A released and recreated scene restarts its revisions, so the whole
         // snapshot (including its runtime-wide effect) identifies the binding.
         let cached = scene
             .as_ref()
-            .is_some_and(|bound| *bound.snapshot() == snapshot);
+            .is_some_and(|bound| bound.snapshot() == snapshot);
         if !cached {
-            *scene = Some(Arc::new(adapter.bind(snapshot).map_err(|e| e.to_string())?));
+            *scene = Some(Arc::new(
+                adapter.bind(snapshot.clone()).map_err(|e| e.to_string())?,
+            ));
         }
         let bound = scene.as_ref().expect("bound above");
         let camera = adapter
@@ -285,7 +265,7 @@ impl Worker {
                 scene: bound,
                 camera: &camera,
                 image,
-                pixels: &self.payload,
+                pixels: &pixels,
                 key: &frame.frame,
                 frame_warp: crate::program::frame_warp(&frame.geometry),
                 seconds: crate::program::media_seconds(*time_base, frame.position.ticks.get()),
