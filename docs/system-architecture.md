@@ -26,7 +26,7 @@ chr 初期有两大交付组件：
 | 控制 WebUI（含 Local Server） | 广告位信息管理、业务操作、现场工作流、状态呈现和交互预览。 | chr；WebUI 与 Local Server 的内部拆分后续细化。 |
 | 实时渲染服务（现场视频运行时） | 组织 SDI 采集、实时追踪接入、逐帧渲染合成、视频输出及录制任务，执行运行时控制。 | chr，以本地 CLI/服务形式运行。 |
 | 离线场景建模 | 读取扫描视频，产出已注册到球场的 atlas 图像/Ti 对及同参考系下的光心 C。 | 可能在仓库外；chr 负责准备输入和接入结果。 |
-| 实时追踪服务 | 使用标定参考模型分析实时视频，提供逐帧 Ti；特征、索引和匹配策略属于内部细节。 | 作为 `chr-server` 监管的跟踪 worker 进程运行（`server/runtime/src/worker/tracking/`），协议与语言无关；当前由回放已记录相机的 `chr-tracking-sim-cli` 代替，真实模块（可能是 Python）按同一协议替换它。见 [Tracking worker](../server/docs/tracking-worker.md)。 |
+| 实时追踪服务 | 使用标定参考模型分析实时视频，提供逐帧 Ti；特征、索引和匹配策略属于内部细节。 | 作为 `chr-server` 监管的跟踪 worker 进程运行（`server/runtime/src/worker/tracking/`），协议与语言无关（经 GStreamer unixfd socket 传输）；当前由回放已记录相机的 `chr-tracking-sim-cli` 代替，真实模块（可能是 Python，例如 vchao 的适配器，#140/#141）按同一协议替换它。见 [Tracking worker](../server/docs/tracking-worker.md)。 |
 
 Local Server 属于控制侧，不另计为第五个大模块。离线与实时分析也不因名称中有
 “服务”就要求远端部署；可否本地运行、使用什么传输方式均未冻结。
@@ -116,7 +116,7 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 | `monitor/` | `chr-monitor`：可选的独立监看进程，读取节目 tap，编码后以 WebRTC/SRT 发送；停止或卡住不影响节目输出。 |
 | `server/viewer/` | `chr-app`：原生窗口、事件、呈现、无窗口导出与文件写入的应用壳。 |
 | `common/` | `chr-common`：共享控制消息、方法和 NativeSocket/WebSocket IPC 实现。 |
-| `common/shm/` | `chr-shm`：进程间共享内存帧环；唯一允许 `unsafe` 的 crate（仅限其映射模块）。 |
+| `common/shm/` | `chr-shm`：进程间共享内存帧环（采集输入 ring 与节目 tap）；唯一允许 `unsafe` 的 crate（仅限其映射模块）。 |
 | `client/example/render-harness/` | 浏览器示例客户端和验证 harness，不等同于完整业务 WebUI。 |
 
 遵守 [server/AGENTS.md](../server/AGENTS.md)：渲染算法留在 renderer，交付壳不维护另一套渲染实现。
@@ -124,6 +124,7 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 写入共享内存节目 tap；`chr-monitor` 编码该 tap 并发送给浏览器或 SRT 接收端。
 当前编码使用 CPU readback 后的软件编码，是开发实现，不是已验证的硬件零拷贝链路。
 `chr-server` 不创建 GPU 设备：每帧由它启动并监管的 `chr-renderer-cli worker` 进程渲染；worker 超时、失败或重启期间输出 clean feed（Linux 已验证，Windows 未验证）。
+`chr-server` 与渲染、跟踪两个 worker 之间经 GStreamer `unixfdsink`/`unixfdsrc` socket 通信：每条消息是 buffer 上 `GstCustomMeta` 中的 JSON，帧以 memfd 文件描述符传递；一帧采集画面只拷贝一次，两个 worker 共用（#141）。
 实际 SDI 采集/输出硬件、视频输入、录制、真实的实时追踪算法和 calibration 管线仍未实现；
 跟踪 worker 的进程、协议与监管已实现，目前用回放替身代替算法。
 已有坐标契约见 [Coordinate contract](../server/docs/coordinates.md)。

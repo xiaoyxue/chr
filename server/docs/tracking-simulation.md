@@ -67,6 +67,13 @@ new ring file (a restarted capture process) restarts capture sequences; the
 server forgets pending frames and cameras and keeps its own input sequence
 increasing.
 
+The server copies each frame once, straight from its slot into memfd-backed
+shared memory; the backlog holds that memory, and the tracking worker and the
+render worker receive it without another copy (the worker channels are GStreamer
+unixfd sockets, see [tracking worker](tracking-worker.md#transport)). The input
+ring itself stays a `chr-shm` ring: the capture process is not a supervised
+worker and never waits for the server.
+
 A physical SDI input would deliver UYVY; converting it is part of #80 and not
 simulated here.
 

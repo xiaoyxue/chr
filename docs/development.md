@@ -28,7 +28,8 @@ server/runtime/           chr-runtime: chr-server (render server), its workers c
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
   src/sdi.rs              Simulated SDI output port, output clock and program tap
-  src/worker/             Render worker protocol, the worker side and its supervisor
+  src/worker/             Worker transport (GStreamer unixfd), render worker protocol,
+                          the worker side and its supervisor
   src/worker/tracking/    Tracking worker protocol and its supervisor
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
@@ -119,9 +120,10 @@ The root development shell provides:
 | Rust server | Rust/Cargo, rustfmt, and Clippy from `rust-toolchain.toml` via the locked Rust overlay |
 | Build and maintenance | Git, pkg-config, and nixfmt |
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
+| Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
 
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
-GStreamer core/base/bad/ugly plugins, and Python GObject bindings. It runs the video-only
+the GStreamer ugly plugins, and Python GObject bindings. It runs the video-only
 software input helper under `server/scripts/` and builds the opt-in
 `gstreamer-media` feature of `chr-runtime` and `chr-monitor`; it does not install
 SDI drivers, provide a physical SDI device, or change the renderer protocol. The
@@ -204,10 +206,10 @@ flowchart LR
   player["VLC / ffplay"]
 
   sim -- "frames: input ring (shm)" --> server
-  server -- "frame N (shm + track)" --> tracker
-  tracker -- "camera N or unavailable" --> server
-  server -- "frame + camera (shm + render)" --> renderer
-  renderer -- "composed SDI frame" --> server
+  server -- "track + frame N (unixfd, memfd)" --> tracker
+  tracker -- "camera N or unavailable (unixfd)" --> server
+  server -- "render + same frame N memory + camera (unixfd)" --> renderer
+  renderer -- "done + composed SDI frame (unixfd, memfd)" --> server
   server -- "every SDI slot: program tap (shm)" --> monitor
   studio -- "description.load: ws :8787" --> server
   page -- "status: ws :8787" --> server
@@ -239,16 +241,22 @@ The same in text, with every channel:
   │ (replay stand-in)    │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
   └──────────────────────┘  └──────────────────┘                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
 
-  ① frame N in a shm ring and a `track` line ▼; its camera (Ti, C, frame_warp) or `unavailable` ▲
-  ② frame N with its camera, in a shm ring and a `render` line ▼; the composed SDI frame ▲
+  ① `track` carrying frame N as memfd memory ▼; its camera (Ti, C, frame_warp) or `unavailable` ▲
+  ② `render` carrying the same frame N memory and its camera ▼; `done` carrying the composed SDI frame ▲
+  ①② two GStreamer unixfd sockets per worker; each message is JSON in a buffer's GstCustomMeta
   ③ every slot the SDI port sends
 ```
 
-Each box is one process; `shm` is a `chr-shm` shared-memory ring. chr-server
-starts, feeds and replaces both workers; their requests and replies are JSON lines
-on stdin/stdout. `chr-tracking-sim-cli` replays the clip's recorded cameras and
-estimates nothing. The real tracking module replaces it by speaking the same
-protocol (`chr-server --tracking-cli`); see
+Each box is one process; `shm` is a `chr-shm` shared-memory ring (the capture
+input and the program tap). chr-server starts, feeds and replaces both workers and
+talks to each over two GStreamer `unixfdsink`/`unixfdsrc` sockets: every message
+is JSON in a buffer's `GstCustomMeta`, and frames are memfd memory passed as file
+descriptors, so chr-server copies each captured frame once and both workers read
+that copy. Clients such as pitch-studio still talk JSON-RPC to chr-server over
+WebSocket or the NativeSocket, unchanged. `chr-tracking-sim-cli` replays the
+clip's recorded cameras and estimates nothing. The real tracking module (for
+example vchao's adapter, #140) replaces it by speaking the same protocol
+(`chr-server --tracking-cli`); see
 [tracking worker](../server/docs/tracking-worker.md). With `tracking = "external"` in
 `stack.toml`, no tracking worker runs and the simulator sends each camera as
 `tracking.frame` on `<dir>/render.sock`. `run-tracked.sh` restarts the simulator,
@@ -273,8 +281,9 @@ nix fmt -- --check flake.nix
 ```
 
 The default package and named `chr-app` package build the renderer viewer,
-`chr-server` builds the headless render server and `chr-renderer-cli`, and `chr-monitor` builds the
-video monitor process. `pitch-studio` builds the onsite client: the static
+`chr-server` builds the headless render server with its workers `chr-renderer-cli`
+and `chr-tracking-sim-cli` (wrapped with the GStreamer plugin path for the unixfd
+transport), and `chr-monitor` builds the video monitor process. `pitch-studio` builds the onsite client: the static
 site in `share/pitch-studio/dist` and a `pitch-studio` launcher. The
 default application runs the viewer; `nix run .#pitch-studio` serves the
 client.
@@ -287,7 +296,7 @@ client.
 | `media-source` | Python tests in `server/scripts/`: synthetic MP4 decoding into a GStreamer appsink, pixel integrity, fractional-rate loop timing and short-input failure; `stack.py` configuration, components and process records |
 | `fmt` | Rust workspace formatting |
 | `clippy` | Rust workspace and all targets, with warnings treated as errors |
-| `tests` | Rust workspace CPU tests; hardware GPU tests remain explicitly ignored |
+| `tests` | Rust workspace CPU tests, including the GStreamer unixfd worker transport and the tracking worker; hardware GPU tests remain explicitly ignored |
 
 The toolchain smoke check is not a client typecheck or application test. The
 `pitch-studio` check typechecks and builds that client and runs its Node

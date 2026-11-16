@@ -6,7 +6,7 @@
 - `server/`: The live render server, primarily Rust. The renderer library lives in `server/renderer/` (`chr-renderer`), the render server runtime in `server/runtime/` (`chr-runtime`, which builds `chr-server`, its two workers `chr-renderer-cli` and `chr-tracking-sim-cli`, the replay stand-in that the real tracking module will replace, and the `chr-tracking-sim` camera simulator) and the native window/headless shell in `server/viewer/` (`chr-app`); further server crates are added as `server/<name>/`. Offline scene modelling stays outside this repository. Follow `server/AGENTS.md`.
 - `monitor/`: The optional video monitor process, Rust crate `chr-monitor`. It reads the program tap written by `chr-server`, encodes it and streams it over WebRTC/SRT; it never controls the program. It sits at the root because it may run on another host from an SDI loop-out.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: The single Rust workspace at the repository root. Its members live under `server/`, `monitor/` (and Rust parts of `common/`); run Cargo commands from the root.
-- `common/`: Shared communication protocols. `common/` is the Rust crate `chr-common` (JSON-RPC 2.0 control messages and the NativeSocket/WebSocket IPC transports) and is the source of truth; TypeScript clients mirror its types. `common/shm/` is the crate `chr-shm`, shared-memory frame rings between processes and the only crate allowed to use `unsafe` (confined to its mapping module).
+- `common/`: Shared communication protocols. `common/` is the Rust crate `chr-common` (JSON-RPC 2.0 control messages and the NativeSocket/WebSocket IPC transports) and is the source of truth; TypeScript clients mirror its types. `common/shm/` is the crate `chr-shm`, shared-memory frame rings between processes (the capture input ring and the program tap) and the only crate allowed to use `unsafe` (confined to its mapping module). `chr-server` and its workers talk over GStreamer `unixfdsink`/`unixfdsrc` sockets instead (`server/docs/tracking-worker.md`).
 - `docs/`: Repository-wide documentation. `docs/development.md` defines the
   development environment and directory ownership; server-specific contracts
   live in `server/docs/`.
@@ -21,9 +21,10 @@
   existing outputs for future module tooling rather than adding independent flakes.
 - Use the root Nix shell for Linux development tools and dependencies. It provides
   Node.js/npm, TypeScript (`tsc`), the renderer Rust toolchain, Git, pkg-config,
-  nixfmt, and rendering libraries. Do not install global npm tools or use an
-  unrelated flake template to replace the existing environment.
-- `nix develop .#media` extends the root shell with FFmpeg, GStreamer core/base/bad/ugly
+  nixfmt, rendering libraries, and GStreamer core/base/bad (the `unixfd` elements of
+  chr-server's worker transport, a hard dependency of `chr-runtime`). Do not install
+  global npm tools or use an unrelated flake template to replace the existing environment.
+- `nix develop .#media` extends the root shell with FFmpeg, the GStreamer ugly
   plugins and Python GObject bindings for the software video-input helper in
   `server/scripts/` and the opt-in `gstreamer-media` feature of `chr-runtime` and
   `chr-monitor`.
@@ -36,7 +37,8 @@
 - Run `nix develop`, `nix build`, `nix flake check`, and Cargo commands from the
   root inside the development shell.
 - `nix flake check` covers the Node.js/npm/TypeScript toolchain smoke check, the
-  `pitch-studio` typecheck, build and Node tests, and renderer formatting, Clippy, and CPU tests. The default package and app remain
+  `pitch-studio` typecheck, build and Node tests, and renderer formatting, Clippy, and CPU tests
+  (including the GStreamer worker transport). The default package and app remain
   the renderer. GPU and interactive checks are separate; follow `server/AGENTS.md`.
 - Preserve locked dependency revisions unless an update is explicitly required.
 - The shell uses an absolute `target/linux` Cargo cache. Keep this cache,

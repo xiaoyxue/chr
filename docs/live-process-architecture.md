@@ -3,8 +3,10 @@
 **Status:** `confirmed` — owner decision recorded in #94 (2026-11-13).
 `implemented` on Linux: `chr-monitor` serves WebRTC/SRT from the program tap
 (#95), and `chr-server` renders every frame through a supervised
-`chr-renderer-cli worker` with clean feed on failure (#96, #97). Windows is not
-verified; physical SDI (#80) is not implemented.
+`chr-renderer-cli worker` with clean feed on failure (#96, #97). Since #141 both
+workers talk to `chr-server` over GStreamer unixfd sockets instead of
+stdin/stdout lines and `chr-shm` rings. Windows is not verified; physical SDI
+(#80) is not implemented.
 Implementation steps are in
 [Live process implementation plan](live-process-implementation.md).
 
@@ -47,7 +49,7 @@ WebUI / CLI / tests ────────────────────
                                                       │ scheduling, deadlines, clean feed
                                                       │ authoritative scene state, health
                                                       │ output clock + output port
-             stdin/stdout JSON lines + chr-shm rings  │
+  unixfd sockets: JSON in GstCustomMeta + memfd       │
         ┌───────────────────────┬─────────────────────┤
         ▼                       ▼                     │ chr-shm tap ring (read-only for readers)
 chr-renderer-cli worker   tracking worker             ▼
@@ -65,8 +67,9 @@ chr-renderer-cli worker   tracking worker             ▼
 | `chr-monitor` | Reading the tap, encoding, WebRTC/SRT fan-out, its own signalling endpoint | Feed anything back into program output |
 
 Tracking runs out of process as a worker that `chr-server` supervises like the
-render worker (#128). `chr-server` hands it every captured frame through a
-`chr-shm` ring and joins its cameras with the frames by capture sequence; see
+render worker (#128). `chr-server` hands it every captured frame, the same
+shared memory the render worker receives, and joins its cameras with the frames
+by capture sequence; see
 [tracking worker](../server/docs/tracking-worker.md). The protocol is
 language-neutral, so the real tracking module can replace the replay stand-in.
 #60 keeps the questions this does not settle: the tracking reference lifecycle
@@ -82,7 +85,7 @@ worker runs ([tracked camera simulation](../server/docs/tracking-simulation.md))
 | `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-tracking-sim` camera simulator |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
-| `common/shm/` | `chr-shm` | Shared-memory frame rings between processes; the only crate allowed to use `unsafe` |
+| `common/shm/` | `chr-shm` | Shared-memory frame rings between processes (capture input ring, program tap); the only crate allowed to use `unsafe` |
 | `monitor/` | `chr-monitor` | Separate monitoring process |
 
 `chr-renderer-cli` and `chr-tracking-sim-cli` are executables of the runtime
@@ -94,23 +97,33 @@ executables (`CARGO_BIN_EXE_*`). The package is renamed from `chr-server` to
 `monitor/` sits at the repository root, not under `server/`: `server/` is the
 render server and what runs in its process, while the monitor is a separate,
 optional process that may run on another host from an SDI loop-out.
-`chr-shm` is the protocol shared by `chr-server`, the worker and the monitor,
-so it lives under `common/`.
+`chr-shm` is the protocol shared by `chr-server`, the capture process and the
+monitor, so it lives under `common/`.
 
 ## Channels
 
 | Channel | Between | Transport | Carries |
 | --- | --- | --- | --- |
 | Control plane | Clients ↔ `chr-server` | Existing JSON-RPC over WebSocket/NativeSocket | Commands and status, never pixels |
-| Worker control | `chr-server` ↔ worker | The worker's stdin/stdout, one JSON object per line | Startup spec, render requests, completions |
-| Worker pixels | `chr-server` ↔ worker | Two `chr-shm` rings (input, output) | Input images and composited UYVY frames |
+| Worker messages | `chr-server` ↔ each worker | Two GStreamer unixfd sockets per worker (`unixfdsink` listens, `unixfdsrc` connects); each buffer is one message, JSON in a `chr-worker-message` `GstCustomMeta` | Startup spec, render and track requests, completions, cameras |
+| Worker pixels | `chr-server` ↔ each worker | The same buffers' memfd-backed memory, passed as file descriptors | Captured frames (one copy shared by both workers) and composited UYVY frames |
+| Capture input | Capture process → `chr-server` | One `chr-shm` ring | Captured RGBA8 frames (software stand-in for SDI in) |
 | Program tap | `chr-server` → monitor | One `chr-shm` ring | Every transmitted output slot, repeats included |
 | Monitor signalling | Clients ↔ `chr-monitor` | JSON-RPC `webrtc.offer` on the monitor's own WebSocket | WebRTC session setup |
 
-Using the worker's stdin/stdout avoids a listening socket and file-descriptor
-passing. At 1080p a UYVY frame is about 4 MB; the rings add one copy per
-direction per frame on top of the existing CPU upload and readback. GPU-handle
-sharing is not required and not claimed.
+The worker sockets live in `chr-server`'s private 0700 runtime directory and
+are passed to the worker on its command line. File-descriptor passing lets one
+captured frame reach both workers without further copies; at 1080p a UYVY
+frame is about 4 MB, copied once by the worker into shared memory and once by
+`chr-server` out of it, on top of the CPU upload and readback. `chr-server`
+grants each worker a fixed number of requests in flight (render 4, tracking 8),
+so a slow or stopped worker holds a bounded number of buffers. GPU-handle
+sharing is not required and not claimed. The transport is specified in
+[tracking worker](../server/docs/tracking-worker.md#transport); any language
+with GStreamer bindings can implement a worker (vchao's adapter is to, #140).
+The program tap and the capture input stay on `chr-shm`: the monitor and the
+capture process are not supervised workers, and a ring never makes its writer
+wait.
 
 ## State ownership
 
@@ -151,11 +164,11 @@ sharing is not required and not claimed.
 | Monitor crashes, stalls or has no viewers | No effect on program output; the tap writer never waits |
 | `chr-server` itself fails | Out of scope here: hardware bypass/watchdog and a service supervisor (#80) |
 
-A hot-standby worker, fill+key output and cross-process zero-copy are possible
-follow-ups, not part of this decision.
+A hot-standby worker, fill+key output and GPU zero-copy between processes are
+possible follow-ups, not part of this decision.
 
 ## References
 
 - #94 decision; #95 monitor split and `chr-shm`; #96 `chr-renderer-cli`;
   #97 worker supervision and clean feed; #80 physical SDI; #60 tracking results;
-  #128 tracking worker.
+  #128 tracking worker; #141 unixfd worker transport.

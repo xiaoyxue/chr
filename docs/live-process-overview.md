@@ -37,9 +37,8 @@ flowchart TB
 
     input --> server
     control -- "JSON-RPC (ws 127.0.0.1:8787 / NativeSocket)" --> server
-    server -- "JSON lines: render / done / failed" --> worker
-    server -- "input ring (chr-shm, 4 slots)" --> worker
-    worker -- "output ring (chr-shm, 4 slots)" --> server
+    server -- "unixfd socket: render + input frame (memfd), at most 4 in flight" --> worker
+    worker -- "unixfd socket: done + UYVY frame (memfd) / failed" --> server
     server -- "program frames" --> tap
     tap --> monitor
     encode --> webrtc
@@ -55,9 +54,12 @@ Key points:
 - **Monitoring is decoupled:** `chr-monitor` only reads the program tap and never
   feeds back. Encoding and streaming cannot stall program output, and the monitor
   restarts on its own.
+- **Worker transport:** two GStreamer `unixfdsink`/`unixfdsrc` sockets per
+  worker (render and tracking). Each message is JSON in a buffer's custom meta;
+  frames are memfd-backed memory passed as file descriptors, so a captured frame
+  is copied once (about 0.75 ms at 1080p RGBA) and shared by both workers.
 - **Shared memory (`chr-shm`):** single-writer, many-reader rings on mapped
-  files; torn reads are discarded. A 1080p RGBA frame costs about 1.3 ms to
-  write and 1.1 ms to read.
+  files for the program tap and the capture input; torn reads are discarded.
 - **Code layout:** `server/renderer` (`chr-renderer`, the library),
   `server/runtime` (`chr-server` and `chr-renderer-cli`), `monitor/`
   (`chr-monitor`), `common/` (protocol and IPC), `server/viewer` (local window
@@ -98,9 +100,8 @@ flowchart TB
 
     input --> server
     control -- "JSON-RPC（ws 127.0.0.1:8787 / NativeSocket）" --> server
-    server -- "JSON lines：render / done / failed" --> worker
-    server -- "输入 ring（chr-shm，4 个 slot）" --> worker
-    worker -- "输出 ring（chr-shm，4 个 slot）" --> server
+    server -- "unixfd socket：render + 输入帧（memfd），最多 4 个在途" --> worker
+    worker -- "unixfd socket：done + UYVY 帧（memfd）/ failed" --> server
     server -- "节目帧" --> tap
     tap --> monitor
     encode --> webrtc
@@ -114,8 +115,11 @@ flowchart TB
   worker 重启后自动接回 CG。
 - **监看解耦：** `chr-monitor` 只读 program tap，从不回写。编码和推流不会拖慢节目输出，
   monitor 也可以单独重启。
-- **共享内存（`chr-shm`）：** 基于映射文件的单写多读环形缓冲，读到被覆盖了一半的帧直接丢弃。
-  1080p RGBA 一帧写约 1.3 ms、读约 1.1 ms。
+- **Worker 传输：** 每个 worker（渲染和跟踪）两个 GStreamer `unixfdsink`/`unixfdsrc` socket。
+  每条消息是 buffer 自定义 meta 里的 JSON；帧是以文件描述符传递的 memfd 内存，
+  所以一帧采集画面只拷贝一次（1080p RGBA 约 0.75 ms），两个 worker 共用。
+- **共享内存（`chr-shm`）：** 基于映射文件的单写多读环形缓冲，用于 program tap 和采集输入，
+  读到被覆盖了一半的帧直接丢弃。
 - **代码分层：** `server/renderer`（`chr-renderer`，渲染库）、`server/runtime`
   （`chr-server` 和 `chr-renderer-cli`）、`monitor/`（`chr-monitor`）、`common/`
   （协议和 IPC）、`server/viewer`（本地窗口和 PNG 导出）。
