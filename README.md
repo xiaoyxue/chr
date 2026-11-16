@@ -14,6 +14,7 @@
 | `common/shm/` | `chr-shm`: shared-memory frame rings between processes | Rust |
 | `flake.nix`, `flake.lock` | Shared, pinned Linux development environment and renderer build/check entry points | Nix |
 | `docs/` | Repository-wide documentation, including `docs/development.md`; server contracts live in `server/docs/` | |
+| `external/vchao/` | Git submodule of [Hong-Xiang/vchao](https://github.com/Hong-Xiang/vchao) (soccer video VPP), pinned; never edited here | Python |
 | `reference/` | All reference materials (private, local-only, ignored by Git) | |
 | `output/<module>/` | Generated runtime artifacts, including renderer images in `output/renderer/` (local-only, ignored by Git) | |
 
@@ -125,6 +126,16 @@ From the repository root:
 ```powershell
 git worktree add -b feature/my-feature .worktree/my-feature main
 ```
+
+Clone with its submodules:
+
+```sh
+git clone --recursive https://github.com/xiaoyxue/chr.git
+```
+
+In an existing clone or a new worktree, run `git submodule update --init` instead.
+The vchao submodule needs read access to that private repository; builds and
+checks do not need it.
 
 See `AGENTS.md` for contributor guidelines and `docs/development.md` for the
 directory layout, toolchain ownership, and complete development workflow.
