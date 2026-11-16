@@ -13,8 +13,11 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 
 ## Architecture and scope
 
-- Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `runtime/`
-  (`chr-runtime`) builds the `chr-server` render server, its two workers (the
+- Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `tracker/`
+  (`chr-tracker`) is chr's tracking logic: the VchaoFrame contract and its
+  validation (`protocol`), pose to camera (`pose`), camera-model selection
+  (`lens`), the frame/camera join (`join`) and the replay stand-in's logic
+  (`replay`); `runtime/` (`chr-runtime`) builds the `chr-server` render server, its two workers (the
   headless `chr-renderer-cli` and the `chr-tracking-sim-cli` tracking replay
   stand-in) and the `chr-sdi-sim` SDI capture simulator; `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
@@ -24,14 +27,21 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   surfaces, and presentation, not separate rendering algorithms.
 - Start new server functionality as modules of an existing crate; split out a
   crate when it brings heavy dependencies or needs its own lint exception, such
-  as hardware FFI.
-- Runtime ownership: `src/input/` acquires video; `src/calibration/` consumes
-  calibration and associates it with frames; `src/program/` assembles demo
+  as hardware FFI. Tracking is the explicit exception: `tracker/` is a
+  pure-logic sibling of `renderer/`, for symmetry and testability. It has no
+  processes, sockets, GStreamer, async runtime or GPU dependency; geometry
+  checks come from the renderer through `chr_tracker::Checks`, which
+  `chr-runtime` supplies (`calibration/lens.rs`). Put new tracking contract,
+  selection and join logic there, and only process and transport glue in
+  `runtime/`. The estimation algorithm stays in the tracking worker (vchao).
+- Runtime ownership: `src/input/` acquires video; `src/calibration/` replays a
+  calibrated clip's lens and turns wire lenses into the renderer's; `src/program/` assembles demo
   scenes and bridges admitted frames into rendering; `src/worker/` supervises
   the out-of-process renderer (`chr-renderer-cli worker`), which holds the GPU
   device, while `chr-server` holds none, and owns the GStreamer unixfd transport
   both workers use (`transport.rs`); `src/worker/tracking/` holds the
-  tracking worker protocol and its supervisor; `src/sdi.rs` owns the
+  tracking worker's supervisor and the VchaoFrame GStreamer buffer and caps
+  glue (`wire.rs`), with the contract itself in `chr-tracker`; `src/sdi.rs` owns the
   simulated output port and writes every transmitted slot into the shared-memory
   program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
   encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer media
@@ -40,7 +50,8 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   Live tracking runs in a tracking worker that `chr-server` starts, feeds and
   supervises like the render worker (`docs/tracking-worker.md`). It may hold its
   own GPU device; for now both workers share one GPU. `chr-tracking-sim-cli`
-  replays recorded cameras and must never be described as estimating them; the
+  (a thin process over `chr_tracker::replay`) replays recorded cameras and
+  must never be described as estimating them; the
   real tracking module, possibly in another language, replaces it through the
   same protocol. Replay calibration is not a live tracking service or a public
   distortion protocol.

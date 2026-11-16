@@ -22,15 +22,40 @@ chr-server ─unixfd: frame + VchaoFrame{selection: null}───────�
 The tracking hop speaks vchao's raw-frame boundary unchanged: the contract of
 `live-video/src/unixfd.rs` and `live-video/README.md#native-unixfd-boundary` as
 merged in Hong-Xiang/vchao#196 (`f209fc9`, the `external/vchao` pin). chr mirrors its types in
-`server/runtime/src/worker/tracking/protocol.rs` and does not depend on vchao's
+`chr_tracker::protocol` (`server/tracker/src/protocol.rs`) and does not depend on vchao's
 crates. The render worker keeps chr's own protocol
 ([live process implementation](../../docs/live-process-implementation.md)).
+
+## Code layout
+
+chr's side of tracking is the pure-logic crate `chr-tracker`
+(`server/tracker/`), the renderer's sibling (#151). It has no processes,
+sockets, GStreamer or async runtime, and does not depend on the GPU renderer:
+
+| Module | Content |
+| --- | --- |
+| `protocol` | The VchaoFrame v1 mirror, chr's [lens extensions](#chr-lens-extensions), and the meta's [validation](#validation) as functions of its JSON |
+| `pose` | A returned pose as its frame's camera ([Mapping to cameras](#mapping-to-cameras)) and that camera as render geometry |
+| `lens` | The camera-model choice ([Lens](#lens)) and the session's fixed lens |
+| `join` | Frames paired with cameras by capture sequence, the [program delay](#latency-and-program-delay) and the [clean-feed](#clean-feed) decision |
+| `replay` | The stand-in's poses and lens from a `calibrated-video-v1` manifest |
+
+Geometry is checked by the renderer's own constructors (`Ti::new`,
+`RadialDistortion::new`, `FrameWarp::new`): `chr-runtime` passes them to
+`chr-tracker` as `chr_tracker::Checks` (`server/runtime/src/calibration/lens.rs`),
+so a camera chr-tracker accepts is one the render worker can draw.
+`chr-runtime` keeps the processes and their transport: the supervisor
+(`server/runtime/src/worker/tracking/supervisor.rs`), the VchaoFrame caps,
+buffers and meta on GStreamer (`server/runtime/src/worker/tracking/wire.rs`),
+the unixfd transport shared with the render worker
+(`server/runtime/src/worker/transport.rs`), chr-server's wiring and the
+`chr-tracking-sim-cli` process.
 
 ## Executables
 
 | Executable | Role |
 | --- | --- |
-| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`) | Stand-in worker and the regression reference. It returns every frame with `selection.pose = fresh`: `t` is the **recorded** `Ti` of a `calibrated-video-v1` manifest, and its left endpoint is the frame itself. It replays; it never estimates. That `t` maps to the ideal image, so every frame also carries the manifest's lens in chr's [lens extension](#chr-lens-extensions); it sends no frame warp ([Lens](#lens)). |
+| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`, over `chr_tracker::replay`) | Stand-in worker and the regression reference. It returns every frame with `selection.pose = fresh`: `t` is the **recorded** `Ti` of a `calibrated-video-v1` manifest, and its left endpoint is the frame itself. It replays; it never estimates. That `t` maps to the ideal image, so every frame also carries the manifest's lens in chr's [lens extension](#chr-lens-extensions); it sends no frame warp ([Lens](#lens)). |
 | vchao's `pitch-analysis` | The real tracking worker (`atlas-vq-estimate`, N=8/S=4 grid, LogH interpolation, 500 ms overload rule), built from `external/vchao` ([Running vchao's pitch-analysis](#running-vchaos-pitch-analysis)). |
 
 chr-server runs the worker as:

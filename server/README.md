@@ -11,6 +11,7 @@ The Cargo workspace is at the repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
+| `tracker/` | `chr-tracker` | chr's tracking logic, without processes, GStreamer, an async runtime or the GPU renderer: vchao's VchaoFrame v1 mirror with chr's lens extensions and its validation (`protocol`), a returned pose as its frame's camera (`pose`), camera-model selection (`lens`), the frame/camera join with its fixed delay and clean-feed decision (`join`) and the replay stand-in's poses and lens (`replay`). Geometry is validated by the renderer's own checks, which `chr-runtime` passes in (`chr_tracker::Checks`) |
 | `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-sdi-sim` simulates the camera |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
@@ -29,12 +30,12 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `input/software.rs` | FFmpeg/GStreamer MP4 acquisition and native input sequence assignment |
 | `input/ring.rs` | Frames from a capture process through the shared-memory input ring (`--tracked-scene`) |
 | `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
-| `calibration/tracking.rs` | Per-frame tracked cameras (`tracking.frame`) paired with captured frames by capture sequence |
+| `calibration/lens.rs` | The renderer's lens of a wire lens, and the renderer's geometry checks (`CHECKS`) that `chr-tracker` validates tracked cameras with |
 | `program/description.rs`, `program/assets.rs` | Render descriptions: startup program, `description.load`, asset reading, verification and import |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
 | `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
 | `worker/` | The unixfd transport shared by both workers (`transport.rs`), the render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
-| `worker/tracking/` | Tracking worker protocol (`protocol.rs`) and its supervisor in `chr-server` (`supervisor.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker |
+| `worker/tracking/` | The tracking worker's supervisor in `chr-server` (`supervisor.rs`) and the VchaoFrame contract on GStreamer buffers: caps, meta and frames (`wire.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker's process over `chr_tracker::replay`. Pairing frames with cameras is `chr_tracker::join` |
 | `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 
