@@ -146,9 +146,12 @@ wait.
   transmitted as its **clean feed** (the input image converted to the output
   format, without CG); its submission is reported as failed, not rendered.
   Late completions are discarded by request ID.
-- Clean feed is available when the input is 8-bit BT.709 and its extent equals
-  the output extent, which is the SDI-in/SDI-out case. Other inputs fall back to
-  repeating the last output and are counted.
+- Clean feed is available when the input is 8-bit BT.709; an input of another
+  extent (with the output's aspect) is scaled bilinearly on the CPU. Other
+  inputs fall back to repeating the last output and are counted.
+- A tracked frame without a camera (no ready tracking worker, an `unavailable`
+  pose, or a camera later than the wait) is clean feed too, at the same fixed
+  delay as its neighbours (#148).
 - Input-locked output with a fixed delay of D frames, genlock and audio
   pass-through are part of physical SDI (#80); the simulated output keeps its
   own clock until then.

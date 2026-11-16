@@ -86,6 +86,10 @@ git submodule update --remote external/vchao   # move the pin to vchao's latest 
   `external/` is initialized, and the Nix build sources exclude it.
 - **Privacy:** keep vchao's code, data and models in its own repository. Do not copy
   them into chr fixtures or documentation.
+- **Using vchao's programs:** build them from the submodule with vchao's own flake,
+  outside chr's checks, for example the tracking worker:
+  `nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis`
+  ([tracking worker](../server/docs/tracking-worker.md#running-vchaos-pitch-analysis)).
 
 `chr-server` creates no GPU device. As decided in #94 and implemented in #97, it
 starts and supervises a `chr-renderer-cli worker` process that renders every

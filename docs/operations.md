@@ -168,7 +168,53 @@ to its tracking worker and renders each frame with the `Ti` it returns
   - Every waiting frame holds 8 MiB of memory at 1080p (33 MB at 4K).
 
 `stack.py status` names the worker and its current stream and counts the
-returned poses: fresh, interpolated, reused, unavailable and overdue.
+returned poses: fresh, interpolated, reused, unavailable and overdue. Frames
+without a camera, such as while the worker loads its model or restarts, go out
+as clean feed: the camera picture without CG, at the same delay.
+
+### Run with vchao tracking
+
+vchao's `pitch-analysis` estimates every frame's `Ti` from a map of the venue
+([tracking worker](../server/docs/tracking-worker.md#running-vchaos-pitch-analysis)).
+
+1. Build it once per checkout (about 7 GB in the Nix store; the first build
+   downloads PyTorch and CUDA):
+
+   ```sh
+   git submodule update --init external/vchao
+   nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
+   ```
+
+2. Put the map (`manifest.json` with its Parquet files) under `<asset-root>`
+   and create a directory for its ledgers, for example `<asset-root>/runs`.
+3. In `stack.toml` (relative paths are from the repository root):
+
+   ```toml
+   tracking = "worker"
+   # On NixOS the wrapper is not needed: name pitch-analysis directly.
+   tracking_cli = "server/scripts/with-cuda-driver.sh"
+   tracking_worker_args = [
+       "output/vchao/pitch-analysis/bin/pitch-analysis",
+       "--asset-manifest", "<asset-root>/map/manifest.json",
+       "--batch-frames", "8", "--estimate-every", "4", "--interpolation", "logh",
+       "--overload-ms", "500", "--ledger", "<asset-root>/runs/{stream_id}.arrow",
+   ]
+   tracking_centre = [14.52857216404143, 60.620266710663365, -9.91514362632655]
+   tracking_wait_ms = 800
+   nixgl = true
+   ```
+
+   `tracking_centre` is the station's optical centre of that map; the value
+   above is the SC1464 fixture's. The description must match the camera's size
+   and rate; its lens is not applied to vchao's `Ti`.
+4. `uv run server/scripts/stack.py restart render`. The worker is `ready`
+   about 10 s later (model and map loading); until then the output carries
+   clean feed. Its log lines, such as `analysis-listening` and, at stop,
+   `analysis-complete`, are in `output/stack/render.log`.
+
+The ledgers grow with every frame (about 90 bytes per frame plus about 3 KB
+per estimate) and a restarted worker starts a new pair; remove old ones from
+time to time.
 
 ## Launch and operate
 
@@ -254,5 +300,6 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 | `OLD BUILD` in `status` | Restart that component to run the new binary. |
 | Many clean-feed frames or deadline misses after raising `size` | The render worker is slower than a frame at that size, or another process uses the GPU. Check `stack.py status`, stop other GPU processes, or use a smaller `size`. |
 | A benchmark or test stack is hundreds of times slower than expected | Another Vulkan process uses the same GPU while Resizable BAR is off (#146). Stop the other process or enable Resizable BAR ([host checklist](#host-checklist)). |
+| `render.log`: `with-cuda-driver.sh: no libcuda.so.1` or the estimator finds no CUDA device | `pitch-analysis` runs outside nixGL; keep `nixgl = true`, or on NixOS name `pitch-analysis` directly as `tracking_cli`. |
 | Many frames without camera, or the tracking worker restarts with "holds N frames" | The worker returns frames later than `tracking_wait_ms`. Raise `tracking_wait_ms` (at most 1500), or check the worker's log in `output/stack/render.log`. |
 | `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |

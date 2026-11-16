@@ -1,8 +1,9 @@
 # Tracking worker
 
-**Status:** `implemented` on vchao's VchaoFrame v1 contract, with a replay
-stand-in (#148, phase 1). vchao's `pitch-analysis` speaks the same contract;
-running it as the tracking worker is phase 2 of #148.
+**Status:** `implemented` on vchao's VchaoFrame v1 contract (#148). vchao's
+`pitch-analysis` runs as the tracking worker unchanged; it is verified on the
+SC1464 fixture (see [Measured](#measured)). The `chr-tracking-sim-cli` replay
+stand-in speaks the same contract and remains the regression reference.
 
 `chr-server --tracking-worker` starts one tracking worker, gives it every
 captured frame, and takes the camera of each frame from it. This is the
@@ -18,8 +19,8 @@ chr-server ─unixfd: frame + VchaoFrame{selection: null}───────�
 ```
 
 The tracking hop speaks vchao's raw-frame boundary unchanged: the contract of
-`live-video/src/unixfd.rs` and `live-video/README.md#native-unixfd-boundary` at
-Hong-Xiang/vchao#196 head `cd0b904`. chr mirrors its types in
+`live-video/src/unixfd.rs` and `live-video/README.md#native-unixfd-boundary` as
+merged in Hong-Xiang/vchao#196 (`f209fc9`, the `external/vchao` pin). chr mirrors its types in
 `server/runtime/src/worker/tracking/protocol.rs` and does not depend on vchao's
 crates. The render worker keeps chr's own protocol
 ([live process implementation](../../docs/live-process-implementation.md)).
@@ -29,7 +30,7 @@ crates. The render worker keeps chr's own protocol
 | Executable | Role |
 | --- | --- |
 | `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`) | Stand-in worker and the regression reference. It returns every frame with `selection.pose = fresh`: `t` is the **recorded** `Ti` of a `calibrated-video-v1` manifest, and its left endpoint is the frame itself. It replays; it never estimates. The manifest's frame warps are dropped: VchaoFrame has none. |
-| vchao's `pitch-analysis` | The real tracking worker (`atlas-vq-estimate`, N=8/S=4 grid, LogH interpolation, 500 ms overload rule). It is built from `external/vchao` in phase 2. |
+| vchao's `pitch-analysis` | The real tracking worker (`atlas-vq-estimate`, N=8/S=4 grid, LogH interpolation, 500 ms overload rule), built from `external/vchao` ([Running vchao's pitch-analysis](#running-vchaos-pitch-analysis)). |
 
 chr-server runs the worker as:
 
@@ -72,14 +73,19 @@ chr-server  appsrc ! unixfdsink socket-path=input.sock   ──►  unixfdsrc ! 
 chr-server  appsink ! unixfdsrc socket-path=output.sock  ◄──  unixfdsink ! appsrc   worker
 ```
 
-- The sending side listens (`unixfdsink`, `wait-for-connection=true`) and the
-  receiving side connects (`unixfdsrc`).
+- The sending side listens (`unixfdsink`) and the receiving side connects
+  (`unixfdsrc`).
   - chr-server listens on `input.sock` (A) before it starts the worker.
   - The worker loads its model and map, then listens on `output.sock` (B). It
     waits for its one consumer, then connects to A.
   - chr-server connects to B once it exists.
-- **Readiness** is that connection: the worker becomes `ready` when chr-server
-  is connected to its output socket. Before that, frames are not sent.
+- Neither side's sink uses `wait-for-connection`, as in vchao's merged code:
+  `unixfdsink` waits for a connection inside `render` holding the base sink's
+  preroll lock, so tearing it down after its peer was lost can deadlock. Each
+  side pushes only while its peer is connected (`num-clients`).
+- **Readiness** is both connections: the worker becomes `ready` when chr-server
+  reads its output socket and the worker reads its input socket. Before that,
+  frames are not sent. A worker that leaves its input socket is replaced.
 - **One consumer:** `pitch-analysis` fails when its consumer disconnects or a
   second one connects. chr-server is the only consumer, and restarts the worker
   when it fails.
@@ -229,7 +235,7 @@ without a camera.
   `chr-<server pid>-<session>`, and its `frame_id`s start at 0 again, as
   `pitch-analysis` requires (a stream change within a session is fatal there).
   Frames captured while no worker is ready are not sent: they belong to no
-  stream, get no camera and are skipped.
+  stream, get no camera and go out as clean feed.
 - **Capture restart:** after the capture restarts its sequence numbers, frames
   in flight are forgotten. They still come back in order and keep their
   `frame_id`s, but their answers are ignored.
@@ -247,9 +253,23 @@ Starting ──output socket connected──► Ready ──exit / invalid frame
 - **Hang:** a worker that holds a frame longer than `--worker-hang-ms` (default
   2000 ms) is killed (SIGKILL) and restarted. The backoff grows from 250 ms to
   5 s. Its frames are released with its sockets.
-- **While no worker is ready:** frames are not sent, so they get no camera and
-  are skipped. The SDI output continues by repeating its last frame. Killing the
-  stand-in at 30 fps costs about seven frames.
+- **While no worker is ready** (starting, loading its model, restarting):
+  frames are not sent, so they get no camera and go out as clean feed. The SDI
+  output keeps its cadence and its delay.
+
+## Clean feed
+
+A frame without its camera is transmitted as its **clean feed**: its own
+pixels, converted to UYVY and scaled bilinearly to the output size if the
+camera's differs, without CG. It is never rendered with another frame's camera.
+This covers frames sent while no worker is ready, frames returned `unavailable`
+(as in vchao, "unavailable geometry passes the original pixels through
+unchanged"), and frames whose camera is later than the wait. The join releases
+them at the same fixed delay as joined frames, and the render loop transmits
+them in their place among the rendered frames. `tracking.get_status` counts
+them as `frames_clean_feed`; `frames_without_tracking` counts the frames whose
+camera did not arrive. Frames a render deadline miss turns into clean feed are
+counted by the render worker (`render.get_worker_status`).
 
 ## Latency and program delay
 
@@ -266,12 +286,23 @@ Starting ──output socket connected──► Ready ──exit / invalid frame
     lookahead to the next target, about 4 frames plus one estimate), or after
     at most 500 ms with a reused or unavailable pose (`overdue`). Give it about
     800 ms.
-- The SDI program delay is then the wait plus rendering: about 0.8 s.
+- The SDI program delay is then the wait plus rendering: about 0.8 s. On the
+  SC1464 fixture `pitch-analysis` selected each frame's pose 198 ms (median),
+  305 ms (95th percentile) and at most 376 ms after capture, so 600 ms would
+  also suffice there ([Measured](#measured)).
 - **Memory:** every waiting frame holds its RGBA8 pixels: 8 MiB at 1080p,
   32 MiB at 4K. The capture backlog holds `wait × fps + 2` frames, about
   0.6 GiB at 1500 ms and 1080p50.
 - Without a tracking worker (`tracking.frame`), frames still leave as soon as
   their camera arrives.
+
+## Image coordinates
+
+vchao's SNC is chr's: `x = (2u - W) / sqrt(W·H)`, `y = (2v - H) / sqrt(W·H)`
+(vchao `README.md#images-snc`, `atlas-vq-estimate` `geometry.py`). vchao
+leaves the pixel-centre convention to each producer; `atlas-vq-estimate`
+maps detector pixel coordinates without a half-pixel shift, which is chr's
+convention of integer sample centres ([coordinates](coordinates.md)).
 
 ## Status
 
@@ -286,7 +317,8 @@ Starting ──output socket connected──► Ready ──exit / invalid frame
 - `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable`:
   every returned frame, by pose;
 - `poses_overdue`: frames released by the worker's overload rule, whatever
-  their pose.
+  their pose;
+- `frames_clean_feed`: frames sent as clean feed for want of a camera.
 
 These fields default to 0 for older clients. With a tracking worker,
 `tracking.frame` is rejected.
@@ -308,3 +340,50 @@ server/scripts/run-tracked.sh --scene clip-manifest.json --video clip.mp4 --trac
   (`server/scripts/stack.example.toml`).
 - `tracking = "external"` keeps the previous behaviour, in which the simulator
   sends the cameras.
+
+## Running vchao's pitch-analysis
+
+Build it from the pinned submodule (the closure is about 7 GB, mostly
+PyTorch/CUDA wheels; vchao's flake has no binary cache, so a first build fetches
+and builds it). chr's own builds and checks never need the submodule:
+
+```sh
+git submodule update --init external/vchao
+nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
+```
+
+- `pitch-analysis` runs vchao's `atlas-vq-estimate` (Python, CUDA). Its
+  wrapper looks for the NVIDIA driver only in `/run/opengl-driver/lib` (NixOS)
+  and replaces `LD_LIBRARY_PATH`. On other hosts run it through
+  `server/scripts/with-cuda-driver.sh`, which preloads `libcuda.so.1` from the
+  inherited `LD_LIBRARY_PATH`, under nixGL as `run-tracked.sh` and `stack.py`
+  run chr-server.
+- Arguments: the map's `--asset-manifest`, `--batch-frames 8
+  --estimate-every 4 --interpolation logh --overload-ms 500` and a new
+  `--ledger <dir>/{stream_id}.arrow` per session. chr-server adds
+  `--stream-id` and both sockets.
+- Give the station centre with `--tracking-centre` and the wait (program
+  delay) with `--tracking-wait-ms`; the lens is `identity` by default.
+- `pitch-analysis` fails on an input stall of 2 s or an estimator without
+  progress for 5 s; chr-server then restarts it as a new stream, with clean feed
+  meanwhile. On `stack.py stop` it receives the end of its input, returns every
+  frame it accepted and writes its `analysis-complete` summary to the log.
+
+`docs/operations.md` has the `stack.toml` keys for it.
+
+### Measured
+
+SC1464 fixture (1212x654p30 clip, looped by the camera simulator; private,
+not in the repository), RTX 3090 shared with a running stack, 150 s,
+`--tracking-wait-ms 800`:
+
+| Quantity | Value |
+| --- | --- |
+| Startup to `ready` (model and map load) | 9.5 s; its 278 frames went out as clean feed |
+| Frames sent / returned | 4,137, all returned in order (`analysis-complete` at shutdown) |
+| Poses | 1,015 fresh, 3,045 interpolated, 64 reused, 13 unavailable; the 13 unavailable are frames 0–12, overdue before the first estimate |
+| Estimates | 1,016 launched, 1,016 accepted: about 7.2 fresh `Ti` per second (the N=8/S=4 grid at 30 fps targets 7.5) |
+| Capture to selected pose | 198 ms median, 305 ms 95th percentile, 376 ms maximum; chr-server to worker 1.2 ms median |
+| Frames held by the worker | at most 16 (`peak_video_queue`; its capacity 26, chr-server's limit 32) |
+| Restarts | none; the clip loop (frame 359 to 0) did not disturb the stream |
+| GPU memory | `atlas-vq-estimate` 1.8 GiB; `pitch-analysis` itself none |

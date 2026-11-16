@@ -114,23 +114,26 @@ only, never by arrival order. Once per output period the server:
    whose wait (`--tracking-wait-ms`, default 3 frame periods, at most 1500 ms)
    ended without one is skipped. A frame never overtakes an older unresolved
    frame;
-3. renders the oldest joined frame that is due. In this external mode a frame
+3. outputs the oldest resolved frame that is due: a joined frame is rendered,
+   a frame without camera goes out as clean feed. In this external mode a frame
    is due once joined; with a tracking worker, exactly the wait after its
    capture, a constant program delay
    ([tracking worker](tracking-worker.md#latency-and-program-delay)). Up to 2
    due frames wait for later periods, which absorbs capture bursts; older ones
    are dropped, so latency returns to the tracking delay after a stall.
 
-A skipped frame is never rendered with another frame's camera, and its late
-camera is rejected. The output port repeats its previous frame for that period,
-because the 1080p input does not match the 720p output for clean feed.
+A frame without its camera is never rendered with another frame's camera, and
+its late camera is rejected. It goes out as clean feed in its own output period:
+its own pixels without CG, scaled to the output size when the camera's differs
+(#148). Before #148 the output port repeated its previous frame instead.
 
 | `tracking.get_status` | Meaning |
 | --- | --- |
 | `samples_received` | Cameras accepted into the backlog |
 | `samples_late` | Cameras rejected because their frame was already rendered or skipped |
 | `frames_joined` | Frames submitted for rendering with their camera |
-| `frames_without_tracking` | Frames skipped because their camera did not arrive in time |
+| `frames_without_tracking` | Frames whose camera did not arrive in time, including frames a tracking worker returned `unavailable` or never received |
+| `frames_clean_feed` | Frames sent as clean feed because they had no camera |
 | `frames_dropped` | Joined frames given up to keep the latency bounded |
 | `frames_overwritten` | Frames the input ring overwrote before the server read them |
 | `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable` | Frames a tracking worker returned, by pose; 0 in external mode |
