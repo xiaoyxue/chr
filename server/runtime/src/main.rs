@@ -640,6 +640,9 @@ fn run(args: Args) -> Result<()> {
             let mut tracking = tracking;
             // Capture sequences restart with the capture process; input sequences may not.
             let mut capture_offset = 0;
+            // One past the highest input sequence given to either the render or the
+            // clean-feed path; clean frames never advance `synthetic`'s own counter.
+            let mut emitted_end = 0;
             let mut progress = tokio::time::interval(Duration::from_millis(5));
             progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut frames = tokio::time::interval(mode.frame_duration());
@@ -660,7 +663,7 @@ fn run(args: Args) -> Result<()> {
                                 log::info!("input ring at {} was replaced; capture sequences restart", input.path().display());
                                 join.reset();
                                 if let Some(tracker) = tracker { tracker.forget(); }
-                                capture_offset = synthetic.next_sequence();
+                                capture_offset = synthetic.next_sequence().max(emitted_end);
                             }
                             feed.count_overwritten(polled.overwritten);
                             let arrived = std::time::Instant::now();
@@ -669,7 +672,11 @@ fn run(args: Args) -> Result<()> {
                                 join.frame(CapturedFrame { sequence, rgba, arrived });
                             }
                             if let Some(tracker) = tracker { accept_answers(feed, tracker.poll()); }
-                            match join.next(std::time::Instant::now()) {
+                            let next = join.next(std::time::Instant::now());
+                            if let Some((frame, _)) = &next {
+                                emitted_end = emitted_end.max(capture_offset + frame.sequence + 1);
+                            }
+                            match next {
                                 Some((frame, Some(sample))) => {
                                     let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
                                     if let Err(error) = synthetic.inject_pixels(control, capture_offset + frame.sequence, Pixels::Shared(frame.rgba), geometry).await {
