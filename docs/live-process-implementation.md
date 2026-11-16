@@ -444,7 +444,7 @@ python3 server/scripts/resolution_bench.py run 1920x1080 --seconds 60 \
 cargo run --release -p chr-renderer --example upload_probe   # through nixGL on non-NixOS hosts
 ```
 
-### A second Vulkan process on the same GPU (#144 follow-up)
+### A second Vulkan process on the same GPU (#146)
 
 A render process started next to a running render worker on this host spends
 most of each frame in CPU stores into memory mapped from the GPU driver. Copying
@@ -466,7 +466,8 @@ NVreg_EnableResizableBar=1` in `/etc/modprobe.d/`, `update-initramfs -u` and a
 reboot, plus Re-Size BAR in the BIOS if BAR1 stays at 256 MB. Production runs a
 single render worker, so only benchmarks and test stacks next to the live stack
 are hit, and a future tracking worker that uses the GPU would be; re-check both
-after enabling Resizable BAR.
+after enabling Resizable BAR. #146 tracks the fix; it must be done before the vchao
+tracking worker (#140) is tested on the same GPU.
 
 ## Documentation to update with the code
 

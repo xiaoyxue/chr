@@ -63,6 +63,30 @@ page reloads the current copy. Files in `files/` are never deleted automatically
 - Nix with flakes and `uv` (or Python 3.11 or newer) on the host. Run the stack
   commands outside any Nix shell; the script enters the shells it needs.
 
+### Host checklist
+
+Check every render host before it goes onsite:
+
+| Check | Command | Expected |
+| --- | --- | --- |
+| Render GPU and driver | `nvidia-smi` | The intended GPU (the RTX 3090 on the development host) with a working driver |
+| Resizable BAR enabled (#146) | `sudo lspci -vv -s <gpu-bus-id> \| grep "BAR 1:"` and `grep EnableResizableBar /proc/driver/nvidia/params` | BAR 1 larger than 256MB, `EnableResizableBar: 1` |
+| GPU clocks under light load | `nvidia-smi -q -d CLOCK` while the stack runs | Not stuck at idle clocks; otherwise lock the minimum core clock, e.g. `sudo nvidia-smi -pm 1 && sudo nvidia-smi -i 0 -lgc 1500,2100` (`server/README.md`) |
+| Room for the rings | `df -h $XDG_RUNTIME_DIR` | More free space than the [Video size](#video-size) table needs |
+| SRT port reachable from viewers | `sudo ufw status` | The `srt` UDP port is allowed from the viewers' addresses |
+
+To enable Resizable BAR on an NVIDIA host (needs a reboot; stop the stack first):
+
+```sh
+echo "options nvidia NVreg_EnableResizableBar=1" | sudo tee /etc/modprobe.d/nvidia-rebar.conf
+sudo update-initramfs -u
+sudo reboot
+```
+
+If BAR 1 still reports 256MB, enable "Above 4G Decoding" and "Re-Size BAR Support"
+in the BIOS (older boards may need a BIOS update). Until it is enabled, run only one
+stack or GPU benchmark per GPU.
+
 ## Configure
 
 ```sh
@@ -118,7 +142,8 @@ measurements in
 [live process implementation](live-process-implementation.md#resolutions-and-performance)).
 Run one stack per GPU: while Resizable BAR is off, a second Vulkan process on the
 same GPU, such as a test stack or a benchmark, is slowed down by orders of
-magnitude in its frame uploads and readbacks (#144 follow-up).
+magnitude in its frame uploads and readbacks (#146; see the
+[host checklist](#host-checklist)).
 
 ## Launch and operate
 
@@ -203,4 +228,5 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 | Changes not visible after an update | Restart `pitch-studio` / `monitor-page`, then force-reload the browser. |
 | `OLD BUILD` in `status` | Restart that component to run the new binary. |
 | Many clean-feed frames or deadline misses after raising `size` | The render worker is slower than a frame at that size, or another process uses the GPU. Check `stack.py status`, stop other GPU processes, or use a smaller `size`. |
+| A benchmark or test stack is hundreds of times slower than expected | Another Vulkan process uses the same GPU while Resizable BAR is off (#146). Stop the other process or enable Resizable BAR ([host checklist](#host-checklist)). |
 | `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |
