@@ -1,7 +1,7 @@
 //! Explicit synthetic program bridge. Rendering and colour math stay in chr-renderer.
 //! One GPU worker executes at a time; the scene owner and SDI clock never wait on it.
 
-use crate::calibration::{replay::VideoLens, tracking::rows3};
+use crate::calibration::replay::VideoLens;
 use crate::frame_submissions::{Execution, FrameSubmissions};
 use crate::retained::BoundScene;
 use crate::sdi::SdiInput;
@@ -13,6 +13,7 @@ use chr_renderer::{
     coordinates::ImageExtent,
     distortion::{CameraModel, FrameWarp, LensDistortion, RadialDistortion},
 };
+use chr_tracker::pose::rows3;
 use std::sync::Arc;
 
 pub mod assets;

@@ -1,0 +1,20 @@
+[package]
+name = "chr-tracker"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "chr's side of tracking: the VchaoFrame contract, pose-to-camera mapping, camera-model selection, the frame/camera join and the replay stand-in's logic; no processes, GStreamer or async runtime"
+
+[lints]
+workspace = true
+
+[dependencies]
+chr-common.workspace = true
+log.workspace = true
+serde.workspace = true
+# Bit-exact f64 parsing: tracking Ti crosses JSON (VchaoFrame) unchanged.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+# The tests validate geometry with the renderer's own checks, as chr-runtime does.
+chr-renderer.workspace = true

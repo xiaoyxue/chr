@@ -9,14 +9,20 @@ use std::{
 
 use chr_common::{methods::render_worker::WorkerState, scene_frame as w};
 use chr_runtime::{
-    calibration::{lens, tracking::TrackingReplay},
+    calibration::lens::CHECKS,
     worker::{
         tracking::{
-            protocol::{Endpoint, Pose, PoseStatus, Received, Selection, attach},
-            supervisor::{Answer, StatusHandle, Tracker, TrackerConfig, status_handle},
+            supervisor::{StatusHandle, Tracker, TrackerConfig, status_handle},
+            wire::{Received, attach},
         },
         transport::{Inbound, Receiver, Sender, SharedPixels},
     },
+};
+use chr_tracker::{
+    lens,
+    pose::Answer,
+    protocol::{Endpoint, Pose, PoseStatus, Selection},
+    replay::TrackingReplay,
 };
 
 const WIDTH: u32 = 4;
@@ -29,7 +35,7 @@ const WARPS: [[[f64; 3]; 3]; 2] = [
 const CENTRE: [f64; 3] = [14.52857216404143, 60.620266710663365, -9.91514362632655];
 
 fn radial(k1: f64) -> w::RadialLens {
-    lens::wire([2., 1.], 2., [k1, 0., 0.], None).unwrap()
+    lens::wire([2., 1.], 2., [k1, 0., 0.], None, &CHECKS).unwrap()
 }
 
 struct Fixture {
@@ -143,7 +149,7 @@ fn every_sent_frame_comes_back_with_the_recorded_ti_and_the_station_centre() {
     }
     let answers = fixture.until(|_, answers| answers.len() == 4);
     assert_eq!(sequences(&answers), [10, 11, 12, 13], "in order");
-    let replay = TrackingReplay::new(TI, [0., 0., -10.], radial(-0.05), &WARPS).unwrap();
+    let replay = TrackingReplay::new(TI, [0., 0., -10.], radial(-0.05), &WARPS, &CHECKS).unwrap();
     let ti = replay.ti();
     for answer in &answers {
         assert_eq!((answer.pose, answer.overdue), (PoseStatus::Fresh, false));

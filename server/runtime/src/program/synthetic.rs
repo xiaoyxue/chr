@@ -51,7 +51,7 @@ pub struct Synthetic {
     pub stream_id: w::Id,
     pub video_lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     /// Startup lens and world of a tracked program; its frames carry their camera.
-    pub tracking: Option<crate::calibration::tracking::Tracked>,
+    pub tracking: Option<chr_tracker::pose::Tracked>,
     /// SHA-256 of each asset a render description registered at startup.
     pub described: Option<std::collections::HashMap<w::Id, String>>,
     /// Made on first use: a described or tracked program never injects it.

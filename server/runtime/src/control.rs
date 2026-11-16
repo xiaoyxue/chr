@@ -9,14 +9,12 @@ use chr_common::{
     },
     server::{ConnectionInfo, Handler},
 };
+use chr_tracker::join::TrackingFeed;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{
-    calibration::tracking::TrackingFeed, pipeline::Command, sdi::SdiStats,
-    worker::supervisor::StatusHandle,
-};
+use crate::{pipeline::Command, sdi::SdiStats, worker::supervisor::StatusHandle};
 
 pub struct ControlHandler {
     commands: mpsc::Sender<Command>,
@@ -375,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn a_tracking_worker_reports_status_and_rejects_external_cameras() {
         let (handler, _worker) = fake_worker();
-        let feed = TrackingFeed::new(4);
+        let feed = TrackingFeed::new(4, crate::calibration::lens::CHECKS);
         let handler = handler.with_tracking(feed.clone());
         let camera = json!({"sequence": "1", "ti": [0.02, 0, 0, 0, 0.02, 0, 0, 0, 1],
                             "camera_center": [0, 0, -10], "frame_warp": null});

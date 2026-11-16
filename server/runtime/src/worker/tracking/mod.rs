@@ -6,15 +6,15 @@
 //!            ◄── frame N + VchaoFrame{selection: {pose: t | unavailable}} ──┘
 //! ```
 //!
-//! [`protocol`] is vchao's `VchaoFrame` v1 raw-frame contract over two
-//! GStreamer unixfd sockets ([`transport`](crate::worker::transport)), so the
-//! real tracking module, vchao's `pitch-analysis` (#148), runs unchanged. The
-//! frame is the memory the render worker receives too: the server copies each
-//! captured frame once. [`supervisor`] is chr-server's side.
+//! The contract is vchao's `VchaoFrame` v1 raw-frame boundary, mirrored in
+//! [`chr_tracker::protocol`], so the real tracking module, vchao's
+//! `pitch-analysis` (#148), runs unchanged. [`wire`] carries it on GStreamer
+//! buffers over two unixfd sockets ([`transport`](crate::worker::transport)).
+//! The frame is the memory the render worker receives too: the server copies
+//! each captured frame once. [`supervisor`] is chr-server's side.
 //! `chr-tracking-sim-cli` (`src/tracking_sim_cli.rs`) is a stand-in worker that
 //! returns a calibrated clip's recorded `Ti` for every frame
-//! ([`TrackingReplay`](crate::calibration::tracking::TrackingReplay)); it
-//! estimates nothing.
+//! ([`chr_tracker::replay`]); it estimates nothing.
 
-pub mod protocol;
 pub mod supervisor;
+pub mod wire;

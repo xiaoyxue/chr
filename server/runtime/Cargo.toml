@@ -30,6 +30,7 @@ gstreamer-media = ["dep:gstreamer-video"]
 
 [dependencies]
 chr-renderer.workspace = true
+chr-tracker.workspace = true
 chr-common.workspace = true
 chr-shm.workspace = true
 wgpu.workspace = true
