@@ -37,6 +37,7 @@ monitor/                  chr-monitor: program-tap encoding and WebRTC/SRT fan-o
 common/                   chr-common: JSON-RPC 2.0 messages and local IPC (Rust)
 common/shm/               chr-shm: shared-memory frame rings; the only crate with unsafe
 docs/                     Repository-wide documentation
+external/vchao/           Git submodule: Hong-Xiang/vchao (soccer video VPP, Python), pinned
 reference/                Private, local-only reference materials
 output/<module>/          Generated runtime artifacts, including output/renderer/
 .worktree/                Dedicated feature worktrees
@@ -59,6 +60,31 @@ module is only a startup-loaded lens replay for a validated clip. Offline scene
 modelling (scan video to calibration results) stays outside this repository.
 A general public distortion contract and physical SDI adapters are not
 implemented by this layout.
+
+### External repositories
+
+`external/` holds other projects' repositories as Git submodules, each pinned to
+a commit; today only `external/vchao` (Hong-Xiang/vchao, branch `main`). Its URL in
+`.gitmodules` is relative, so it uses the same protocol (HTTPS or SSH) as the chr
+clone. Both repositories are private: cloning the submodule needs read access to
+vchao.
+
+```sh
+git clone --recurse-submodules https://github.com/xiaoyxue/chr.git
+git submodule update --init external/vchao     # an existing clone or a new worktree
+git submodule update --remote external/vchao   # move the pin to vchao's latest main
+```
+
+- **No local edits:** never edit files inside `external/<name>` here. Change the
+  upstream repository, then move the pin in a chr pull request that commits the new
+  submodule commit.
+- **Worktrees:** each worktree initializes only the submodules it needs. Git keeps
+  their data under the main checkout's `.git/`.
+- **Builds stay independent:** builds and checks do not depend on submodules.
+  `nix flake check`, Cargo and the pitch-studio checks pass whether or not
+  `external/` is initialized, and the Nix build sources exclude it.
+- **Privacy:** keep vchao's code, data and models in its own repository. Do not copy
+  them into chr fixtures or documentation.
 
 `chr-server` creates no GPU device. As decided in #94 and implemented in #97, it
 starts and supervises a `chr-renderer-cli worker` process that renders every

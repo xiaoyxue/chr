@@ -10,6 +10,7 @@
 - `docs/`: Repository-wide documentation. `docs/development.md` defines the
   development environment and directory ownership; server-specific contracts
   live in `server/docs/`.
+- `external/`: Other projects' repositories as Git submodules pinned to a commit, currently `external/vchao` (Hong-Xiang/vchao). Never edit files inside them here: change the upstream repository, then move the pin in a chr pull request. Builds and checks must not depend on submodules being initialized; see `docs/development.md`.
 - `reference/`: All reference materials belong here at the repository root. These materials are private and local-only; never stage or upload them.
 - `output/`: Generated runtime artifacts, ignored by Git. Renderer PNGs belong in `output/renderer/`.
 - Onsite runtime data (Fusion offline ZIPs, logo/flag/model files and the pitch-studio store) lives outside the repository, under chr-server's asset root; `docs/operations.md` defines these locations and how to launch and operate the stack.
