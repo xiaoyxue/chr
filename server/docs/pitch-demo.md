@@ -143,7 +143,8 @@ DataChannel renderer bypass, second scene/image registry or direct preview strea
 The named configuration admits 5 lights and 8 instances per scene; model choices
 pre-register 1–8 GLBs (128 MiB source-file limit each), but selection replaces one
 model instance. Four tower instances and the receiver bring the initial count
-to six. Native raster is at most 4096×2160; output is even and at most 1280×720.
+to six. Native raster and output are even and at most 7680×4320, with the same
+aspect ratio.
 Other admission limits remain 4 scene slots, 8 operations/mutation, 8 published
 frames, 4 frames/submission, 4 inflight frames, 8 receipts and 5000 ms deadline.
 These are demo capacities, not production-policy approval.
@@ -160,7 +161,9 @@ shadow-map approximation, not an area-light integrator; large sources can hit
 radius caps, while bias/resolution can erase thin contact detail. No atmosphere
 or new area-light model is introduced.
 
-Composition intermediates are bounded to 128 MiB. Native input capacity is
+Composition intermediates are bounded to `(3 * native + output) * 8` bytes of
+pixels and at least 256 MiB (native, output and a guard-banded canvas, RGBA16F;
+about 1.06 GB at 8K). Native input capacity is
 `8 * native_width * native_height * 8` bytes (14.06 MiB at 640×360; 126.56 MiB
 at 1920×1080); this budget includes physically draining inputs. Eight possible
 shared raw UYVY owners at 640×360 represent at most 3.52 MiB, plus the fixed

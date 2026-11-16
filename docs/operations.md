@@ -80,10 +80,44 @@ Edit `output/stack/stack.toml`; the example documents every key.
 | `studio_data_dir` | `<asset-root>/studio` |
 | `srt` | An interface address, to let players on the LAN receive SRT directly |
 | `server_ws`, `monitor_ws`, `webrtc_tcp`, ports | Free local ports; set a page or relay port to 0 to leave it out |
+| `size` | The camera's own size, such as `1920x1080`; see [Video size](#video-size) |
 
 An unknown key stops the script ("unknown keys"). This happens when a configuration
 from a newer checkout is used with an older `stack.py`: remove the key or update
 the checkout.
+
+### Video size
+
+chr-server renders and transmits at `size`, from 1080p up to 8K UHD
+(7680x4320); 4K UHD 3840x2160 and DCI 4096x2160 lie in between. Both sides must be
+even and have the camera's aspect ratio (the `width`/`height` of the description
+and the manifest). Render at the camera's own size: for the usual 1080p camera set
+
+```toml
+size = "1920x1080"
+```
+
+and restart `render`. A smaller size of the same aspect, such as `1280x720`,
+scales the composed program down. The SDI port and the program tap carry `size`;
+the monitor preview (WebRTC and SRT) is scaled down to at most 1920x1080 and
+encoded with NVENC when the GPU offers it (`stack.py` runs it through nixGL), else
+with x264. The `render` log names the choice: `monitor preview 1920x1080 of
+3840x2160p30 with nvh264enc`.
+
+| Size | Camera input ring + program tap in `dir` | Each captured frame (RGBA) |
+| --- | --- | --- |
+| 1920x1080 | about 100 MB | 8.3 MB |
+| 3840x2160 | about 400 MB | 33 MB |
+| 7680x4320 | about 1.6 GB | 133 MB |
+
+`dir` usually lives in `$XDG_RUNTIME_DIR`, a RAM-backed file system of limited
+size (`df -h $XDG_RUNTIME_DIR`); 8K needs about 1.6 GB free there and several GB
+of RAM besides (see the measurements in
+[live process implementation](live-process-implementation.md#resolutions-and-performance)).
+Run one stack per GPU: next to another Vulkan process on the same GPU, such as a
+test stack or a benchmark, a render worker's CPU access to GPU-visible memory
+(frame upload and readback) slowed down by orders of magnitude on the RTX 3090
+host without Resizable BAR (#144).
 
 ## Launch and operate
 
@@ -167,3 +201,5 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 | `start` reports a port taken | Another checkout or process holds it; `stack.py status` names it. Stop it from the checkout that started it. |
 | Changes not visible after an update | Restart `pitch-studio` / `monitor-page`, then force-reload the browser. |
 | `OLD BUILD` in `status` | Restart that component to run the new binary. |
+| Many clean-feed frames or deadline misses after raising `size` | The render worker is slower than a frame at that size, or another process uses the GPU. Check `stack.py status`, stop other GPU processes, or use a smaller `size`. |
+| `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |

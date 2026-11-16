@@ -94,7 +94,7 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
 ```text
 chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
             [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--srt <ip:port>]
-            [--encoder openh264|gstreamer] [--allow-origin <origin>]
+            [--encoder openh264|gstreamer|nvenc|x264] [--allow-origin <origin>]
 ```
 
 - `--size`/`--fps` (defaults 1280x720, 50) must match the server: the ring
@@ -110,8 +110,15 @@ chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
   `chr-common` transport. `chr-server` no longer answers `webrtc.offer`.
 - `--srt` works with any program and either encoder; it no longer requires
   `--software-video`.
-- `--srt` and `--encoder gstreamer` need the `gstreamer-media` feature. The
+- `--srt` and the GStreamer encoders need the `gstreamer-media` feature. The
   monitor's GStreamer helpers are its own; it does not depend on `chr-runtime`.
+- Since #144 the tap stays at the program's size (up to 7680x4320) and the
+  monitor encodes a preview scaled down to fit 1920x1080 (aspect kept, never
+  scaled up, even sides). `gstreamer` scales with `videoconvertscale` and
+  encodes with NVENC `nvh264enc` when a probe frame encodes at start, else x264;
+  `nvenc`/`x264` force one; openh264 samples the nearest pixels. WebRTC and SRT
+  share that stream; `monitor.get_status` adds `encoder`, `preview_width` and
+  `preview_height`.
 - The render harness takes a separate monitor URL for video (`?monitor=`,
   `npm run verify -- --monitor`); control stays on `chr-server`. The development
   launcher `server/scripts/run-live.sh` starts both processes with matching
@@ -352,6 +359,122 @@ buffers were reused across scene revisions (#106). Scene edits during a restart
 were not measured separately. Physical SDI is not verified (#80). The live
 service is Linux-only; SRT preview from a Windows PC in VLC was checked against
 this stack (the Linux host must allow the SRT UDP port through its firewall).
+
+## Resolutions and performance
+
+Since #144 the camera programs take a native camera extent and an output size up
+to 8K UHD (7680x4320, both even, same aspect; `program::MAX_EXTENT`). Only
+`--synthetic-program` and `--software-video` keep their 1280x720 demonstration
+limit (`program::DEMO_MAX_EXTENT`). The SDI port and the program tap run at the
+output size; `chr-monitor` encodes a preview of at most 1920x1080 (above).
+
+### Memory per resolution
+
+| | 1280x720 | 1920x1080 | 3840x2160 | 4096x2160 | 7680x4320 |
+| --- | --- | --- | --- | --- | --- |
+| RGBA8 input frame | 3.7 MB | 8.3 MB | 33 MB | 35 MB | 133 MB |
+| UYVY output frame | 1.8 MB | 4.1 MB | 17 MB | 18 MB | 66 MB |
+| Input ring + program tap (8 + 8 slots, in `dir`) | 44 MB | 100 MB | 398 MB | 425 MB | 1.59 GB |
+| Shared input frames in `chr-server`, about | 70 MB | 158 MB | 630 MB | 672 MB | 2.5 GB |
+| Frame-resource pool budget (`64 * w * h`) | 59 MB | 133 MB | 531 MB | 566 MB | 2.1 GB |
+| Composition budget, GPU (`max(256 MiB, (3 * native + output) * 8)`) | 268 MB | 268 MB | 268 MB | 283 MB | 1.06 GB |
+
+The shared input frames are the capture backlog (the wait in frame periods plus
+two, at least four; five at the default 3-period wait), two ready frames, the
+four frames the render worker may hold and eight released memories kept for
+reuse (`RECYCLED`). Every one of these queues has a fixed length, so memory
+grows with the frame size only. The composition budget covers the native and
+output RGBA16Float canvases and a guard-banded ideal canvas of up to twice the
+native area; MSAA targets and shadow maps are outside it. Description assets
+keep their own limits (64 assets, 1 GiB, 256 MiB per file). A synthetic program's
+own constant input image is only made when it injects one, so a described 8K
+program no longer allocates 133 MB for it in both `chr-server` and the worker.
+
+### Measurements
+
+Recorded on the RTX 3090 host (i9-10900X, 62 GiB RAM, 6.3 GB `$XDG_RUNTIME_DIR`)
+with `server/scripts/resolution_bench.py` (synthetic camera: a testsrc2 clip, a
+fixed top-down camera, four image quads, 4x MSAA, radial lens) while the live
+stack's render worker kept running on the same GPU. **Every wall time and every
+deadline or clean-feed figure below is distorted by that second Vulkan process**
+(next section); GPU times, memory and the monitor's encoder are not.
+
+| | 1280x720 | 1920x1080 | 3840x2160 | 7680x4320 |
+| --- | --- | --- | --- | --- |
+| Render GPU time per frame, mean (`bench`) | 1.07 ms | 2.12 ms | 7.16 ms | 24.4 ms |
+| Render wall time per frame, mean (`bench`, distorted) | 374 ms | 837 ms | 117 ms | 147 ms |
+| Render worker GPU memory | | 465–721 MiB | 1021 MiB | 3595 MiB |
+| `dir` (tmpfs) used | | 95 MiB | 380 MiB | 1519 MiB |
+| `chr-server` RSS (of it shared frames) | | 198–210 (166–174) MiB | 713–760 (664–680) MiB | 2368–2738 (2278–2595) MiB |
+| `chr-monitor` RSS / CPU at 30 slots/s | | 212 MiB / 12–20 % | 333 MiB / 104 % | 807 MiB / 95–98 % |
+| Monitor preview | | 1920x1080 NVENC | 1920x1080 NVENC | 1920x1080 NVENC |
+
+- **1920x1080p30, onsite description** (`start.json`, the recorded 1080p clip,
+  tracking worker; 60 s): 30 slots/s, 29.9 frames/s paired with a camera, every
+  frame tracked, none without a camera. Every frame missed the render deadline
+  and went out as clean feed, as the 837 ms wall time predicts. `chr-server` used
+  90 % of a core, mostly converting clean feed; the worker 88 %.
+- **3840x2160p30** (30 s): 29.8 frames/s tracked; 204 deadline misses, 700
+  repeated slots. At **5 fps**, 0 deadline misses and 0 clean feed, CG on every
+  frame of the recorded SRT preview.
+- **7680x4320p30** (30 s): the software camera delivered only 6.3–6.7 frames/s
+  (`chr-tracking-sim` and its `ffmpeg` decoder at about 220 % each, limited by
+  moving 66 MB UYVY frames through the decoder pipe), so most slots repeated; 59
+  deadline misses. At **2 fps**, 0 deadline misses and 0 clean feed, CG on every
+  frame. The monitor encoded about 20 of the 30 slots/s, counting the rest as
+  skipped: it reads, copies and hands each slot to the encoder on one thread.
+- At **1 fps**, 1080p still missed every deadline (750 ms), as its distorted wall
+  time exceeds it.
+- The SRT preview was H.264 Constrained Baseline 1920x1080 (level 4.0) at every
+  size, received by GStreamer `srtsrc` and read by `ffprobe`. The monitor's CPU
+  is mostly the downscale: `videoconvertscale` costs about 28 ms of CPU per 8K
+  frame and 17 ms per 4K frame (bilinear without a chroma pass; 34 and 22 ms
+  with it, 13 and 8 ms nearest-neighbour).
+
+The GPU times put 8K at about 24 ms of a 33 ms frame at 30 fps on this GPU; 8K at
+50 or 60 fps does not fit. The 8K camera simulation, not the program, limited the
+8K run's rate. The clean numbers still have to be taken with nothing else on the
+GPU, from the repository root inside `nix develop .#media`:
+
+```sh
+for size in 1280x720 1920x1080 3840x2160 7680x4320; do
+  python3 server/scripts/resolution_bench.py prepare $size
+  python3 server/scripts/resolution_bench.py bench $size
+  python3 server/scripts/resolution_bench.py run $size --seconds 60
+done
+python3 server/scripts/resolution_bench.py run 1920x1080 --seconds 60 \
+  --scene <manifest.json> --video <1080p clip> --description <start.json> --asset-root <asset-root>
+cargo run --release -p chr-renderer --example upload_probe   # through nixGL on non-NixOS hosts
+```
+
+### A second Vulkan process on the same GPU
+
+On this host (BAR1 256 MiB, no Resizable BAR) a render process started next to a
+running render worker spends most of each frame in CPU writes to and reads from
+memory it maps from the GPU driver, not on the GPU. `upload_probe`, run next to
+the live worker, times a memcpy of one RGBA8 frame into such memory:
+
+| Frame | Fresh `MAP_WRITE` (BAR1 first) | Fresh `MAP_READ` (host cached) | Reused mapped buffer | `queue.write_texture` |
+| --- | --- | --- | --- | --- |
+| 1080p, 8.3 MB | 828–845 ms | 837–845 ms | 833–849 ms | 838–844 ms |
+| 4K, 33 MB | 102–106 ms | 102–104 ms, then 4 ms | 4 ms | 6 ms, then 103 ms |
+| 8K, 133 MB | 16 ms | 16 ms | 16 ms | 49–53 ms |
+
+With `GLIBC_TUNABLES=glibc.cpu.x86_non_temporal_threshold=0x100000`, which makes
+glibc's `memcpy` use non-temporal stores from 1 MiB on, the 1080p rows drop to
+25–27 ms while 4K and 8K stay the same. So the cost is not the GPU, and not
+BAR1 alone: the host-cached type is just as slow. Ordinary stores into these
+mappings run at about 10 MB/s, as if the second process's mappings were
+uncached, while non-temporal stores (glibc uses them above about 3/4 of the L3
+cache, so for 4K and 8K frames) and large dedicated allocations stay fast. wgpu
+30 makes every `queue.write_texture` allocate a fresh `MAP_WRITE` staging buffer,
+which gpu-allocator places in `DEVICE_LOCAL | HOST_VISIBLE` (BAR1, a 246 MiB
+Vulkan heap with about 113 MiB of budget left next to the live worker) when it
+fits and in host memory otherwise. The workaround above did not fix a 1080p
+worker in a stack, whose readbacks read such memory too. Confirming the cause
+needs the memory types of the second process's mappings (as root:
+`/sys/kernel/debug/x86/pat_memtype_list`), the probe with the live stack stopped,
+and Resizable BAR. Until then run one render process per GPU.
 
 ## Documentation to update with the code
 

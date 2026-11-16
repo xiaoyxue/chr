@@ -14,7 +14,7 @@ The Cargo workspace is at the repository root; its server crates live here:
 | `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim` simulates the camera |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
-| `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers and the `stack.py` one-command development stack |
+| `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers, the `stack.py` one-command development stack and the `resolution_bench.py` per-resolution measurement |
 
 The video monitor is a separate process, `chr-monitor`, in the repository-root
 `monitor/` crate (not under `server/`: it is optional and may run on another host
@@ -153,9 +153,10 @@ server/scripts/run-live.sh --media \
 
 Use the existing host-driver wrapper below if Vulkan cannot access the hardware.
 The source must be progressive, square-pixel, limited-range BT.709, with the
-same integral rate and aspect ratio as the selected output. The software profile
-retains the synthetic configuration's 1280x720 maximum. A 1920x1080 source is
-explicitly scaled to the selected 1280x720 output; no audio is connected.
+same integral rate and aspect ratio as the selected output. This software-video
+demonstration keeps its own 1280x720 maximum, like `--synthetic-program`; the
+camera programs below go up to 7680x4320. A 1920x1080 source is explicitly scaled
+to the selected 1280x720 output; no audio is connected.
 The sample geometry is deliberately small and **not calibrated to the video**.
 The orange mesh and gray ground are separate instances. The live WebUI's
 top-right mesh controller sends server-owned rotation commands, leaving the
@@ -175,9 +176,9 @@ queue drops old frames; those identities and gaps survive native admission.
 Frame resources and scene snapshots use the existing owner/scheduler. Output
 still ticks independently, repeating the previous frame on underrun. Every
 transmitted slot, repeats included, enters the program tap. With
-`--encoder gstreamer`, `chr-monitor` encodes those slots with software x264 (the
-old `chr-server` chose this encoder automatically for `--software-video`); this
-is not zero-copy or hardware encoding.
+`--encoder gstreamer`, `chr-monitor` scales those slots down to at most 1920x1080
+on the CPU and encodes them with NVENC, or with software x264 where NVENC is not
+available; this is not zero-copy.
 
 WebRTC in `chr-monitor` uses the existing implementation and ICE-TCP forwarding, not
 GStreamer's WebRTC backend. JSON-RPC and the default triangle/synthetic/pitch
@@ -210,8 +211,8 @@ decodes WebRTC and never re-encodes H.264. A slow SRT consumer loses queued
 access units and resumes at an IDR without stalling WebRTC or SDI. The SRT
 listener keeps encoding without browser viewers, requests an IDR on caller
 connect, and accepts reconnecting callers. This is software simulation, not
-physical SDI or hardware encoding. The media shell includes the bad plugins
-needed for H.264 parsing, MPEG-TS and SRT.
+physical SDI. The media shell includes the bad plugins needed for H.264
+parsing, MPEG-TS, SRT and NVENC.
 
 Focused checks inside the media shell:
 
@@ -238,8 +239,9 @@ reference-native-pixel-to-frame-SNC matrix per decoded presentation frame),
 and `pitch_m` (`[length,width]`). Model height and ground placement are authored,
 not inferred. All private paths, coefficients and renders must stay local.
 
-Native images remain at calibration resolution (up to 4096x2160); only the
-composed output is fitted to the selected size (up to 1280x720, same aspect).
+Native images remain at calibration resolution (even, up to 7680x4320); only the
+composed output is fitted to the selected size (even, up to 7680x4320, same
+aspect).
 Startup decodes/probes the clip to require an exact warp count, matching native
 extent/rate and zero-based contiguous CFR presentation timestamps. The decoder
 does not resample frames. Its software sequence is assigned before input queue
@@ -740,15 +742,28 @@ ones. It waits for the tap if it does not exist yet and reopens it when
 `chr-server` restarts. Its loopback WebSocket (default `ws://127.0.0.1:8789`)
 serves `webrtc.offer` (previews close with that connection) and
 `monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`,
-`srt_callers`); it has no program control. `--size` and `--fps` must match
-`chr-server`; slots in another mode are skipped and logged. Encoding is software
-after a CPU readback (openh264 by default, or GStreamer x264 with
-`--encoder gstreamer`); this is a development shortcut, not the intended
-GPU-to-hardware-encoder path or physical SDI loop-out (#80).
+`srt_callers`, `encoder`, `preview_width`, `preview_height`); it has no program
+control. `--size` and `--fps` must match `chr-server` (up to 7680x4320); slots in
+another mode are skipped and logged.
+
+The tap stays at the program's native size. The monitor scales its preview down
+to fit 1920x1080, keeping the aspect ratio and never scaling up (7680x4320 and
+3840x2160 become 1920x1080, 4096x2160 becomes 1920x1012, 1280x720 stays), and
+WebRTC and SRT carry that one stream. `--encoder gstreamer` scales with
+GStreamer `videoconvertscale` (bilinear, up to four threads) and encodes with
+NVENC (`nvh264enc`, Constrained Baseline, CBR, no B-frames) when it encodes a
+probe frame at start, otherwise with x264; `nvenc` or `x264` forces one. NVENC
+needs the NVIDIA driver's `libcuda` and `libnvidia-encode` in the library path:
+run the monitor through nixGL on non-NixOS hosts, as `stack.py` does. The log
+line `monitor preview WxH of <mode> with <encoder>` and `monitor.get_status` show
+the choice. The default openh264 encoder samples the nearest pixels on the CPU
+instead. Encoding still follows a CPU readback of the program, not a GPU-to-encoder
+path or physical SDI loop-out (#80).
 
 ```text
-chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>] [--encoder openh264|gstreamer]
-            [--srt <ip:port>] [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--allow-origin <origin>]
+chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
+            [--encoder openh264|gstreamer|nvenc|x264] [--srt <ip:port>]
+            [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--allow-origin <origin>]
 ```
 
 Run it next to `chr-server` with the same `--size`/`--fps`:
@@ -760,8 +775,8 @@ cargo run --locked --release -p chr-monitor -- --webrtc-tcp 127.0.0.1:8790
 `--webrtc-tcp` adds ICE-TCP candidates on four consecutive ports (8790-8793
 here) so a browser on another machine can connect through an SSH port forward
 (also forward the monitor WebSocket, 8789). The range must not include the
-`--ws` port; the monitor refuses to start otherwise. `--srt` and `--encoder gstreamer` need
-`--features gstreamer-media` inside `nix develop .#media`.
+`--ws` port; the monitor refuses to start otherwise. `--srt` and the GStreamer
+encoders need `--features gstreamer-media` inside `nix develop .#media`.
 
 `server/scripts/run-live.sh [--media] [--no-monitor] [--monitor-arg <arg>]... [chr-server options]`
 builds and starts both from the repository root inside the development shell.
@@ -846,6 +861,38 @@ needs. With every component enabled the stack runs nine working processes:
 
 The script uses only the standard library; `python3 server/scripts/stack.py`
 works as well.
+
+### Resolutions
+
+The camera programs (`--description`, `--tracked-scene`, `--video-scene`,
+`--pitch-demo`) take a native camera extent and an output `--size` up to 8K UHD
+(7680x4320), both even, with the camera's aspect ratio: 1080p, 4K UHD 3840x2160
+and DCI 4096x2160 lie in between. `--synthetic-program` and `--software-video`
+alone keep their 1280x720 demonstration limit. The program tap stays at the
+output size; `chr-monitor` previews at most 1920x1080. Memory per resolution and
+measurements are in
+[live process implementation](../docs/live-process-implementation.md#resolutions-and-performance).
+
+`server/scripts/resolution_bench.py` measures one resolution without private
+assets, from the repository root inside `nix develop .#media`:
+
+```sh
+python3 server/scripts/resolution_bench.py prepare 3840x2160   # synthetic clip, manifest, description
+python3 server/scripts/resolution_bench.py bench 3840x2160     # chr-renderer-cli bench: GPU and wall per frame
+python3 server/scripts/resolution_bench.py run 3840x2160 --seconds 60
+```
+
+`run` starts `run-tracked.sh` (both workers, the camera simulator and
+`chr-monitor --encoder gstreamer`) in its own process group on ports 28987 and
+up (`--port-base`) with its own runtime directory (`--dir`), records the SRT
+preview while it samples, and stops and removes everything it started. It prints
+SDI, worker and tracking counters, CPU and memory per process, the runtime
+directory's size and GPU memory. `--scene/--video/--description/--asset-root` run
+a real camera instead; `--fps` picks the synthetic camera's rate. Another Vulkan
+process on the same GPU, such as a running stack, distorts every number (see the
+upload probe below), so measure with nothing else on the GPU.
+`cargo run --release -p chr-renderer --example upload_probe` times the CPU writes
+into wgpu's upload staging memory that slow such a second process down.
 
 ### Program stills (chr-renderer-cli)
 
