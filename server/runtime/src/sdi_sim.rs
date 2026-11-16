@@ -124,10 +124,11 @@ fn run(args: Args) -> Result<()> {
 
     use chr_common::{client::NativeSocketClient, methods::tracking};
     use chr_runtime::{
-        calibration::tracking::TrackingReplay, input::software::VideoInput,
-        program::video::Manifest, sdi::VideoMode,
+        calibration::lens::CHECKS, input::software::VideoInput, program::video::Manifest,
+        sdi::VideoMode,
     };
     use chr_shm::{SlotHeader, Writer, input::SlotMeta};
+    use chr_tracker::replay::TrackingReplay;
 
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(&args.scene)?)?;
     if manifest.frame_warps.is_empty() {
@@ -136,8 +137,9 @@ fn run(args: Args) -> Result<()> {
     let replay = TrackingReplay::new(
         manifest.ti,
         manifest.center,
-        manifest.radial.wire()?,
+        manifest.radial.wire(&CHECKS)?,
         &manifest.frame_warps,
+        &CHECKS,
     )?;
     let mode = VideoMode {
         width: manifest.width,

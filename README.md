@@ -7,7 +7,7 @@
 | `client/src/` | Client-side code | Primarily TypeScript |
 | `client/pitch-studio/` | Onsite pitch client: Three.js pitch preview and read-only Fusion match data | TypeScript (Vite) |
 | `client/example/` | Example clients and verification harnesses, such as `render-harness/` | TypeScript |
-| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, its render worker `chr-renderer-cli`, its tracking worker stand-in `chr-tracking-sim-cli` and the `chr-sdi-sim` SDI capture simulator), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
+| `server/` | Live render server: renderer library in `renderer/` (`chr-renderer`), tracking logic in `tracker/` (`chr-tracker`: the tracking worker contract, pose-to-camera mapping, lens selection, frame/camera join and the replay stand-in's logic), render server runtime in `runtime/` (`chr-runtime`, building `chr-server`, its render worker `chr-renderer-cli`, its tracking worker stand-in `chr-tracking-sim-cli` and the `chr-sdi-sim` SDI capture simulator), native window/headless shell in `viewer/` (`chr-app`) | Primarily Rust |
 | `monitor/` | `chr-monitor`: optional video monitor process that encodes the `chr-server` program tap for WebRTC/SRT viewers | Rust |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` | Root Rust workspace for the crates under `server/`, `monitor/` and `common/` | Rust |
 | `common/` | Shared communication protocols: `chr-common` JSON-RPC 2.0 messages and NativeSocket/WebSocket IPC | Rust (TypeScript mirrors in clients) |
@@ -126,6 +126,7 @@ Working today:
   - The monitor preview is at most 1080p and encoded with NVENC.
 - **Worker transport:** chr-server and its render and tracking workers exchange frames and messages over GStreamer `unixfdsink`/`unixfdsrc` (#141). Each captured frame is copied once and shared by both workers.
 - **Camera model from the lens that arrives (#150):** each tracked frame is rendered with the tracking worker's lens, else a `--tracking-lens-*` lens, else pinhole; vchao's `pitch-analysis` sends none (pinhole), the replay stand-in sends its manifest's lens (radial, without per-frame warps). `stack.py status` shows the model and its source ([lens](server/docs/tracking-worker.md#lens)).
+- **Tracking crate (#151):** chr's tracking logic (VchaoFrame contract, pose-to-camera mapping, lens selection, frame/camera join, replay stand-in) is the pure-logic crate `chr-tracker` beside `chr-renderer`; `chr-runtime` keeps the worker processes and their GStreamer transport.
 - **Pitch studio:**
   - waving flags;
   - a server-side studio store;

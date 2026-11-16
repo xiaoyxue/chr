@@ -14,7 +14,7 @@ use chr_renderer::{
 use w::Validate;
 
 use super::{incompatible, reject};
-use crate::calibration::tracking::rows3;
+use chr_tracker::pose::rows3;
 
 /// Immutable native binding for a declared calibration context. No calibration is inferred.
 #[derive(Clone, Debug)]

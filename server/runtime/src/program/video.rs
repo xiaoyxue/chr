@@ -5,8 +5,8 @@ use super::{
 };
 use crate::{
     calibration::{
-        replay::{Radial, VideoLens},
-        tracking::{Tracked, TrackingReplay},
+        lens::CHECKS,
+        replay::{self, Radial, VideoLens},
     },
     retained::{Registrations, SceneAdapter},
     sdi::VideoMode,
@@ -18,6 +18,7 @@ use chr_renderer::{
     glb::{GlbAsset, ImportedMaterial, import_glb},
     scene::{MeshData, ModelMatrix, PbrMaterial},
 };
+use chr_tracker::{pose::Tracked, replay::TrackingReplay};
 use serde::Deserialize;
 use serde_json::json;
 use std::{fs, path::Path, path::PathBuf, sync::Arc};
@@ -117,10 +118,16 @@ pub fn prepare_with(
         return Err("invalid calibrated video extent, rate, frames or scene dimensions".into());
     }
     let camera = RendererCamera::from_ti(e, Ti::new(manifest.ti)?, manifest.center, 0.1, 10000.0)?;
-    let lens = manifest.radial.wire()?;
-    let replay = TrackingReplay::new(manifest.ti, manifest.center, lens, &manifest.frame_warps)?;
+    let lens = manifest.radial.wire(&CHECKS)?;
+    let replay = TrackingReplay::new(
+        manifest.ti,
+        manifest.center,
+        lens,
+        &manifest.frame_warps,
+        &CHECKS,
+    )?;
     let models = match kind {
-        CameraSource::Replay => manifest.radial.models(e, &manifest.frame_warps)?,
+        CameraSource::Replay => replay::models(&manifest.radial, e, &manifest.frame_warps)?,
         CameraSource::Tracked => Vec::new(),
     };
     let ray = camera.ray(manifest.anchor_pixel)?;

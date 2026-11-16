@@ -20,6 +20,7 @@ use chr_renderer::{
     glb::{GlbAsset, ImportedMaterial},
     scene::{MeshData, PbrMaterial},
 };
+use chr_tracker::{pose::Tracked, replay::TrackingReplay};
 use serde_json::{Value, json};
 
 use super::{
@@ -28,10 +29,7 @@ use super::{
     synthetic::{Synthetic, id},
 };
 use crate::{
-    calibration::{
-        replay::Radial,
-        tracking::{Tracked, TrackingReplay},
-    },
+    calibration::{lens::CHECKS, replay::Radial},
     retained::{Registrations, SceneAdapter, SceneControl, incompatible, reject},
     sdi::VideoMode,
     worker::supervisor::WorkerAssets,
@@ -97,11 +95,11 @@ pub fn prepare(
     };
     // The description's lens is the reference camera's, for still renders; tracked
     // frames bring their own (`server/docs/tracking-worker.md#lens`).
-    let lens = radial(&camera.radial).wire()?;
+    let lens = radial(&camera.radial).wire(&CHECKS)?;
     let replay = camera
         .reference
         .as_ref()
-        .map(|r| TrackingReplay::new(r.ti, r.center, lens, &r.frame_warps))
+        .map(|r| TrackingReplay::new(r.ti, r.center, lens, &r.frame_warps, &CHECKS))
         .transpose()?;
 
     let mut config = Synthetic::configuration(mode, &runtime)?;

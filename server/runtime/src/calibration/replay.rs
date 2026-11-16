@@ -5,57 +5,38 @@ use chr_renderer::{
     coordinates::ImageExtent,
     distortion::{CameraModel, FrameWarp, LensDistortion, RadialDistortion, SupportRect},
 };
-use serde::Deserialize;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Radial {
-    pub centre_px: [f64; 2],
-    pub scale_px: f64,
-    pub coefficients: [f64; 3],
-    pub support: Option<[[f64; 2]; 2]>,
+pub use chr_tracker::replay::Radial;
+
+/// The startup lens shared by every frame of a clip.
+pub fn distortion(radial: &Radial) -> Result<RadialDistortion, Error> {
+    Ok(RadialDistortion::new(
+        radial.centre_px,
+        radial.scale_px,
+        radial.coefficients,
+        radial.support.map(|[min, max]| SupportRect { min, max }),
+    )?)
 }
 
-impl Radial {
-    /// The startup lens shared by every frame of a clip.
-    pub fn distortion(&self) -> Result<RadialDistortion, Error> {
-        Ok(RadialDistortion::new(
-            self.centre_px,
-            self.scale_px,
-            self.coefficients,
-            self.support.map(|[min, max]| SupportRect { min, max }),
-        )?)
-    }
-
-    /// The same lens as tracking data carries it, validated.
-    pub fn wire(&self) -> Result<w::RadialLens, Error> {
-        super::lens::wire(
-            self.centre_px,
-            self.scale_px,
-            self.coefficients,
-            self.support,
-        )
-    }
-
-    pub(crate) fn models(
-        self,
-        extent: ImageExtent,
-        frame_warps: &[[[f64; 3]; 3]],
-    ) -> Result<Vec<CameraModel>, Error> {
-        let radial = self.distortion()?;
-        frame_warps
-            .iter()
-            .map(|rows| {
-                Ok(CameraModel::Distorted(Box::new(LensDistortion::new(
-                    extent,
-                    radial,
-                    Some(FrameWarp::new(*rows)?),
-                ))))
-            })
-            .collect()
-    }
+/// The clip's camera model of every frame: its lens and that frame's warp.
+pub(crate) fn models(
+    radial: &Radial,
+    extent: ImageExtent,
+    frame_warps: &[[[f64; 3]; 3]],
+) -> Result<Vec<CameraModel>, Error> {
+    let radial = distortion(radial)?;
+    frame_warps
+        .iter()
+        .map(|rows| {
+            Ok(CameraModel::Distorted(Box::new(LensDistortion::new(
+                extent,
+                radial,
+                Some(FrameWarp::new(*rows)?),
+            ))))
+        })
+        .collect()
 }
 
 /// Bound to the native producer, not output slots or mutable scene revisions.

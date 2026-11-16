@@ -21,16 +21,22 @@ Cargo.lock                Locked Rust dependencies
 rust-toolchain.toml       Rust toolchain selection
 server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
+server/tracker/           chr-tracker: tracking logic without processes, GStreamer or async runtime
+  src/protocol.rs         vchao's VchaoFrame v1 mirror, chr's lens/frame_warp extensions, validation
+  src/pose.rs             A returned pose as its frame's camera and render geometry
+  src/lens.rs             Camera-model selection: tracking data's lens > CLI lens > pinhole
+  src/join.rs             Frame/camera join by capture sequence, fixed delay, clean-feed decision
+  src/replay.rs           The replay stand-in's poses and lens from a calibrated-video-v1 manifest
 server/runtime/           chr-runtime: chr-server (render server), its workers chr-renderer-cli (also
                           stills) and chr-tracking-sim-cli (replay stand-in for the tracking module),
                           and chr-sdi-sim (simulated SDI capture, --send-cameras for recorded cameras)
   src/input/              Video acquisition adapters (software MP4, shared-memory input ring)
-  src/calibration/        Calibration consumption and frame/lens association
+  src/calibration/        Calibrated clip lens replay; the renderer's lens and geometry checks
   src/program/            Demo scenes and admitted-frame rendering bridge
   src/sdi.rs              Simulated SDI output port, output clock and program tap
   src/worker/             Worker transport (GStreamer unixfd), render worker protocol,
                           the worker side and its supervisor
-  src/worker/tracking/    Tracking worker protocol and its supervisor
+  src/worker/tracking/    Tracking worker supervisor and VchaoFrame on GStreamer buffers
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
@@ -55,9 +61,14 @@ Live tracking runs in a tracking worker that `chr-server` supervises
 (`server/runtime/src/worker/tracking/`, [tracking worker](../server/docs/tracking-worker.md)). Its
 protocol is vchao's language-neutral VchaoFrame raw-frame contract, so the real
 tracking module, vchao's `pitch-analysis`, replaces the `chr-tracking-sim-cli`
-replay stand-in without changing the server. Pairing frames with cameras belongs in the runtime, not the renderer:
-`calibration/tracking` joins them by capture sequence. The `calibration/replay`
-module is only a startup-loaded lens replay for a validated clip. Offline scene
+replay stand-in without changing the server. chr's tracking logic is the
+pure-logic crate `chr-tracker`, the renderer's sibling: the contract, the pose
+to camera mapping, the lens selection, the join of frames with cameras by
+capture sequence and the replay stand-in's logic. It validates geometry with
+the renderer's own checks, which `chr-runtime` supplies, without depending on
+the GPU renderer. `chr-runtime` keeps the processes, their GStreamer transport
+and the wiring. The `calibration/replay` module is only a startup-loaded lens
+replay for a validated clip. Offline scene
 modelling (scan video to calibration results) stays outside this repository.
 A general public distortion contract and physical SDI adapters are not
 implemented by this layout.

@@ -26,20 +26,22 @@ use chr_common::{
 };
 use chr_renderer::coordinates::ImageExtent;
 
-use chr_runtime::calibration::{
-    lens::{self, LensSelection},
-    tracking::{CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog},
-};
+use chr_runtime::calibration::lens::CHECKS;
 use chr_runtime::control::ControlHandler;
 use chr_runtime::frame_resources::Pixels;
 use chr_runtime::input::ring::RingInput;
 use chr_runtime::pipeline::{CLEAN_QUEUE, CleanFrame, RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
-use chr_runtime::worker::tracking::supervisor::{Answer, Tracker, TrackerConfig, in_flight_limit};
+use chr_runtime::worker::tracking::supervisor::{Tracker, TrackerConfig, in_flight_limit};
 use chr_runtime::worker::{
     protocol::{Output, WorkerProgram},
     supervisor::{WorkerAssets, WorkerConfig, status_handle},
+};
+
+use chr_tracker::{
+    join::{CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog},
+    lens::{self, LensSelection},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -285,7 +287,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     args.tracking_lens = match (lens_k, lens_centre, lens_scale) {
         (Some(k), Some(centre), Some(scale)) => Some(
-            lens::wire(centre, scale, k, lens_support)
+            lens::wire(centre, scale, k, lens_support, &CHECKS)
                 .map_err(|error| format!("invalid --tracking-lens-* lens: {error}"))?,
         ),
         (None, None, None) if lens_support.is_none() => None,
@@ -482,7 +484,7 @@ fn run(args: Args) -> Result<()> {
                 .map_or(mode.frame_duration() * 3, Duration::from_millis);
             let in_flight = in_flight_limit(wait, mode.fps);
             // A worker's cameras arrive in order, so the feed holds few at once.
-            let feed = TrackingFeed::new(TRACKING_BACKLOG.max(in_flight));
+            let feed = TrackingFeed::new(TRACKING_BACKLOG.max(in_flight), CHECKS);
             let join = TrackingJoin::new(
                 feed.clone(),
                 wait,
@@ -707,7 +709,7 @@ fn run(args: Args) -> Result<()> {
                     _ = progress.tick() => {
                         synthetic.scheduler.tick().map_err(|e| e.to_string())?;
                         if let Some((feed, _, _, Some(tracker))) = &mut tracking {
-                            accept_answers(feed, tracker.poll());
+                            feed.accept(tracker.poll());
                         }
                     }
                     _ = frames.tick() => {
@@ -726,7 +728,7 @@ fn run(args: Args) -> Result<()> {
                                 if let Some(tracker) = tracker { tracker.track(sequence, &rgba); }
                                 join.frame(CapturedFrame { sequence, rgba, arrived });
                             }
-                            if let Some(tracker) = tracker { accept_answers(feed, tracker.poll()); }
+                            if let Some(tracker) = tracker { feed.accept(tracker.poll()); }
                             let next = join.next(std::time::Instant::now());
                             if let Some((frame, _)) = &next {
                                 emitted_end = emitted_end.max(capture_offset + frame.sequence + 1);
@@ -853,23 +855,6 @@ fn server_running(pid: u32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
         Ok(comm) => comm.trim_end() == "chr-server",
         Err(_) => !std::path::Path::new("/proc/self").exists(),
-    }
-}
-
-/// Counts the tracking worker's poses and queues its cameras for the join,
-/// which counts late ones.
-fn accept_answers(feed: &TrackingFeed, answers: Vec<Answer>) {
-    for answer in answers {
-        feed.count_pose(answer.pose, answer.overdue);
-        if let Some(camera) = answer.camera
-            && let Err(error) = feed.push(camera)
-        {
-            log::debug!(
-                "camera of frame {} not used: {}",
-                answer.sequence,
-                error.message
-            );
-        }
     }
 }
 
@@ -1072,7 +1057,7 @@ mod tests {
         assert!(!cli.tracking_pinhole, "auto is the default");
         assert_eq!(
             cli.tracking_lens,
-            Some(lens::wire([960., 540.], 960., [-0.05, 0., 0.], None).unwrap()),
+            Some(lens::wire([960., 540.], 960., [-0.05, 0., 0.], None, &CHECKS).unwrap()),
             "the CLI lens needs no tracking worker"
         );
         let supported = [

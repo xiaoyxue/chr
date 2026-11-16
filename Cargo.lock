@@ -608,6 +608,7 @@ dependencies = [
  "chr-common",
  "chr-renderer",
  "chr-shm",
+ "chr-tracker",
  "env_logger",
  "futures-util",
  "gstreamer",
@@ -633,6 +634,17 @@ version = "0.1.0"
 dependencies = [
  "memmap2",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "chr-tracker"
+version = "0.1.0"
+dependencies = [
+ "chr-common",
+ "chr-renderer",
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

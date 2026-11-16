@@ -1,6 +1,6 @@
 //! Per-frame camera of a tracked input, paired with captured frames by capture
 //! sequence. Every frame carries its own `Ti`, `C`, lens and frame warp; which
-//! lens it is rendered with is [`lens`](super::lens)'s choice.
+//! lens it is rendered with is [`lens`](crate::lens)'s choice.
 //!
 //! [`TrackingFeed`] is the bounded backlog that `tracking.frame` or the tracking
 //! worker fills; [`TrackingJoin`] holds captured frames until their camera
@@ -14,142 +14,34 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chr_common::methods::tracking::ActiveCameraModel;
 use chr_common::{
     jsonrpc::ErrorObject,
-    methods::tracking::{TrackingFrame, TrackingStatus},
+    methods::tracking::{ActiveCameraModel, TrackingFrame, TrackingStatus},
     scene_frame as w,
 };
-use chr_renderer::{coordinates::Ti, distortion::FrameWarp};
 
 use crate::{
-    retained::{incompatible, reject},
-    worker::{tracking::protocol::PoseStatus, transport::SharedPixels},
+    Checks, Error,
+    pose::{Answer, rows3},
+    protocol::PoseStatus,
 };
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
-
-/// Rows of a forward row-major wire matrix.
-pub fn rows3(matrix: &w::Matrix3) -> [[f64; 3]; 3] {
-    std::array::from_fn(|row| std::array::from_fn(|col| matrix[row * 3 + col].get()))
-}
-
-/// The wire form of `rows`, rejecting nonfinite values.
-pub fn matrix3(rows: [[f64; 3]; 3]) -> Result<w::Matrix3, Error> {
-    let flat: Vec<w::Finite> = rows
-        .into_iter()
-        .flatten()
-        .map(w::Finite::try_from)
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.0)?;
-    Ok(flat.try_into().expect("nine values"))
-}
-
-/// The startup half of a tracked program: its world and native extent.
-#[derive(Clone, Debug)]
-pub struct Tracked {
-    pub world: w::Version,
-    pub extent: w::Extent,
-    /// A fixed reference camera and warps, replayed by `chr-renderer-cli render
-    /// --frame`; a render description may omit it.
-    pub replay: Option<TrackingReplay>,
-}
-
-impl Tracked {
-    /// The frame geometry `render.submit` receives for one tracking sample.
-    pub fn geometry(&self, frame: &TrackingFrame) -> w::FrameGeometry {
-        w::FrameGeometry::TiC {
-            world: self.world.clone(),
-            context_id: None,
-            extent: self.extent,
-            ti: frame.ti,
-            camera_center: frame.camera_center,
-            lens: frame.lens.clone().map(Box::new),
-            frame_warp: frame.frame_warp.map(Box::new),
-        }
+fn reject(kind: w::RejectionKind, message: impl ToString) -> ErrorObject {
+    w::Rejection {
+        kind,
+        message: message.to_string(),
+        frame: None,
     }
-}
-
-/// Tracking samples replayed from a calibrated clip: the reference `Ti` and `C` and
-/// the clip's lens for every frame, and the clip's warp of `sequence % warps`, the
-/// convention of the calibrated video replay. No warps means `W = S`.
-#[derive(Clone, Debug)]
-pub struct TrackingReplay {
-    ti: w::Matrix3,
-    camera_center: w::Vec3,
-    lens: w::RadialLens,
-    frame_warps: Vec<w::Matrix3>,
-}
-
-impl TrackingReplay {
-    pub fn new(
-        ti: [[f64; 3]; 3],
-        camera_center: [f64; 3],
-        lens: w::RadialLens,
-        frame_warps: &[[[f64; 3]; 3]],
-    ) -> Result<Self, Error> {
-        Ti::new(ti)?;
-        super::lens::radial(&lens)?;
-        for rows in frame_warps {
-            FrameWarp::new(*rows)?;
-        }
-        Ok(Self {
-            ti: matrix3(ti)?,
-            camera_center: camera_center
-                .map(w::Finite::try_from)
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.0)?
-                .try_into()
-                .expect("three values"),
-            lens,
-            frame_warps: frame_warps
-                .iter()
-                .map(|rows| matrix3(*rows))
-                .collect::<Result<_, _>>()?,
-        })
-    }
-
-    pub fn warp_count(&self) -> usize {
-        self.frame_warps.len()
-    }
-
-    /// The clip's `radial-poly-native-px-v1` lens.
-    pub fn lens(&self) -> &w::RadialLens {
-        &self.lens
-    }
-
-    /// The clip's warp of `index % warps`, if it has warps.
-    pub fn warp(&self, index: u64) -> Option<w::Matrix3> {
-        (!self.frame_warps.is_empty())
-            .then(|| self.frame_warps[(index % self.frame_warps.len() as u64) as usize])
-    }
-
-    /// The reference camera's optical centre: world metres, negative Z up.
-    pub fn camera_center(&self) -> [f64; 3] {
-        self.camera_center.map(w::Finite::get)
-    }
-
-    /// The reference `Ti`, forward row-major ground XY to ideal image SNC.
-    pub fn ti(&self) -> [f64; 9] {
-        self.ti.map(w::Finite::get)
-    }
-
-    pub fn frame(&self, sequence: u64) -> TrackingFrame {
-        TrackingFrame {
-            sequence: sequence.into(),
-            ti: self.ti,
-            camera_center: self.camera_center,
-            frame_warp: self.warp(sequence),
-            lens: Some(self.lens.clone()),
-        }
-    }
+    .into()
 }
 
 /// Bounded backlog of tracking samples not yet paired, shared by the control plane
 /// and the injection loop.
 #[derive(Clone)]
-pub struct TrackingFeed(Arc<Mutex<Feed>>);
+pub struct TrackingFeed {
+    feed: Arc<Mutex<Feed>>,
+    checks: Checks,
+}
 
 struct Feed {
     capacity: usize,
@@ -160,18 +52,23 @@ struct Feed {
 }
 
 impl TrackingFeed {
-    pub fn new(capacity: usize) -> Self {
-        Self(Arc::new(Mutex::new(Feed {
-            capacity,
-            samples: BTreeMap::new(),
-            done_through: None,
-            status: TrackingStatus::default(),
-        })))
+    /// A backlog of at most `capacity` samples, each validated by `checks`.
+    pub fn new(capacity: usize, checks: Checks) -> Self {
+        Self {
+            feed: Arc::new(Mutex::new(Feed {
+                capacity,
+                samples: BTreeMap::new(),
+                done_through: None,
+                status: TrackingStatus::default(),
+            })),
+            checks,
+        }
     }
 
     /// Accepts the camera of one frame that has not been rendered or skipped yet.
     pub fn push(&self, frame: TrackingFrame) -> Result<(), ErrorObject> {
-        validate(&frame).map_err(incompatible)?;
+        validate(&frame, &self.checks)
+            .map_err(|error| reject(w::RejectionKind::IncompatibleInput, error))?;
         let sequence = frame.sequence.get();
         let mut feed = self.lock();
         if feed.done_through.is_some_and(|done| sequence <= done) {
@@ -196,6 +93,23 @@ impl TrackingFeed {
         feed.samples.insert(sequence, frame);
         feed.status.samples_received += 1;
         Ok(())
+    }
+
+    /// Counts the tracking worker's poses and queues its cameras for the join,
+    /// which counts late ones.
+    pub fn accept(&self, answers: Vec<Answer>) {
+        for answer in answers {
+            self.count_pose(answer.pose, answer.overdue);
+            if let Some(camera) = answer.camera
+                && let Err(error) = self.push(camera)
+            {
+                log::debug!(
+                    "camera of frame {} not used: {}",
+                    answer.sequence,
+                    error.message
+                );
+            }
+        }
     }
 
     pub fn status(&self) -> TrackingStatus {
@@ -247,31 +161,31 @@ impl TrackingFeed {
     }
 
     fn lock(&self) -> MutexGuard<'_, Feed> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.feed.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 /// Checks one frame's camera at the boundary: an invertible `Ti`, a valid lens
 /// and an invertible frame warp, which needs the frame's own lens.
-pub fn validate(frame: &TrackingFrame) -> Result<(), Error> {
-    Ti::new(rows3(&frame.ti))?;
+pub fn validate(frame: &TrackingFrame, checks: &Checks) -> Result<(), Error> {
+    (checks.ti)(rows3(&frame.ti))?;
     if let Some(lens) = &frame.lens {
-        super::lens::radial(lens)?;
+        (checks.lens)(lens)?;
     }
     if let Some(rows) = &frame.frame_warp {
         if frame.lens.is_none() {
             return Err("a frame warp needs the frame's lens".into());
         }
-        FrameWarp::new(rows3(rows))?;
+        (checks.frame_warp)(rows3(rows))?;
     }
     Ok(())
 }
 
-/// One captured input frame: RGBA8 BT.709 code values at the native extent, in
-/// the memory shared with the workers.
-pub struct CapturedFrame {
+/// One captured input frame. In chr-server, `rgba` is RGBA8 BT.709 code values
+/// at the native extent, in the memory shared with the workers.
+pub struct CapturedFrame<P> {
     pub sequence: u64,
-    pub rgba: SharedPixels,
+    pub rgba: P,
     pub arrived: Instant,
 }
 
@@ -295,18 +209,18 @@ pub const READY: usize = 2;
 
 /// Captured frames waiting for their camera, oldest first, and joined frames
 /// waiting for an output period.
-pub struct TrackingJoin {
+pub struct TrackingJoin<P> {
     feed: TrackingFeed,
     wait: Duration,
     capacity: usize,
     /// How long after capture a joined frame leaves; zero: as soon as it is joined.
     playout: Duration,
-    frames: VecDeque<CapturedFrame>,
+    frames: VecDeque<CapturedFrame<P>>,
     /// Resolved frames, with their camera or `None` for clean feed.
-    ready: VecDeque<(CapturedFrame, Option<TrackingFrame>)>,
+    ready: VecDeque<(CapturedFrame<P>, Option<TrackingFrame>)>,
 }
 
-impl TrackingJoin {
+impl<P> TrackingJoin<P> {
     /// `wait` bounds how long a frame waits for its camera; `capacity` bounds the
     /// frames held, so latency cannot grow when capture runs ahead of the output.
     /// Joined frames leave as soon as they are joined.
@@ -341,7 +255,7 @@ impl TrackingJoin {
     }
 
     /// Adds a captured frame; frames arrive in increasing sequence.
-    pub fn frame(&mut self, frame: CapturedFrame) {
+    pub fn frame(&mut self, frame: CapturedFrame<P>) {
         if self.frames.len() == self.capacity
             && let Some(oldest) = self.frames.pop_front()
         {
@@ -362,7 +276,7 @@ impl TrackingJoin {
     /// [`READY`] due frames wait for an output period, absorbing capture bursts;
     /// beyond that the oldest are dropped, so a stall cannot raise the latency
     /// for good.
-    pub fn next(&mut self, now: Instant) -> Option<(CapturedFrame, Option<TrackingFrame>)> {
+    pub fn next(&mut self, now: Instant) -> Option<(CapturedFrame<P>, Option<TrackingFrame>)> {
         while let Some(front) = self.frames.front() {
             let waited = now.saturating_duration_since(front.arrived) >= self.wait;
             let sequence = front.sequence;
@@ -406,32 +320,18 @@ impl TrackingJoin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{pose::matrix3, replay::tests::replay, tests::CHECKS};
 
-    const S: f64 = 0.001;
-
-    fn lens() -> w::RadialLens {
-        crate::calibration::lens::wire([96., 64.], 96., [-0.05, 0., 0.], None).unwrap()
-    }
-
-    fn replay() -> TrackingReplay {
-        TrackingReplay::new(
-            [[0.02, 0., 0.], [0., 0.02, 0.], [0., 0., 1.]],
-            [0., 0., -10.],
-            lens(),
-            &[
-                [[S, 0., -1.], [0., S, -0.5], [0., 0., 1.]],
-                [[S, 0., -0.9], [0., S, -0.5], [0., 0., 1.]],
-            ],
-        )
-        .unwrap()
-    }
-
-    fn captured(sequence: u64, arrived: Instant) -> CapturedFrame {
+    fn captured(sequence: u64, arrived: Instant) -> CapturedFrame<u64> {
         CapturedFrame {
             sequence,
-            rgba: SharedPixels::copy_from(&[sequence as u8; 4]).unwrap(),
+            rgba: sequence,
             arrived,
         }
+    }
+
+    fn feed(capacity: usize) -> TrackingFeed {
+        TrackingFeed::new(capacity, CHECKS)
     }
 
     #[test]
@@ -444,39 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn replay_follows_the_clip_loop_and_rejects_singular_input() {
-        let replay = replay();
-        assert_eq!(replay.frame(2).frame_warp, replay.frame(0).frame_warp);
-        assert_ne!(replay.frame(1).frame_warp, replay.frame(0).frame_warp);
-        assert_eq!(replay.frame(5).sequence.get(), 5);
-        assert_eq!(
-            replay.frame(4).lens,
-            Some(lens()),
-            "every frame has the lens"
-        );
-        let unwarped = TrackingReplay::new(
-            [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
-            [0., 0., -1.],
-            lens(),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(unwarped.frame(3).frame_warp, None);
-        assert!(TrackingReplay::new([[0.; 3]; 3], [0., 0., -1.], lens(), &[]).is_err());
-        assert!(
-            TrackingReplay::new(
-                [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
-                [0., 0., -1.],
-                lens(),
-                &[[[0.; 3]; 3]]
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn pairs_by_sequence_regardless_of_arrival_order() {
-        let feed = TrackingFeed::new(8);
+        let feed = feed(8);
         let mut join = TrackingJoin::new(feed.clone(), Duration::from_millis(100), 4);
         let start = Instant::now();
         join.frame(captured(10, start));
@@ -500,7 +369,7 @@ mod tests {
 
     #[test]
     fn a_burst_is_spread_over_output_periods_and_a_backlog_is_dropped() {
-        let feed = TrackingFeed::new(8);
+        let feed = feed(8);
         let mut join = TrackingJoin::new(feed.clone(), Duration::from_millis(100), 8);
         let start = Instant::now();
         for sequence in 0..5 {
@@ -516,7 +385,7 @@ mod tests {
 
     #[test]
     fn a_fixed_delay_releases_a_burst_of_cameras_one_frame_per_period() {
-        let feed = TrackingFeed::new(8);
+        let feed = feed(8);
         let wait = Duration::from_millis(100);
         let period = Duration::from_millis(20);
         let mut join = TrackingJoin::new(feed.clone(), wait, 8).with_fixed_delay(period);
@@ -540,7 +409,7 @@ mod tests {
 
     #[test]
     fn a_frame_without_camera_goes_out_as_clean_feed_and_its_late_camera_is_rejected() {
-        let feed = TrackingFeed::new(8);
+        let feed = feed(8);
         let wait = Duration::from_millis(100);
         let period = Duration::from_millis(20);
         let mut join = TrackingJoin::new(feed.clone(), wait, 4).with_fixed_delay(period);
@@ -576,7 +445,7 @@ mod tests {
 
     #[test]
     fn bounds_the_backlog_and_drops_superseded_samples() {
-        let feed = TrackingFeed::new(2);
+        let feed = feed(2);
         feed.push(replay().frame(3)).unwrap();
         assert_eq!(
             feed.push(replay().frame(3)).unwrap_err().code,
@@ -602,7 +471,10 @@ mod tests {
         feed.push(replay().frame(10)).unwrap();
         let mut bad = replay().frame(11);
         bad.frame_warp = Some(matrix3([[0.; 3]; 3]).unwrap());
-        assert!(feed.push(bad).is_err());
+        assert_eq!(
+            feed.push(bad).unwrap_err().code,
+            w::RejectionKind::IncompatibleInput.code()
+        );
         let mut warp_without_lens = replay().frame(11);
         warp_without_lens.lens = None;
         assert!(feed.push(warp_without_lens).is_err());
@@ -611,6 +483,6 @@ mod tests {
         assert!(feed.push(bad_lens).is_err());
         let mut pinhole = replay().frame(11);
         (pinhole.lens, pinhole.frame_warp) = (None, None);
-        validate(&pinhole).unwrap();
+        validate(&pinhole, &CHECKS).unwrap();
     }
 }

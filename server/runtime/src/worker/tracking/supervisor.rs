@@ -1,6 +1,6 @@
 //! chr-server's side of the tracking worker: starts it, hands it every captured
-//! frame as a VchaoFrame ([`protocol`](super::protocol)), takes each frame back
-//! with its selected pose, and replaces the worker when it exits, fails or hangs.
+//! frame as a VchaoFrame ([`wire`](super::wire)), takes each frame back with its
+//! selected pose, and replaces the worker when it exits, fails or hangs.
 //!
 //! ```text
 //! Starting ──both sockets connected──► Ready ──exit / invalid frame / hang / full──► Backoff ──timer──► Starting
@@ -15,8 +15,9 @@
 //! a frame waits for its camera is the caller's join policy.
 //!
 //! A session's lens (chr's optional `lens` extension, `null` for vchao) is
-//! fixed by its first returned frame: a later frame with another lens, an
-//! invalid lens or frame warp, or a warp without a lens is a worker failure.
+//! fixed by its first returned frame ([`SessionLens`]): a later frame with
+//! another lens, an invalid lens or frame warp, or a warp without a lens is a
+//! worker failure. Each pose becomes its frame's camera by [`pose::camera`].
 
 use std::{
     collections::VecDeque,
@@ -26,20 +27,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::protocol::{PoseStatus, Received, Wire, check_caps, now_ns};
-use crate::calibration::{lens, tracking::matrix3};
+use super::wire::{Received, Wire, check_caps, now_ns};
+use crate::calibration::lens::CHECKS;
 use crate::worker::{
     supervisor::{Running, create_private_dir},
     transport::{self, Channel, Event, SharedPixels},
 };
 use chr_common::{
-    methods::{
-        render_worker::WorkerState,
-        tracking::{TrackerStatus, TrackingFrame},
-    },
+    methods::{render_worker::WorkerState, tracking::TrackerStatus},
     scene_frame as w,
 };
-use chr_renderer::distortion::FrameWarp;
+use chr_tracker::{
+    lens::SessionLens,
+    pose::{self, Answer},
+};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -105,17 +106,6 @@ pub fn status_handle() -> StatusHandle {
     }))
 }
 
-/// One frame the worker returned.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Answer {
-    /// The frame's capture sequence.
-    pub sequence: u64,
-    pub pose: PoseStatus,
-    pub overdue: bool,
-    /// `None` for an `unavailable` pose.
-    pub camera: Option<TrackingFrame>,
-}
-
 pub struct Tracker {
     config: TrackerConfig,
     camera_center: w::Vec3,
@@ -145,7 +135,7 @@ struct Session {
     next_frame_id: u64,
     last_source_ns: u64,
     /// The lens of every frame of this stream, once the first one came back.
-    lens: Option<Option<w::RadialLens>>,
+    lens: SessionLens,
 }
 
 enum State {
@@ -368,58 +358,25 @@ impl Tracker {
                 meta.frame_id
             ));
         };
-        match &session.lens {
-            None => {
-                if let Some(lens) = &meta.lens {
-                    lens::radial(lens).map_err(|error| {
-                        format!("the tracking worker returned an invalid lens: {error}")
-                    })?;
-                }
-                log::info!(
-                    "tracking worker stream {stream_id}: {}",
-                    meta.lens
-                        .as_ref()
-                        .map_or_else(|| "no lens".to_owned(), lens::describe)
-                );
-                session.lens = Some(meta.lens.clone());
-            }
-            Some(lens) if *lens != meta.lens => {
-                return Err(format!(
-                    "the tracking worker changed its lens within stream {stream_id} at frame {}",
-                    meta.frame_id
-                ));
-            }
-            Some(_) => {}
-        }
-        let frame_warp = selection
-            .pose
-            .frame_warp()
-            .map(|warp| {
-                if meta.lens.is_none() {
-                    return Err("a frame warp without a lens".to_owned());
-                }
-                let rows = std::array::from_fn(|r| std::array::from_fn(|c| warp[r * 3 + c]));
-                FrameWarp::new(rows).map_err(|error| error.to_string())?;
-                matrix3(rows).map_err(|error| error.to_string())
-            })
-            .transpose()
-            .map_err(|error| {
-                format!(
-                    "the tracking worker returned frame {} with an invalid frame warp: {error}",
-                    meta.frame_id
-                )
-            })?;
+        session
+            .lens
+            .accept(meta.lens.as_ref(), stream_id, meta.frame_id, &CHECKS)?;
+        let camera = pose::camera(
+            &selection.pose,
+            meta.lens.as_ref(),
+            pending.sequence,
+            self.camera_center,
+            &CHECKS,
+        )
+        .map_err(|error| {
+            format!(
+                "the tracking worker returned frame {} with an invalid frame warp: {error}",
+                meta.frame_id
+            )
+        })?;
         if pending.forgotten {
             return Ok(());
         }
-        let camera = selection.pose.t().map(|t| TrackingFrame {
-            sequence: pending.sequence.into(),
-            // Finite: checked when the meta was read.
-            ti: t.map(|v| w::Finite::try_from(v).expect("finite Ti")),
-            camera_center: self.camera_center,
-            frame_warp,
-            lens: meta.lens.clone(),
-        });
         let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
         match camera {
             Some(_) => status.cameras += 1,
@@ -469,7 +426,7 @@ impl Tracker {
                         in_flight: VecDeque::new(),
                         next_frame_id: 0,
                         last_source_ns: 0,
-                        lens: None,
+                        lens: SessionLens::default(),
                     },
                     since: Instant::now(),
                 };

@@ -1,16 +1,15 @@
 //! `chr-tracking-sim-cli`: a stand-in tracking worker for `chr-server
 //! --tracking-worker`, in place of vchao's `pitch-analysis`.
 //!
-//! It speaks the same VchaoFrame contract (`chr_runtime::worker::tracking::protocol`):
-//! it receives every frame on `--input-socket` and returns it, the same memory,
-//! in order, on `--output-socket` with `selection.pose = fresh` and the recorded
-//! `Ti` of a calibrated clip (`TrackingReplay`): it replays, it does not
-//! estimate. That `Ti` maps to the ideal image, so every frame also carries the
-//! clip's lens in chr's optional VchaoFrame `lens` extension. It sends no frame
-//! warp: it never sees capture sequences, so it cannot tell which of the clip's
-//! warps belongs to a frame, and a misaligned warp jitters more than none.
-//! Options inject latency, unavailable poses, crashes and hangs to exercise
-//! chr-server's supervision and missing-camera handling.
+//! It speaks the same VchaoFrame contract (`chr_tracker::protocol`): it receives
+//! every frame on `--input-socket` and returns it, the same memory, in order, on
+//! `--output-socket` with `selection.pose = fresh` and the recorded `Ti` of a
+//! calibrated clip: it replays, it does not estimate. That `Ti` maps to the
+//! ideal image, so every frame also carries the clip's lens in chr's optional
+//! VchaoFrame `lens` extension, and no frame warp. The replay itself is
+//! `chr_tracker::replay`; this binary is its process: arguments, sockets and
+//! fault injection. Options inject latency, unavailable poses, crashes and
+//! hangs to exercise chr-server's supervision and missing-camera handling.
 
 use std::{
     collections::VecDeque,
@@ -21,14 +20,14 @@ use std::{
 };
 
 use chr_runtime::{
-    calibration::{replay::Radial, tracking::TrackingReplay},
+    calibration::lens::CHECKS,
     worker::{
-        tracking::protocol::{Endpoint, Pose, Received, Selection, attach, check_caps, now_ns},
+        tracking::wire::{Received, attach, check_caps, now_ns},
         transport::{self, Inbound, Receiver, Sender},
     },
 };
+use chr_tracker::replay::{self, TrackingReplay};
 use gstreamer as gst;
-use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -137,27 +136,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// The fields of a `calibrated-video-v1` manifest the replay needs.
-#[derive(Deserialize)]
-struct Calibration {
-    ti: [[f64; 3]; 3],
-    center: [f64; 3],
-    radial: Radial,
-    #[serde(default)]
-    frame_warps: Vec<[[f64; 3]; 3]>,
-}
-
-fn load(path: &std::path::Path) -> Result<TrackingReplay> {
-    let calibration: Calibration = serde_json::from_slice(&std::fs::read(path)?)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    TrackingReplay::new(
-        calibration.ti,
-        calibration.center,
-        calibration.radial.wire()?,
-        &calibration.frame_warps,
-    )
-}
-
 /// How long an exiting worker waits for its last frames to reach the server.
 const FINISH: Duration = Duration::from_secs(2);
 /// Frames waiting for the consumer before the worker fails instead of growing.
@@ -167,7 +145,7 @@ const IDLE: Duration = Duration::from_millis(100);
 
 fn serve(worker: &Worker) -> Result<()> {
     // The reference loads before the output socket exists, as pitch-analysis does.
-    let replay = load(&worker.manifest)?;
+    let replay = replay::load(&worker.manifest, &CHECKS)?;
     log::info!(
         "chr-tracking-sim-cli returning the recorded Ti and lens of {} for stream {} (a \
          replay; no estimation, no frame warps)",
@@ -209,19 +187,9 @@ fn forward(
                     std::process::exit(3);
                 }
                 let frame = Received::decode(sample)?;
-                let meta = &frame.meta;
                 // pitch-analysis' input rules: one stream, no gaps, fixed caps.
-                if meta.stream_id != worker.stream_id || meta.frame_id != received - 1 {
-                    return Err(format!(
-                        "frame {} of stream {:?}: an identity gap or another stream",
-                        meta.frame_id, meta.stream_id
-                    )
-                    .into());
-                }
-                if meta.selection.is_some() || last_source_ns >= Some(meta.source_ns) {
-                    return Err("an input frame with a selection or an old source time".into());
-                }
-                last_source_ns = Some(meta.source_ns);
+                replay::check_input(&frame.meta, &worker.stream_id, received - 1, last_source_ns)?;
+                last_source_ns = Some(frame.meta.source_ns);
                 let frame_caps = frame.caps.clone().ok_or("an input frame without caps")?;
                 check_caps(&frame_caps, &worker.stream_id)?;
                 match &caps {
@@ -271,32 +239,10 @@ fn select(frame: Received, replay: &TrackingReplay, faults: &Faults) -> Result<g
         mut buffer,
         ..
     } = frame;
-    let t = replay.ti();
-    let now = now_ns();
-    let pose = if faults
+    let unavailable = faults
         .unavailable_every
-        .is_some_and(|n| (meta.frame_id + 1) % n == 0)
-    {
-        Pose::Unavailable {}
-    } else {
-        Pose::Fresh {
-            t,
-            left: Endpoint {
-                frame_id: meta.frame_id,
-                sequence: meta.frame_id,
-                source_ns: meta.source_ns,
-                observed_ns: now,
-                t,
-            },
-            frame_warp: None,
-        }
-    };
-    meta.lens = Some(replay.lens().clone());
-    meta.selection = Some(Selection {
-        selected_ns: now,
-        overdue: false,
-        pose,
-    });
+        .is_some_and(|n| (meta.frame_id + 1) % n == 0);
+    replay.select(&mut meta, now_ns(), unavailable);
     attach(buffer.make_mut(), &meta)?;
     Ok(buffer)
 }

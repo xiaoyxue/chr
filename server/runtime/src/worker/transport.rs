@@ -22,7 +22,7 @@
 //! crosses the socket as a file descriptor without a copy; a control message is
 //! a buffer without memory. All its buffers have the caps [`CAPS`]; the protocol
 //! messages give pixel formats and extents. The tracking worker's sockets carry
-//! vchao's raw video frames instead ([`super::tracking::protocol`]): the same
+//! vchao's raw video frames instead ([`super::tracking::wire`]): the same
 //! sockets and memory, other caps and another meta. Both sides must register the
 //! metas (see [`init`]) before they receive, or `unixfdsrc` rejects the buffer.
 //!
@@ -69,7 +69,7 @@ pub fn init() -> Result<(), Error> {
     INIT.get_or_init(|| {
         gst::init().map_err(|error| error.to_string())?;
         gst::meta::CustomMeta::register(META, &[]);
-        gst::meta::CustomMeta::register(super::tracking::protocol::META, &[]);
+        gst::meta::CustomMeta::register(chr_tracker::protocol::META, &[]);
         Ok(())
     })
     .clone()
