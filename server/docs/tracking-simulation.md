@@ -7,8 +7,9 @@ capture card or calibration contract. The default daemon and the initial
 
 With `chr-server --tracking-worker` the simulator is the camera only
 (`--no-tracking`) and the server's [tracking worker](tracking-worker.md) supplies
-the cameras; `stack.py` runs that mode by default. This document describes the
-external mode, in which `chr-tracking-sim` sends the cameras itself.
+the cameras over vchao's VchaoFrame contract; `stack.py` runs that mode by
+default. This document describes the external mode, in which `chr-tracking-sim`
+sends the cameras itself, and the pairing both modes share.
 
 `chr-tracking-sim` stands in for a camera with a tracking system. It sends every
 frame of a calibrated clip into `chr-server`, and it sends each frame's camera
@@ -70,7 +71,7 @@ increasing.
 The server copies each frame once, straight from its slot into memfd-backed
 shared memory; the backlog holds that memory, and the tracking worker and the
 render worker receive it without another copy (the worker channels are GStreamer
-unixfd sockets, see [tracking worker](tracking-worker.md#transport)). The input
+unixfd sockets, see [tracking worker](tracking-worker.md#transport-and-startup)). The input
 ring itself stays a `chr-shm` ring: the capture process is not a supervised
 worker and never waits for the server.
 
@@ -110,12 +111,15 @@ only, never by arrival order. Once per output period the server:
 1. reads new frames from the input ring into a backlog that outlasts the wait
    (one frame per output period of the wait plus two, at least four);
 2. resolves frames oldest first: a frame with its camera is joined; a frame
-   whose wait (`--tracking-wait-ms`, default 3 frame periods, at most 500 ms)
+   whose wait (`--tracking-wait-ms`, default 3 frame periods, at most 1500 ms)
    ended without one is skipped. A frame never overtakes an older unresolved
    frame;
-3. renders the oldest joined frame. Up to 2 joined frames wait for later
-   periods, which absorbs capture bursts; older ones are dropped, so latency
-   returns to the tracking delay after a stall.
+3. renders the oldest joined frame that is due. In this external mode a frame
+   is due once joined; with a tracking worker, exactly the wait after its
+   capture, a constant program delay
+   ([tracking worker](tracking-worker.md#latency-and-program-delay)). Up to 2
+   due frames wait for later periods, which absorbs capture bursts; older ones
+   are dropped, so latency returns to the tracking delay after a stall.
 
 A skipped frame is never rendered with another frame's camera, and its late
 camera is rejected. The output port repeats its previous frame for that period,
@@ -129,6 +133,8 @@ because the 1080p input does not match the 720p output for clean feed.
 | `frames_without_tracking` | Frames skipped because their camera did not arrive in time |
 | `frames_dropped` | Joined frames given up to keep the latency bounded |
 | `frames_overwritten` | Frames the input ring overwrote before the server read them |
+| `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable` | Frames a tracking worker returned, by pose; 0 in external mode |
+| `poses_overdue` | Frames a tracking worker released by its overload rule |
 
 ## Run
 

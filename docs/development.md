@@ -53,9 +53,9 @@ mirrors in clients. No client framework is chosen by this environment setup.
 
 Live tracking runs in a tracking worker that `chr-server` supervises
 (`server/runtime/src/worker/tracking/`, [tracking worker](../server/docs/tracking-worker.md)). Its
-protocol is language-neutral, so the real tracking module, which may be written in
-Python, replaces the `chr-tracking-sim-cli` replay stand-in without changing the
-server. Pairing frames with cameras belongs in the runtime, not the renderer:
+protocol is vchao's language-neutral VchaoFrame raw-frame contract, so the real
+tracking module, vchao's `pitch-analysis`, replaces the `chr-tracking-sim-cli`
+replay stand-in without changing the server. Pairing frames with cameras belongs in the runtime, not the renderer:
 `calibration/tracking` joins them by capture sequence. The `calibration/replay`
 module is only a startup-loaded lens replay for a validated clip. Offline scene
 modelling (scan video to calibration results) stays outside this repository.
@@ -252,12 +252,12 @@ input and the program tap). chr-server starts, feeds and replaces both workers a
 talks to each over two GStreamer `unixfdsink`/`unixfdsrc` sockets: every message
 is JSON in a buffer's `GstCustomMeta`, and frames are memfd memory passed as file
 descriptors, so chr-server copies each captured frame once and both workers read
-that copy. Clients such as pitch-studio still talk JSON-RPC to chr-server over
-WebSocket or the NativeSocket, unchanged. `chr-tracking-sim-cli` replays the
-clip's recorded cameras and estimates nothing. The real tracking module (for
-example vchao's adapter, #140) replaces it by speaking the same protocol
-(`chr-server --tracking-cli`); see
-[tracking worker](../server/docs/tracking-worker.md). With `tracking = "external"` in
+that copy. The tracking hop speaks vchao's VchaoFrame contract: each frame goes to
+the tracking worker and comes back with its `Ti`. Clients such as pitch-studio
+still talk JSON-RPC to chr-server over WebSocket or the NativeSocket, unchanged.
+`chr-tracking-sim-cli` replays the clip's recorded `Ti` and estimates nothing.
+vchao's `pitch-analysis` replaces it unchanged (`chr-server --tracking-cli`,
+#148); see [tracking worker](../server/docs/tracking-worker.md). With `tracking = "external"` in
 `stack.toml`, no tracking worker runs and the simulator sends each camera as
 `tracking.frame` on `<dir>/render.sock`. `run-tracked.sh` restarts the simulator,
 chr-server and chr-monitor independently, so one exiting does not stop the others.

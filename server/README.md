@@ -43,9 +43,10 @@ sends every frame to a supervised `chr-renderer-cli worker` process (#97), which
 calls the `chr-renderer` library; see [Render worker](#render-worker). #95 moved
 video monitoring out of `chr-server` into `chr-monitor`.
 
-Live tracking runs in a supervised tracking worker
-([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim-cli` stands in for
-the real module by replaying recorded cameras. Runtime calibration consumption
+Live tracking runs in a supervised tracking worker that speaks vchao's
+VchaoFrame v1 contract ([tracking worker](docs/tracking-worker.md), #148), so
+vchao's `pitch-analysis` runs as the tracking worker unchanged;
+`chr-tracking-sim-cli` stands in for it by replaying recorded `Ti`. Runtime calibration consumption
 estimates nothing: the existing replay loads local lens data at startup and
 associates it by native stream/frame identity.
 `program/video.rs` retains the demo-specific GLB and scene setup. The opt-in
@@ -268,7 +269,15 @@ renders through the worker to the SDI port, which `chr-monitor` streams. See
 [Tracked camera simulation](docs/tracking-simulation.md). With `--tracking-worker`
 the simulator is the camera only and chr-server's tracking worker supplies the
 cameras ([tracking worker](docs/tracking-worker.md)); `stack.py` uses that mode
-by default.
+by default. The tracking worker's options are:
+- `--tracking-cli <path>` and `--tracking-worker-arg <arg>`: the worker and its
+  arguments. The default is the stand-in, which takes `--manifest <json>`.
+- `--tracking-centre <x> <y> <z>`: the station centre of every camera. The
+  default is the reference camera's.
+- `--tracking-lens identity|program`: whether the startup lens applies. The
+  default is `identity`: vchao's `Ti` maps to the distorted image.
+- `--tracking-wait-ms <n>` (at most 1500): with a worker, also the constant
+  program delay.
 
 ### Render description
 
@@ -689,7 +698,7 @@ frame once. The worker's stderr (and stdout) is `chr-server`'s log. The worker
 installs the same program with the server's runtime ID, logs its adapter and
 rejects software adapters. The protocol is in
 [Live process implementation plan](../docs/live-process-implementation.md#step-4-worker-supervision-and-clean-feed-97)
-and the transport in [tracking worker](docs/tracking-worker.md#transport).
+and the transport in [tracking worker](docs/tracking-worker.md#transport-and-startup).
 
 At most 4 requests are outstanding (credits); without a credit the frame is
 clean feed. The queue towards the worker never blocks the render loop, and a
@@ -851,7 +860,7 @@ needs. With every component enabled the stack runs nine working processes:
 | --- | --- | --- |
 | render | `chr-server` | control WebSocket (`server_ws`), NativeSocket `<dir>/render.sock` |
 | render | `chr-renderer-cli worker` | none listed: two unixfd sockets with chr-server (frames, replies) in `$XDG_RUNTIME_DIR/chr/worker-<pid>/`, holds the GPU |
-| render | `chr-tracking-sim-cli worker` | none listed: two unixfd sockets with chr-server in `$XDG_RUNTIME_DIR/chr/tracking-<pid>/`; frames in, cameras back (`tracking = "worker"`) |
+| render | `chr-tracking-sim-cli` (or `tracking_cli`) | none listed: two unixfd sockets with chr-server in `$XDG_RUNTIME_DIR/chr/tracking-<pid>/`; VchaoFrame frames in and back with their `Ti` (`tracking = "worker"`) |
 | render | `chr-tracking-sim` | none: input ring (shared memory); with `tracking = "external"` also chr-server's socket |
 | render | `ffmpeg` | none: decodes the clip for the simulator |
 | render | `chr-monitor` | WebSocket (`monitor_ws`), SRT listener (`srt`, UDP), ICE-TCP from `webrtc_tcp` (only while a viewer is connected) |

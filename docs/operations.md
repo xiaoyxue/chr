@@ -105,6 +105,7 @@ Edit `output/stack/stack.toml`; the example documents every key.
 | `srt` | An interface address, to let players on the LAN receive SRT directly |
 | `server_ws`, `monitor_ws`, `webrtc_tcp`, ports | Free local ports; set a page or relay port to 0 to leave it out |
 | `size` | The camera's own size, such as `1920x1080`; see [Video size](#video-size) |
+| `tracking`, `tracking_cli`, `tracking_worker_args`, `tracking_centre`, `tracking_wait_ms` | The tracking worker; see [Tracking worker](#tracking-worker) |
 
 An unknown key stops the script ("unknown keys"). This happens when a configuration
 from a newer checkout is used with an older `stack.py`: remove the key or update
@@ -144,6 +145,30 @@ Run one stack per GPU: while Resizable BAR is off, a second Vulkan process on th
 same GPU, such as a test stack or a benchmark, is slowed down by orders of
 magnitude in its frame uploads and readbacks (#146; see the
 [host checklist](#host-checklist)).
+
+### Tracking worker
+
+With `tracking = "worker"` (the default), chr-server hands every camera frame
+to its tracking worker and renders each frame with the `Ti` it returns
+([tracking worker](../server/docs/tracking-worker.md)).
+
+- Without `tracking_cli`, the worker is the `chr-tracking-sim-cli` stand-in.
+  It replays the manifest's recorded `Ti`.
+- `tracking_cli` names another worker that speaks vchao's VchaoFrame contract,
+  such as vchao's `pitch-analysis`. Its `tracking_worker_args` give its map and
+  settings; `{stream_id}` in them becomes each session's stream ID, for example
+  in `--ledger`. Its `Ti` is rendered without a lens.
+- `tracking_centre` is the station's optical centre `[x, y, z]`. Without it,
+  the description's or manifest's reference camera is used.
+- `tracking_wait_ms` is the **program delay**: every frame leaves exactly this
+  long after capture, and a frame whose camera is later is not rendered.
+  - The default, three frame periods, suits the stand-in.
+  - `pitch-analysis` may hold a frame up to its 500 ms overload threshold: set
+    about 800 ms. The maximum is 1500 ms.
+  - Every waiting frame holds 8 MiB of memory at 1080p (33 MB at 4K).
+
+`stack.py status` names the worker and its current stream and counts the
+returned poses: fresh, interpolated, reused, unavailable and overdue.
 
 ## Launch and operate
 
@@ -229,4 +254,5 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 | `OLD BUILD` in `status` | Restart that component to run the new binary. |
 | Many clean-feed frames or deadline misses after raising `size` | The render worker is slower than a frame at that size, or another process uses the GPU. Check `stack.py status`, stop other GPU processes, or use a smaller `size`. |
 | A benchmark or test stack is hundreds of times slower than expected | Another Vulkan process uses the same GPU while Resizable BAR is off (#146). Stop the other process or enable Resizable BAR ([host checklist](#host-checklist)). |
+| Many frames without camera, or the tracking worker restarts with "holds N frames" | The worker returns frames later than `tracking_wait_ms`. Raise `tracking_wait_ms` (at most 1500), or check the worker's log in `output/stack/render.log`. |
 | `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |

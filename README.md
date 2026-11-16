@@ -86,12 +86,12 @@ input and the program tap). chr-server starts, feeds and replaces both workers a
 talks to each over two GStreamer `unixfdsink`/`unixfdsrc` sockets: every message
 is JSON in a buffer's `GstCustomMeta`, and frames are memfd memory passed as file
 descriptors, so chr-server copies each captured frame once and both workers read
-that copy. Clients such as pitch-studio still talk JSON-RPC to chr-server over
-WebSocket or the NativeSocket, unchanged. `chr-tracking-sim-cli` replays the
-clip's recorded cameras and estimates nothing. The real tracking module (for
-example vchao's adapter, #140) replaces it by speaking the same protocol
-(`chr-server --tracking-cli`); see
-[tracking worker](server/docs/tracking-worker.md). With `tracking = "external"` in
+that copy. The tracking hop speaks vchao's VchaoFrame contract: each frame goes to
+the tracking worker and comes back with its `Ti`. Clients such as pitch-studio
+still talk JSON-RPC to chr-server over WebSocket or the NativeSocket, unchanged.
+`chr-tracking-sim-cli` replays the clip's recorded `Ti` and estimates nothing.
+vchao's `pitch-analysis` replaces it unchanged (`chr-server --tracking-cli`,
+#148); see [tracking worker](server/docs/tracking-worker.md). With `tracking = "external"` in
 `stack.toml`, no tracking worker runs and the simulator sends each camera as
 `tracking.frame` on `<dir>/render.sock`. `run-tracked.sh` restarts the simulator,
 chr-server and chr-monitor independently, so one exiting does not stop the others.
@@ -135,8 +135,8 @@ Next, in order:
 
 | Issue | Work | State |
 | --- | --- | --- |
-| #146 | Enable Resizable BAR on render hosts: a second Vulkan process on the same GPU is about 1000x slower while it is off | `necessary`, host configuration; do before #140 testing, then add to the [host checklist](docs/operations.md#host-checklist) |
-| #140 | vchao's `atlas-vq-estimate` replaces the `chr-tracking-sim-cli` replay as the tracking worker, over the #141 transport | Waiting for vchao's refactor |
+| #146 | Enable Resizable BAR on render hosts: a second Vulkan process on the same GPU is about 1000x slower while it is off | `necessary`, host configuration; do before #148 phase 2 testing, then add to the [host checklist](docs/operations.md#host-checklist) |
+| #148 | vchao's `pitch-analysis` (`atlas-vq-estimate`) replaces the `chr-tracking-sim-cli` replay as the tracking worker over vchao's VchaoFrame unixfd contract (supersedes #140's transport) | In progress: phase 1 (chr speaks VchaoFrame; stand-in ported; station C, lens, program delay) done; phase 2 waits for Hong-Xiang/vchao#196 to merge |
 | #142 | Rename the camera simulator `chr-tracking-sim` to `chr-sdi-sim`; camera sending becomes `--send-cameras` | Planned |
 | #80 | Physical SDI capture and output | Not started |
 

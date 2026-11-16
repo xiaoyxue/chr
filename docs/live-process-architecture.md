@@ -105,7 +105,7 @@ monitor, so it lives under `common/`.
 | Channel | Between | Transport | Carries |
 | --- | --- | --- | --- |
 | Control plane | Clients ↔ `chr-server` | Existing JSON-RPC over WebSocket/NativeSocket | Commands and status, never pixels |
-| Worker messages | `chr-server` ↔ each worker | Two GStreamer unixfd sockets per worker (`unixfdsink` listens, `unixfdsrc` connects); each buffer is one message, JSON in a `chr-worker-message` `GstCustomMeta` | Startup spec, render and track requests, completions, cameras |
+| Worker messages | `chr-server` ↔ each worker | Two GStreamer unixfd sockets per worker (`unixfdsink` listens, `unixfdsrc` connects); each buffer is one message, JSON in a `GstCustomMeta`: `chr-worker-message` for the render worker, vchao's `VchaoFrame` for the tracking worker (#148) | Startup spec, render requests and completions; frames out and back with their selected `Ti` |
 | Worker pixels | `chr-server` ↔ each worker | The same buffers' memfd-backed memory, passed as file descriptors | Captured frames (one copy shared by both workers) and composited UYVY frames |
 | Capture input | Capture process → `chr-server` | One `chr-shm` ring | Captured RGBA8 frames (software stand-in for SDI in) |
 | Program tap | `chr-server` → monitor | One `chr-shm` ring | Every transmitted output slot, repeats included |
@@ -116,11 +116,12 @@ are passed to the worker on its command line. File-descriptor passing lets one
 captured frame reach both workers without further copies; at 1080p a UYVY
 frame is about 4 MB, copied once by the worker into shared memory and once by
 `chr-server` out of it, on top of the CPU upload and readback. `chr-server`
-grants each worker a fixed number of requests in flight (render 4, tracking 8),
-so a slow or stopped worker holds a bounded number of buffers. GPU-handle
+bounds what each worker holds in flight (render 4 requests; tracking
+`ceil((--tracking-wait-ms + 250 ms) × fps)` frames), so a slow or stopped worker
+holds a bounded number of buffers. GPU-handle
 sharing is not required and not claimed. The transport is specified in
-[tracking worker](../server/docs/tracking-worker.md#transport); any language
-with GStreamer bindings can implement a worker (vchao's adapter is to, #140).
+[tracking worker](../server/docs/tracking-worker.md#transport-and-startup); any language
+with GStreamer bindings can implement a worker (vchao's `pitch-analysis` does, #148).
 The program tap and the capture input stay on `chr-shm`: the monitor and the
 capture process are not supervised workers, and a ring never makes its writer
 wait.
