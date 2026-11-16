@@ -125,6 +125,7 @@ Working today:
   - 4K is accepted but not yet sustained at 30 fps with the software camera simulation.
   - The monitor preview is at most 1080p and encoded with NVENC.
 - **Worker transport:** chr-server and its render and tracking workers exchange frames and messages over GStreamer `unixfdsink`/`unixfdsrc` (#141). Each captured frame is copied once and shared by both workers.
+- **Camera model from the lens that arrives (#150):** each tracked frame is rendered with the tracking worker's lens, else a `--tracking-lens-*` lens, else pinhole; vchao's `pitch-analysis` sends none (pinhole), the replay stand-in sends its manifest's lens (radial, without per-frame warps). `stack.py status` shows the model and its source ([lens](server/docs/tracking-worker.md#lens)).
 - **Pitch studio:**
   - waving flags;
   - a server-side studio store;

@@ -78,6 +78,16 @@ class Config:
     # How long a frame waits for its camera, which with a tracking worker is also the
     # program delay; at most 1500. Default: three frame periods.
     tracking_wait_ms: int | None = None
+    # Camera model of tracked frames: "auto" takes the tracking data's lens, else the
+    # tracking_lens_* lens below, else none (pinhole); "pinhole" ignores every lens.
+    tracking_lens: str = "auto"
+    # A radial-poly-native-px-v1 lens for tracking data without one: [k1, k2, k3],
+    # centre [x, y] and scale in native pixels, all three or none; optional support
+    # [min_x, min_y, max_x, max_y].
+    tracking_lens_k: list[float] | None = None
+    tracking_lens_centre: list[float] | None = None
+    tracking_lens_scale: float | None = None
+    tracking_lens_support: list[float] | None = None
 
 
 def load_config(path: Path) -> Config:
@@ -98,9 +108,22 @@ def load_config(path: Path) -> Config:
         raise SystemExit(f"{path}: {', '.join(worker_keys)} need tracking = \"worker\"")
     if values.get("tracking_worker_args") and not values.get("tracking_cli"):
         raise SystemExit(f"{path}: tracking_worker_args need tracking_cli (the stand-in takes the scene)")
-    centre = values.get("tracking_centre")
-    if centre is not None and (len(centre) != 3 or not all(isinstance(v, (int, float)) for v in centre)):
-        raise SystemExit(f"{path}: tracking_centre must be [x, y, z]")
+    def numbers(key: str, count: int) -> bool:
+        value = values.get(key)
+        if value is not None and (not isinstance(value, list) or len(value) != count
+                                  or not all(isinstance(v, (int, float)) for v in value)):
+            raise SystemExit(f"{path}: {key} must be {count} numbers")
+        return value is not None
+    numbers("tracking_centre", 3)
+    if values.get("tracking_lens", "auto") not in ("auto", "pinhole"):
+        raise SystemExit(f"{path}: tracking_lens must be \"auto\" or \"pinhole\"")
+    scale = values.get("tracking_lens_scale")
+    if scale is not None and not isinstance(scale, (int, float)):
+        raise SystemExit(f"{path}: tracking_lens_scale must be a number")
+    lens = [numbers("tracking_lens_k", 3), numbers("tracking_lens_centre", 2), scale is not None]
+    if any(lens) and not all(lens) or numbers("tracking_lens_support", 4) and not all(lens):
+        raise SystemExit(f"{path}: tracking_lens_k, tracking_lens_centre and tracking_lens_scale go together "
+                         "(tracking_lens_support needs them)")
     return Config(**values)
 
 
@@ -116,6 +139,19 @@ class Component:
 def endpoint(address: str) -> tuple[str, int]:
     host, _, port = address.rpartition(":")
     return host, int(port)
+
+
+def lens_args(config: Config) -> list[str]:
+    """chr-server's --tracking-lens options for the configuration."""
+    def values(flag: str, numbers: list[float] | float | None) -> list[str]:
+        if numbers is None:
+            return []
+        return [flag, *(repr(float(v)) for v in (numbers if isinstance(numbers, list) else [numbers]))]
+    args = ["--tracking-lens", "pinhole"] if config.tracking_lens == "pinhole" else []
+    return (args + values("--tracking-lens-k", config.tracking_lens_k)
+            + values("--tracking-lens-centre", config.tracking_lens_centre)
+            + values("--tracking-lens-scale", config.tracking_lens_scale)
+            + values("--tracking-lens-support", config.tracking_lens_support))
 
 
 def components(config: Config) -> list[Component]:
@@ -138,6 +174,7 @@ def components(config: Config) -> list[Component]:
             render += ["--tracking-centre", *(repr(float(v)) for v in config.tracking_centre)]
     if config.tracking_wait_ms is not None:
         render += ["--tracking-wait-ms", str(config.tracking_wait_ms)]
+    render += lens_args(config)
     if config.nixgl:
         render = NIXGL + render
     stack = [
@@ -387,6 +424,9 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
                      f"{join['frames_joined']} joined, {join['frames_without_tracking']} without camera "
                      f"({join.get('frames_clean_feed', 0)} sent as clean feed), "
                      f"{join['samples_late']} late cameras, {join['frames_dropped']} dropped")
+        model = join.get("camera_model")
+        lines.append("  camera model      " + (f"{model['model']} (lens source: {model['source']})" if model
+                                                 else "none yet: no frame was rendered with its camera"))
         if isinstance(tracker, dict) and "error" not in tracker and "poses_fresh" in join:
             lines.append(f"  poses             {join['poses_fresh']} fresh, {join['poses_interpolated']} interpolated, "
                          f"{join['poses_reused']} reused, {join['poses_unavailable']} unavailable, "

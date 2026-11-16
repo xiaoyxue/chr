@@ -7,9 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chr_common::methods::render_worker::WorkerState;
+use chr_common::{methods::render_worker::WorkerState, scene_frame as w};
 use chr_runtime::{
-    calibration::tracking::TrackingReplay,
+    calibration::{lens, tracking::TrackingReplay},
     worker::{
         tracking::{
             protocol::{Endpoint, Pose, PoseStatus, Received, Selection, attach},
@@ -27,6 +27,10 @@ const WARPS: [[[f64; 3]; 3]; 2] = [
     [[0.001, 0., -0.9], [0., 0.001, -0.5], [0., 0., 1.]],
 ];
 const CENTRE: [f64; 3] = [14.52857216404143, 60.620266710663365, -9.91514362632655];
+
+fn radial(k1: f64) -> w::RadialLens {
+    lens::wire([2., 1.], 2., [k1, 0., 0.], None).unwrap()
+}
 
 struct Fixture {
     dir: PathBuf,
@@ -52,8 +56,10 @@ impl Fixture {
         let manifest = dir.join("scene.json");
         std::fs::write(
             &manifest,
-            serde_json::json!({"ti": TI, "center": [0., 0., -10.], "frame_warps": WARPS})
-                .to_string(),
+            serde_json::json!({"ti": TI, "center": [0., 0., -10.], "frame_warps": WARPS,
+                "radial": {"centre_px": [2., 1.], "scale_px": 2., "coefficients": [-0.05, 0., 0.],
+                    "support": null}})
+            .to_string(),
         )
         .unwrap();
         let mut worker_args = vec!["--manifest".to_owned(), manifest.display().to_string()];
@@ -137,9 +143,8 @@ fn every_sent_frame_comes_back_with_the_recorded_ti_and_the_station_centre() {
     }
     let answers = fixture.until(|_, answers| answers.len() == 4);
     assert_eq!(sequences(&answers), [10, 11, 12, 13], "in order");
-    let ti = TrackingReplay::new(TI, [0., 0., -10.], &WARPS)
-        .unwrap()
-        .ti();
+    let replay = TrackingReplay::new(TI, [0., 0., -10.], radial(-0.05), &WARPS).unwrap();
+    let ti = replay.ti();
     for answer in &answers {
         assert_eq!((answer.pose, answer.overdue), (PoseStatus::Fresh, false));
         let camera = answer.camera.as_ref().unwrap();
@@ -150,7 +155,8 @@ fn every_sent_frame_comes_back_with_the_recorded_ti_and_the_station_centre() {
             CENTRE.map(f64::to_bits),
             "the configured station centre, not the manifest's"
         );
-        assert_eq!(camera.frame_warp, None);
+        assert_eq!(camera.lens, Some(radial(-0.05)), "the manifest's lens");
+        assert_eq!(camera.frame_warp, None, "the replay sends no warp");
     }
     let status = fixture.status();
     assert_eq!((status.requests, status.cameras), (4, 4));
@@ -292,6 +298,17 @@ fn return_frame(
     name: &str,
     corrupt: impl FnOnce(&mut Received),
 ) -> (Vec<Answer>, chr_common::methods::tracking::TrackerStatus) {
+    let mut corrupt = Some(corrupt);
+    return_frames(name, 1, |_, frame| (corrupt.take().unwrap())(frame))
+}
+
+/// [`return_frame`] for `count` frames (capture sequences 3, 4, ...), each
+/// changed by `corrupt(frame_id, frame)`.
+fn return_frames(
+    name: &str,
+    count: u64,
+    mut corrupt: impl FnMut(u64, &mut Received),
+) -> (Vec<Answer>, chr_common::methods::tracking::TrackerStatus) {
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("chr-tracking-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -305,33 +322,40 @@ fn return_frame(
     let output = Sender::listen_live(&sockets.join("output.sock"), None, 4).unwrap();
     let input = Receiver::connect(&sockets.join("input.sock")).unwrap();
     fixture.ready();
-    fixture.tracker().track(3, &Fixture::frame(3));
-    let mut frame = Received::decode(input.reader().recv_sample().unwrap().unwrap()).unwrap();
-    assert_eq!(
-        (frame.meta.frame_id, frame.meta.selection.clone()),
-        (0, None)
-    );
-    output.set_caps(frame.caps.as_ref().unwrap());
-    let t = [0.5, 0., 0.25, 0., 0.5, 1. / 3., 0., 0., 1.];
-    frame.meta.selection = Some(Selection {
-        selected_ns: frame.meta.source_ns + 1,
-        overdue: true,
-        pose: Pose::Fresh {
-            t,
-            left: Endpoint {
-                frame_id: 0,
-                sequence: 0,
-                source_ns: frame.meta.source_ns,
-                observed_ns: frame.meta.source_ns,
+    for frame_id in 0..count {
+        fixture
+            .tracker()
+            .track(3 + frame_id, &Fixture::frame(3 + frame_id));
+        let mut frame = Received::decode(input.reader().recv_sample().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            (frame.meta.frame_id, frame.meta.selection.clone()),
+            (frame_id, None)
+        );
+        if frame_id == 0 {
+            output.set_caps(frame.caps.as_ref().unwrap());
+        }
+        let t = [0.5, 0., 0.25, 0., 0.5, 1. / 3., 0., 0., 1.];
+        frame.meta.selection = Some(Selection {
+            selected_ns: frame.meta.source_ns + 1,
+            overdue: true,
+            pose: Pose::Fresh {
                 t,
+                left: Endpoint {
+                    frame_id,
+                    sequence: frame_id,
+                    source_ns: frame.meta.source_ns,
+                    observed_ns: frame.meta.source_ns,
+                    t,
+                },
+                frame_warp: None,
             },
-        },
-    });
-    corrupt(&mut frame);
-    attach(frame.buffer.make_mut(), &frame.meta).unwrap();
-    output.push(frame.buffer).unwrap();
+        });
+        corrupt(frame_id, &mut frame);
+        attach(frame.buffer.make_mut(), &frame.meta).unwrap();
+        output.push(frame.buffer).unwrap();
+    }
     let answers = fixture.until(|fixture, answers| {
-        !answers.is_empty() || fixture.status().state == WorkerState::Backoff
+        answers.len() as u64 == count || fixture.status().state == WorkerState::Backoff
     });
     let status = fixture.status();
     drop((input, output, fixture));
@@ -354,6 +378,66 @@ fn a_well_formed_return_from_any_worker_becomes_a_camera() {
         [0.5, 0., 0.25, 0., 0.5, 1. / 3., 0., 0., 1.].map(f64::to_bits),
         "row-major, bit for bit"
     );
+    assert_eq!(
+        (&camera.lens, camera.frame_warp),
+        (&None, None),
+        "vchao: no lens"
+    );
+}
+
+const WARP: [f64; 9] = [0.001, 0., -1., 0., 0.001, -0.5, 0., 0., 1.];
+
+fn warped(frame: &mut Received, lens: Option<w::RadialLens>, warp: Option<[f64; 9]>) {
+    frame.meta.lens = lens;
+    if let Some(Selection {
+        pose: Pose::Fresh { frame_warp, .. },
+        ..
+    }) = &mut frame.meta.selection
+    {
+        *frame_warp = warp;
+    }
+}
+
+#[test]
+fn a_session_lens_and_frame_warps_reach_the_camera() {
+    let (answers, status) = return_frames("lens", 3, |_, frame| {
+        warped(frame, Some(radial(-0.05)), Some(WARP))
+    });
+    assert_eq!(status.state, WorkerState::Ready, "{status:?}");
+    assert_eq!(answers.len(), 3);
+    for answer in &answers {
+        let camera = answer.camera.as_ref().unwrap();
+        assert_eq!(camera.lens, Some(radial(-0.05)));
+        assert_eq!(
+            camera.frame_warp.map(|warp| warp.map(w::Finite::get)),
+            Some(WARP)
+        );
+    }
+}
+
+#[test]
+fn a_lens_change_within_a_session_is_a_worker_failure() {
+    for (name, first, later) in [
+        ("lens-change", Some(radial(-0.05)), Some(radial(-0.04))),
+        ("lens-appears", None, Some(radial(-0.05))),
+        ("lens-vanishes", Some(radial(-0.05)), None),
+    ] {
+        let (answers, status) = return_frames(name, 2, |frame_id, frame| {
+            warped(
+                frame,
+                if frame_id == 0 {
+                    first.clone()
+                } else {
+                    later.clone()
+                },
+                None,
+            )
+        });
+        assert_eq!(sequences(&answers), [3], "{name}: the first frame stands");
+        assert_eq!(status.state, WorkerState::Backoff, "{name}");
+        let error = status.last_error.unwrap();
+        assert!(error.contains("changed its lens"), "{name}: {error}");
+    }
 }
 
 #[test]
@@ -386,6 +470,25 @@ fn malformed_returns_are_worker_failures() {
             "bad-duration",
             Box::new(|frame: &mut Received| frame.meta.duration_ns += 1),
             "does not match its buffer",
+        ),
+        (
+            "bad-lens",
+            Box::new(|frame: &mut Received| {
+                let mut lens = radial(-0.05);
+                lens.scale_px = w::Finite::try_from(0.).unwrap();
+                warped(frame, Some(lens), None)
+            }),
+            "invalid lens",
+        ),
+        (
+            "warp-without-lens",
+            Box::new(|frame: &mut Received| warped(frame, None, Some(WARP))),
+            "a frame warp without a lens",
+        ),
+        (
+            "singular-warp",
+            Box::new(|frame: &mut Received| warped(frame, Some(radial(-0.05)), Some([0.; 9]))),
+            "invalid frame warp",
         ),
     ] {
         let (answers, status) = return_frame(name, corrupt);

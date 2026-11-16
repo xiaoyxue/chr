@@ -15,8 +15,13 @@
 //!
 //! `t` is forward, row-major, acting on homogeneous column vectors: ground XY
 //! metres to this frame's SNC (`server/docs/coordinates.md`). vchao estimates it
-//! against the real, distorted image, so chr renders it without a lens
-//! ([`TrackedLens::Identity`](crate::worker::protocol::TrackedLens)).
+//! against the real, distorted image and sends no lens, so chr renders it with
+//! the pinhole camera.
+//!
+//! chr's mirror accepts two optional extensions that vchao never sends, for a
+//! worker whose `t` maps to the ideal (undistorted) image, such as the
+//! `chr-tracking-sim-cli` replay: the session's `lens` ([`FrameMeta::lens`]) and
+//! each pose's `frame_warp`. Every other unknown field is still an error.
 
 use gstreamer::{self as gst, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -51,12 +56,20 @@ pub enum Pose {
     /// No geometry; never an identity matrix.
     Unavailable {},
     /// The frame's own estimate: `t` is bit-equal to `left.t`.
-    Fresh { t: [f64; 9], left: Endpoint },
+    Fresh {
+        t: [f64; 9],
+        left: Endpoint,
+        /// chr extension: see [`Pose::frame_warp`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_warp: Option<[f64; 9]>,
+    },
     /// An earlier estimate: `t` is bit-equal to `left.t`.
     Reused {
         t: [f64; 9],
         left: Endpoint,
         interpolation_failure: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_warp: Option<[f64; 9]>,
     },
     /// Interpolated between two estimates.
     Interpolated {
@@ -64,6 +77,8 @@ pub enum Pose {
         left: Endpoint,
         right: Endpoint,
         alpha: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_warp: Option<[f64; 9]>,
     },
 }
 
@@ -95,6 +110,17 @@ impl Pose {
             }
         }
     }
+
+    /// chr extension: this frame's warp after the session's lens, row-major,
+    /// reference native pixel to frame SNC. Only with a session lens.
+    pub fn frame_warp(&self) -> Option<[f64; 9]> {
+        match self {
+            Self::Unavailable {} => None,
+            Self::Fresh { frame_warp, .. }
+            | Self::Reused { frame_warp, .. }
+            | Self::Interpolated { frame_warp, .. } => *frame_warp,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -119,6 +145,11 @@ pub struct FrameMeta {
     pub duration_ns: u64,
     /// `null` from chr-server; set by the worker.
     pub selection: Option<Selection>,
+    /// chr extension, never sent by chr-server or vchao: the worker session's
+    /// `radial-poly-native-px-v1` lens, the same in every returned frame of the
+    /// session. Absent or `null`: the session has no lens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<chr_common::scene_frame::RadialLens>,
 }
 
 /// The current time in [`CLOCK_DOMAIN`].
@@ -191,6 +222,7 @@ impl Wire {
                 clock_domain: CLOCK_DOMAIN.to_owned(),
                 duration_ns: self.duration_ns(),
                 selection: None,
+                lens: None,
             },
         )?;
         Ok(buffer)
@@ -238,7 +270,7 @@ pub fn read(buffer: &gst::BufferRef) -> Result<FrameMeta, Error> {
     if let Some(selection) = &meta.selection {
         let (t, endpoints) = match &selection.pose {
             Pose::Unavailable {} => return Ok(meta),
-            Pose::Fresh { t, left } | Pose::Reused { t, left, .. } => {
+            Pose::Fresh { t, left, .. } | Pose::Reused { t, left, .. } => {
                 if t.map(f64::to_bits) != left.t.map(f64::to_bits) {
                     return Err("a retained pose differs from its endpoint estimate".into());
                 }
@@ -353,6 +385,7 @@ mod tests {
         let pose = Pose::Fresh {
             t: hard,
             left: endpoint(hard),
+            frame_warp: None,
         };
         let back: Pose = serde_json::from_str(&serde_json::to_string(&pose).unwrap()).unwrap();
         assert_eq!(back.t().unwrap().map(f64::to_bits), hard.map(f64::to_bits));
@@ -360,10 +393,26 @@ mod tests {
             serde_json::to_string(&Pose::Unavailable {}).unwrap(),
             r#"{"status":"unavailable"}"#
         );
+        let warped: Pose = serde_json::from_str(
+            r#"{"status":"reused","t":[1,0,0,0,1,0,0,0,1],"left":{"frame_id":1,"sequence":1,"source_ns":1,"observed_ns":2,"t":[1,0,0,0,1,0,0,0,1]},"interpolation_failure":null,"frame_warp":[2,0,0,0,2,0,0,0,1]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            warped.frame_warp(),
+            Some([2., 0., 0., 0., 2., 0., 0., 0., 1.])
+        );
+        assert_eq!(selection.pose.frame_warp(), None, "vchao sends no warp");
+        let meta: FrameMeta = serde_json::from_str(
+            r#"{"version":1,"stream_id":"s","frame_id":0,"source_ns":1,"clock_domain":"c","duration_ns":1,"selection":null,"lens":{"model":"radial-poly-native-px-v1","centre_px":[960,540],"scale_px":960,"k":[-0.05,0,0]}}"#,
+        )
+        .unwrap();
+        assert_eq!(meta.lens.unwrap().k[0].get(), -0.05);
         for bad in [
             r#"{"status":"unavailable","t":[1,0,0,0,1,0,0,0,1]}"#,
             r#"{"status":"estimated","t":[1,0,0,0,1,0,0,0,1]}"#,
             r#"{"status":"fresh","t":[1,0,0,0,1,0,0,0]}"#,
+            r#"{"status":"unavailable","frame_warp":[1,0,0,0,1,0,0,0,1]}"#,
+            r#"{"status":"fresh","t":[1,0,0,0,1,0,0,0,1],"left":{"frame_id":1,"sequence":1,"source_ns":1,"observed_ns":2,"t":[1,0,0,0,1,0,0,0,1]},"frame_warps":[1,0,0,0,1,0,0,0,1]}"#,
         ] {
             assert!(serde_json::from_str::<Pose>(bad).is_err(), "{bad}");
         }
@@ -429,6 +478,7 @@ mod tests {
             Pose::Fresh {
                 t: other,
                 left: endpoint(id),
+                frame_warp: None,
             },
         );
         assert!(read(&buffer).is_err(), "fresh t differs from its endpoint");

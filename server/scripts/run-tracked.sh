@@ -12,8 +12,8 @@
 #            [--tracking-cli <path>] [--sim-arg <arg>]... [--monitor-arg <arg>]...
 #            [chr-server options]
 #
-#   --scene <json>    calibrated-video-v1 manifest: the server's scene and lens, the
-#                     simulator's per-frame Ti/C/warp
+#   --scene <json>    calibrated-video-v1 manifest: the server's scene, the simulator's
+#                     per-frame Ti/C, lens and warp (the stand-in's Ti and lens)
 #   --video <mp4>     The manifest's clip, played in a loop as the camera
 #   --description <json>  Run chr-server with this render description instead of the
 #                     manifest's scene; the simulator still replays the manifest's cameras.
@@ -30,12 +30,15 @@
 #                     --tap <dir>/program.tap and the same --size/--fps
 #   --tracking-worker chr-server hands every frame to its tracking worker; the
 #                     simulator sends no cameras. Without --tracking-cli the worker is
-#                     chr-tracking-sim-cli replaying the manifest's Ti (with the
-#                     manifest's or description's lens, --tracking-lens program)
+#                     chr-tracking-sim-cli replaying the manifest's Ti and lens (no warps)
 #   --tracking-cli <path>  Tracking worker executable instead of the stand-in, for
 #                     example pitch-analysis (implies --tracking-worker). Give its own
 #                     arguments as chr-server options --tracking-worker-arg <arg>, and
 #                     --tracking-centre <x> <y> <z> and --tracking-wait-ms <n>
+#
+# The lens options --tracking-lens <auto|pinhole>, --tracking-lens-k <k1> <k2> <k3>,
+# --tracking-lens-centre <x> <y>, --tracking-lens-scale <px> and
+# --tracking-lens-support <4 numbers> are chr-server options too and pass through.
 #
 # The output rate is the manifest's fps. Run from the repository root inside
 # `nix develop .#media`; on a non-NixOS NVIDIA host wrap this script with nixGL.
@@ -99,8 +102,8 @@ if [[ -n $tracking_worker ]]; then
   if [[ -n $tracking_cli ]]; then
     program+=(--tracking-cli "$tracking_cli")
   else
-    # The stand-in returns the manifest's recorded ideal-image Ti: keep its lens.
-    program+=(--tracking-worker-arg --manifest --tracking-worker-arg "$scene" --tracking-lens program)
+    # The stand-in returns the manifest's recorded ideal-image Ti with its lens.
+    program+=(--tracking-worker-arg --manifest --tracking-worker-arg "$scene")
   fi
 else
   sim_args+=(--send-cameras)

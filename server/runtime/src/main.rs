@@ -20,11 +20,15 @@
 
 use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
+use chr_common::{
+    scene_frame as w,
+    server::{IpcServer, ServerConfig, WebSocketListener},
+};
 use chr_renderer::coordinates::ImageExtent;
 
-use chr_runtime::calibration::tracking::{
-    CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog,
+use chr_runtime::calibration::{
+    lens::{self, LensSelection},
+    tracking::{CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog},
 };
 use chr_runtime::control::ControlHandler;
 use chr_runtime::frame_resources::Pixels;
@@ -34,7 +38,7 @@ use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
 use chr_runtime::worker::tracking::supervisor::{Answer, Tracker, TrackerConfig, in_flight_limit};
 use chr_runtime::worker::{
-    protocol::{Output, TrackedLens, WorkerProgram},
+    protocol::{Output, WorkerProgram},
     supervisor::{WorkerAssets, WorkerConfig, status_handle},
 };
 
@@ -81,10 +85,16 @@ Options:
   --tracking-centre <x> <y> <z> Station optical centre of every tracked camera, world
                           metres with negative Z up [default: the reference camera of
                           the manifest or description]
-  --tracking-lens <identity|program> Lens of tracked frames: identity for Ti of the real,
-                          distorted image (vchao), program for the manifest's or
-                          description's lens, for recorded ideal-image Ti such as the
-                          replay stand-in's [default: identity]
+  --tracking-lens <auto|pinhole> Camera model of tracked frames: auto takes the lens the
+                          tracking data carries, else the --tracking-lens-k/-centre/-scale
+                          lens, else none (pinhole); pinhole ignores every lens. The
+                          description's or manifest's lens is never applied [default: auto]
+  --tracking-lens-k <k1> <k2> <k3> radial-poly-native-px-v1 coefficients of the CLI lens
+                          (with --tracking-lens-centre and --tracking-lens-scale)
+  --tracking-lens-centre <x> <y> Its centre, native pixels
+  --tracking-lens-scale <px> Its normalisation scale, native pixels, positive
+  --tracking-lens-support <min_x> <min_y> <max_x> <max_y> Its validated ideal-pixel
+                          rectangle [default: none]
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
@@ -124,7 +134,25 @@ struct Args {
     tracking_cli: Option<PathBuf>,
     tracking_worker_args: Vec<String>,
     tracking_centre: Option<[f64; 3]>,
-    tracking_lens: Option<TrackedLens>,
+    /// `--tracking-lens pinhole`.
+    tracking_pinhole: bool,
+    /// The validated `--tracking-lens-*` lens.
+    tracking_lens: Option<w::RadialLens>,
+}
+
+/// Reads `N` finite numbers that follow `flag`.
+fn numbers<const N: usize>(flag: &str, raw: &mut impl Iterator<Item = String>) -> Result<[f64; N]> {
+    let mut values = [0.0_f64; N];
+    for value in &mut values {
+        *value = raw
+            .next()
+            .ok_or_else(|| format!("{flag} needs {N} numbers"))?
+            .parse()?;
+        if !value.is_finite() {
+            return Err(format!("{flag} must be finite").into());
+        }
+    }
+    Ok(values)
 }
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
@@ -153,8 +181,11 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         tracking_cli: None,
         tracking_worker_args: Vec::new(),
         tracking_centre: None,
+        tracking_pinhole: false,
         tracking_lens: None,
     };
+    let mut lens_given = false;
+    let (mut lens_k, mut lens_centre, mut lens_scale, mut lens_support) = (None, None, None, None);
     let mut use_socket = true;
     let mut use_tap = true;
     while let Some(flag) = raw.next() {
@@ -182,27 +213,26 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--tracking-worker" => args.tracking_worker = true,
             "--tracking-cli" => args.tracking_cli = Some(value()?.into()),
             "--tracking-worker-arg" => args.tracking_worker_args.push(value()?),
-            "--tracking-centre" => {
-                let mut centre = [0.0_f64; 3];
-                for coordinate in &mut centre {
-                    *coordinate = value()?.parse()?;
-                }
-                if !centre.iter().all(|v| v.is_finite()) {
-                    return Err("--tracking-centre must be finite".into());
-                }
-                args.tracking_centre = Some(centre);
-            }
+            "--tracking-centre" => args.tracking_centre = Some(numbers(&flag, &mut raw)?),
             "--tracking-lens" => {
-                args.tracking_lens = Some(match value()?.as_str() {
-                    "identity" => TrackedLens::Identity,
-                    "program" => TrackedLens::Program,
+                lens_given = true;
+                args.tracking_pinhole = match value()?.as_str() {
+                    "auto" => false,
+                    "pinhole" => true,
                     other => {
                         return Err(format!(
-                            "--tracking-lens must be identity or program, not {other:?}"
+                            "--tracking-lens must be auto or pinhole, not {other:?}"
                         )
                         .into());
                     }
-                })
+                }
+            }
+            "--tracking-lens-k" => lens_k = Some(numbers::<3>(&flag, &mut raw)?),
+            "--tracking-lens-centre" => lens_centre = Some(numbers::<2>(&flag, &mut raw)?),
+            "--tracking-lens-scale" => lens_scale = Some(numbers::<1>(&flag, &mut raw)?[0]),
+            "--tracking-lens-support" => {
+                let [x0, y0, x1, y1] = numbers(&flag, &mut raw)?;
+                lens_support = Some([[x0, y0], [x1, y1]]);
             }
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
@@ -245,14 +275,31 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if (args.tracking_cli.is_some()
         || !args.tracking_worker_args.is_empty()
-        || args.tracking_centre.is_some()
-        || args.tracking_lens.is_some())
+        || args.tracking_centre.is_some())
         && !args.tracking_worker
     {
         return Err(
-            "--tracking-cli, --tracking-worker-arg, --tracking-centre and --tracking-lens \
-             require --tracking-worker"
+            "--tracking-cli, --tracking-worker-arg and --tracking-centre require --tracking-worker"
                 .into(),
+        );
+    }
+    args.tracking_lens = match (lens_k, lens_centre, lens_scale) {
+        (Some(k), Some(centre), Some(scale)) => Some(
+            lens::wire(centre, scale, k, lens_support)
+                .map_err(|error| format!("invalid --tracking-lens-* lens: {error}"))?,
+        ),
+        (None, None, None) if lens_support.is_none() => None,
+        _ => {
+            return Err(
+                "--tracking-lens-k, --tracking-lens-centre and --tracking-lens-scale \
+                        go together; --tracking-lens-support needs them"
+                    .into(),
+            );
+        }
+    };
+    if (lens_given || args.tracking_lens.is_some()) && !tracked {
+        return Err(
+            "--tracking-lens and --tracking-lens-* require --tracked-scene or --description".into(),
         );
     }
     if !args.asset_roots.is_empty() && args.description.is_none() {
@@ -421,10 +468,11 @@ fn run(args: Args) -> Result<()> {
     // The capture side of a tracked program: frames from the input ring wait in the
     // join for the camera that the tracking worker or tracking.frame delivers.
     let tracker_status = chr_runtime::worker::tracking::supervisor::status_handle();
-    // vchao's Ti maps to the real, distorted image: no lens unless asked for.
-    let tracked_lens = match (args.tracking_worker, args.tracking_lens) {
-        (true, lens) => lens.unwrap_or(TrackedLens::Identity),
-        (false, _) => TrackedLens::Program,
+    // The lens belongs to whoever produces Ti: the tracking data's, else the CLI's.
+    let lenses = if args.tracking_pinhole {
+        LensSelection::pinhole()
+    } else {
+        LensSelection::auto(args.tracking_lens.clone())
     };
     let tracking = match (&installation, &args.input_ring) {
         (Some((program, _)), Some(path)) => {
@@ -482,22 +530,29 @@ fn run(args: Args) -> Result<()> {
                     in_flight,
                 };
                 log::info!(
-                    "tracking worker {}: station centre {camera_center:?}, {:?} lens, at most \
+                    "tracking worker {}: station centre {camera_center:?}, at most \
                      {in_flight} frames in flight, program delay {wait:?}",
                     config.executable.display(),
-                    tracked_lens,
                 );
                 Some(Tracker::new(config, Arc::clone(&tracker_status))?)
             } else {
                 None
             };
             log::info!(
-                "tracked input: frames from {}, cameras from {}, wait {wait:?}",
+                "tracked input: frames from {}, cameras from {}, wait {wait:?}, lens: {}",
                 path.display(),
                 if args.tracking_worker {
                     "the tracking worker"
                 } else {
                     "tracking.frame"
+                },
+                match (lenses.is_forced_pinhole(), lenses.cli()) {
+                    (true, _) => "pinhole (--tracking-lens pinhole; every lens ignored)".to_owned(),
+                    (false, Some(cli)) => format!(
+                        "the tracking data's, else the CLI's {}",
+                        lens::describe(cli)
+                    ),
+                    (false, None) => "the tracking data's, else none (pinhole)".to_owned(),
                 }
             );
             Some((feed, join, input, tracker))
@@ -554,7 +609,6 @@ fn run(args: Args) -> Result<()> {
         socket_dir: worker_dir(),
         hang: Duration::from_millis(args.worker_hang_ms),
         assets: worker_assets.clone(),
-        lens: tracked_lens,
     };
     log::info!("render worker: {}", worker_config.executable.display());
     let render_config = RenderConfig {
@@ -638,6 +692,7 @@ fn run(args: Args) -> Result<()> {
             let Some(mut synthetic) = synthetic else { return std::future::pending::<Result<()>>().await };
             let control = scenes.as_ref().expect("synthetic scene endpoint");
             let mut tracking = tracking;
+            let mut lenses = lenses;
             // Capture sequences restart with the capture process; input sequences may not.
             let mut capture_offset = 0;
             // One past the highest input sequence given to either the render or the
@@ -678,6 +733,8 @@ fn run(args: Args) -> Result<()> {
                             }
                             match next {
                                 Some((frame, Some(sample))) => {
+                                    let (sample, model) = lenses.apply(sample);
+                                    feed.record_model(model);
                                     let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
                                     if let Err(error) = synthetic.inject_pixels(control, capture_offset + frame.sequence, Pixels::Shared(frame.rgba), geometry).await {
                                         log::warn!("tracked frame {} skipped: {error}", frame.sequence);
@@ -977,7 +1034,7 @@ mod tests {
             "60.6",
             "-9.9",
             "--tracking-lens",
-            "program",
+            "pinhole",
         ])
         .unwrap()
         .unwrap();
@@ -987,16 +1044,75 @@ mod tests {
                 worker.tracking_cli,
                 worker.tracking_worker_args,
                 worker.tracking_centre,
-                worker.tracking_lens,
+                worker.tracking_pinhole,
             ),
             (
                 true,
                 Some(PathBuf::from("/opt/tracker")),
                 vec!["--ledger".to_owned(), "/runs/{stream_id}.arrow".to_owned()],
                 Some([14.5, 60.6, -9.9]),
-                Some(TrackedLens::Program),
+                true,
             )
         );
+        let tracked = ["--tracked-scene", "s.json", "--input-ring", "/tmp/in.ring"];
+        let lens_args = [
+            "--tracking-lens-k",
+            "-0.05",
+            "0",
+            "0",
+            "--tracking-lens-centre",
+            "960",
+            "540",
+            "--tracking-lens-scale",
+            "960",
+        ];
+        let cli = parse(&[&tracked[..], &lens_args].concat())
+            .unwrap()
+            .unwrap();
+        assert!(!cli.tracking_pinhole, "auto is the default");
+        assert_eq!(
+            cli.tracking_lens,
+            Some(lens::wire([960., 540.], 960., [-0.05, 0., 0.], None).unwrap()),
+            "the CLI lens needs no tracking worker"
+        );
+        let supported = [
+            &tracked[..],
+            &lens_args,
+            &["--tracking-lens-support", "-160", "680", "2080", "1090"],
+        ]
+        .concat();
+        assert!(
+            parse(&supported)
+                .unwrap()
+                .unwrap()
+                .tracking_lens
+                .unwrap()
+                .support
+                .is_some()
+        );
+        for bad in [&lens_args[..], &["--tracking-lens", "auto"]] {
+            assert!(parse(bad).is_err(), "{bad:?} without a tracked program");
+        }
+        for bad in [
+            &lens_args[..5],
+            &lens_args[..7],
+            &lens_args[4..],
+            &["--tracking-lens-support", "0", "0", "1", "1"],
+            &[&lens_args[..8], &["0"]].concat(),
+            &[&lens_args[..8], &["-1"]].concat(),
+            &[&lens_args[..8], &["nan"]].concat(),
+            &[
+                &lens_args[..],
+                &["--tracking-lens-support", "5", "0", "1", "1"],
+            ]
+            .concat(),
+            &["--tracking-lens", "identity"],
+            &["--tracking-lens", "program"],
+            &["--tracking-lens-k", "1", "2"],
+        ] {
+            let args = [&tracked[..], bad].concat();
+            assert!(parse(&args).is_err(), "{bad:?}");
+        }
         assert!(
             parse(&["--tracking-worker"]).is_err(),
             "needs a tracked program"
@@ -1004,7 +1120,6 @@ mod tests {
         for bad in [
             &["--tracking-cli", "/opt/tracker"][..],
             &["--tracking-centre", "1", "2", "3"],
-            &["--tracking-lens", "identity"],
         ] {
             let args = [
                 &["--tracked-scene", "s.json", "--input-ring", "/tmp/in.ring"][..],
@@ -1017,6 +1132,7 @@ mod tests {
             &["--tracking-centre", "1", "2"][..],
             &["--tracking-centre", "1", "2", "inf"],
             &["--tracking-lens", "radial"],
+            &["--tracking-lens", "identity"],
         ] {
             let tracked = ["--tracked-scene", "s.json", "--input-ring", "/tmp/in.ring"];
             let args = [&tracked[..], &["--tracking-worker"], bad].concat();

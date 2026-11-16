@@ -218,7 +218,7 @@ stdout joins it, stdin is unused.
 
 | Direction | `type` | Payload | Fields |
 | --- | --- | --- | --- |
-| server → worker | `hello` | – | `version` (2), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `assets`, `lens` (`program` or `identity`; optional, default `program`) |
+| server → worker | `hello` | – | `version` (3), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `assets` |
 | worker → server | `ready` | – | `adapter` (logged GPU adapter) |
 | worker → server | `fatal` | – | `message`; the worker then exits |
 | server → worker | `render` | input image | `id`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`) |
@@ -226,9 +226,10 @@ stdout joins it, stdin is unused.
 | worker → server | `done` | UYVY frame | `id` |
 | worker → server | `failed` | – | `id`, `message` |
 
-- `lens: identity` drops a tracked program's startup lens: its cameras come
-  from a VchaoFrame tracking worker whose `Ti` maps to the distorted image
-  (`chr-server --tracking-lens`, #148).
+- A tracked frame's lens travels in its `ti_c` geometry (`lens`, `frame_warp`),
+  so the worker holds no lens between frames and a lens that changes with a
+  tracking worker session needs no worker restart (#150,
+  [tracking worker](../server/docs/tracking-worker.md#lens)).
 - The program specification is one of `triangle`, `synthetic`,
   `software_video`, `video_scene { path }`, `tracked_scene { path }`,
   `description { path }`, `pitch_demo { path }`. The worker

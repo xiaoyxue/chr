@@ -3,7 +3,8 @@
 **Status:** `implemented` on vchao's VchaoFrame v1 contract (#148). vchao's
 `pitch-analysis` runs as the tracking worker unchanged; it is verified on the
 SC1464 fixture (see [Measured](#measured)). The `chr-tracking-sim-cli` replay
-stand-in speaks the same contract and remains the regression reference.
+stand-in speaks the same contract and remains the regression reference. Each
+frame's camera model follows the lens that arrives with it ([Lens](#lens), #150).
 
 `chr-server --tracking-worker` starts one tracking worker, gives it every
 captured frame, and takes the camera of each frame from it. This is the
@@ -29,7 +30,7 @@ crates. The render worker keeps chr's own protocol
 
 | Executable | Role |
 | --- | --- |
-| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`) | Stand-in worker and the regression reference. It returns every frame with `selection.pose = fresh`: `t` is the **recorded** `Ti` of a `calibrated-video-v1` manifest, and its left endpoint is the frame itself. It replays; it never estimates. The manifest's frame warps are dropped: VchaoFrame has none. |
+| `chr-tracking-sim-cli` (`chr-runtime`, `server/runtime/src/tracking_sim_cli.rs`) | Stand-in worker and the regression reference. It returns every frame with `selection.pose = fresh`: `t` is the **recorded** `Ti` of a `calibrated-video-v1` manifest, and its left endpoint is the frame itself. It replays; it never estimates. That `t` maps to the ideal image, so every frame also carries the manifest's lens in chr's [lens extension](#chr-lens-extensions); it sends no frame warp ([Lens](#lens)). |
 | vchao's `pitch-analysis` | The real tracking worker (`atlas-vq-estimate`, N=8/S=4 grid, LogH interpolation, 500 ms overload rule), built from `external/vchao` ([Running vchao's pitch-analysis](#running-vchaos-pitch-analysis)). |
 
 chr-server runs the worker as:
@@ -153,7 +154,8 @@ string field `json`. Both sides register the meta before receiving, or
 | `unavailable` | none; never an identity matrix | none: the frame is skipped |
 
 Endpoints are `{frame_id, sequence, source_ns, observed_ns, t}` and keep their
-own estimate's keys. Unknown fields are errors (`deny_unknown_fields`).
+own estimate's keys. Unknown fields are errors (`deny_unknown_fields`), except
+chr's two optional lens extensions below.
 
 `t` is the row-major float64 forward map from ground XY metres to **this
 frame's real (distorted) SNC**, on homogeneous column vectors
@@ -162,6 +164,29 @@ frame's real (distorted) SNC**, on homogeneous column vectors
 the camera's `ti` in the same order, so `Ti` crosses the hop and reaches the
 render worker bit for bit.
 
+### chr lens extensions
+
+chr's mirror accepts two optional fields that vchao's contract does not have and
+`pitch-analysis` never sends. chr-server never sends them either. A worker whose
+`t` maps to the **ideal** (undistorted) image sends them; the stand-in sends
+`lens` only.
+
+| Field | Where | Value |
+| --- | --- | --- |
+| `lens` | top level of the returned meta | `null` (or absent), or `{model: "radial-poly-native-px-v1", centre_px: [x, y], scale_px, k: [k1, k2, k3], support?: [[min_x, min_y], [max_x, max_y]]}`, native pixels ([renderer design §3.3](renderer-design.md)) |
+| `frame_warp` | `fresh`, `interpolated` and `reused` poses | `null` (or absent), or nine numbers: row-major, reference native pixel to this frame's SNC, applied after the lens's radial term |
+
+- `lens` belongs to the worker **session**. The first returned frame fixes it,
+  `null` included; a later frame of the same stream with another `lens` is a
+  worker failure, and the worker is restarted as a new session.
+- `frame_warp` needs the session's `lens`.
+- Both are validated at the boundary; an invalid one is a worker failure:
+  finite values, `scale_px > 0`, a nonempty support (the renderer's
+  `RadialDistortion::new`, which also computes the radius at which the
+  polynomial stops increasing: points beyond it are never drawn), and an
+  invertible `frame_warp` (`FrameWarp::new`).
+- Any other unknown field is still an error.
+
 ## Mapping to cameras
 
 chr-server joins each returned frame to its capture sequence by `frame_id`. It
@@ -169,7 +194,8 @@ keeps the mapping explicit: the frames in flight are a queue of
 `(frame_id, capture sequence)` in send order. A camera is:
 
 ```text
-{ sequence: <capture sequence>, ti: t, camera_center: <station C>, frame_warp: null }
+{ sequence: <capture sequence>, ti: t, camera_center: <station C>,
+  lens: <the session's lens or none>, frame_warp: <the pose's frame_warp or null> }
 ```
 
 It goes into the same join as `tracking.frame` cameras: frames and cameras are
@@ -187,16 +213,51 @@ paired by capture sequence only, never with another frame's camera.
 
 ### Lens
 
-- vchao's `t` maps to the real, distorted image. A program tracked by a
-  VchaoFrame worker therefore registers **no** radial lens: the render worker
-  draws with a pinhole camera model. The `k1` of the manifest or description,
-  for example the frozen calibration chain's, must not be applied on top.
-- This is the default, `--tracking-lens identity`.
-- `--tracking-lens program` applies the manifest's or description's lens
-  instead. Use it only for cameras whose `Ti` maps to the ideal (undistorted)
-  image, such as the stand-in's recorded `Ti`. `run-tracked.sh` and `stack.py`
-  pass it for the stand-in only.
-- chr-server logs the station centre and the lens of the tracking worker at startup.
+The lens belongs to whoever produces `Ti` (#150). Each tracked frame is rendered
+with the first of:
+
+1. **Tracking data:** the lens the frame's tracking data carries: the tracking
+   worker's session `lens` with the pose's `frame_warp`, or `tracking.frame`'s
+   `lens` and `frame_warp`.
+2. **CLI:** chr-server's `--tracking-lens-k <k1> <k2> <k3> --tracking-lens-centre
+   <x> <y> --tracking-lens-scale <px>` (all three or none) with an optional
+   `--tracking-lens-support <min_x> <min_y> <max_x> <max_y>`; `stack.toml`'s
+   `tracking_lens_k`, `tracking_lens_centre`, `tracking_lens_scale` and
+   `tracking_lens_support`. An invalid CLI lens stops chr-server at startup.
+   A CLI lens has no frame warp.
+3. **Neither:** the pinhole camera `S^-1 Ti A(C)`.
+
+- When the tracking data's lens and the CLI lens differ, the tracking data's
+  wins and chr-server logs a warning (once per differing lens).
+- vchao's `pitch-analysis` estimates `t` against the real, distorted image and
+  sends no lens, so its frames are rendered pinhole, unless a CLI lens is given.
+- The stand-in sends its manifest's lens and **no** frame warp: its frames are
+  rendered `radial`. It never sees capture sequences, only the session's
+  `frame_id`, so it cannot tell which of the clip's per-frame warps belongs to a
+  frame, and a misaligned warp jitters more than none. The replay therefore
+  omits the calibration package's per-frame warps; on the panda clip they move
+  the image by about 1–3 px. A worker that does send `frame_warp` is rendered
+  `radial+warp`, pixel for pixel as the calibrated replay renders the same frame
+  (GPU test `gpu_tracked_frames_match_the_calibrated_replay`), and
+  `tracking.frame` from `chr-sdi-sim --send-cameras` sends each frame's warp by
+  capture sequence.
+- A lens in the description or manifest is **never** applied to tracked frames
+  implicitly; only the stand-in, `chr-sdi-sim --send-cameras` and still renders
+  of a reference camera replay it, as tracking data.
+- **Debug switch:** `--tracking-lens auto|pinhole` (default `auto`). `pinhole`
+  forces the ideal camera and ignores every lens source, frame warps included.
+- **How the lens reaches the renderer:** per frame. The chosen lens travels in
+  the frame's `ti_c` geometry (`lens` next to `frame_warp`) through
+  `render.submit` to the render worker's `render` request, and the renderer
+  builds that frame's `CameraModel` from it (`LensDistortion` is per frame
+  already). The render worker holds no lens between frames, so a lens that first
+  arrives with a session's first frame, or changes with a new session, needs no
+  worker restart, and no frame is ever rendered with another session's lens.
+- chr-server logs the lens choice at startup and each worker session's lens when
+  its first frame returns. `tracking.get_status` reports the model of the last
+  frame rendered with its camera as `camera_model: {model, source}`: `model` is
+  `pinhole`, `radial` or `radial+warp`, `source` is `worker` (the tracking
+  data), `cli`, `none` or `forced-pinhole`. `stack.py status` shows it.
 
 ## Validation
 
@@ -210,7 +271,9 @@ a camera. The checks are:
   once, and only frames that were sent;
 - the frame size is unchanged;
 - `selection` is set;
-- every matrix is finite, and `fresh`/`reused` `t` is bit-equal to `left.t`.
+- every matrix is finite, and `fresh`/`reused` `t` is bit-equal to `left.t`;
+- the [lens extensions](#chr-lens-extensions) are valid and the session's
+  `lens` does not change.
 
 A singular `t` is rejected by the join like any invalid camera; the frame goes
 without a camera.
@@ -320,9 +383,11 @@ convention of integer sample centres ([coordinates](coordinates.md)).
   every returned frame, by pose;
 - `poses_overdue`: frames released by the worker's overload rule, whatever
   their pose;
-- `frames_clean_feed`: frames sent as clean feed for want of a camera.
+- `frames_clean_feed`: frames sent as clean feed for want of a camera;
+- `camera_model`: `{model, source}` of the last frame rendered with its camera,
+  `null` before the first ([Lens](#lens)).
 
-These fields default to 0 for older clients. With a tracking worker,
+These fields default to 0 (`null`) for older clients. With a tracking worker,
 `tracking.frame` is rejected.
 
 ## Running it
@@ -332,14 +397,15 @@ server/scripts/run-tracked.sh --scene clip-manifest.json --video clip.mp4 --trac
 ```
 
 - `--tracking-worker` runs the stand-in with the manifest
-  (`--tracking-worker-arg --manifest ... --tracking-lens program`). It starts
+  (`--tracking-worker-arg --manifest ...`), which sends the manifest's lens. It starts
   `chr-sdi-sim` without `--send-cameras`, so the simulator is the camera only.
 - `--tracking-cli <path>` runs another worker instead. Pass its arguments as
   `--tracking-worker-arg <arg>`, and set `--tracking-centre` and
   `--tracking-wait-ms`.
 - `stack.py` does this from `stack.toml`: `tracking = "worker"`, `tracking_cli`,
-  `tracking_worker_args`, `tracking_centre` and `tracking_wait_ms`
-  (`server/scripts/stack.example.toml`).
+  `tracking_worker_args`, `tracking_centre` and `tracking_wait_ms`, and the
+  `tracking_lens*` keys (`server/scripts/stack.example.toml`).
+- `run-tracked.sh` passes the `--tracking-lens*` options to chr-server.
 - `tracking = "external"` keeps the previous behaviour, in which the simulator
   sends the cameras.
 
@@ -365,7 +431,8 @@ nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
   `--ledger <dir>/{stream_id}.arrow` per session. chr-server adds
   `--stream-id` and both sockets.
 - Give the station centre with `--tracking-centre` and the wait (program
-  delay) with `--tracking-wait-ms`; the lens is `identity` by default.
+  delay) with `--tracking-wait-ms`. It sends no lens: its frames are rendered
+  pinhole unless a `--tracking-lens-*` lens is given.
 - `pitch-analysis` fails on an input stall of 2 s or an estimator without
   progress for 5 s; chr-server then restarts it as a new stream, with clean feed
   meanwhile. On `stack.py stop` it receives the end of its input, returns every

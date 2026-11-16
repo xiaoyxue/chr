@@ -4,8 +4,8 @@
 //! It plays a calibrated clip in a loop the way a camera reaches the server: each
 //! decoded frame goes into the shared-memory input ring (standing in for SDI in).
 //! The server's tracking worker supplies the cameras. With `--send-cameras` it
-//! also sends each frame's recorded camera, the manifest's `Ti`/`C` with the
-//! clip's warp of that frame, to `chr-server` as `tracking.frame` over the
+//! also sends each frame's recorded camera, the manifest's `Ti`/`C` and lens with
+//! the clip's warp of that frame, to `chr-server` as `tracking.frame` over the
 //! NativeSocket (the external tracking mode). The two channels are independent;
 //! the server pairs them by capture sequence. No physical SDI or tracking system
 //! is involved; a real capture process (#80) takes its place.
@@ -133,7 +133,12 @@ fn run(args: Args) -> Result<()> {
     if manifest.frame_warps.is_empty() {
         return Err("the manifest has no frame_warps to replay".into());
     }
-    let replay = TrackingReplay::new(manifest.ti, manifest.center, &manifest.frame_warps)?;
+    let replay = TrackingReplay::new(
+        manifest.ti,
+        manifest.center,
+        manifest.radial.wire()?,
+        &manifest.frame_warps,
+    )?;
     let mode = VideoMode {
         width: manifest.width,
         height: manifest.height,

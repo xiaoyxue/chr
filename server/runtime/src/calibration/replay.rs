@@ -19,7 +19,7 @@ pub struct Radial {
 }
 
 impl Radial {
-    /// The startup lens shared by every frame of a clip or a tracked input.
+    /// The startup lens shared by every frame of a clip.
     pub fn distortion(&self) -> Result<RadialDistortion, Error> {
         Ok(RadialDistortion::new(
             self.centre_px,
@@ -27,6 +27,16 @@ impl Radial {
             self.coefficients,
             self.support.map(|[min, max]| SupportRect { min, max }),
         )?)
+    }
+
+    /// The same lens as tracking data carries it, validated.
+    pub fn wire(&self) -> Result<w::RadialLens, Error> {
+        super::lens::wire(
+            self.centre_px,
+            self.scale_px,
+            self.coefficients,
+            self.support,
+        )
     }
 
     pub(crate) fn models(

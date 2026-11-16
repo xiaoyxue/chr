@@ -476,7 +476,7 @@ async fn tracked_frames_carry_their_own_camera_and_warp() {
 }
 
 #[tokio::test]
-async fn frame_warps_need_a_registered_lens() {
+async fn frame_warps_need_the_frames_own_valid_lens() {
     let (mut program, adapter) = Synthetic::install(mode(), runtime_id().unwrap()).unwrap();
     let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
     let mut state = program.initial_state().clone();
@@ -484,34 +484,53 @@ async fn frame_warps_need_a_registered_lens() {
         serde_json::from_value(json!({"mode":"tracked","near_m":0.1,"far_m":100})).unwrap();
     program.create_scene_with(&control, &state).await.unwrap();
     let s = (192_f64 * 128.).sqrt();
-    let geometry = |warp: Option<Value>| {
+    let geometry = |warp: Option<Value>, lens: Option<Value>| {
         let mut geometry = json!({"kind":"ti_c","world":state.world,"context_id":null,
             "extent":{"width":192,"height":128},"ti":[0.12,0,0,0,0.12,0,0,0,1],"camera_center":[0,0,-8]});
         if let Some(warp) = warp {
             geometry["frame_warp"] = warp;
         }
+        if let Some(lens) = lens {
+            geometry["lens"] = lens;
+        }
         serde_json::from_value::<w::FrameGeometry>(geometry).unwrap()
     };
+    let lens = |scale: f64| json!({"model":"radial-poly-native-px-v1","centre_px":[96,64],"scale_px":scale,"k":[-0.05,0,0]});
     let plate = [20, 100, 40, 255].repeat(192 * 128);
-    program
-        .inject_with(&control, 0, &plate, geometry(None))
-        .await
-        .unwrap()
-        .unwrap();
-    program
-        .scheduler
-        .next_ready()
-        .unwrap()
-        .unwrap()
-        .failed()
-        .unwrap();
     let warp = json!([2. / s, 0, -192. / s, 0, 2. / s, -128. / s, 0, 0, 1]);
+    for (sequence, accepted) in [
+        geometry(None, None),
+        geometry(None, Some(lens(96.))),
+        geometry(Some(warp.clone()), Some(lens(96.))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        program
+            .inject_with(&control, sequence as u64, &plate, accepted)
+            .await
+            .unwrap()
+            .unwrap();
+        program
+            .scheduler
+            .next_ready()
+            .unwrap()
+            .unwrap()
+            .failed()
+            .unwrap();
+    }
     let error = program
-        .inject_with(&control, 1, &plate, geometry(Some(warp)))
+        .inject_with(&control, 3, &plate, geometry(Some(warp), None))
         .await
         .unwrap_err()
         .to_string();
     assert!(error.contains("requires a lens"), "{error}");
+    let error = program
+        .inject_with(&control, 4, &plate, geometry(None, Some(lens(0.))))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("positive scale"), "{error}");
     drop(control);
     owner.await.unwrap();
 }
@@ -546,7 +565,7 @@ async fn gpu_tracked_frames_match_the_calibrated_replay() {
         let (control, owner) = SceneControl::spawn(adapter, 16).unwrap();
         program.create_scene(&control).await.unwrap();
         let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
-        renderer.set_lenses(&program);
+        renderer.set_video_lens(program.video_lens.clone());
         let (taps, tap) = Taps::observed();
         let sdi =
             SdiOutput::spawn_program(output, id("tracked-test-output").unwrap(), taps).unwrap();
@@ -575,6 +594,8 @@ async fn gpu_tracked_frames_match_the_calibrated_replay() {
         frames[1][0], frames[1][1],
         "the per-frame warp moves the CG"
     );
+    // The replay's lens and warps reach the renderer per frame, in the geometry
+    // (as a tracking worker's `lens` and `frame_warp` do): the calibrated program's pixels.
     assert_eq!(
         frames[0], frames[1],
         "a tracked frame with the replay's camera renders the replay's pixels"

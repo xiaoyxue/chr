@@ -13,6 +13,10 @@
 //! [`Tracker::track`] queues one frame (its shared memory, not a copy) and
 //! [`Tracker::poll`] returns the frames answered since the last call. How long
 //! a frame waits for its camera is the caller's join policy.
+//!
+//! A session's lens (chr's optional `lens` extension, `null` for vchao) is
+//! fixed by its first returned frame: a later frame with another lens, an
+//! invalid lens or frame warp, or a warp without a lens is a worker failure.
 
 use std::{
     collections::VecDeque,
@@ -23,6 +27,7 @@ use std::{
 };
 
 use super::protocol::{PoseStatus, Received, Wire, check_caps, now_ns};
+use crate::calibration::{lens, tracking::matrix3};
 use crate::worker::{
     supervisor::{Running, create_private_dir},
     transport::{self, Channel, Event, SharedPixels},
@@ -34,6 +39,7 @@ use chr_common::{
     },
     scene_frame as w,
 };
+use chr_renderer::distortion::FrameWarp;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -138,6 +144,8 @@ struct Session {
     in_flight: VecDeque<Pending>,
     next_frame_id: u64,
     last_source_ns: u64,
+    /// The lens of every frame of this stream, once the first one came back.
+    lens: Option<Option<w::RadialLens>>,
 }
 
 enum State {
@@ -360,6 +368,47 @@ impl Tracker {
                 meta.frame_id
             ));
         };
+        match &session.lens {
+            None => {
+                if let Some(lens) = &meta.lens {
+                    lens::radial(lens).map_err(|error| {
+                        format!("the tracking worker returned an invalid lens: {error}")
+                    })?;
+                }
+                log::info!(
+                    "tracking worker stream {stream_id}: {}",
+                    meta.lens
+                        .as_ref()
+                        .map_or_else(|| "no lens".to_owned(), lens::describe)
+                );
+                session.lens = Some(meta.lens.clone());
+            }
+            Some(lens) if *lens != meta.lens => {
+                return Err(format!(
+                    "the tracking worker changed its lens within stream {stream_id} at frame {}",
+                    meta.frame_id
+                ));
+            }
+            Some(_) => {}
+        }
+        let frame_warp = selection
+            .pose
+            .frame_warp()
+            .map(|warp| {
+                if meta.lens.is_none() {
+                    return Err("a frame warp without a lens".to_owned());
+                }
+                let rows = std::array::from_fn(|r| std::array::from_fn(|c| warp[r * 3 + c]));
+                FrameWarp::new(rows).map_err(|error| error.to_string())?;
+                matrix3(rows).map_err(|error| error.to_string())
+            })
+            .transpose()
+            .map_err(|error| {
+                format!(
+                    "the tracking worker returned frame {} with an invalid frame warp: {error}",
+                    meta.frame_id
+                )
+            })?;
         if pending.forgotten {
             return Ok(());
         }
@@ -368,7 +417,8 @@ impl Tracker {
             // Finite: checked when the meta was read.
             ti: t.map(|v| w::Finite::try_from(v).expect("finite Ti")),
             camera_center: self.camera_center,
-            frame_warp: None,
+            frame_warp,
+            lens: meta.lens.clone(),
         });
         let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
         match camera {
@@ -419,6 +469,7 @@ impl Tracker {
                         in_flight: VecDeque::new(),
                         next_frame_id: 0,
                         last_source_ns: 0,
+                        lens: None,
                     },
                     since: Instant::now(),
                 };

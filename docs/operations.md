@@ -157,9 +157,15 @@ to its tracking worker and renders each frame with the `Ti` it returns
 - `tracking_cli` names another worker that speaks vchao's VchaoFrame contract,
   such as vchao's `pitch-analysis`. Its `tracking_worker_args` give its map and
   settings; `{stream_id}` in them becomes each session's stream ID, for example
-  in `--ledger`. Its `Ti` is rendered without a lens.
+  in `--ledger`. It sends no lens, so its `Ti` is rendered with the pinhole camera.
 - `tracking_centre` is the station's optical centre `[x, y, z]`. Without it,
   the description's or manifest's reference camera is used.
+- The lens follows the tracking data
+  ([lens](../server/docs/tracking-worker.md#lens)): a worker's own lens (the
+  stand-in sends its manifest's), else `tracking_lens_k`, `tracking_lens_centre`
+  and `tracking_lens_scale` (all three, plus an optional `tracking_lens_support`),
+  else none (pinhole). The description's or manifest's lens is never applied.
+  `tracking_lens = "pinhole"` ignores every lens, for debugging.
 - `tracking_wait_ms` is the **program delay**: every frame leaves exactly this
   long after capture, and a frame whose camera is later is not rendered.
   - The default, three frame periods, suits the stand-in.
@@ -167,8 +173,12 @@ to its tracking worker and renders each frame with the `Ti` it returns
     about 800 ms. The maximum is 1500 ms.
   - Every waiting frame holds 8 MiB of memory at 1080p (33 MB at 4K).
 
-`stack.py status` names the worker and its current stream and counts the
-returned poses: fresh, interpolated, reused, unavailable and overdue. Frames
+`stack.py status` names the worker and its current stream, counts the
+returned poses (fresh, interpolated, reused, unavailable and overdue) and shows
+the camera model of the last rendered frame with its lens source, for example
+`pinhole (lens source: none)` for `pitch-analysis` or `radial (lens source:
+worker)` for the stand-in, which sends its manifest's lens but not its
+per-frame warps. Frames
 without a camera, such as while the worker loads its model or restarts, go out
 as clean feed: the camera picture without CG, at the same delay.
 
@@ -206,7 +216,8 @@ vchao's `pitch-analysis` estimates every frame's `Ti` from a map of the venue
 
    `tracking_centre` is the station's optical centre of that map; the value
    above is the SC1464 fixture's. The description must match the camera's size
-   and rate; its lens is not applied to vchao's `Ti`.
+   and rate; its lens is not applied to vchao's `Ti`, which `stack.py status`
+   shows as `camera model pinhole (lens source: none)`.
 4. `uv run server/scripts/stack.py restart render`. The worker is `ready`
    about 10 s later (model and map loading); until then the output carries
    clean feed. Its log lines, such as `analysis-listening` and, at stop,

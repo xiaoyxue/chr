@@ -155,6 +155,15 @@ export interface TrackingStatus {
   poses_unavailable: number;
   /** Frames the worker released by its overload rule, whatever their pose. */
   poses_overdue: number;
+  /** Camera model and lens source of the last frame rendered with its camera; `null` before the first. */
+  camera_model: ActiveCameraModel | null;
+}
+
+/** The camera model of a tracked frame (`server/docs/tracking-worker.md#lens`). */
+export interface ActiveCameraModel {
+  model: "pinhole" | "radial" | "radial+warp";
+  /** `worker`: the tracking data's lens; `cli`: chr-server's `--tracking-lens-*`; `none`: no lens anywhere; `forced-pinhole`: `--tracking-lens pinhole`. */
+  source: "worker" | "cli" | "none" | "forced-pinhole";
 }
 
 /** chr-monitor counters since the monitor started. */

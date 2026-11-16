@@ -28,7 +28,7 @@ the CG with that camera, and transmits the program on its simulated SDI port.
 ```text
 chr-sdi-sim ──frames (chr-shm input ring, "SDI in")───────────────┐
    (clip + manifest)                                               ▼
-  --send-cameras ──tracking.frame {sequence, Ti, C, frame_warp}──► chr-server ──worker──► SDI out
+  --send-cameras ──tracking.frame {sequence, Ti, C, lens, frame_warp}──► chr-server ──worker──► SDI out
                    (JSON-RPC over the NativeSocket)                │                      │
                                                                    │             program tap
                                                                    ▼                      ▼
@@ -40,13 +40,14 @@ chr-sdi-sim ──frames (chr-shm input ring, "SDI in")────────�
 | When | Parameter | Source |
 | --- | --- | --- |
 | Startup | Native extent and rate, scene (GLB, its height, anchor and pitch size), lighting | `calibrated-video-v1` manifest given to `--tracked-scene` |
-| Startup | Lens: `radial` (`centre_px`, `scale_px`, three coefficients, optional support) | Same manifest; registered once, never sent per frame |
 | Every frame | Image | One slot of the input ring, `index` = capture sequence |
-| Every frame | `Ti`, `C`, `frame_warp` | `tracking.frame` with the same capture sequence |
+| Every frame | `Ti`, `C`, lens, `frame_warp` | `tracking.frame` with the same capture sequence; the simulator sends the manifest's `radial` lens with every camera |
 
 The manifest's own `ti` and `center` are used only to place the model (the
-anchor pixel's ground ray). Its `frame_warps` are not read by the server; the
-simulator replays them. The scene camera is `{"mode": "tracked"}`, so a frame
+anchor pixel's ground ray). Its `radial` lens and `frame_warps` are not applied
+by the server; the simulator replays them as tracking data
+([tracking worker](tracking-worker.md#lens): the tracking data's lens, else
+chr-server's `--tracking-lens-*` lens, else pinhole). The scene camera is `{"mode": "tracked"}`, so a frame
 without a tracked camera cannot be rendered.
 
 Frame `i` is projected as in [renderer design](renderer-design.md#implemented-radial-poly-native-px-v1),
@@ -54,7 +55,7 @@ with `Ti_i`, `C_i` and `W_i` from that frame's sample:
 
 ```text
 a  = S^-1 Ti_i A(C_i) [X, Y, Z]     ideal native pixel
-r  = radial(a)                      startup lens
+r  = radial(a)                      the frame's lens
 n  = pi(W_i [r, 1])                 frame SNC; without frame_warp, W_i = S
 ```
 
@@ -95,21 +96,27 @@ Answered only by a server running a tracked program
 {"sequence": "42",
  "ti": [9 numbers, row-major, ground XY -> ideal SNC],
  "camera_center": [x, y, z],
- "frame_warp": [9 numbers, row-major, reference native pixel -> frame SNC] | null}
+ "frame_warp": [9 numbers, row-major, reference native pixel -> frame SNC] | null,
+ "lens": {"model": "radial-poly-native-px-v1", "centre_px": [x, y], "scale_px": s,
+          "k": [k1, k2, k3], "support": [[min_x, min_y], [max_x, max_y]]}}
 ```
 
-`sequence` is decimal text, as all `U64` values on the wire. The result is
-`null`. A singular `Ti` or warp is rejected with `incompatible_input`. A camera
+`sequence` is decimal text, as all `U64` values on the wire. `lens` is optional
+(`support` within it too); `ti` maps to the ideal image with a lens and to the
+frame itself without one. The result is `null`. A singular `Ti` or warp, an
+invalid lens (nonfinite, `scale_px <= 0`, an empty support) or a `frame_warp`
+without a `lens` is rejected with `incompatible_input`. A camera
 for a frame that was already rendered or skipped is rejected with
 `invalid_state`, a duplicate with `conflict`, and a full backlog (64 cameras
 ahead of their frames) with `capacity`. `tracking.get_status` returns the
 counters below.
 
 The server turns a joined sample into the frame's `ti_c` geometry for
-`render.submit`. That geometry carries an optional `frame_warp`, the only wire
-addition of this extension. It is omitted when absent, so pinhole messages are
-unchanged, and admission rejects it with `unsupported_profile` unless a lens was
-registered at startup.
+`render.submit`, with the lens it chose ([tracking worker](tracking-worker.md#lens)).
+That geometry carries an optional `lens` and `frame_warp`, the only wire
+additions of this extension. Both are omitted when absent, so pinhole messages
+are unchanged; admission rejects an invalid `lens` with `incompatible_input` and
+a `frame_warp` without a `lens` with `unsupported_profile`.
 
 ## Pairing and late input
 
@@ -146,6 +153,7 @@ its own pixels without CG, scaled to the output size when the camera's differs
 | `frames_overwritten` | Frames the input ring overwrote before the server read them |
 | `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable` | Frames a tracking worker returned, by pose; 0 in external mode |
 | `poses_overdue` | Frames a tracking worker released by its overload rule |
+| `camera_model` | `{model, source}` of the last frame rendered with its camera: `pinhole`, `radial` or `radial+warp`, from `worker` (the tracking data), `cli`, `none` or `forced-pinhole` |
 
 ## Run
 
@@ -182,7 +190,7 @@ without one. It requires the clip's decoded frame count to
 equal the manifest's `frame_warps`, like the calibrated replay.
 
 `chr-renderer-cli render --tracked-scene <json> --frame <n>` renders frame `n`
-with the manifest's `Ti`/`C` and warp `n` through the same tracked path.
+with the manifest's `Ti`/`C`, lens and warp `n` through the same tracked path.
 
 ## Acceptance
 
@@ -197,8 +205,8 @@ cargo test --locked -p chr-runtime --features chr-runtime/gstreamer-media \
   replaced ring, options of both executables.
 - `tracked_frames_carry_their_own_camera_and_warp`: per-frame geometry reaches
   the admitted execution; a tracked scene rejects a scene camera.
-- `frame_warps_need_a_registered_lens`: a warp without a startup lens is
-  rejected at admission.
+- `frame_warps_need_the_frames_own_valid_lens`: a warp without the frame's lens,
+  or an invalid lens, is rejected at admission.
 - `gpu_tracked_frames_match_the_calibrated_replay` (hardware GPU): tracked
   frames carrying the replay's camera produce the replay's UYVY output byte for
   byte, and different warps move the CG.
@@ -214,10 +222,11 @@ are observations on a shared host, not latency or throughput guarantees.
 
 ## Limits
 
-- The lens is fixed at startup; per-frame or zoom-dependent radial coefficients
-  are not supported, and nothing in the calibration records requires them yet.
+- The lens travels per frame but a tracking worker's is fixed per session;
+  zoom-dependent radial coefficients are not modelled, and nothing in the
+  calibration records requires them yet.
 - No timecode, genlock or clock recovery: the server's output clock and the
   simulator's decode clock run independently at the same nominal rate.
 - No clean feed for frames without tracking, and no camera prediction.
-- The TypeScript render harness does not mirror `frame_warp` or the `tracking`
-  methods.
+- The TypeScript render harness does not mirror `lens`, `frame_warp` or the
+  `tracking.frame` method; it mirrors `tracking.get_status`.

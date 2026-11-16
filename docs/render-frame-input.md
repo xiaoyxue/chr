@@ -131,5 +131,5 @@ production questions above or approve #63. Existing renderer features remain
 separate from runtime control and actual program-output acceptance.
 
 The opt-in [tracked camera simulation](../server/docs/sdi-simulation.md) adds an
-optional per-frame `frame_warp` to `ti_c` geometry for a lens registered at startup.
+optional per-frame `lens` and `frame_warp` to `ti_c` geometry.
 It does not change the pinhole initial profile above.

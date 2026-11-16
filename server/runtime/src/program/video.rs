@@ -32,8 +32,9 @@ pub struct Manifest {
     pub center: [f64; 3],
     pub radial: Radial,
     /// Presentation-order reference-native-pixel -> frame-SNC matrices. A tracked
-    /// program receives them per frame instead and ignores this list; only
-    /// `chr-sdi-sim` and still renders replay it.
+    /// program receives them, and the lens, per frame instead and ignores this
+    /// list; only `chr-sdi-sim`, the `chr-tracking-sim-cli` replay and still
+    /// renders replay it.
     #[serde(default)]
     pub frame_warps: Vec<[[f64; 3]; 3]>,
     pub model: PathBuf,
@@ -49,8 +50,8 @@ pub enum CameraSource {
     /// `calibrated-video-v1`: the manifest's fixed `Ti`/`C` and its warp of
     /// `sequence % frame_warps`.
     Replay,
-    /// `tracked-video-v1`: every frame carries `Ti`, `C` and its warp; the
-    /// manifest's `Ti`/`C` only place the model.
+    /// `tracked-video-v1`: every frame carries `Ti`, `C`, its lens and warp; the
+    /// manifest's `Ti`/`C` only place the model and its lens is not applied.
     Tracked,
 }
 
@@ -116,8 +117,8 @@ pub fn prepare_with(
         return Err("invalid calibrated video extent, rate, frames or scene dimensions".into());
     }
     let camera = RendererCamera::from_ti(e, Ti::new(manifest.ti)?, manifest.center, 0.1, 10000.0)?;
-    let lens = manifest.radial.distortion()?;
-    let replay = TrackingReplay::new(manifest.ti, manifest.center, &manifest.frame_warps)?;
+    let lens = manifest.radial.wire()?;
+    let replay = TrackingReplay::new(manifest.ti, manifest.center, lens, &manifest.frame_warps)?;
     let models = match kind {
         CameraSource::Replay => manifest.radial.models(e, &manifest.frame_warps)?,
         CameraSource::Tracked => Vec::new(),
@@ -161,11 +162,6 @@ pub fn prepare_with(
     registrations
         .register_world(world.clone())
         .map_err(|e| e.to_string())?;
-    if kind == CameraSource::Tracked {
-        registrations
-            .register_lens(lens)
-            .map_err(|e| e.to_string())?;
-    }
     log::info!(
         "calibrated video model: vertices={} triangles={} parts={} import_warnings={}",
         asset.mesh.positions().len(),
@@ -243,7 +239,6 @@ pub fn prepare_with(
         }
         CameraSource::Tracked => {
             program.tracking = Some(Tracked {
-                lens,
                 world,
                 extent,
                 replay: Some(replay),

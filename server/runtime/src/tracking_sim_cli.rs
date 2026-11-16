@@ -5,8 +5,12 @@
 //! it receives every frame on `--input-socket` and returns it, the same memory,
 //! in order, on `--output-socket` with `selection.pose = fresh` and the recorded
 //! `Ti` of a calibrated clip (`TrackingReplay`): it replays, it does not
-//! estimate. Options inject latency, unavailable poses, crashes and hangs to
-//! exercise chr-server's supervision and missing-camera handling.
+//! estimate. That `Ti` maps to the ideal image, so every frame also carries the
+//! clip's lens in chr's optional VchaoFrame `lens` extension. It sends no frame
+//! warp: it never sees capture sequences, so it cannot tell which of the clip's
+//! warps belongs to a frame, and a misaligned warp jitters more than none.
+//! Options inject latency, unavailable poses, crashes and hangs to exercise
+//! chr-server's supervision and missing-camera handling.
 
 use std::{
     collections::VecDeque,
@@ -17,7 +21,7 @@ use std::{
 };
 
 use chr_runtime::{
-    calibration::tracking::TrackingReplay,
+    calibration::{replay::Radial, tracking::TrackingReplay},
     worker::{
         tracking::protocol::{Endpoint, Pose, Received, Selection, attach, check_caps, now_ns},
         transport::{self, Inbound, Receiver, Sender},
@@ -37,7 +41,9 @@ Runs as chr-server's tracking worker (started by chr-server --tracking-worker wi
 VchaoFrame contract over the two GStreamer unixfd sockets, like pitch-analysis:
 it listens on --output-socket for its one consumer, connects to --input-socket,
 and returns every frame of stream <id>, in order, with the recorded Ti of the
-calibrated-video-v1 manifest as a fresh pose: a replay, not an estimate.
+calibrated-video-v1 manifest as a fresh pose: a replay, not an estimate. Every
+frame also carries the manifest's radial lens (chr's lens extension); the
+manifest's per-frame warps are not sent.
 
 Options (fault injection):
   --delay-ms <n>           Hold every frame this long before returning it, as a
@@ -136,6 +142,7 @@ fn main() -> ExitCode {
 struct Calibration {
     ti: [[f64; 3]; 3],
     center: [f64; 3],
+    radial: Radial,
     #[serde(default)]
     frame_warps: Vec<[[f64; 3]; 3]>,
 }
@@ -143,7 +150,12 @@ struct Calibration {
 fn load(path: &std::path::Path) -> Result<TrackingReplay> {
     let calibration: Calibration = serde_json::from_slice(&std::fs::read(path)?)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    TrackingReplay::new(calibration.ti, calibration.center, &calibration.frame_warps)
+    TrackingReplay::new(
+        calibration.ti,
+        calibration.center,
+        calibration.radial.wire()?,
+        &calibration.frame_warps,
+    )
 }
 
 /// How long an exiting worker waits for its last frames to reach the server.
@@ -157,21 +169,26 @@ fn serve(worker: &Worker) -> Result<()> {
     // The reference loads before the output socket exists, as pitch-analysis does.
     let replay = load(&worker.manifest)?;
     log::info!(
-        "chr-tracking-sim-cli returning the recorded Ti of {} for stream {} (a replay; no \
-         estimation, frame warps dropped)",
+        "chr-tracking-sim-cli returning the recorded Ti and lens of {} for stream {} (a \
+         replay; no estimation, no frame warps)",
         worker.manifest.display(),
         worker.stream_id
     );
     // As pitch-analysis: frames are returned only to the connected consumer.
     let output = Sender::listen_live(&worker.output, None, OUTPUT_QUEUE)?;
     let input = Receiver::connect(&worker.input)?;
-    let result = forward(&input, &output, worker, replay.ti());
+    let result = forward(&input, &output, worker, &replay);
     output.finish(FINISH);
     result
 }
 
 /// Returns every input frame with its pose, in order, until the input ends.
-fn forward(input: &Receiver, output: &Sender, worker: &Worker, t: [f64; 9]) -> Result<()> {
+fn forward(
+    input: &Receiver,
+    output: &Sender,
+    worker: &Worker,
+    replay: &TrackingReplay,
+) -> Result<()> {
     let reader = input.reader();
     let faults = &worker.faults;
     let mut held: VecDeque<(Instant, gst::Buffer)> = VecDeque::new();
@@ -223,7 +240,10 @@ fn forward(input: &Receiver, output: &Sender, worker: &Worker, t: [f64; 9]) -> R
                     }
                     continue;
                 }
-                held.push_back((Instant::now() + faults.delay, select(frame, t, faults)?));
+                held.push_back((
+                    Instant::now() + faults.delay,
+                    select(frame, replay, faults)?,
+                ));
             }
             None if reader.is_eos() => break,
             None => {
@@ -244,13 +264,14 @@ fn forward(input: &Receiver, output: &Sender, worker: &Worker, t: [f64; 9]) -> R
     Ok(())
 }
 
-/// The frame's buffer, the same memory, with its selected pose.
-fn select(frame: Received, t: [f64; 9], faults: &Faults) -> Result<gst::Buffer> {
+/// The frame's buffer, the same memory, with its selected pose and the clip's lens.
+fn select(frame: Received, replay: &TrackingReplay, faults: &Faults) -> Result<gst::Buffer> {
     let Received {
         mut meta,
         mut buffer,
         ..
     } = frame;
+    let t = replay.ti();
     let now = now_ns();
     let pose = if faults
         .unavailable_every
@@ -267,8 +288,10 @@ fn select(frame: Received, t: [f64; 9], faults: &Faults) -> Result<gst::Buffer> 
                 observed_ns: now,
                 t,
             },
+            frame_warp: None,
         }
     };
+    meta.lens = Some(replay.lens().clone());
     meta.selection = Some(Selection {
         selected_ns: now,
         overdue: false,

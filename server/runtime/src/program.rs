@@ -55,6 +55,8 @@ pub struct Frame<'a> {
     pub pixels: &'a [u8],
     /// Native frame identity; selects the lens model of a calibrated video scene.
     pub key: &'a w::FrameKey,
+    /// The frame's own lens of a tracked program (`lens` of its `ti_c` geometry).
+    pub lens: Option<RadialDistortion>,
     /// The frame's own warp of a tracked program (`frame_warp` of its `ti_c` geometry).
     pub frame_warp: Option<[[f64; 3]; 3]>,
     /// Media time of the frame on its timeline; animates flags reproducibly.
@@ -69,6 +71,7 @@ impl<'a> Frame<'a> {
             image: &execution.input.metadata().image,
             pixels: execution.input.pixels()?,
             key: &execution.provenance.input.frame,
+            lens: frame_lens(&execution.provenance.input.geometry)?,
             frame_warp: frame_warp(&execution.provenance.input.geometry),
             seconds: media_seconds(
                 execution.input.metadata().timeline.time_base,
@@ -81,6 +84,16 @@ impl<'a> Frame<'a> {
 /// Seconds of `ticks` on a timeline with `time_base` seconds per tick.
 pub fn media_seconds(time_base: w::TimeBase, ticks: u64) -> f64 {
     ticks as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator())
+}
+
+/// The lens a frame's geometry carries, if any.
+pub fn frame_lens(geometry: &w::FrameGeometry) -> Result<Option<RadialDistortion>, Error> {
+    match geometry {
+        w::FrameGeometry::TiC {
+            lens: Some(lens), ..
+        } => Ok(Some(crate::calibration::lens::radial(lens)?)),
+        _ => Ok(None),
+    }
 }
 
 /// The warp a frame's geometry carries, if any.
@@ -104,7 +117,6 @@ pub struct ProgramRenderer {
     compositor: Option<(w::ShadowMode, FrameCompositor)>,
     timestamps: Option<wgpu::QuerySet>,
     video_lens: Option<Arc<VideoLens>>,
-    tracked_lens: Option<RadialDistortion>,
     rgba_readback: Option<TextureReadback>,
 }
 
@@ -140,24 +152,13 @@ impl ProgramRenderer {
             compositor: None,
             timestamps: None,
             video_lens: None,
-            tracked_lens: None,
             rgba_readback: None,
         })
     }
 
+    /// The lens of a calibrated video program; a tracked frame brings its own.
     pub fn set_video_lens(&mut self, lens: Option<Arc<VideoLens>>) {
         self.video_lens = lens;
-    }
-
-    /// The startup lens of a tracked program; each frame supplies its own warp.
-    pub fn set_tracked_lens(&mut self, lens: Option<RadialDistortion>) {
-        self.tracked_lens = lens;
-    }
-
-    /// Both lens sources of a program, as its installation provides them.
-    pub fn set_lenses(&mut self, program: &synthetic::Synthetic) {
-        self.set_video_lens(program.video_lens.clone());
-        self.set_tracked_lens(program.tracking.as_ref().map(|tracked| tracked.lens));
     }
 
     /// Optional native diagnostics, disabled by default (no query allocation).
@@ -327,7 +328,7 @@ impl ProgramRenderer {
         )?;
         let compositor = &mut self.compositor.as_mut().expect("installed compositor").1;
         let tracked;
-        let camera_model = match (&self.video_lens, self.tracked_lens) {
+        let camera_model = match (&self.video_lens, frame.lens) {
             (Some(lens), _) => lens.model(frame.key)?,
             (None, Some(radial)) => {
                 tracked = CameraModel::Distorted(Box::new(LensDistortion::new(
@@ -338,7 +339,7 @@ impl ProgramRenderer {
                 &tracked
             }
             (None, None) if frame.frame_warp.is_some() => {
-                return Err("a frame warp needs a tracked program's lens".into());
+                return Err("a frame warp needs the frame's lens".into());
             }
             (None, None) => &CameraModel::Pinhole,
         };
