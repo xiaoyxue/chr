@@ -9,7 +9,7 @@ asset is needed.
 `bench WxH` times the render worker's path for that description with
 `chr-renderer-cli bench` (GPU and wall time per frame).
 
-`run WxH` starts run-tracked.sh (chr-server with both workers, chr-tracking-sim and
+`run WxH` starts run-tracked.sh (chr-server with both workers, chr-sdi-sim and
 chr-monitor with --encoder gstreamer) in its own process group on separate ports and
 runtime directory, waits until frames are tracked and rendered, records the SRT
 preview while it samples for --seconds, then stops everything it started and

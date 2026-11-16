@@ -1,32 +1,35 @@
-//! `chr-tracking-sim`: a capture-and-tracking simulator for `chr-server --tracked-scene`.
+//! `chr-sdi-sim`: a simulated SDI capture input for a tracked `chr-server`
+//! program (`--tracked-scene` or `--description`).
 //!
-//! It plays a calibrated clip the way a tracked camera reaches the server: each
-//! decoded frame goes into the shared-memory input ring (standing in for SDI in),
-//! and its camera, the manifest's `Ti`/`C` with the clip's warp of that frame, goes
-//! to `chr-server` as `tracking.frame` over the NativeSocket. The two channels are
-//! independent; the server pairs them by capture sequence. No physical SDI or
-//! tracking system is involved. With `--no-tracking` it is the camera only, for a
-//! server whose tracking worker supplies the cameras (`chr-server --tracking-worker`).
+//! It plays a calibrated clip in a loop the way a camera reaches the server: each
+//! decoded frame goes into the shared-memory input ring (standing in for SDI in).
+//! The server's tracking worker supplies the cameras. With `--send-cameras` it
+//! also sends each frame's recorded camera, the manifest's `Ti`/`C` with the
+//! clip's warp of that frame, to `chr-server` as `tracking.frame` over the
+//! NativeSocket (the external tracking mode). The two channels are independent;
+//! the server pairs them by capture sequence. No physical SDI or tracking system
+//! is involved; a real capture process (#80) takes its place.
 
 use std::{error::Error, path::PathBuf};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "\
-Usage: chr-tracking-sim --video <mp4> --scene <json> [options]
+Usage: chr-sdi-sim --video <mp4> --scene <json> [options]
 
-Plays a calibrated clip in a loop as a tracked camera: frames into the input ring,
-cameras to chr-server as tracking.frame. Needs the gstreamer-media feature.
+Plays a calibrated clip in a loop as a simulated SDI capture input: frames into the
+input ring. With --send-cameras also each frame's recorded camera to chr-server as
+tracking.frame. Needs the gstreamer-media feature.
 
 Options:
   --video <mp4>              Clip with the manifest's extent and rate, one warp per frame
   --scene <json>             calibrated-video-v1 manifest (Ti, C, radial, frame_warps)
   --socket <path>            chr-server NativeSocket [default: $XDG_RUNTIME_DIR/chr/render.sock]
   --input-ring <path>        Input ring to create [default: $XDG_RUNTIME_DIR/chr/input.ring]
+  --send-cameras             Also send the recorded cameras as tracking.frame (for a
+                             server started without --tracking-worker)
   --tracking-delay-ms <n>    Send each camera this long after its frame [default: 0]
-  --drop-tracking-every <n>  Withhold every n-th camera to exercise skipped frames
-  --no-tracking              Camera only: write frames, send no cameras (for a server
-                             started with --tracking-worker)
+  --drop-tracking-every <n>  Withhold every n-th camera to exercise frames without one
   -h, --help                 Show this help";
 
 #[derive(Debug, PartialEq)]
@@ -37,7 +40,7 @@ struct Args {
     input_ring: PathBuf,
     delay_ms: u64,
     drop_every: Option<u64>,
-    no_tracking: bool,
+    send_cameras: bool,
 }
 
 fn runtime_dir(name: &str) -> Result<PathBuf> {
@@ -48,7 +51,7 @@ fn runtime_dir(name: &str) -> Result<PathBuf> {
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     let (mut video, mut scene, mut socket, mut input_ring) = (None, None, None, None);
-    let (mut delay_ms, mut drop_every, mut no_tracking) = (0, None, false);
+    let (mut delay_ms, mut drop_every, mut send_cameras) = (0, None, false);
     while let Some(flag) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
@@ -63,13 +66,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                     return Err("--drop-tracking-every must be positive".into());
                 }
             }
-            "--no-tracking" => no_tracking = true,
+            "--send-cameras" => send_cameras = true,
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
     }
-    if no_tracking && (delay_ms > 0 || drop_every.is_some()) {
-        return Err("--no-tracking sends no cameras to delay or drop".into());
+    if !send_cameras && (delay_ms > 0 || drop_every.is_some()) {
+        return Err("--tracking-delay-ms and --drop-tracking-every need --send-cameras".into());
     }
     Ok(Some(Args {
         video: video.ok_or("--video <mp4> is required")?,
@@ -84,7 +87,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         },
         delay_ms,
         drop_every,
-        no_tracking,
+        send_cameras,
     }))
 }
 
@@ -109,7 +112,7 @@ fn main() {
 
 #[cfg(not(all(unix, feature = "gstreamer-media")))]
 fn run(_args: Args) -> Result<()> {
-    Err("chr-tracking-sim needs Linux/Unix and the gstreamer-media feature".into())
+    Err("chr-sdi-sim needs Linux/Unix and the gstreamer-media feature".into())
 }
 
 #[cfg(all(unix, feature = "gstreamer-media"))]
@@ -147,9 +150,9 @@ fn run(args: Args) -> Result<()> {
         fps: mode.fps,
     }
     .to_meta();
-    if args.no_tracking {
+    if !args.send_cameras {
         log::info!(
-            "simulating a {} camera: frames into {}; the server's tracking worker supplies cameras",
+            "simulating a {} SDI input: frames into {}; the server's tracking worker supplies cameras",
             mode.name(),
             args.input_ring.display()
         );
@@ -192,7 +195,7 @@ fn run(args: Args) -> Result<()> {
                     &frame.rgba,
                 )?;
                 frames += 1;
-                if args.no_tracking {
+                if !args.send_cameras {
                     continue;
                 }
                 if args.drop_every.is_some_and(|n| (frame.sequence + 1) % n == 0) {
@@ -270,6 +273,7 @@ mod tests {
             "/tmp/s",
             "--input-ring",
             "/tmp/r",
+            "--send-cameras",
             "--tracking-delay-ms",
             "40",
             "--drop-tracking-every",
@@ -286,7 +290,7 @@ mod tests {
                 input_ring: "/tmp/r".into(),
                 delay_ms: 40,
                 drop_every: Some(10),
-                no_tracking: false,
+                send_cameras: true,
             }
         );
         let camera_only = parse(&[
@@ -298,22 +302,21 @@ mod tests {
             "/tmp/s",
             "--input-ring",
             "/tmp/r",
-            "--no-tracking",
         ])
         .unwrap()
         .unwrap();
-        assert!(camera_only.no_tracking);
+        assert!(!camera_only.send_cameras, "frames only by default");
         assert!(
             parse(&[
                 "--video",
                 "v.mp4",
                 "--scene",
                 "s.json",
-                "--no-tracking",
                 "--tracking-delay-ms",
                 "5"
             ])
-            .is_err()
+            .is_err(),
+            "a camera delay needs --send-cameras"
         );
         assert!(parse(&["--help"]).unwrap().is_none());
         for bad in [
@@ -324,6 +327,7 @@ mod tests {
                 "clip.mp4",
                 "--scene",
                 "s.json",
+                "--send-cameras",
                 "--drop-tracking-every",
                 "0",
             ],
@@ -332,6 +336,7 @@ mod tests {
                 "clip.mp4",
                 "--scene",
                 "s.json",
+                "--send-cameras",
                 "--tracking-delay-ms",
                 "-1",
             ],

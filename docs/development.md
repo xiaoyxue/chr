@@ -23,7 +23,7 @@ server/                   Live render server; see server/AGENTS.md
 server/renderer/          chr-renderer: coordinate math, GPU setup, and rendering
 server/runtime/           chr-runtime: chr-server (render server), its workers chr-renderer-cli (also
                           stills) and chr-tracking-sim-cli (replay stand-in for the tracking module),
-                          and chr-tracking-sim (simulated camera, optionally with its cameras)
+                          and chr-sdi-sim (simulated SDI capture, --send-cameras for recorded cameras)
   src/input/              Video acquisition adapters (software MP4, shared-memory input ring)
   src/calibration/        Calibration consumption and frame/lens association
   src/program/            Demo scenes and admitted-frame rendering bridge
@@ -196,11 +196,11 @@ The stack's processes and how they connect:
 ```mermaid
 flowchart LR
   subgraph camera["Camera: simulated SDI input"]
-    sim["chr-tracking-sim<br/>+ ffmpeg decoder"]
+    sim["chr-sdi-sim<br/>+ ffmpeg decoder"]
   end
   subgraph render["render component: run-tracked.sh restarts each process"]
     server["chr-server<br/>no GPU: pairs frames and cameras,<br/>output clock, SDI port"]
-    tracker["tracking worker<br/>chr-tracking-sim-cli<br/>(replays recorded cameras)"]
+    tracker["tracking worker<br/>chr-tracking-sim-cli or pitch-analysis<br/>(replay stand-in or vchao)"]
     renderer["render worker<br/>chr-renderer-cli (GPU)"]
     monitor["chr-monitor<br/>H.264 encoder"]
   end
@@ -210,8 +210,8 @@ flowchart LR
   player["VLC / ffplay"]
 
   sim -- "frames: input ring (shm)" --> server
-  server -- "track + frame N (unixfd, memfd)" --> tracker
-  tracker -- "camera N or unavailable (unixfd)" --> server
+  server -- "frame N + VchaoFrame (unixfd, memfd)" --> tracker
+  tracker -- "same frame N + selected Ti or unavailable (unixfd)" --> server
   server -- "render + same frame N memory + camera (unixfd)" --> renderer
   renderer -- "done + composed SDI frame (unixfd, memfd)" --> server
   server -- "every SDI slot: program tap (shm)" --> monitor
@@ -228,7 +228,7 @@ The same in text, with every channel:
 ```text
               camera (simulated SDI input)
   ┌───────────────────────────────────────────┐
-  │ chr-tracking-sim  ◄── ffmpeg decodes clip │
+  │ chr-sdi-sim  ◄── ffmpeg decodes clip      │
   └─────┬─────────────────────────────────────┘
   frames│ input ring (shm)
         ▼
@@ -245,7 +245,7 @@ The same in text, with every channel:
   │ (replay stand-in)    │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
   └──────────────────────┘  └──────────────────┘                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
 
-  ① `track` carrying frame N as memfd memory ▼; its camera (Ti, C, frame_warp) or `unavailable` ▲
+  ① frame N as memfd memory with vchao's VchaoFrame meta ▼; the same frame N with its selected Ti or `unavailable` ▲
   ② `render` carrying the same frame N memory and its camera ▼; `done` carrying the composed SDI frame ▲
   ①② two GStreamer unixfd sockets per worker; each message is JSON in a buffer's GstCustomMeta
   ③ every slot the SDI port sends

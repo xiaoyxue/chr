@@ -16,7 +16,7 @@ process. Repository-wide rules are in the root `AGENTS.md`.
 - Layout: `renderer/` (`chr-renderer`) is the GPU rendering library; `runtime/`
   (`chr-runtime`) builds the `chr-server` render server, its two workers (the
   headless `chr-renderer-cli` and the `chr-tracking-sim-cli` tracking replay
-  stand-in) and the `chr-tracking-sim` camera simulator; `viewer/` (`chr-app`) is the
+  stand-in) and the `chr-sdi-sim` SDI capture simulator; `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
 - Keep all rendering in `renderer/`. It has no networking, video-device, or

@@ -228,7 +228,7 @@ uv run server/scripts/stack.py restart
 uv run server/scripts/stack.py restart pitch-studio monitor-page   # only these components
 ```
 
-The components are `render` (chr-server, both workers, the camera simulator and
+The components are `render` (chr-server, both workers, the SDI capture simulator and
 chr-monitor), `srt-relay`, `pitch-studio` and `monitor-page`.
 - **First start:** builds the release binaries and both pages. This takes minutes; later starts reuse the builds.
 - **Readiness:** `start` prints `ready: …` as each part comes up, and `PROBLEM: …` for whatever is still wrong.

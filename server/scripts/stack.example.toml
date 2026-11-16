@@ -12,7 +12,7 @@ video = "/path/to/clip.mp4"
 # asset_root = "/path/to/packages"
 
 # "worker": chr-server hands every frame to its tracking worker over vchao's VchaoFrame
-# unixfd contract (server/docs/tracking-worker.md). "external": chr-tracking-sim sends
+# unixfd contract (server/docs/tracking-worker.md). "external": chr-sdi-sim --send-cameras sends
 # the cameras over tracking.frame.
 tracking = "worker"
 # The tracking worker executable; empty: chr-tracking-sim-cli, which replays the

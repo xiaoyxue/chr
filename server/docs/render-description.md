@@ -1,7 +1,7 @@
 # Render description
 
 **Status:** `implemented` opt-in profile `chr-render-description-v1`, used with the
-[tracked camera simulation](tracking-simulation.md). It describes what to draw and
+[tracked camera simulation](sdi-simulation.md). It describes what to draw and
 with which lens, independent of any client's own scene model. The schema lives in
 `chr_common::description`; the pitch-studio client produces it from a Fusion match.
 

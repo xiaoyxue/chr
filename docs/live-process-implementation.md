@@ -412,7 +412,7 @@ recorded 1080p clip. Every run used the tracking worker and `chr-monitor
 | Deadline misses / clean feed / repeats | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 4 | 293 / 293 / 915 |
 | Frames tracked per second | 30.0 | 30.0 | 29.9 | 29.9 |
 | CPU: `chr-server` / render worker / monitor | 9 / 10 / 7 % | 13 / 16 / 14 % | 11 / 14 / 12 % | 85 / 23 / 82 % |
-| CPU: tracking worker / `chr-tracking-sim` + `ffmpeg` | 1 / 19 + 36 % | 1 / 39 + 60 % | 1 / 35 + 58 % | 1 / 195 + 249 % |
+| CPU: tracking worker / `chr-sdi-sim` + `ffmpeg` | 1 / 19 + 36 % | 1 / 39 + 60 % | 1 / 35 + 58 % | 1 / 195 + 249 % |
 | RSS: `chr-server` (shared frames) / render worker | 106 (79) / 193 MiB | 215 (178) / 208 MiB | 207 (170) / 207 MiB | 713 (633) / 291 MiB |
 | Render worker GPU memory | 463 MiB | 465 MiB | 721 MiB | 1021 MiB |
 | `dir` (tmpfs) used | 42 MiB | 95 MiB | 95 MiB | 380 MiB |
@@ -426,7 +426,7 @@ recorded 1080p clip. Every run used the tracking worker and `chr-monitor
   software camera simulation on this host**: 16 % of the frames (293 in 60 s)
   went out as clean feed and 915 slots repeated. Rendering fits (15 ms wall in
   `bench` against the 25 ms deadline); the software camera simulation
-  (`chr-tracking-sim` and its `ffmpeg` decoder, about 4.4 cores) and the CPU it
+  (`chr-sdi-sim` and its `ffmpeg` decoder, about 4.4 cores) and the CPU it
   takes from `chr-server` (85 %, partly converting clean feed) and the monitor
   (82 %, mostly the 4K-to-1080p scaling) do not. A real capture card replaces
   the simulation's decoding.

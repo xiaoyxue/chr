@@ -1,26 +1,34 @@
-# Tracked camera simulation
+# SDI capture and tracked camera simulation
 
 **Status:** `implemented` opt-in simulation on Linux. It simulates the #60 tracking
 path with a replayed calibrated clip; it is not a production tracking service,
 capture card or calibration contract. The default daemon and the initial
 `scene_frame_v1` pinhole profile are unchanged.
 
-With `chr-server --tracking-worker` the simulator is the camera only
-(`--no-tracking`) and the server's [tracking worker](tracking-worker.md) supplies
-the cameras over vchao's VchaoFrame contract; `stack.py` runs that mode by
-default. This document describes the external mode, in which `chr-tracking-sim`
-sends the cameras itself, and the pairing both modes share.
+> **Renamed in #142:** the simulator was called `chr-tracking-sim`, and camera
+> sending was its default (`--no-tracking` turned it off). It is now
+> `chr-sdi-sim`, which feeds frames only unless given `--send-cameras`. This
+> document was `tracking-simulation.md`.
 
-`chr-tracking-sim` stands in for a camera with a tracking system. It sends every
-frame of a calibrated clip into `chr-server`, and it sends each frame's camera
-separately. `chr-server --tracked-scene` pairs both by capture sequence, renders
+`chr-sdi-sim` stands in for the SDI capture card: it decodes a calibrated clip
+in a loop and writes every frame into `chr-server`'s capture input ring. A real
+capture process (#80) will take its place. By default it feeds frames only, and
+the server's [tracking worker](tracking-worker.md) supplies the cameras over
+vchao's VchaoFrame contract; `stack.py` runs that mode by default. This document
+also describes the external mode (`chr-sdi-sim --send-cameras`), in which the
+simulator sends each frame's recorded camera itself, and the pairing both modes
+share.
+
+In the external mode `chr-sdi-sim` stands in for a camera with a tracking
+system. It sends every frame of a calibrated clip into `chr-server`, and it
+sends each frame's camera separately. `chr-server --tracked-scene` pairs both by capture sequence, renders
 the CG with that camera, and transmits the program on its simulated SDI port.
 `chr-monitor` streams that output over SRT or WebRTC, as for every other program.
 
 ```text
-chr-tracking-sim ──frames (chr-shm input ring, "SDI in")──────────┐
+chr-sdi-sim ──frames (chr-shm input ring, "SDI in")───────────────┐
    (clip + manifest)                                               ▼
-                 ──tracking.frame {sequence, Ti, C, frame_warp}──► chr-server ──worker──► SDI out
+  --send-cameras ──tracking.frame {sequence, Ti, C, frame_warp}──► chr-server ──worker──► SDI out
                    (JSON-RPC over the NativeSocket)                │                      │
                                                                    │             program tap
                                                                    ▼                      ▼
@@ -166,9 +174,11 @@ up to 4096x2160, with the camera's aspect, for example the camera's own
 simulator still replays the manifest's cameras. View the stream with an SRT caller, for example VLC on
 `srt://<host>:9001`; the host must allow that UDP port.
 
-`chr-tracking-sim` options: `--tracking-delay-ms <n>` sends every camera that
-long after its frame, and `--drop-tracking-every <n>` withholds every n-th
-camera to exercise skipped frames. It requires the clip's decoded frame count to
+`chr-sdi-sim` options: `--send-cameras` sends the recorded cameras
+(`run-tracked.sh` passes it without `--tracking-worker`); with it,
+`--tracking-delay-ms <n>` sends every camera that long after its frame, and
+`--drop-tracking-every <n>` withholds every n-th camera to exercise frames
+without one. It requires the clip's decoded frame count to
 equal the manifest's `frame_warps`, like the calibrated replay.
 
 `chr-renderer-cli render --tracked-scene <json> --frame <n>` renders frame `n`

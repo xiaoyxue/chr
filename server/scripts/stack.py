@@ -5,7 +5,7 @@
 # ///
 """Starts, stops and reports the local development stack with one command.
 
-The stack is the tracked-camera simulation (chr-tracking-sim, chr-server and
+The stack is the tracked-camera simulation (chr-sdi-sim, chr-server and
 chr-monitor through run-tracked.sh, which restarts whichever exits), the
 pitch-studio client, the program monitor page and an optional SRT-to-TCP relay for
 viewers behind an SSH port forward. Machine-specific paths live in a local TOML
@@ -64,7 +64,8 @@ class Config:
     # (STUDIO_DATA_DIR); inside asset_root so chr-server can read the uploads.
     studio_data_dir: str | None = None
     monitor_page_port: int = 5173
-    # "worker": chr-server's tracking worker supplies cameras; "external": the simulator does.
+    # "worker": chr-server's tracking worker supplies cameras; "external": chr-sdi-sim
+    # sends the recorded ones (--send-cameras).
     tracking: str = "worker"
     # Tracking worker executable (VchaoFrame contract, e.g. vchao's pitch-analysis);
     # empty: the chr-tracking-sim-cli replay stand-in.
@@ -182,7 +183,7 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
     known = {
         f"tcp {config.server_ws}": "chr-server control JSON-RPC WebSocket (description.load, status)",
         f"unix {config.dir}/render.sock": "chr-server NativeSocket: local control"
-                                         + (", tracking.frame from chr-tracking-sim" if external_tracking else ""),
+                                         + (", tracking.frame from chr-sdi-sim" if external_tracking else ""),
         f"tcp {config.monitor_ws}": "chr-monitor WebSocket: status and WebRTC signalling",
         f"udp {config.srt}": "chr-monitor SRT listener: the program for VLC / ffplay",
         **{f"tcp {host}:{port + i}": "chr-monitor WebRTC ICE-TCP, one per open stream" for i in range(4)},
@@ -195,8 +196,8 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
 
 # Processes that hold no socket, and what they do instead.
 PORTLESS = {
-    "chr-tracking-sim": "camera: frames into the input ring (shared memory)",
-    "ffmpeg": "decodes the clip in a loop for chr-tracking-sim",
+    "chr-sdi-sim": "simulated SDI input: frames into the input ring (shared memory)",
+    "ffmpeg": "decodes the clip in a loop for chr-sdi-sim",
     "chr-renderer-cli worker": "GPU renderer; frames and replies over chr-server's unixfd sockets",
     "chr-tracking-sim-cli": "tracking worker stand-in (replays recorded Ti); VchaoFrame frames from"
                             " chr-server and back over unixfd sockets",
@@ -425,7 +426,7 @@ def report(config: Config) -> str:
             others = len(held) - len(ports)
             notes = f"up {uptime(pid)}" + (", OLD BUILD: rebuilt since it started, restart to run it" if old_build(pid) else "")
             role = "" if ports else PORTLESS.get(name, "no listening socket")
-            if name == "chr-tracking-sim" and external_tracking:
+            if name == "chr-sdi-sim" and external_tracking:
                 role += "; Ti/C to chr-server's socket (tracking.frame)"
             lines.append(f"  {name:28} pid {pid:<8} {notes:8} {role}".rstrip())
             lines += [f"      {address:40} {known[address]}" for address in ports]
@@ -519,7 +520,7 @@ def runs(component: str, config: Config) -> str:
     tracker = Path(config.tracking_cli).name if config.tracking_cli else "chr-tracking-sim-cli"
     workers = f"render and tracking ({tracker}) workers" if config.tracking == "worker" else "render worker"
     return {
-        "render": f"run-tracked.sh: chr-server with its {workers}, chr-tracking-sim, chr-monitor",
+        "render": f"run-tracked.sh: chr-server with its {workers}, chr-sdi-sim, chr-monitor",
         "srt-relay": "SRT-to-TCP relay",
         "pitch-studio": "built client/pitch-studio served by vite preview",
         "monitor-page": "built client/example/render-harness served by vite preview",

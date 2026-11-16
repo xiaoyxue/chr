@@ -331,7 +331,7 @@ server/scripts/run-tracked.sh --scene clip-manifest.json --video clip.mp4 --trac
 
 - `--tracking-worker` runs the stand-in with the manifest
   (`--tracking-worker-arg --manifest ... --tracking-lens program`). It starts
-  `chr-tracking-sim` with `--no-tracking`, so the simulator is the camera only.
+  `chr-sdi-sim` without `--send-cameras`, so the simulator is the camera only.
 - `--tracking-cli <path>` runs another worker instead. Pass its arguments as
   `--tracking-worker-arg <arg>`, and set `--tracking-centre` and
   `--tracking-wait-ms`.
@@ -373,7 +373,7 @@ nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
 
 ### Measured
 
-SC1464 fixture (1212x654p30 clip, looped by the camera simulator; private,
+SC1464 fixture (1212x654p30 clip, looped by `chr-sdi-sim`; private,
 not in the repository), RTX 3090 shared with a running stack, 150 s,
 `--tracking-wait-ms 800`:
 

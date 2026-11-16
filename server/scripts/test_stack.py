@@ -79,6 +79,7 @@ class ReportTests(unittest.TestCase):
     def test_short_names(self):
         self.assertEqual(stack.describe(["/x/target/chr-renderer-cli", "worker"]), "chr-renderer-cli worker")
         self.assertIn(stack.describe(["/x/target/chr-tracking-sim-cli", "--manifest", "m.json"]), stack.PORTLESS)
+        self.assertIn(stack.describe(["/x/target/chr-sdi-sim", "--scene", "s.json"]), stack.PORTLESS)
         self.assertIn(stack.describe(["/nix/store/x/bin/pitch-analysis", "--input-socket", "a"]), stack.PORTLESS)
         self.assertEqual(stack.describe(["bash", "/x/server/scripts/run-tracked.sh", "--scene", "s.json"]), "bash run-tracked.sh")
         self.assertEqual(stack.describe(["python3", "server/scripts/stack.py", "relay", "srt://a:1"]), "python3 stack.py relay")

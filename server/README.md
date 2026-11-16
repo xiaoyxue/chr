@@ -11,7 +11,7 @@ The Cargo workspace is at the repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-tracking-sim` simulates the camera |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-sdi-sim` simulates the camera |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers, the `stack.py` one-command development stack and the `resolution_bench.py` per-resolution measurement |
@@ -50,8 +50,8 @@ vchao's `pitch-analysis` runs as the tracking worker unchanged;
 estimates nothing: the existing replay loads local lens data at startup and
 associates it by native stream/frame identity.
 `program/video.rs` retains the demo-specific GLB and scene setup. The opt-in
-[tracked camera simulation](docs/tracking-simulation.md) receives `Ti`, `C` and a
-frame warp per frame from `chr-tracking-sim`; it is a simulation, not a production
+[tracked camera simulation](docs/sdi-simulation.md) receives `Ti`, `C` and a
+frame warp per frame from `chr-sdi-sim`; it is a simulation, not a production
 tracking service. Physical SDI adapters and a general public distortion protocol
 remain separate work; the initial frame contract is still pinhole-only.
 
@@ -259,14 +259,14 @@ without moving its shadow catcher. Leave the camera alone: edits would invalidat
 the clip alignment. This is diagnostic replay:
 no scene occlusion, audio, physical SDI, hardware encoding or real-time estimator.
 
-### Tracked camera simulation
+### SDI capture and tracked camera simulation
 
 `server/scripts/run-tracked.sh --scene scene.json --video clip.mp4 --srt <ip:port>`
-replays the same manifest and clip as a tracked camera: `chr-tracking-sim` writes
+replays the same manifest and clip as a tracked camera: `chr-sdi-sim` writes
 each frame into a shared-memory input ring and sends its `Ti`/`C`/frame warp as
 `tracking.frame`; `chr-server --tracked-scene` pairs them by capture sequence and
 renders through the worker to the SDI port, which `chr-monitor` streams. See
-[Tracked camera simulation](docs/tracking-simulation.md). With `--tracking-worker`
+[SDI capture and tracked camera simulation](docs/sdi-simulation.md). With `--tracking-worker`
 the simulator is the camera only and chr-server's tracking worker supplies the
 cameras ([tracking worker](docs/tracking-worker.md)); `stack.py` uses that mode
 by default. The tracking worker's options are:
@@ -861,7 +861,7 @@ needs. With every component enabled the stack runs nine working processes:
 | render | `chr-server` | control WebSocket (`server_ws`), NativeSocket `<dir>/render.sock` |
 | render | `chr-renderer-cli worker` | none listed: two unixfd sockets with chr-server (frames, replies) in `$XDG_RUNTIME_DIR/chr/worker-<pid>/`, holds the GPU |
 | render | `chr-tracking-sim-cli` (or `tracking_cli`) | none listed: two unixfd sockets with chr-server in `$XDG_RUNTIME_DIR/chr/tracking-<pid>/`; VchaoFrame frames in and back with their `Ti` (`tracking = "worker"`) |
-| render | `chr-tracking-sim` | none: input ring (shared memory); with `tracking = "external"` also chr-server's socket |
+| render | `chr-sdi-sim` | none: input ring (shared memory); with `tracking = "external"` also chr-server's socket |
 | render | `ffmpeg` | none: decodes the clip for the simulator |
 | render | `chr-monitor` | WebSocket (`monitor_ws`), SRT listener (`srt`, UDP), ICE-TCP from `webrtc_tcp` (only while a viewer is connected) |
 | srt-relay | `stack.py relay` | TCP `srt_relay_port`, plus one `ffmpeg` per connected player |
@@ -892,7 +892,7 @@ python3 server/scripts/resolution_bench.py bench 3840x2160     # chr-renderer-cl
 python3 server/scripts/resolution_bench.py run 3840x2160 --seconds 60
 ```
 
-`run` starts `run-tracked.sh` (both workers, the camera simulator and
+`run` starts `run-tracked.sh` (both workers, the SDI capture simulator and
 `chr-monitor --encoder gstreamer`) in its own process group on ports 28987 and
 up (`--port-base`) with its own runtime directory (`--dir`), records the SRT
 preview while it samples, and stops and removes everything it started. It prints

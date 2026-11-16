@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Starts a tracked-camera simulation: chr-tracking-sim (capture and tracking),
-# chr-server --tracked-scene and chr-monitor. With --tracking-worker the simulator is
-# the camera only and chr-server's tracking worker supplies the cameras over vchao's
+# Starts a tracked-camera simulation: chr-sdi-sim (simulated SDI capture input),
+# chr-server --tracked-scene and chr-monitor. Without --tracking-worker the simulator
+# also sends the manifest's recorded cameras (chr-sdi-sim --send-cameras). With it
+# the simulator is the camera only and chr-server's tracking worker supplies the cameras over vchao's
 # VchaoFrame contract: the chr-tracking-sim-cli replay stand-in, or the --tracking-cli
 # executable such as vchao's pitch-analysis. Each runs on its own: a process that exits
 # is restarted after a short delay while the others keep running. Ctrl-C stops all.
@@ -20,8 +21,8 @@
 #   --size <WxH>      Program output size: even, up to 4096x2160, with the camera's
 #                     aspect ratio; chr-monitor previews at most 1920x1080 [default: 1280x720]
 #   --srt <ip:port>   chr-monitor SRT listener [default: 127.0.0.1:9001]
-#   --sim-arg <arg>   Pass one argument to chr-tracking-sim (repeatable), for example
-#                     --sim-arg --tracking-delay-ms --sim-arg 40
+#   --sim-arg <arg>   Pass one argument to chr-sdi-sim (repeatable), for example
+#                     --sim-arg --tracking-delay-ms --sim-arg 40 (without --tracking-worker)
 #   --monitor-arg <arg>  Pass one argument to chr-monitor (repeatable)
 #   --dir <path>      Directory for the socket, input ring and program tap, kept on exit
 #                     [default: a private directory removed on exit]
@@ -101,7 +102,8 @@ if [[ -n $tracking_worker ]]; then
     # The stand-in returns the manifest's recorded ideal-image Ti: keep its lens.
     program+=(--tracking-worker-arg --manifest --tracking-worker-arg "$scene" --tracking-lens program)
   fi
-  sim_args+=(--no-tracking)
+else
+  sim_args+=(--send-cameras)
 fi
 supervise chr-server "$target/release/chr-server" "${program[@]}" --size "$size" --fps "$fps" \
   --socket "$dir/render.sock" --input-ring "$dir/input.ring" --monitor-tap "$dir/program.tap" \
@@ -110,6 +112,6 @@ if [[ -n $with_monitor ]]; then
   supervise chr-monitor "$target/release/chr-monitor" --tap "$dir/program.tap" --size "$size" \
     --fps "$fps" --srt "$srt" "${monitor_args[@]}"
 fi
-supervise chr-tracking-sim "$target/release/chr-tracking-sim" --scene "$scene" --video "$video" \
+supervise chr-sdi-sim "$target/release/chr-sdi-sim" --scene "$scene" --video "$video" \
   --socket "$dir/render.sock" --input-ring "$dir/input.ring" "${sim_args[@]}"
 wait

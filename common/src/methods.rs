@@ -85,8 +85,8 @@ pub mod mesh {
 }
 
 /// Per-frame camera of a tracked program (`--tracked-scene`), sent by a tracking
-/// source such as `chr-tracking-sim`. Only `chr-server` running a tracked program
-/// answers these methods. See `server/docs/tracking-simulation.md`.
+/// source such as `chr-sdi-sim --send-cameras`. Only `chr-server` running a tracked program
+/// answers these methods. See `server/docs/sdi-simulation.md`.
 pub mod tracking {
     use super::*;
     use crate::scene_frame::{Matrix3, U64, Vec3};

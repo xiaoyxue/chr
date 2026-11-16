@@ -58,7 +58,8 @@ Options:
                           (Linux gstreamer-media feature; --fps must match source)
   --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
   --tracked-scene <json> The same manifest as tracked-video-v1: frames come from the input
-                          ring and each frame's Ti/C/warp from tracking.frame (chr-tracking-sim)
+                          ring (chr-sdi-sim) and each frame's camera from the tracking worker
+                          or tracking.frame (chr-sdi-sim --send-cameras)
   --description <json>    A chr-render-description-v1 scene and lens, with the same tracked
                           input as --tracked-scene
   --asset-root <dir>      Folder that description.load may read assets from (repeatable;

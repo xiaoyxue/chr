@@ -75,14 +75,14 @@ language-neutral, so the real tracking module can replace the replay stand-in.
 #60 keeps the questions this does not settle: the tracking reference lifecycle
 (#59), `FrameKey` versus capture sequence, and production missing/late policy.
 An external tracker can still send cameras as `tracking.frame` when no tracking
-worker runs ([tracked camera simulation](../server/docs/tracking-simulation.md)).
+worker runs ([tracked camera simulation](../server/docs/sdi-simulation.md)).
 
 ## Repository layout
 
 | Path | Package | Contents |
 | --- | --- | --- |
 | `server/renderer/` | `chr-renderer` | GPU rendering library (unchanged) |
-| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-tracking-sim` camera simulator |
+| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-sdi-sim` SDI capture simulator |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
 | `common/shm/` | `chr-shm` | Shared-memory frame rings between processes (capture input ring, program tap); the only crate allowed to use `unsafe` |

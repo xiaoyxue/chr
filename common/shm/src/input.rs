@@ -1,4 +1,4 @@
-//! The capture input ring: frames a capture process (for example `chr-tracking-sim`)
+//! The capture input ring: frames a capture process (for example `chr-sdi-sim`)
 //! hands to `chr-server`, standing in for an SDI input card.
 //!
 //! The capture process pushes each frame into a [`SLOTS`]-slot ring: `index` is the
