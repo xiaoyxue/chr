@@ -1,31 +1,38 @@
-//! chr-server's side of the tracking worker: starts it, hands it captured frames
-//! and collects its cameras, and replaces it when it exits, fails or hangs.
+//! chr-server's side of the tracking worker: starts it, hands it every captured
+//! frame as a VchaoFrame ([`protocol`](super::protocol)), takes each frame back
+//! with its selected pose, and replaces the worker when it exits, fails or hangs.
 //!
 //! ```text
-//! Starting ──ready──► Ready ──exit / fatal / hang──► Backoff ──timer──► Starting
+//! Starting ──output socket connected──► Ready ──exit / invalid frame / hang / full──► Backoff ──timer──► Starting
 //! ```
 //!
-//! Nothing here blocks: [`Tracker::track`] queues one request that carries the
-//! frame's shared memory, and [`Tracker::poll`] returns the cameras answered since
-//! the last call. At most [`CREDITS`] frames await an answer. How
-//! long a frame waits for its camera is the caller's join policy. Each request
-//! has its own ID and is answered at most once, so answers from a replaced
-//! worker or for forgotten frames are never used.
+//! Every started worker is a new stream: a new `stream_id`, `frame_id`s from 0.
+//! While ready, every captured frame is sent, so the stream has no gaps; the
+//! frames the worker holds are bounded by [`TrackerConfig::in_flight`], and a
+//! worker that would need more is replaced. Nothing here blocks:
+//! [`Tracker::track`] queues one frame (its shared memory, not a copy) and
+//! [`Tracker::poll`] returns the frames answered since the last call. How long
+//! a frame waits for its camera is the caller's join policy.
 
 use std::{
+    collections::VecDeque,
     path::PathBuf,
+    process::Command,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
-use super::protocol::{CREDITS, Reply, Request, VERSION};
+use super::protocol::{PoseStatus, Received, Wire, check_caps, now_ns};
 use crate::worker::{
     supervisor::{Running, create_private_dir},
-    transport::{Event, SharedPixels},
+    transport::{self, Channel, Event, SharedPixels},
 };
-use chr_common::methods::{
-    render_worker::WorkerState,
-    tracking::{TrackerStatus, TrackingFrame},
+use chr_common::{
+    methods::{
+        render_worker::WorkerState,
+        tracking::{TrackerStatus, TrackingFrame},
+    },
+    scene_frame as w,
 };
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -34,23 +41,44 @@ const FIRST_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// Time in `Ready` after which the backoff starts again from the beginning.
 const STABLE: Duration = Duration::from_secs(10);
-/// Loading a tracking reference can take a while; a worker that never becomes
-/// ready is replaced.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Loading a tracking model and map can take a while (vchao's `pitch-analysis`
+/// allows 120 s); a worker that never listens on its output is replaced.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Frames in flight beyond the join's wait: transport, and replies read once
+/// per output period.
+const IN_FLIGHT_MARGIN: Duration = Duration::from_millis(250);
+/// The fewest frames in flight, the render worker's old fixed credit count.
+const MIN_IN_FLIGHT: usize = 8;
+/// Placeholder in worker arguments replaced by each session's stream ID, for
+/// example a new ledger path per session.
+pub const STREAM_ID_PLACEHOLDER: &str = "{stream_id}";
+
+/// The frames a worker may hold at once: every frame the join still waits for
+/// (`wait` at `fps`) plus a margin. A worker holding more answers too late for
+/// any of them to be rendered, so it is replaced rather than sent fewer frames:
+/// a VchaoFrame stream has no gaps.
+pub fn in_flight_limit(wait: Duration, fps: u32) -> usize {
+    let frames = ((wait + IN_FLIGHT_MARGIN).as_nanos() * u128::from(fps)).div_ceil(1_000_000_000);
+    usize::try_from(frames).map_or(usize::MAX, |n| n.max(MIN_IN_FLIGHT))
+}
 
 pub struct TrackerConfig {
-    /// The worker executable; it is run as `<executable> worker <args>...`.
+    /// The worker executable, run as `<executable> <args>... --stream-id <id>
+    /// --input-socket <path> --output-socket <path>`.
     pub executable: PathBuf,
+    /// Worker arguments; [`STREAM_ID_PLACEHOLDER`] is replaced in each.
     pub args: Vec<String>,
-    /// Passed to the worker in `hello`.
-    pub calibration: PathBuf,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// The station's optical centre for every camera: world metres, negative Z up.
+    pub camera_center: [f64; 3],
     /// Private directory for the worker's two sockets; removed with the tracker.
     pub socket_dir: PathBuf,
-    /// The oldest unanswered request may be this old before the worker is killed.
+    /// The oldest frame in flight may be this old before the worker is killed.
     pub hang: Duration,
+    /// Frames the worker may hold at once ([`in_flight_limit`]).
+    pub in_flight: usize,
 }
 
 /// Shared with the control plane for `tracking.get_worker_status`.
@@ -59,6 +87,8 @@ pub type StatusHandle = Arc<Mutex<TrackerStatus>>;
 pub fn status_handle() -> StatusHandle {
     Arc::new(Mutex::new(TrackerStatus {
         state: WorkerState::Backoff,
+        worker: String::new(),
+        stream_id: None,
         pid: None,
         restarts: 0,
         requests: 0,
@@ -69,35 +99,56 @@ pub fn status_handle() -> StatusHandle {
     }))
 }
 
-pub struct Tracker {
-    config: TrackerConfig,
-    status: StatusHandle,
-    state: State,
-    /// The unanswered requests, one per credit.
-    credits: [Option<Pending>; CREDITS],
-    /// Cameras answered since the last [`Tracker::poll`].
-    answered: Vec<TrackingFrame>,
-    next_id: u64,
-    backoff: Duration,
-    started: bool,
+/// One frame the worker returned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    /// The frame's capture sequence.
+    pub sequence: u64,
+    pub pose: PoseStatus,
+    pub overdue: bool,
+    /// `None` for an `unavailable` pose.
+    pub camera: Option<TrackingFrame>,
 }
 
-#[derive(Clone, Copy)]
+pub struct Tracker {
+    config: TrackerConfig,
+    camera_center: w::Vec3,
+    status: StatusHandle,
+    state: State,
+    /// Frames answered since the last [`Tracker::poll`].
+    answered: Vec<Answer>,
+    /// Workers started so far; numbers the streams.
+    sessions: u64,
+    backoff: Duration,
+}
+
+/// A frame sent and not yet returned.
 struct Pending {
-    id: u64,
+    frame_id: u64,
     sequence: u64,
     sent: Instant,
-    /// The frame's answer is no longer wanted; the credit stays held until it comes.
+    /// The frame's answer is no longer wanted (the capture restarted).
     forgotten: bool,
+}
+
+/// One worker's stream.
+struct Session {
+    wire: Wire,
+    /// Sent frames in `frame_id` order: the order they come back in.
+    in_flight: VecDeque<Pending>,
+    next_frame_id: u64,
+    last_source_ns: u64,
 }
 
 enum State {
     Starting {
-        worker: Running<Reply>,
+        worker: Running<Received>,
+        session: Session,
         since: Instant,
     },
     Ready {
-        worker: Running<Reply>,
+        worker: Running<Received>,
+        session: Session,
         since: Instant,
     },
     Backoff {
@@ -108,18 +159,29 @@ enum State {
 impl Tracker {
     /// Creates the socket directory; the first worker starts on the first call.
     pub fn new(config: TrackerConfig, status: StatusHandle) -> Result<Self, Error> {
+        let camera_center = config
+            .camera_center
+            .map(w::Finite::try_from)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "the station centre must be finite")?
+            .try_into()
+            .expect("three values");
         create_private_dir(&config.socket_dir)?;
+        status.lock().unwrap_or_else(PoisonError::into_inner).worker = config
+            .executable
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         Ok(Self {
             config,
+            camera_center,
             status,
             state: State::Backoff {
                 until: Instant::now(),
             },
-            credits: [None; CREDITS],
             answered: Vec::new(),
-            next_id: 0,
+            sessions: 0,
             backoff: FIRST_BACKOFF,
-            started: false,
         })
     }
 
@@ -128,85 +190,84 @@ impl Tracker {
     }
 
     /// Hands the captured frame `sequence` (RGBA8 at the configured extent) to the
-    /// worker: its shared memory, not a copy. Without a ready worker or a free
-    /// credit the frame is not sent, so it will go without a camera.
+    /// worker: its shared memory, not a copy. Without a ready worker the frame is
+    /// not sent, so it goes without a camera; a worker that already holds
+    /// [`TrackerConfig::in_flight`] frames is replaced.
     pub fn track(&mut self, sequence: u64, rgba: &SharedPixels) {
         self.maintain();
-        let credit = match &self.state {
-            State::Ready { .. } => self.credits.iter().position(Option::is_none),
-            _ => None,
+        let sent = match &mut self.state {
+            State::Ready {
+                worker, session, ..
+            } => send(worker, session, self.config.in_flight, sequence, rgba),
+            _ => Err(None),
         };
-        let Some(credit) = credit else {
-            self.status().not_sent += 1;
-            return;
-        };
-        let State::Ready { worker, .. } = &mut self.state else {
-            unreachable!("a credit is only taken while ready")
-        };
-        let id = self.next_id;
-        self.next_id += 1;
-        if let Err(error) = worker
-            .channel
-            .send(&Request::Track { id, sequence }, Some(rgba.memory()))
-        {
-            self.status().not_sent += 1;
-            self.reap(format!("cannot send to the tracking worker: {error}"));
-            return;
+        match sent {
+            Ok(()) => self.status().requests += 1,
+            Err(failure) => {
+                self.status().not_sent += 1;
+                if let Some(reason) = failure {
+                    self.reap(reason);
+                }
+            }
         }
-        self.credits[credit] = Some(Pending {
-            id,
-            sequence,
-            sent: Instant::now(),
-            forgotten: false,
-        });
-        self.status().requests += 1;
     }
 
-    /// Advances supervision and returns the cameras answered since the last call.
-    pub fn poll(&mut self) -> Vec<TrackingFrame> {
+    /// Advances supervision and returns the frames answered since the last call.
+    pub fn poll(&mut self) -> Vec<Answer> {
         self.maintain();
         std::mem::take(&mut self.answered)
     }
 
-    /// Forgets every unanswered frame, for example after the capture restarted
-    /// its sequence numbers: their answers will be ignored. Their credits return
-    /// only once answered, as the worker may still be reading them.
+    /// Forgets every frame in flight, for example after the capture restarted
+    /// its sequence numbers: their answers will be ignored. They still come back,
+    /// in order, and keep their place in the stream.
     pub fn forget(&mut self) {
-        for pending in self.credits.iter_mut().flatten() {
-            pending.forgotten = true;
+        if let State::Starting { session, .. } | State::Ready { session, .. } = &mut self.state {
+            for pending in &mut session.in_flight {
+                pending.forgotten = true;
+            }
         }
         self.answered.clear();
     }
 
-    /// Handles replies, then replaces an exited, failed, hung or never-ready
-    /// worker and starts one when the backoff ends.
+    /// Handles returned frames, then replaces an exited, failed, hung or
+    /// never-ready worker and starts one when the backoff ends.
     fn maintain(&mut self) {
         while let Some(event) = self.try_event() {
-            self.handle(event);
+            if let Err(reason) = self.handle(event) {
+                self.reap(reason);
+            }
         }
         let now = Instant::now();
         let mut spawn = false;
+        let mut ready = false;
         let reap = match &mut self.state {
             State::Backoff { until } => {
                 spawn = now >= *until;
                 None
             }
-            State::Starting { worker, since } => worker.check().or_else(|| {
-                (now.duration_since(*since) > STARTUP_TIMEOUT)
-                    .then(|| "the tracking worker did not become ready in time".to_owned())
+            State::Starting { worker, since, .. } => worker.check().or_else(|| {
+                ready = worker.channel.is_connected();
+                (!ready && now.duration_since(*since) > STARTUP_TIMEOUT).then(|| {
+                    "the tracking worker did not listen on its output socket in time".to_owned()
+                })
             }),
-            State::Ready { worker, since } => {
+            State::Ready {
+                worker,
+                session,
+                since,
+            } => {
                 if now.duration_since(*since) > STABLE {
                     self.backoff = FIRST_BACKOFF;
                 }
                 worker.check().or_else(|| {
-                    self.credits
-                        .iter()
-                        .flatten()
-                        .any(|pending| now.duration_since(pending.sent) > self.config.hang)
+                    session
+                        .in_flight
+                        .front()
+                        .is_some_and(|pending| now.duration_since(pending.sent) > self.config.hang)
                         .then(|| {
                             format!(
-                                "the tracking worker left a frame unanswered for more than {:?}",
+                                "the tracking worker held a frame for more than {:?}",
                                 self.config.hang
                             )
                         })
@@ -217,79 +278,112 @@ impl Tracker {
             self.reap(reason);
         } else if spawn {
             self.spawn();
+        } else if ready {
+            self.become_ready();
         }
     }
 
-    fn handle(&mut self, event: Event<Reply>) {
-        let reply = match event {
-            // The frame memory, if any, is released here.
-            Event::Message(incoming) => incoming.message,
-            Event::Closed(reason) => {
-                self.reap(reason);
-                return;
-            }
+    /// The worker listens on its output socket and chr-server is its consumer:
+    /// there is no `ready` message in the VchaoFrame contract.
+    fn become_ready(&mut self) {
+        let State::Starting {
+            worker, session, ..
+        } = std::mem::replace(
+            &mut self.state,
+            State::Backoff {
+                until: Instant::now(),
+            },
+        )
+        else {
+            unreachable!("only a starting worker becomes ready")
         };
-        match reply {
-            Reply::Ready { name } => {
-                let State::Starting { .. } = self.state else {
-                    self.reap("unexpected ready from the tracking worker".into());
-                    return;
-                };
-                let State::Starting { worker, .. } = std::mem::replace(
-                    &mut self.state,
-                    State::Backoff {
-                        until: Instant::now(),
-                    },
-                ) else {
-                    unreachable!()
-                };
-                log::info!("tracking worker {} ready: {name}", worker.child.id());
-                self.state = State::Ready {
-                    worker,
-                    since: Instant::now(),
-                };
-                self.status().state = WorkerState::Ready;
-            }
-            Reply::Fatal { message } => {
-                self.reap(format!("tracking worker failed: {message}"));
-            }
-            Reply::Camera { id, camera } => {
-                let Some(pending) = self.answer(id) else {
-                    return;
-                };
-                if pending.forgotten {
-                    return;
-                }
-                if camera.sequence.get() != pending.sequence {
-                    self.reap(format!(
-                        "the tracking worker answered request {id} for frame {} with frame {}",
-                        pending.sequence,
-                        camera.sequence.get()
-                    ));
-                    return;
-                }
-                self.status().cameras += 1;
-                self.answered.push(camera);
-            }
-            Reply::Unavailable { id, reason } => {
-                if let Some(pending) = self.answer(id).filter(|pending| !pending.forgotten) {
-                    log::debug!("frame {} has no camera: {reason}", pending.sequence);
-                    self.status().unavailable += 1;
-                }
-            }
+        log::info!(
+            "tracking worker {} ready: stream {}",
+            worker.child.id(),
+            session.wire.stream_id
+        );
+        self.state = State::Ready {
+            worker,
+            session,
+            since: Instant::now(),
+        };
+        self.status().state = WorkerState::Ready;
+    }
+
+    /// Validates one returned frame against the oldest frame in flight; any
+    /// mismatch is a worker failure, not a frame without a camera.
+    fn handle(&mut self, event: Event<Received>) -> Result<(), String> {
+        let received = match event {
+            Event::Message(received) => received,
+            Event::Closed(reason) => return Err(reason),
+        };
+        let (State::Starting { session, .. } | State::Ready { session, .. }) = &mut self.state
+        else {
+            return Ok(());
+        };
+        let meta = &received.meta;
+        let stream_id = &session.wire.stream_id;
+        if &meta.stream_id != stream_id {
+            return Err(format!(
+                "the tracking worker returned a frame of stream {:?}, not {stream_id:?}",
+                meta.stream_id
+            ));
         }
+        if let Some(caps) = &received.caps {
+            check_caps(caps, stream_id).map_err(|error| error.to_string())?;
+        }
+        let Some(pending) = session.in_flight.pop_front() else {
+            return Err(format!(
+                "the tracking worker returned frame {} that was never sent",
+                meta.frame_id
+            ));
+        };
+        if meta.frame_id != pending.frame_id {
+            return Err(format!(
+                "the tracking worker returned frame {} where frame {} was due",
+                meta.frame_id, pending.frame_id
+            ));
+        }
+        if meta.duration_ns != session.wire.duration_ns()
+            || received.buffer.size() != session.wire.frame_bytes()
+        {
+            return Err(format!(
+                "the tracking worker returned frame {} with another duration or size",
+                meta.frame_id
+            ));
+        }
+        let Some(selection) = &meta.selection else {
+            return Err(format!(
+                "the tracking worker returned frame {} without a selection",
+                meta.frame_id
+            ));
+        };
+        if pending.forgotten {
+            return Ok(());
+        }
+        let camera = selection.pose.t().map(|t| TrackingFrame {
+            sequence: pending.sequence.into(),
+            // Finite: checked when the meta was read.
+            ti: t.map(|v| w::Finite::try_from(v).expect("finite Ti")),
+            camera_center: self.camera_center,
+            frame_warp: None,
+        });
+        let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        match camera {
+            Some(_) => status.cameras += 1,
+            None => status.unavailable += 1,
+        }
+        drop(status);
+        self.answered.push(Answer {
+            sequence: pending.sequence,
+            pose: selection.pose.status(),
+            overdue: selection.overdue,
+            camera,
+        });
+        Ok(())
     }
 
-    /// Returns the credit of request `id`; `None` if it is not awaited (any more).
-    fn answer(&mut self, id: u64) -> Option<Pending> {
-        let credit = self
-            .credits
-            .iter_mut()
-            .find(|credit| credit.is_some_and(|p| p.id == id))?;
-        credit.take()
-    }
-
-    fn try_event(&self) -> Option<Event<Reply>> {
+    fn try_event(&self) -> Option<Event<Received>> {
         match &self.state {
             State::Starting { worker, .. } | State::Ready { worker, .. } => {
                 worker.channel.try_event()
@@ -299,18 +393,31 @@ impl Tracker {
     }
 
     fn spawn(&mut self) {
-        if self.started {
+        if self.sessions > 0 {
             self.status().restarts += 1;
         }
-        self.started = true;
-        match self.start() {
+        self.sessions += 1;
+        let wire = Wire {
+            stream_id: format!("chr-{}-{}", std::process::id(), self.sessions),
+            width: self.config.width,
+            height: self.config.height,
+            fps: self.config.fps,
+        };
+        match self.start(&wire) {
             Ok(worker) => {
                 let mut status = self.status();
                 status.state = WorkerState::Starting;
                 status.pid = Some(worker.child.id());
+                status.stream_id = Some(wire.stream_id.clone());
                 drop(status);
                 self.state = State::Starting {
                     worker,
+                    session: Session {
+                        wire,
+                        in_flight: VecDeque::new(),
+                        next_frame_id: 0,
+                        last_source_ns: 0,
+                    },
                     since: Instant::now(),
                 };
             }
@@ -318,19 +425,24 @@ impl Tracker {
         }
     }
 
-    fn start(&self) -> Result<Running<Reply>, Error> {
-        Running::spawn(
-            &self.config.executable,
-            &self.config.args,
+    fn start(&self, wire: &Wire) -> Result<Running<Received>, Error> {
+        transport::init()?;
+        let channel = Channel::open(
             &self.config.socket_dir,
-            &Request::Hello {
-                version: VERSION,
-                width: self.config.width,
-                height: self.config.height,
-                fps: self.config.fps,
-                calibration: self.config.calibration.clone(),
-            },
-        )
+            Some(&wire.caps()),
+            self.config.in_flight as u64 + 1,
+        )?;
+        let mut command = Command::new(&self.config.executable);
+        command
+            .args(
+                self.config
+                    .args
+                    .iter()
+                    .map(|arg| arg.replace(STREAM_ID_PLACEHOLDER, &wire.stream_id)),
+            )
+            .arg("--stream-id")
+            .arg(&wire.stream_id);
+        Running::spawn(command, channel)
     }
 
     /// Kills the current worker, if any, forgets its frames and starts the backoff.
@@ -341,10 +453,9 @@ impl Tracker {
                 until: Instant::now(),
             },
         ) {
+            // Its frames are released with its sockets.
             worker.kill();
         }
-        // The worker is gone with its buffers, so every credit is free again.
-        self.credits = [None; CREDITS];
         self.backoff(reason);
     }
 
@@ -360,12 +471,48 @@ impl Tracker {
         let mut status = self.status();
         status.state = WorkerState::Backoff;
         status.pid = None;
+        status.stream_id = None;
         status.last_error = Some(reason);
     }
 
     fn status(&self) -> MutexGuard<'_, TrackerStatus> {
         self.status.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Sends one frame on the session's stream. Fails with `None` if it was merely
+/// not sent and with the reason if the worker must be replaced.
+fn send(
+    worker: &Running<Received>,
+    session: &mut Session,
+    limit: usize,
+    sequence: u64,
+    rgba: &SharedPixels,
+) -> Result<(), Option<String>> {
+    if session.in_flight.len() >= limit {
+        return Err(Some(format!(
+            "the tracking worker holds {} frames, the most chr-server keeps in flight \
+             (--tracking-wait-ms plus {IN_FLIGHT_MARGIN:?})",
+            session.in_flight.len()
+        )));
+    }
+    let frame_id = session.next_frame_id;
+    // Strictly increasing, as the stream requires, even for frames read together.
+    let source_ns = now_ns().max(session.last_source_ns + 1);
+    session
+        .wire
+        .frame(frame_id, source_ns, rgba.memory())
+        .and_then(|buffer| worker.channel.push(buffer))
+        .map_err(|error| Some(format!("cannot send to the tracking worker: {error}")))?;
+    session.next_frame_id += 1;
+    session.last_source_ns = source_ns;
+    session.in_flight.push_back(Pending {
+        frame_id,
+        sequence,
+        sent: Instant::now(),
+        forgotten: false,
+    });
+    Ok(())
 }
 
 impl Drop for Tracker {
@@ -379,5 +526,22 @@ impl Drop for Tracker {
             worker.stop();
         }
         let _ = std::fs::remove_dir_all(&self.config.socket_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_in_flight_limit_covers_the_wait() {
+        let ms = Duration::from_millis;
+        // 1.5 s + 0.25 s at 50 fps.
+        assert_eq!(in_flight_limit(ms(1500), 50), 88);
+        // pitch-analysis holds up to ceil(500 ms / frame) + 8 + 2 frames: 25 at 30 fps.
+        assert!(in_flight_limit(ms(600), 30) >= 25);
+        assert_eq!(in_flight_limit(ms(1000), 30), 38);
+        assert_eq!(in_flight_limit(ms(60), 50), 16);
+        assert_eq!(in_flight_limit(Duration::ZERO, 1), MIN_IN_FLIGHT);
     }
 }

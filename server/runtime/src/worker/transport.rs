@@ -8,19 +8,21 @@
 //!
 //! The sending side listens (`unixfdsink`) and the receiving side connects
 //! (`unixfdsrc`). The server listens on `input.sock` before it starts the worker
-//! and passes both paths as `worker --input-socket <path> --output-socket <path>`;
+//! and passes both paths as `--input-socket <path> --output-socket <path>`;
 //! the worker listens on `output.sock` and the server connects once it exists.
 //! Both sinks hold their buffers until a client connects
 //! (`wait-for-connection`), so no message is lost to the startup order.
 //!
-//! Every buffer carries exactly one [`META`] `GstCustomMeta` whose structure has
-//! a string field `json`: one protocol message, a serde JSON object tagged by
-//! `type`. A message with pixels carries them as the buffer's single memory,
-//! memfd-backed ([`SharedPixels`]), which crosses the socket as a file
-//! descriptor without a copy; a control message is a buffer without memory.
-//! All buffers on a socket have the caps [`CAPS`]; the protocol messages give
-//! pixel formats and extents. Both sides must register [`META`] (see [`init`])
-//! before they receive, or `unixfdsrc` rejects the buffer.
+//! On the render worker's sockets every buffer carries exactly one [`META`]
+//! `GstCustomMeta` whose structure has a string field `json`: one protocol
+//! message, a serde JSON object tagged by `type`. A message with pixels carries
+//! them as the buffer's single memory, memfd-backed ([`SharedPixels`]), which
+//! crosses the socket as a file descriptor without a copy; a control message is
+//! a buffer without memory. All its buffers have the caps [`CAPS`]; the protocol
+//! messages give pixel formats and extents. The tracking worker's sockets carry
+//! vchao's raw video frames instead ([`super::tracking::protocol`]): the same
+//! sockets and memory, other caps and another meta. Both sides must register the
+//! metas (see [`init`]) before they receive, or `unixfdsrc` rejects the buffer.
 //!
 //! A receiver releases a buffer (and its memory, in both processes) by dropping
 //! it; the sink also releases everything of a client that disconnects.
@@ -48,7 +50,7 @@ pub const INPUT_FLAG: &str = "--input-socket";
 pub const OUTPUT_FLAG: &str = "--output-socket";
 /// Buffers an `appsrc` may hold before [`Sender::send`] fails instead of growing.
 /// The server's credits keep the queue far below this.
-const QUEUE: u64 = 16;
+pub const QUEUE: u64 = 16;
 /// Released [`SharedPixels`] memories kept for reuse: a fresh memfd costs page
 /// faults on every frame (about 3 ms more per 1080p RGBA8 frame than a reused one).
 const RECYCLED: usize = 8;
@@ -58,12 +60,14 @@ const RECYCLED: usize = 8;
 /// being sent, a frame a worker has not released) still holds it.
 static RECYCLE: Mutex<Vec<gst::Buffer>> = Mutex::new(Vec::new());
 
-/// Initializes GStreamer and registers [`META`]; idempotent.
+/// Initializes GStreamer and registers [`META`] and the tracking hop's
+/// `VchaoFrame` meta; idempotent.
 pub fn init() -> Result<(), Error> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     INIT.get_or_init(|| {
         gst::init().map_err(|error| error.to_string())?;
         gst::meta::CustomMeta::register(META, &[]);
+        gst::meta::CustomMeta::register(super::tracking::protocol::META, &[]);
         Ok(())
     })
     .clone()
@@ -199,23 +203,34 @@ impl Deref for SharedPixels {
 pub struct Sender {
     pipeline: gst::Pipeline,
     source: AppSrc,
+    queue: u64,
 }
 
 impl Sender {
-    /// Listens on `path`, replacing a socket file that a killed process left behind.
+    /// Listens on `path` for render worker messages ([`CAPS`]), replacing a
+    /// socket file that a killed process left behind.
     pub fn listen(path: &Path) -> Result<Self, Error> {
         check()?;
+        Self::listen_with(path, Some(&gst::Caps::new_empty_simple(CAPS)), QUEUE)
+    }
+
+    /// Listens on `path` for buffers with `caps` (or caps set later with
+    /// [`Self::set_caps`]); at most `queue` buffers wait for the peer.
+    pub fn listen_with(path: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
+        check()?;
         let _ = std::fs::remove_file(path);
-        // Never blocks the caller: the queue is checked in `send`.
-        let source = AppSrc::builder()
-            .caps(&gst::Caps::new_empty_simple(CAPS))
+        // Never blocks the caller: the queue is checked in `push`.
+        let mut source = AppSrc::builder()
             .format(gst::Format::Time)
             .is_live(true)
             .block(false)
-            .max_buffers(QUEUE)
+            .max_buffers(queue)
             .max_bytes(0)
-            .max_time(gst::ClockTime::ZERO)
-            .build();
+            .max_time(gst::ClockTime::ZERO);
+        if let Some(caps) = caps {
+            source = source.caps(caps);
+        }
+        let source = source.build();
         let sink = gst::ElementFactory::make("unixfdsink")
             .property("socket-path", path_str(path)?)
             .property("wait-for-connection", true)
@@ -228,25 +243,39 @@ impl Sender {
         let pipeline = gst::Pipeline::new();
         pipeline.add_many([source.upcast_ref(), &sink])?;
         source.link(&sink)?;
-        let sender = Self { pipeline, source };
+        let sender = Self {
+            pipeline,
+            source,
+            queue,
+        };
         sender.pipeline.set_state(gst::State::Playing)?;
         Ok(sender)
     }
 
+    /// The caps of the buffers pushed from now on.
+    pub fn set_caps(&self, caps: &gst::Caps) {
+        self.source.set_caps(Some(caps));
+    }
+
     /// Queues one message, with `memory` as its payload, without blocking.
     pub fn send(&self, message: &impl Serialize, memory: Option<gst::Memory>) -> Result<(), Error> {
-        if let Some(error) = bus_error(&self.pipeline) {
-            return Err(error.into());
-        }
-        if self.source.current_level_buffers() >= QUEUE {
-            return Err("the send queue is full".into());
-        }
         let mut buffer = gst::Buffer::new();
         let writable = buffer.get_mut().expect("new buffer is not shared");
         if let Some(memory) = memory {
             writable.append_memory(memory);
         }
         attach(writable, &serde_json::to_string(message)?);
+        self.push(buffer)
+    }
+
+    /// Queues one buffer without blocking; fails if the queue is full.
+    pub fn push(&self, buffer: gst::Buffer) -> Result<(), Error> {
+        if let Some(error) = bus_error(&self.pipeline) {
+            return Err(error.into());
+        }
+        if self.source.current_level_buffers() >= self.queue {
+            return Err("the send queue is full".into());
+        }
         self.source.push_buffer(buffer)?;
         Ok(())
     }
@@ -327,6 +356,11 @@ impl Receiver {
     pub fn recv<T: DeserializeOwned>(&self) -> Result<Option<Incoming<T>>, Error> {
         self.reader.recv()
     }
+
+    /// The error that stopped the connection, such as a lost sender.
+    pub fn error(&self) -> Option<String> {
+        bus_error(&self.pipeline)
+    }
 }
 
 impl Drop for Receiver {
@@ -339,18 +373,48 @@ impl Reader {
     /// Blocks for the next message; `None` once the stream ended, the sender
     /// went away or the receiver was dropped.
     pub fn recv<T: DeserializeOwned>(&self) -> Result<Option<Incoming<T>>, Error> {
-        let Ok(sample) = self.sink.pull_sample() else {
-            return Ok(None);
-        };
+        self.recv_sample()?.map(Incoming::from_sample).transpose()
+    }
+
+    /// Blocks for the next sample (a buffer and its caps); `None` as for [`Self::recv`].
+    pub fn recv_sample(&self) -> Result<Option<gst::Sample>, Error> {
+        Ok(self.sink.pull_sample().ok())
+    }
+
+    /// The next sample, or `None` if none arrives within `timeout` or the stream ended.
+    pub fn recv_sample_timeout(&self, timeout: Duration) -> Option<gst::Sample> {
+        self.sink
+            .try_pull_sample(gst::ClockTime::from_nseconds(timeout.as_nanos() as u64))
+    }
+
+    /// Whether the stream ended or the sender went away.
+    pub fn is_eos(&self) -> bool {
+        self.sink.is_eos()
+    }
+}
+
+/// What a [`Channel`] reads from its worker: one decoded sample.
+pub trait Inbound: Sized + Send + 'static {
+    fn decode(sample: gst::Sample) -> Result<Self, Error>;
+}
+
+impl<T: DeserializeOwned> Incoming<T> {
+    fn from_sample(sample: gst::Sample) -> Result<Self, Error> {
         let buffer = sample.buffer_owned().ok_or("a sample without a buffer")?;
         let message = decode(&buffer)?;
-        Ok(Some(Incoming { message, buffer }))
+        Ok(Incoming { message, buffer })
+    }
+}
+
+impl<T: DeserializeOwned + Send + 'static> Inbound for Incoming<T> {
+    fn decode(sample: gst::Sample) -> Result<Self, Error> {
+        Self::from_sample(sample)
     }
 }
 
 /// What arrives from a worker on the server's side.
-pub enum Event<T> {
-    Message(Incoming<T>),
+pub enum Event<M> {
+    Message(M),
     /// The worker's output ended; the reason is for the log.
     Closed(String),
 }
@@ -359,24 +423,26 @@ pub enum Event<T> {
 /// `input.sock` at once and connects to the worker's `output.sock` once that
 /// exists ([`Self::connect`]). A thread forwards the worker's messages, so
 /// [`Self::try_event`] never blocks.
-pub struct Channel<T> {
+pub struct Channel<M> {
     sender: Sender,
     input: PathBuf,
     output: PathBuf,
     receiver: Option<Receiver>,
-    forward: mpsc::Sender<Event<T>>,
-    events: mpsc::Receiver<Event<T>>,
+    forward: mpsc::Sender<Event<M>>,
+    events: mpsc::Receiver<Event<M>>,
 }
 
-impl<T: DeserializeOwned + Send + 'static> Channel<T> {
-    pub fn open(dir: &Path) -> Result<Self, Error> {
+impl<M: Inbound> Channel<M> {
+    /// Listens on `input.sock` in `dir` for buffers with `caps`, at most `queue`
+    /// of them waiting for the worker.
+    pub fn open(dir: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
         let input = dir.join("input.sock");
         let output = dir.join("output.sock");
         // Connecting must wait for this worker's socket, not a dead one's.
         let _ = std::fs::remove_file(&output);
         let (forward, events) = mpsc::channel();
         Ok(Self {
-            sender: Sender::listen(&input)?,
+            sender: Sender::listen_with(&input, caps, queue)?,
             input,
             output,
             receiver: None,
@@ -404,7 +470,10 @@ impl<T: DeserializeOwned + Send + 'static> Channel<T> {
             .name("chr-worker-replies".into())
             .spawn(move || {
                 loop {
-                    let event = match reader.recv() {
+                    let event = match reader
+                        .recv_sample()
+                        .and_then(|sample| sample.map(M::decode).transpose())
+                    {
                         Ok(Some(message)) => Event::Message(message),
                         Ok(None) => Event::Closed("the worker exited".into()),
                         Err(error) => Event::Closed(format!("invalid worker output: {error}")),
@@ -420,7 +489,7 @@ impl<T: DeserializeOwned + Send + 'static> Channel<T> {
     }
 }
 
-impl<T> Channel<T> {
+impl<M> Channel<M> {
     /// The worker's command-line arguments naming both sockets.
     pub fn worker_args(&self) -> [&std::ffi::OsStr; 4] {
         [
@@ -435,16 +504,20 @@ impl<T> Channel<T> {
         self.sender.send(message, memory)
     }
 
+    pub fn push(&self, buffer: gst::Buffer) -> Result<(), Error> {
+        self.sender.push(buffer)
+    }
+
     pub fn is_connected(&self) -> bool {
         self.receiver.is_some()
     }
 
-    pub fn try_event(&self) -> Option<Event<T>> {
+    pub fn try_event(&self) -> Option<Event<M>> {
         self.events.try_recv().ok()
     }
 
     /// The next event, or `None` if none arrives within `timeout`.
-    pub fn event_timeout(&self, timeout: Duration) -> Option<Event<T>> {
+    pub fn event_timeout(&self, timeout: Duration) -> Option<Event<M>> {
         self.events.recv_timeout(timeout).ok()
     }
 

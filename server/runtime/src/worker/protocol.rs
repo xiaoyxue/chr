@@ -4,7 +4,7 @@
 //!
 //! | Direction | `type` | Payload | Purpose |
 //! | --- | --- | --- | --- |
-//! | server → worker | `hello` | – | Program, runtime ID, output mode, assets |
+//! | server → worker | `hello` | – | Program, runtime ID, output mode, assets, tracked lens |
 //! | worker → server | `ready` / `fatal` | – | Startup result |
 //! | server → worker | `render` | input image | One program frame |
 //! | server → worker | `triangle` | – | One frame of the default triangle |
@@ -74,6 +74,20 @@ impl WorkerProgram {
     }
 }
 
+/// The lens a tracked program's frames go through.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackedLens {
+    /// The startup lens of the description or manifest, with each frame's warp:
+    /// cameras whose `Ti` maps to the ideal (undistorted) image, such as the
+    /// recorded cameras the replay stand-in returns.
+    #[default]
+    Program,
+    /// No lens: cameras whose `Ti` maps to the real, distorted image, such as
+    /// vchao's `pitch-analysis` estimates (`server/docs/tracking-worker.md`).
+    Identity,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
     pub width: u32,
@@ -93,6 +107,8 @@ pub enum Request {
         /// the worker imports and registers them after installing its program.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         assets: Vec<chr_common::description::Asset>,
+        #[serde(default)]
+        lens: TrackedLens,
     },
     /// The input image, tightly packed as `image` describes it, is the payload.
     Render {

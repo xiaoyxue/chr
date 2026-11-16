@@ -143,6 +143,16 @@ export interface TrackingStatus {
   frames_dropped: number;
   /** Captured frames the input ring overwrote before the server read them. */
   frames_overwritten: number;
+  /** Frames a tracking worker returned with their own estimate (`fresh`). */
+  poses_fresh: number;
+  /** Frames returned with a pose interpolated between two estimates. */
+  poses_interpolated: number;
+  /** Frames returned with an earlier frame's estimate (`reused`). */
+  poses_reused: number;
+  /** Frames returned without a camera (`unavailable`). */
+  poses_unavailable: number;
+  /** Frames the worker released by its overload rule, whatever their pose. */
+  poses_overdue: number;
 }
 
 /** chr-monitor counters since the monitor started. */

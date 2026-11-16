@@ -177,6 +177,10 @@ export interface WorkerStatus {
 /** `tracking.get_worker_status` result (chr_common::methods::tracking::TrackerStatus). */
 export interface TrackerStatus {
   state: WorkerStatus['state'];
+  /** The worker executable's file name, e.g. `chr-tracking-sim-cli` or `pitch-analysis`. */
+  worker: string;
+  /** VchaoFrame stream of the current worker session. */
+  stream_id: string | null;
   pid: number | null;
   restarts: number;
   requests: number;

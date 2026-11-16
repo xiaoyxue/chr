@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Starts a tracked-camera simulation: chr-tracking-sim (capture and tracking),
 # chr-server --tracked-scene and chr-monitor. With --tracking-worker the simulator is
-# the camera only and chr-server's tracking worker (chr-tracking-sim-cli, a replay
-# stand-in) supplies the cameras. Each runs on its own: a process that exits
+# the camera only and chr-server's tracking worker supplies the cameras over vchao's
+# VchaoFrame contract: the chr-tracking-sim-cli replay stand-in, or the --tracking-cli
+# executable such as vchao's pitch-analysis. Each runs on its own: a process that exits
 # is restarted after a short delay while the others keep running. Ctrl-C stops all.
 #
 # Usage: server/scripts/run-tracked.sh --scene <json> --video <mp4> [--description <json>]
 #            [--size <WxH>] [--srt <ip:port>] [--dir <path>] [--no-monitor] [--tracking-worker]
-#            [--sim-arg <arg>]... [--monitor-arg <arg>]... [chr-server options]
+#            [--tracking-cli <path>] [--sim-arg <arg>]... [--monitor-arg <arg>]...
+#            [chr-server options]
 #
 #   --scene <json>    calibrated-video-v1 manifest: the server's scene and lens, the
 #                     simulator's per-frame Ti/C/warp
@@ -25,8 +27,14 @@
 #                     [default: a private directory removed on exit]
 #   --no-monitor      Do not start chr-monitor; start it separately with
 #                     --tap <dir>/program.tap and the same --size/--fps
-#   --tracking-worker chr-server hands every frame to its tracking worker, which
-#                     replays the manifest's cameras; the simulator sends none
+#   --tracking-worker chr-server hands every frame to its tracking worker; the
+#                     simulator sends no cameras. Without --tracking-cli the worker is
+#                     chr-tracking-sim-cli replaying the manifest's Ti (with the
+#                     manifest's or description's lens, --tracking-lens program)
+#   --tracking-cli <path>  Tracking worker executable instead of the stand-in, for
+#                     example pitch-analysis (implies --tracking-worker). Give its own
+#                     arguments as chr-server options --tracking-worker-arg <arg>, and
+#                     --tracking-centre <x> <y> <z> and --tracking-wait-ms <n>
 #
 # The output rate is the manifest's fps. Run from the repository root inside
 # `nix develop .#media`; on a non-NixOS NVIDIA host wrap this script with nixGL.
@@ -40,6 +48,7 @@ srt=127.0.0.1:9001
 dir=
 with_monitor=1
 tracking_worker=
+tracking_cli=
 sim_args=()
 monitor_args=()
 server_args=()
@@ -53,6 +62,7 @@ while (($#)); do
     --dir) dir=$2; shift 2 ;;
     --no-monitor) with_monitor=; shift ;;
     --tracking-worker) tracking_worker=1; shift ;;
+    --tracking-cli) tracking_worker=1; tracking_cli=$2; shift 2 ;;
     --sim-arg) sim_args+=("$2"); shift 2 ;;
     --monitor-arg) monitor_args+=("$2"); shift 2 ;;
     *) server_args+=("$1"); shift ;;
@@ -84,7 +94,13 @@ if [[ -n $description ]]; then
   program=(--description "$description")
 fi
 if [[ -n $tracking_worker ]]; then
-  program+=(--tracking-worker "$scene")
+  program+=(--tracking-worker)
+  if [[ -n $tracking_cli ]]; then
+    program+=(--tracking-cli "$tracking_cli")
+  else
+    # The stand-in returns the manifest's recorded ideal-image Ti: keep its lens.
+    program+=(--tracking-worker-arg --manifest --tracking-worker-arg "$scene" --tracking-lens program)
+  fi
   sim_args+=(--no-tracking)
 fi
 supervise chr-server "$target/release/chr-server" "${program[@]}" --size "$size" --fps "$fps" \
