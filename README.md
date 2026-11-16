@@ -127,9 +127,15 @@ From the repository root:
 git worktree add -b feature/my-feature .worktree/my-feature main
 ```
 
-Clone with `git clone --recurse-submodules`, or run `git submodule update --init`
-in an existing clone or worktree. The vchao submodule needs read access to that
-private repository; builds and checks do not need it.
+Clone with its submodules:
+
+```sh
+git clone --recursive https://github.com/xiaoyxue/chr.git
+```
+
+In an existing clone or a new worktree, run `git submodule update --init` instead.
+The vchao submodule needs read access to that private repository; builds and
+checks do not need it.
 
 See `AGENTS.md` for contributor guidelines and `docs/development.md` for the
 directory layout, toolchain ownership, and complete development workflow.

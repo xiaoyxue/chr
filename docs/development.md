@@ -70,7 +70,7 @@ clone. Both repositories are private: cloning the submodule needs read access to
 vchao.
 
 ```sh
-git clone --recurse-submodules https://github.com/xiaoyxue/chr.git
+git clone --recursive https://github.com/xiaoyxue/chr.git
 git submodule update --init external/vchao     # an existing clone or a new worktree
 git submodule update --remote external/vchao   # move the pin to vchao's latest main
 ```
