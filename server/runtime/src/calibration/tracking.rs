@@ -291,10 +291,14 @@ impl TrackingJoin {
         }
     }
 
-    /// Releases every joined frame exactly `wait` after its capture instead: a
-    /// constant program delay for cameras that arrive in bursts, such as a
-    /// tracking worker that holds frames until a later estimate resolves them.
-    pub fn with_fixed_delay(mut self) -> Self {
+    /// Releases every resolved frame at the output period nearest to `wait`
+    /// after its capture instead: a constant program delay for cameras that
+    /// arrive in bursts, such as a tracking worker that holds frames until a
+    /// later estimate resolves them. A wait of whole periods puts every
+    /// deadline on an output tick, so tick jitter would move frames by a whole
+    /// period, in pairs and gaps; deciding half a `period` early avoids that.
+    pub fn with_fixed_delay(mut self, period: Duration) -> Self {
+        self.wait = self.wait.saturating_sub(period / 2);
         self.playout = self.wait;
         self
     }
@@ -473,7 +477,7 @@ mod tests {
         let feed = TrackingFeed::new(8);
         let wait = Duration::from_millis(100);
         let period = Duration::from_millis(20);
-        let mut join = TrackingJoin::new(feed.clone(), wait, 8).with_fixed_delay();
+        let mut join = TrackingJoin::new(feed.clone(), wait, 8).with_fixed_delay(period);
         let start = Instant::now();
         for sequence in 0..4 {
             join.frame(captured(sequence, start + period * sequence as u32));
@@ -496,9 +500,9 @@ mod tests {
     fn a_frame_without_camera_goes_out_as_clean_feed_and_its_late_camera_is_rejected() {
         let feed = TrackingFeed::new(8);
         let wait = Duration::from_millis(100);
-        let mut join = TrackingJoin::new(feed.clone(), wait, 4).with_fixed_delay();
-        let start = Instant::now();
         let period = Duration::from_millis(20);
+        let mut join = TrackingJoin::new(feed.clone(), wait, 4).with_fixed_delay(period);
+        let start = Instant::now();
         join.frame(captured(1, start));
         join.frame(captured(2, start + period));
         feed.push(replay().frame(2)).unwrap();

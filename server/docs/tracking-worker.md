@@ -273,8 +273,10 @@ counted by the render worker (`render.get_worker_status`).
 
 ## Latency and program delay
 
-- With a tracking worker, the join releases every joined frame exactly
-  `--tracking-wait-ms` after its capture. This is a constant program delay,
+- With a tracking worker, the join releases every joined frame at the output
+  period nearest to `--tracking-wait-ms` after its capture (it decides half a
+  period early, so tick jitter cannot shift frames by a whole period, which
+  showed as pairs of frames and gaps: 5 % drops and repeats in a first test). This is a constant program delay,
   quantized to the output period. `pitch-analysis` returns frames in bursts:
   a frame waits for the next scheduled estimate to resolve. Releasing each frame
   as soon as it is joined would drop most of a burst. A frame whose camera has
@@ -387,3 +389,18 @@ not in the repository), RTX 3090 shared with a running stack, 150 s,
 | Frames held by the worker | at most 16 (`peak_video_queue`; its capacity 26, chr-server's limit 32) |
 | Restarts | none; the clip loop (frame 359 to 0) did not disturb the stream |
 | GPU memory | `atlas-vq-estimate` 1.8 GiB; `pitch-analysis` itself none |
+
+With the GPU to itself (no other stack), the full program for 77 s: 2,306 SDI
+slots, none repeated or dropped; 2,058 frames rendered with CG from vchao's `Ti`
+(2 of them clean feed after a render deadline miss), 252 clean-feed frames while
+the worker started, 2 frames dropped by the join at startup. The CG test quads
+sit on the pitch markings in the SRT preview. GPU memory: render worker 463 MiB,
+`atlas-vq-estimate` 1.8 GiB. CPU: `atlas-vq-estimate` 112 %, `chr-monitor`
+(OpenH264) 83 %, the simulator's `ffmpeg` 29 %, `chr-sdi-sim` 15 %, `chr-server`
+and the render worker 7 % each, `pitch-analysis` 4 %.
+
+#146 does not hit a CUDA process next to a Vulkan one: `chr-renderer-cli bench`
+of this description (1212x654, 300 frames) takes 1.80 ms wall per frame
+(95th percentile 2.08 ms, GPU 0.56 ms) alone and 2.32 ms (95th percentile
+3.39 ms, GPU 0.51 ms) next to a running `pitch-analysis`. A second Vulkan
+process is what slows uploads by orders of magnitude.

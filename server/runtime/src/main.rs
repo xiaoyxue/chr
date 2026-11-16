@@ -441,7 +441,7 @@ fn run(args: Args) -> Result<()> {
                 capture_backlog(wait, mode.frame_duration()),
             );
             let join = if args.tracking_worker {
-                join.with_fixed_delay()
+                join.with_fixed_delay(mode.frame_duration())
             } else {
                 join
             };
