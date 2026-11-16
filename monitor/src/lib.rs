@@ -73,8 +73,8 @@ impl VideoMode {
     }
 }
 
-/// Largest program output the monitor reads: 8K UHD, as `chr-server`.
-pub const MAX_SIZE: [u32; 2] = [7680, 4320];
+/// Largest program output the monitor reads: DCI 4K, as `chr-server`.
+pub const MAX_SIZE: [u32; 2] = [4096, 2160];
 
 /// Largest preview the monitor encodes: H.264 NVENC takes at most 4096 pixels per
 /// side, and a 1080p preview is enough to judge the program.
@@ -126,7 +126,6 @@ mod tests {
             }
             .preview()
         };
-        assert_eq!(preview(7680, 4320), [1920, 1080]);
         assert_eq!(preview(3840, 2160), [1920, 1080]);
         assert_eq!(preview(1920, 1080), [1920, 1080]);
         assert_eq!(preview(1280, 720), [1280, 720]);
@@ -138,6 +137,6 @@ mod tests {
         // Portrait: 2160 * 1080 / 3840 = 607.5 -> 608.
         assert_eq!(preview(2160, 3840), [608, 1080]);
         // An extreme aspect still keeps an even, nonzero side.
-        assert_eq!(preview(7680, 2), [1920, 2]);
+        assert_eq!(preview(4096, 2), [1920, 2]);
     }
 }

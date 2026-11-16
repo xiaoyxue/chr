@@ -54,7 +54,7 @@ pub struct Synthetic {
     pub tracking: Option<crate::calibration::tracking::Tracked>,
     /// SHA-256 of each asset a render description registered at startup.
     pub described: Option<std::collections::HashMap<w::Id, String>>,
-    /// Made on first use: a described or tracked program at 8K never injects it.
+    /// Made on first use: a described or tracked program never injects it.
     pixels: std::sync::OnceLock<Vec<u8>>,
     next: u64,
     pending: Vec<w::Id>,
@@ -72,7 +72,7 @@ impl Synthetic {
         runtime: &w::Id,
     ) -> Result<w::Configuration, Error> {
         if !super::fits(mode.width, mode.height, super::MAX_EXTENT) {
-            return Err("program output must be even and at most 7680x4320".into());
+            return Err("program output must be even and at most 4096x2160".into());
         }
         let configuration: w::Configuration = serde_json::from_value(json!({
             "runtime_id":runtime, "configuration_id":format!("{}-configuration", runtime.as_str()),

@@ -121,8 +121,8 @@ impl VideoInput {
             "scale=w={}:h={}:in_range=tv:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709,format=uyvy422",
             mode.width, mode.height
         );
-        // Two threads per started 1080p frame of pixels, 2..8: a 4K or 8K camera
-        // clip must still decode and convert at its rate.
+        // Two threads per started 1080p frame of pixels, 2..8: a 4K camera clip
+        // must still decode and convert at its rate.
         let threads = (mode.width * mode.height)
             .div_ceil(1920 * 1080)
             .saturating_mul(2)

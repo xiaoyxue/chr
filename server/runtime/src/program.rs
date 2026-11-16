@@ -24,8 +24,9 @@ pub mod synthetic;
 pub mod video;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-/// Largest camera native extent and program output size: 8K UHD.
-pub const MAX_EXTENT: [u32; 2] = [7680, 4320];
+/// Largest camera native extent and program output size: DCI 4K, which also
+/// covers 4K UHD (3840x2160).
+pub const MAX_EXTENT: [u32; 2] = [4096, 2160];
 /// The synthetic and software-video demonstrations' own limit.
 pub const DEMO_MAX_EXTENT: [u32; 2] = [1280, 720];
 
@@ -379,7 +380,7 @@ pub fn validate_output(config: &w::Configuration) -> Result<(), Error> {
         )
     {
         return Err(
-            "program port requires even BT.709 output up to 7680x4320 at integral 1..120 FPS"
+            "program port requires even BT.709 output up to 4096x2160 at integral 1..120 FPS"
                 .into(),
         );
     }
@@ -391,19 +392,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extents_up_to_8k_fit_and_odd_or_larger_ones_do_not() {
-        for (width, height) in [
-            (7680, 4320),
-            (3840, 2160),
-            (4096, 2160),
-            (1920, 1080),
-            (2, 2),
-        ] {
+    fn extents_up_to_4k_fit_and_odd_or_larger_ones_do_not() {
+        for (width, height) in [(4096, 2160), (3840, 2160), (1920, 1080), (2, 2)] {
             assert!(fits(width, height, MAX_EXTENT), "{width}x{height}");
         }
         for (width, height) in [
-            (7682, 4320),
-            (7680, 4322),
+            (4098, 2160),
+            (4096, 2162),
+            (7680, 4320),
             (1921, 1080),
             (1920, 1081),
             (0, 2),
@@ -421,8 +417,8 @@ mod tests {
             composition_budget(extent(1920, 1080), extent(1280, 720)),
             256 * 1024 * 1024
         );
-        // 8K native and output: 4 x 33.2 MP x 8 bytes, about 1.06 GB.
-        let k8 = extent(7680, 4320);
-        assert_eq!(composition_budget(k8, k8), 4 * 7680 * 4320 * 8);
+        // DCI 4K native and output: 4 x 8.8 MP x 8 bytes, about 283 MB.
+        let dci = extent(4096, 2160);
+        assert_eq!(composition_budget(dci, dci), 4 * 4096 * 2160 * 8);
     }
 }

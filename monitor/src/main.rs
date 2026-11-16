@@ -28,7 +28,7 @@ Usage: chr-monitor [options]
 Options:
   --tap <path>            Program tap written by chr-server
                           [default: $XDG_RUNTIME_DIR/chr/program.tap]
-  --size <WxH>            Program output size; must match chr-server, up to 7680x4320.
+  --size <WxH>            Program output size; must match chr-server, up to 4096x2160.
                           The preview is scaled down to fit 1920x1080 [default: 1280x720]
   --fps <n>               Program output rate; must match chr-server [default: 50]
   --ws <addr>             Loopback WebSocket for webrtc.offer and monitor.get_status
@@ -114,7 +114,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         || !mode.width.is_multiple_of(2)
         || !mode.height.is_multiple_of(2)
     {
-        return Err("--size needs an even width and height up to 7680x4320".into());
+        return Err("--size needs an even width and height up to 4096x2160".into());
     }
     if !(1..=120).contains(&mode.fps) {
         return Err("--fps must be between 1 and 120".into());
@@ -285,7 +285,7 @@ mod tests {
         for encoder in ["gstreamer", "nvenc", "x264"] {
             assert_eq!(parse(&["--encoder", encoder]).is_ok(), media, "{encoder}");
         }
-        assert!(parse(&["--size", "7680x4320"]).is_ok());
+        assert!(parse(&["--size", "4096x2160"]).is_ok());
         for bad in [
             &["--size", "641x360"][..],
             &["--size", "0x0"],
@@ -293,8 +293,9 @@ mod tests {
             &["--fps"],
             &["--bogus"],
             &["--encoder", "nvh264enc"],
-            &["--size", "7682x4320"],
-            &["--size", "7680x4322"],
+            &["--size", "4098x2160"],
+            &["--size", "4096x2162"],
+            &["--size", "7680x4320"],
             &["--srt", "127.0.0.1:0"],
             &["--webrtc-udp", "none"],
             &["--webrtc-tcp", "localhost"],

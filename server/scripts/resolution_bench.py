@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Measures the tracked live stack at one native resolution, 720p to 8K UHD.
+"""Measures the tracked live stack at one native resolution, 720p to 4K.
 
 `prepare WxH` writes a synthetic camera into output/resolution-bench/<WxH>p<fps>/: a
 testsrc2 clip, its calibrated-video-v1 manifest (a fixed top-down camera), a render
-description with one generated image quad, and one clip frame as a PNG. No private
+description with four instances of one generated image quad, and one clip frame as a PNG. No private
 asset is needed.
 
 `bench WxH` times the render worker's path for that description with
@@ -19,8 +19,9 @@ process, runtime-directory (tmpfs) and GPU memory, and the preview's codec and s
 synthetic one.
 
 Run from the repository root inside `nix develop .#media`. Another Vulkan process on
-the same GPU, such as a running live stack, distorts the numbers (#144: upload
-staging buffers share the 256 MiB BAR1 window when Resizable BAR is off).
+the same GPU, such as a running live stack, distorts the numbers: with Resizable
+BAR off, a second process's CPU stores into GPU-mapped memory are orders of
+magnitude slower (#144 follow-up).
 
     python3 server/scripts/resolution_bench.py prepare 3840x2160
     python3 server/scripts/resolution_bench.py bench 3840x2160
@@ -55,6 +56,8 @@ CENTER = [0, 0, -8]
 
 def size(text: str) -> tuple[int, int]:
     width, height = (int(value) for value in text.split("x"))
+    if not (0 < width <= 4096 and 0 < height <= 2160) or width % 2 or height % 2:
+        raise argparse.ArgumentTypeError("needs an even WxH up to 4096x2160, e.g. 1920x1080")
     return width, height
 
 

@@ -143,7 +143,7 @@ pub struct Encoder {
     preview: [u32; 2],
     timestamp_offset: Option<i128>,
     /// The last input buffer, refilled once the pipeline has released it: a fresh
-    /// 8K buffer costs page faults on every frame.
+    /// 4K buffer costs page faults on every frame.
     spare: Option<gst::Buffer>,
 }
 
@@ -153,9 +153,9 @@ impl Encoder {
         gst::init()?;
         let preview = mode.preview();
         let h264 = H264::choose(choice, preview, || probe_nvenc(preview))?;
-        // Scaling an 8K slot down costs about 28 ms of CPU (a 4K one 17 ms); four
-        // threads keep its latency near 10 ms. Without a separate chroma resampling
-        // pass bilinear scaling costs about a third less, invisible in a preview.
+        // Scaling a 4K slot down costs about 17 ms of CPU; four threads keep its
+        // latency under 10 ms. Without a separate chroma resampling pass bilinear
+        // scaling costs about a third less, invisible in a preview.
         let threads = (mode.width * mode.height).div_ceil(1920 * 1080).clamp(1, 4);
         let pipeline = gst::parse::launch(&format!(
             "appsrc name=input is-live=true format=time block=false max-buffers=2 \
@@ -334,10 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn scales_an_8k_slot_down_to_1080p() {
+    fn scales_a_4k_slot_down_to_1080p() {
         let mode = VideoMode {
-            width: 7680,
-            height: 4320,
+            width: 3840,
+            height: 2160,
             fps: 30,
         };
         let encoder = encodes_slots_and_forces_keyframes(mode, Choice::X264);

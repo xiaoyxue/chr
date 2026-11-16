@@ -49,7 +49,7 @@ Options:
   --ws <addr>             Loopback WebSocket address [default: 127.0.0.1:8787]
   --socket <path>         NativeSocket path [default: $XDG_RUNTIME_DIR/chr/render.sock]
   --no-socket             Do not listen on a NativeSocket
-  --size <WxH>            Render size; both even, up to 7680x4320 and with the camera's
+  --size <WxH>            Render size; both even, up to 4096x2160 and with the camera's
                           aspect for a camera program [default: 1280x720]
   --fps <n>               Frames per second, 1-120 [default: 50]
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)

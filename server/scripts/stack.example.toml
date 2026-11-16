@@ -16,9 +16,9 @@ video = "/path/to/clip.mp4"
 # "external": chr-tracking-sim sends the cameras over tracking.frame.
 tracking = "worker"
 
-# Program output size: even, up to 7680x4320 (8K UHD), with the camera's aspect
-# ratio. Use the camera's own size to render natively, for example "1920x1080" for
-# a 1080p camera; chr-monitor scales its preview down to at most 1920x1080.
+# Program output size: even, up to 4096x2160 (DCI 4K; 4K UHD is 3840x2160), with
+# the camera's aspect ratio. Use the camera's own size to render natively: onsite
+# that is "1920x1080". chr-monitor scales its preview down to at most 1920x1080.
 size = "1280x720"
 # Socket, input ring and program tap; kept between runs.
 # dir = "/run/user/1000/chr-stack"

@@ -335,7 +335,7 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
 }
 
 #[test]
-fn cameras_up_to_8k_render_at_any_output_size_of_their_aspect() {
+fn cameras_up_to_4k_render_at_any_output_size_of_their_aspect() {
     let camera = |width: u32, height: u32| -> d::RenderDescription {
         serde_json::from_value(json!({
             "profile": d::PROFILE,
@@ -352,9 +352,9 @@ fn cameras_up_to_8k_render_at_any_output_size_of_their_aspect() {
         fps: 30,
     };
     for (native, size) in [
-        ((7680, 4320), (7680, 4320)),
-        ((7680, 4320), (1920, 1080)),
+        ((4096, 2160), (4096, 2160)),
         ((3840, 2160), (3840, 2160)),
+        ((3840, 2160), (1920, 1080)),
         ((1920, 1080), (1920, 1080)),
         ((4096, 2160), (2048, 1080)),
     ] {
@@ -369,9 +369,12 @@ fn cameras_up_to_8k_render_at_any_output_size_of_their_aspect() {
         assert_eq!(program.configuration.output_extent.width, size.0);
     }
     for (native, size) in [
-        // Above 8K, odd, or another aspect than the output.
-        ((7682, 4322), (7682, 4322)),
-        ((7680, 4320), (7682, 4322)),
+        // Above DCI 4K, odd, or another aspect than the output.
+        ((4098, 2160), (4098, 2160)),
+        ((4096, 2162), (4096, 2162)),
+        ((7680, 4320), (7680, 4320)),
+        ((7680, 4320), (1920, 1080)),
+        ((3840, 2160), (7680, 4320)),
         ((1921, 1080), (1920, 1080)),
         ((1920, 1080), (1280, 1024)),
     ] {

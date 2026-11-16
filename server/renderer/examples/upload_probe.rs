@@ -1,5 +1,5 @@
 //! Upload-path probe for #144, not a renderer path: how fast the CPU writes an
-//! RGBA8 camera frame (1080p, 4K, 8K) into wgpu's Vulkan host-visible memory, the
+//! RGBA8 camera frame (1080p, 4K) into wgpu's Vulkan host-visible memory, the
 //! way `queue.write_texture` stages every program input.
 //!
 //! `queue.write_texture` allocates a fresh `MAP_WRITE | COPY_SRC` staging buffer
@@ -27,11 +27,7 @@ fn milliseconds(start: Instant) -> f64 {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None))?;
     let wait = || gpu.device.poll(wgpu::PollType::wait_indefinitely());
-    for (label, width, height) in [
-        ("1080p", 1920, 1080),
-        ("4K", 3840, 2160),
-        ("8K", 7680, 4320),
-    ] {
+    for (label, width, height) in [("1080p", 1920, 1080), ("4K", 3840, 2160)] {
         let data = vec![7_u8; width as usize * height as usize * 4];
         let buffer = |usage| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
