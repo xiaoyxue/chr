@@ -63,7 +63,6 @@ async fn gpu_worker_renders_exactly_what_the_in_process_bridge_renders() {
             socket_dir: temp_dir("parity"),
             hang: Duration::from_secs(10),
             assets: Default::default(),
-            lens: Default::default(),
         },
         status_handle(),
     )

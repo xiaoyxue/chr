@@ -40,6 +40,17 @@ class ConfigTests(unittest.TestCase):
             self.load('scene = "a"\nvideo = "b"\ntracking_worker_args = ["--x"]\n')
         with self.assertRaisesRegex(SystemExit, "tracking_centre must be"):
             self.load('scene = "a"\nvideo = "b"\ntracking_centre = [1, 2]\n')
+        with self.assertRaisesRegex(SystemExit, "tracking_lens must be"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_lens = "program"\n')
+        with self.assertRaisesRegex(SystemExit, "go together"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_lens_k = [-0.05, 0, 0]\n')
+        with self.assertRaisesRegex(SystemExit, "go together"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_lens_support = [0, 0, 1, 1]\n')
+        with self.assertRaisesRegex(SystemExit, "tracking_lens_centre must be 2 numbers"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_lens_centre = [1, 2, 3]\n')
+        lens = self.load('scene = "a"\nvideo = "b"\ntracking = "external"\ntracking_lens_k = [-0.05, 0, 0]\n'
+                         'tracking_lens_centre = [960, 540]\ntracking_lens_scale = 960\n')
+        self.assertEqual(lens.tracking_lens_scale, 960, "a CLI lens needs no tracking worker")
 
 
 class ComponentTests(unittest.TestCase):
@@ -67,6 +78,14 @@ class ComponentTests(unittest.TestCase):
         centre = render.index("--tracking-centre")
         self.assertEqual(render[centre + 1:centre + 4], ["14.5", "60.6", "-9.9"])
         self.assertEqual(render[render.index("--tracking-wait-ms") + 1], "800")
+        self.assertNotIn("--tracking-lens", render, "auto and no CLI lens are chr-server's defaults")
+        lens = stack.Config(scene="s.json", video="v.mp4", tracking_lens="pinhole", tracking_lens_k=[-0.05, 0, 0],
+                            tracking_lens_centre=[960, 540], tracking_lens_scale=960,
+                            tracking_lens_support=[-160, 680, 2080, 1090])
+        self.assertEqual(stack.lens_args(lens), [
+            "--tracking-lens", "pinhole", "--tracking-lens-k", "-0.05", "0.0", "0.0",
+            "--tracking-lens-centre", "960.0", "540.0", "--tracking-lens-scale", "960.0",
+            "--tracking-lens-support", "-160.0", "680.0", "2080.0", "1090.0"])
         # A wildcard listener is reached on loopback.
         self.assertIn("srt://127.0.0.1:9001?mode=caller&latency=120000", by_name["srt-relay"].command)
 
@@ -145,7 +164,7 @@ class HealthTests(unittest.TestCase):
                    "last_error": "the tracking worker exited"}
         join = {"frames_joined": 40, "frames_without_tracking": 3, "samples_late": 0, "frames_dropped": 1,
                 "poses_fresh": 13, "poses_interpolated": 26, "poses_reused": 10, "poses_unavailable": 1,
-                "poses_overdue": 2}
+                "poses_overdue": 2, "camera_model": {"model": "radial+warp", "source": "worker"}}
         first = {"sdi.get_status": sdi, "render.get_worker_status": render, "tracking.get_worker_status": tracker,
                  "tracking.get_status": join}
         second = {**first, "sdi.get_status": {**sdi, "frames_output": 130, "repeated_frames": 12},
@@ -155,6 +174,7 @@ class HealthTests(unittest.TestCase):
         self.assertIn("PROBLEM: tracking worker backoff: the tracking worker exited", text)
         self.assertIn("tracking worker   pitch-analysis: backoff", text)
         self.assertIn("13 fresh, 26 interpolated, 10 reused, 1 unavailable, 2 overdue", text)
+        self.assertIn("camera model      radial+warp (lens source: worker)", text)
         self.assertIn("PROBLEM: no frame was paired with a camera", text)
         external = {**second, "tracking.get_worker_status": {"error": "Method not found"}}
         self.assertIn("none: cameras come from tracking.frame", "\n".join(stack.health(first, external, 1.0)))

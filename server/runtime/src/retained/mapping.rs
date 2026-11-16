@@ -7,7 +7,7 @@ use chr_renderer::{
     camera::{Camera, Intrinsics},
     composition::{AlphaMode, CompositionOutput, ImageFit, ImageStage, Transfer},
     coordinates::{ImageExtent, Ti},
-    distortion::{FrameWarp, RadialDistortion},
+    distortion::FrameWarp,
     glb::GlbAsset,
     scene::{self, EnvironmentMap, ModelMatrix, Scene, SceneView},
 };
@@ -34,7 +34,6 @@ pub struct Registrations {
     environments: HashMap<w::Id, Arc<EnvironmentMap>>,
     worlds: Vec<w::Version>,
     contexts: HashMap<w::Id, CameraContext>,
-    lens: Option<RadialDistortion>,
 }
 
 impl Registrations {
@@ -79,18 +78,6 @@ impl Registrations {
             return Err(reject(
                 w::RejectionKind::Conflict,
                 "asset already registered",
-            ));
-        }
-        Ok(())
-    }
-
-    /// The startup lens of a tracked input. Only with it may frames carry a
-    /// `frame_warp`; the radial term itself never travels per frame.
-    pub fn register_lens(&mut self, lens: RadialDistortion) -> Result<(), ErrorObject> {
-        if self.lens.replace(lens).is_some() {
-            return Err(reject(
-                w::RejectionKind::Conflict,
-                "lens already registered",
             ));
         }
         Ok(())
@@ -272,14 +259,18 @@ impl Registrations {
                     extent,
                     ti,
                     camera_center,
+                    lens,
                     frame_warp,
                 },
             ) => {
+                if let Some(lens) = lens {
+                    crate::calibration::lens::radial(lens).map_err(incompatible)?;
+                }
                 if let Some(rows) = frame_warp {
-                    if self.lens.is_none() {
+                    if lens.is_none() {
                         return Err(reject(
                             w::RejectionKind::UnsupportedProfile,
-                            "frame_warp requires a lens registered at startup",
+                            "frame_warp requires a lens",
                         ));
                     }
                     FrameWarp::new(rows3(rows)).map_err(incompatible)?;

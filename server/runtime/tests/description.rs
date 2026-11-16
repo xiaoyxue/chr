@@ -412,7 +412,7 @@ async fn gpu_described_image_quads_are_drawn_unlit_through_the_tracked_camera() 
         let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
         program.create_scene(&control).await.unwrap();
         let mut renderer = ProgramRenderer::new(&gpu, &program.configuration).unwrap();
-        renderer.set_lenses(&program);
+        renderer.set_video_lens(program.video_lens.clone());
         let (taps, tap) = Taps::observed();
         let sdi =
             SdiOutput::spawn_program(MODE, id("description-test-output").unwrap(), taps).unwrap();

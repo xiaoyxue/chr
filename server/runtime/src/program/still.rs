@@ -120,7 +120,7 @@ impl Prepared {
     pub async fn render(self, gpu: &Gpu) -> Result<Vec<u8>, Error> {
         let rendered =
             ProgramRenderer::new(gpu, &self.program.configuration).and_then(|mut renderer| {
-                renderer.set_lenses(&self.program);
+                renderer.set_video_lens(self.program.video_lens.clone());
                 renderer.render_rgba(gpu, self.execution)
             });
         self.control.shutdown().await;
@@ -135,7 +135,7 @@ impl Prepared {
     pub async fn bench(self, gpu: &Gpu, frames: u32) -> Result<Vec<FrameTiming>, Error> {
         let timings = (|| {
             let mut renderer = ProgramRenderer::new(gpu, &self.program.configuration)?;
-            renderer.set_lenses(&self.program);
+            renderer.set_video_lens(self.program.video_lens.clone());
             let timer = Timer::new(gpu);
             renderer.set_timestamp_queries(gpu, timer.as_ref().map(|t| t.queries.clone()))?;
             let frame = super::Frame::of(&self.execution)?;

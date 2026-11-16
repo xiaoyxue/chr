@@ -28,7 +28,7 @@ use chr_common::{
 };
 
 use super::{
-    protocol::{CREDITS, Output, Reply, Request, TrackedLens, VERSION, WorkerProgram},
+    protocol::{CREDITS, Output, Reply, Request, VERSION, WorkerProgram},
     transport::{self, Channel, Event, Inbound, Incoming, SharedPixels},
 };
 use crate::frame_resources::Pixels;
@@ -54,8 +54,6 @@ pub struct WorkerConfig {
     pub hang: Duration,
     /// Assets every worker registers after installing its program.
     pub assets: WorkerAssets,
-    /// Whether a tracked program's frames go through its startup lens.
-    pub lens: TrackedLens,
 }
 
 /// Assets registered after startup, shared by the control plane and the supervisor.
@@ -427,7 +425,6 @@ impl Supervisor {
                 runtime_id: self.config.runtime_id.clone(),
                 output: self.config.output,
                 assets,
-                lens: self.config.lens,
             },
             None,
         )?;
@@ -568,7 +565,6 @@ mod tests {
             socket_dir: dir.join("sockets"),
             hang: Duration::from_millis(200),
             assets: Default::default(),
-            lens: TrackedLens::Program,
         }
     }
 

@@ -308,13 +308,37 @@ pub enum FrameGeometry {
         extent: Extent,
         ti: Matrix3,
         camera_center: Vec3,
+        /// Opt-in `radial-poly-native-px-v1` lens of this frame. Absent means the
+        /// pinhole camera `S^-1 Ti A(C)`; omitted when absent, so the pinhole
+        /// profile's messages are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lens: Option<Box<RadialLens>>,
         /// Opt-in `radial-poly-native-px-v1` frame warp: row-major, reference native
-        /// pixel to this frame's SNC. Only a runtime that registered a lens at
-        /// startup accepts it; absent means `W = S`. Omitted when absent, so the
-        /// pinhole profile's messages are unchanged.
+        /// pixel to this frame's SNC. Only accepted with a `lens`; absent means
+        /// `W = S`. Omitted when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frame_warp: Option<Box<Matrix3>>,
     },
+}
+
+strings!(LensModel { RadialPolyNativePxV1 => "radial-poly-native-px-v1" });
+
+/// A `radial-poly-native-px-v1` lens in native pixels:
+/// `r = centre + (a - centre) * (1 + k1 p^2 + k2 p^4 + k3 p^6)` with
+/// `p = |a - centre| / scale_px`, where `a` is the ideal pixel of `S^-1 Ti A(C)`.
+/// The runtime also requires a positive scale and rejects a support rectangle
+/// that is empty.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadialLens {
+    pub model: LensModel,
+    pub centre_px: [Finite; 2],
+    pub scale_px: Finite,
+    pub k: [Finite; 3],
+    /// Validated ideal-pixel rectangle `[[min_x, min_y], [max_x, max_y]]`;
+    /// outside it, results are extrapolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<[[Finite; 2]; 2]>,
 }
 
 object!(FrameInput {

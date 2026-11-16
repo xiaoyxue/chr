@@ -265,7 +265,8 @@ no scene occlusion, audio, physical SDI, hardware encoding or real-time estimato
 replays the same manifest and clip as a tracked camera: `chr-sdi-sim` writes
 each frame into a shared-memory input ring and sends its `Ti`/`C`/frame warp as
 `tracking.frame`; `chr-server --tracked-scene` pairs them by capture sequence and
-renders through the worker to the SDI port, which `chr-monitor` streams. See
+renders through the worker to the SDI port, which `chr-monitor` streams. The
+simulator also sends the manifest's lens with each camera. See
 [SDI capture and tracked camera simulation](docs/sdi-simulation.md). With `--tracking-worker`
 the simulator is the camera only and chr-server's tracking worker supplies the
 cameras ([tracking worker](docs/tracking-worker.md)); `stack.py` uses that mode
@@ -274,8 +275,14 @@ by default. The tracking worker's options are:
   arguments. The default is the stand-in, which takes `--manifest <json>`.
 - `--tracking-centre <x> <y> <z>`: the station centre of every camera. The
   default is the reference camera's.
-- `--tracking-lens identity|program`: whether the startup lens applies. The
-  default is `identity`: vchao's `Ti` maps to the distorted image.
+- `--tracking-lens auto|pinhole` and `--tracking-lens-k <k1> <k2> <k3>
+  --tracking-lens-centre <x> <y> --tracking-lens-scale <px>
+  [--tracking-lens-support <4 numbers>]`: the camera model of every tracked
+  frame (with or without a worker). `auto` takes the tracking data's lens, else
+  the CLI lens, else none (pinhole); `pinhole` ignores every lens. The
+  description's or manifest's lens is never applied; vchao's `Ti` maps to the
+  distorted image and comes without a lens
+  ([lens](docs/tracking-worker.md#lens)).
 - `--tracking-wait-ms <n>` (at most 1500): with a worker, also the constant
   program delay.
 

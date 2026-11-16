@@ -89,7 +89,7 @@ pub mod mesh {
 /// answers these methods. See `server/docs/sdi-simulation.md`.
 pub mod tracking {
     use super::*;
-    use crate::scene_frame::{Matrix3, U64, Vec3};
+    use crate::scene_frame::{Matrix3, RadialLens, U64, Vec3};
 
     /// Delivers the camera of one input frame. Params: [`TrackingFrame`]. Result: `null`.
     /// Rejected when the frame was already rendered or skipped, when it is a duplicate,
@@ -105,13 +105,53 @@ pub mod tracking {
     #[serde(deny_unknown_fields)]
     pub struct TrackingFrame {
         pub sequence: U64,
-        /// Forward row-major ground-to-SNC matrix of the ideal (undistorted) image.
+        /// Forward row-major ground-to-SNC matrix: of the ideal (undistorted)
+        /// image with a `lens`, of the frame itself without one.
         pub ti: Matrix3,
         /// Optical centre in world metres; negative Z is up.
         pub camera_center: Vec3,
         /// Row-major reference-native-pixel to frame-SNC warp applied after the
-        /// startup lens's radial term; `null` means `W = S`.
+        /// lens's radial term; `null` means `W = S`. Requires a `lens`.
         pub frame_warp: Option<Matrix3>,
+        /// The frame's lens. Absent: the server's `--tracking-lens-*` lens, or
+        /// none (pinhole). See `server/docs/tracking-worker.md#lens`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub lens: Option<RadialLens>,
+    }
+
+    /// The camera model of a frame rendered with its camera.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum CameraModel {
+        /// `S^-1 Ti A(C)`, no lens.
+        #[serde(rename = "pinhole")]
+        Pinhole,
+        /// A `radial-poly-native-px-v1` lens without a frame warp.
+        #[serde(rename = "radial")]
+        Radial,
+        /// A `radial-poly-native-px-v1` lens and the frame's own warp.
+        #[serde(rename = "radial+warp")]
+        RadialWarp,
+    }
+
+    /// Where the lens of a frame came from.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum LensSource {
+        /// The tracking data: the tracking worker's frames or `tracking.frame`.
+        Worker,
+        /// chr-server's `--tracking-lens-k/-centre/-scale` (or `stack.toml`).
+        Cli,
+        /// No lens anywhere: pinhole.
+        None,
+        /// `--tracking-lens pinhole`: every lens source is ignored.
+        ForcedPinhole,
+    }
+
+    /// The camera model of the last frame rendered with its camera.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct ActiveCameraModel {
+        pub model: CameraModel,
+        pub source: LensSource,
     }
 
     /// Counters since the server started.
@@ -154,6 +194,10 @@ pub mod tracking {
         /// whatever their pose.
         #[serde(default)]
         pub poses_overdue: u64,
+        /// Camera model and lens source of the last frame rendered with its
+        /// camera; `null` before the first.
+        #[serde(default)]
+        pub camera_model: Option<ActiveCameraModel>,
     }
 
     /// Reads the tracking worker's supervision counters. No params. Result:

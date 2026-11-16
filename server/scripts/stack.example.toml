@@ -16,8 +16,9 @@ video = "/path/to/clip.mp4"
 # the cameras over tracking.frame.
 tracking = "worker"
 # The tracking worker executable; empty: chr-tracking-sim-cli, which replays the
-# manifest's recorded Ti through the manifest's or description's lens. Any other
-# worker's Ti is rendered without a lens (vchao estimates against the distorted image).
+# manifest's recorded Ti and sends the manifest's lens (not its per-frame warps).
+# vchao's pitch-analysis sends no lens: its Ti is rendered with the pinhole camera
+# (it estimates against the distorted image).
 # vchao's pitch-analysis (build: docs/operations.md#run-with-vchao-tracking) on a
 # non-NixOS host goes through with-cuda-driver.sh; on NixOS name it directly.
 # tracking_cli = "server/scripts/with-cuda-driver.sh"
@@ -34,6 +35,17 @@ tracking = "worker"
 # frame leaves exactly this long after capture: the program delay. pitch-analysis may
 # hold a frame up to its 500 ms overload threshold, so give it about 800.
 # tracking_wait_ms = 800
+# Camera model of tracked frames (server/docs/tracking-worker.md#lens): the lens the
+# tracking data carries, else the tracking_lens_* lens below, else none (pinhole).
+# "pinhole" ignores every lens; a description's or manifest's lens is never applied.
+# tracking_lens = "auto"
+# A radial-poly-native-px-v1 lens for tracking data without one: k1 k2 k3, centre and
+# scale in native pixels (all three or none), and an optional ideal-pixel support
+# [min_x, min_y, max_x, max_y]. Tracking data with its own lens wins (with a warning).
+# tracking_lens_k = [-0.05394372167711824, 0, 0]
+# tracking_lens_centre = [960, 540]
+# tracking_lens_scale = 960
+# tracking_lens_support = [-160, 680, 2080, 1090]
 
 # Program output size: even, up to 4096x2160 (DCI 4K; 4K UHD is 3840x2160), with
 # the camera's aspect ratio. Use the camera's own size to render natively: onsite

@@ -95,11 +95,13 @@ pub fn prepare(
         width: camera.width,
         height: camera.height,
     };
-    let lens = radial(&camera.radial).distortion()?;
+    // The description's lens is the reference camera's, for still renders; tracked
+    // frames bring their own (`server/docs/tracking-worker.md#lens`).
+    let lens = radial(&camera.radial).wire()?;
     let replay = camera
         .reference
         .as_ref()
-        .map(|r| TrackingReplay::new(r.ti, r.center, &r.frame_warps))
+        .map(|r| TrackingReplay::new(r.ti, r.center, lens, &r.frame_warps))
         .transpose()?;
 
     let mut config = Synthetic::configuration(mode, &runtime)?;
@@ -117,9 +119,6 @@ pub fn prepare(
     let mut registrations = Registrations::default();
     registrations
         .register_world(world.clone())
-        .map_err(|e| e.to_string())?;
-    registrations
-        .register_lens(lens)
         .map_err(|e| e.to_string())?;
     registrations
         .register_model(id(GROUND)?, ground())
@@ -141,7 +140,6 @@ pub fn prepare(
     let state = scene_state(&config.configuration_id, &world, &description.scene)?;
     let (mut program, adapter) = Synthetic::install_registered(config, registrations, state)?;
     program.tracking = Some(Tracked {
-        lens,
         world,
         extent,
         replay,

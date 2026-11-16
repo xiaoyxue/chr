@@ -536,11 +536,14 @@ incompatible supplied C rejects. Null explicitly means caller-supplied synthetic
 Ti/C without a calibration service, not "use the current calibration".
 
 Opt-in extension (not part of `scene_frame_v1`): `ti_c` geometry may carry an
-optional `frame_warp` (row-major `RenderMatrix3`, reference native pixel to frame
-SNC), omitted when absent. Only a runtime that registered a
-`radial-poly-native-px-v1` lens at startup accepts it; otherwise admission
-rejects it with `unsupported_profile`. It serves the
-[tracked camera simulation](../server/docs/sdi-simulation.md).
+optional `lens` (`{model: "radial-poly-native-px-v1", centre_px, scale_px, k,
+support?}`, native pixels) and an optional `frame_warp` (row-major
+`RenderMatrix3`, reference native pixel to frame SNC), both omitted when absent.
+Without a `lens` the frame is pinhole. An invalid `lens` is rejected with
+`incompatible_input`, a `frame_warp` without a `lens` with `unsupported_profile`.
+It serves tracked programs
+([tracking worker](../server/docs/tracking-worker.md#lens),
+[tracked camera simulation](../server/docs/sdi-simulation.md)).
 
 Images and geometry may arrive independently at the runtime's join adapter.
 The adapter joins them by FrameKey **before** calling this complete-input

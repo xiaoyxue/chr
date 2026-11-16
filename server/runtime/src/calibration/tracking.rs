@@ -1,7 +1,6 @@
 //! Per-frame camera of a tracked input, paired with captured frames by capture
-//! sequence. A simulation of the #60 tracking path, not a production tracking
-//! service: the lens is fixed at startup and only `Ti`, `C` and the frame warp
-//! travel per frame.
+//! sequence. Every frame carries its own `Ti`, `C`, lens and frame warp; which
+//! lens it is rendered with is [`lens`](super::lens)'s choice.
 //!
 //! [`TrackingFeed`] is the bounded backlog that `tracking.frame` or the tracking
 //! worker fills; [`TrackingJoin`] holds captured frames until their camera
@@ -15,15 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chr_common::methods::tracking::ActiveCameraModel;
 use chr_common::{
     jsonrpc::ErrorObject,
     methods::tracking::{TrackingFrame, TrackingStatus},
     scene_frame as w,
 };
-use chr_renderer::{
-    coordinates::Ti,
-    distortion::{FrameWarp, RadialDistortion},
-};
+use chr_renderer::{coordinates::Ti, distortion::FrameWarp};
 
 use crate::{
     retained::{incompatible, reject},
@@ -48,10 +45,9 @@ pub fn matrix3(rows: [[f64; 3]; 3]) -> Result<w::Matrix3, Error> {
     Ok(flat.try_into().expect("nine values"))
 }
 
-/// The startup half of a tracked program: its lens, world and native extent.
+/// The startup half of a tracked program: its world and native extent.
 #[derive(Clone, Debug)]
 pub struct Tracked {
-    pub lens: RadialDistortion,
     pub world: w::Version,
     pub extent: w::Extent,
     /// A fixed reference camera and warps, replayed by `chr-renderer-cli render
@@ -68,18 +64,20 @@ impl Tracked {
             extent: self.extent,
             ti: frame.ti,
             camera_center: frame.camera_center,
+            lens: frame.lens.clone().map(Box::new),
             frame_warp: frame.frame_warp.map(Box::new),
         }
     }
 }
 
-/// Tracking samples replayed from a calibrated clip: the reference `Ti` and `C` for
-/// every frame and the clip's warp of `sequence % warps`, the convention of the
-/// calibrated video replay. No warps means `W = S`.
+/// Tracking samples replayed from a calibrated clip: the reference `Ti` and `C` and
+/// the clip's lens for every frame, and the clip's warp of `sequence % warps`, the
+/// convention of the calibrated video replay. No warps means `W = S`.
 #[derive(Clone, Debug)]
 pub struct TrackingReplay {
     ti: w::Matrix3,
     camera_center: w::Vec3,
+    lens: w::RadialLens,
     frame_warps: Vec<w::Matrix3>,
 }
 
@@ -87,9 +85,11 @@ impl TrackingReplay {
     pub fn new(
         ti: [[f64; 3]; 3],
         camera_center: [f64; 3],
+        lens: w::RadialLens,
         frame_warps: &[[[f64; 3]; 3]],
     ) -> Result<Self, Error> {
         Ti::new(ti)?;
+        super::lens::radial(&lens)?;
         for rows in frame_warps {
             FrameWarp::new(*rows)?;
         }
@@ -102,6 +102,7 @@ impl TrackingReplay {
                 .map_err(|e| e.0)?
                 .try_into()
                 .expect("three values"),
+            lens,
             frame_warps: frame_warps
                 .iter()
                 .map(|rows| matrix3(*rows))
@@ -111,6 +112,17 @@ impl TrackingReplay {
 
     pub fn warp_count(&self) -> usize {
         self.frame_warps.len()
+    }
+
+    /// The clip's `radial-poly-native-px-v1` lens.
+    pub fn lens(&self) -> &w::RadialLens {
+        &self.lens
+    }
+
+    /// The clip's warp of `index % warps`, if it has warps.
+    pub fn warp(&self, index: u64) -> Option<w::Matrix3> {
+        (!self.frame_warps.is_empty())
+            .then(|| self.frame_warps[(index % self.frame_warps.len() as u64) as usize])
     }
 
     /// The reference camera's optical centre: world metres, negative Z up.
@@ -128,8 +140,8 @@ impl TrackingReplay {
             sequence: sequence.into(),
             ti: self.ti,
             camera_center: self.camera_center,
-            frame_warp: (!self.frame_warps.is_empty())
-                .then(|| self.frame_warps[(sequence % self.frame_warps.len() as u64) as usize]),
+            frame_warp: self.warp(sequence),
+            lens: Some(self.lens.clone()),
         }
     }
 }
@@ -159,10 +171,7 @@ impl TrackingFeed {
 
     /// Accepts the camera of one frame that has not been rendered or skipped yet.
     pub fn push(&self, frame: TrackingFrame) -> Result<(), ErrorObject> {
-        Ti::new(rows3(&frame.ti)).map_err(incompatible)?;
-        if let Some(rows) = &frame.frame_warp {
-            FrameWarp::new(rows3(rows)).map_err(incompatible)?;
-        }
+        validate(&frame).map_err(incompatible)?;
         let sequence = frame.sequence.get();
         let mut feed = self.lock();
         if feed.done_through.is_some_and(|done| sequence <= done) {
@@ -191,6 +200,11 @@ impl TrackingFeed {
 
     pub fn status(&self) -> TrackingStatus {
         self.lock().status.clone()
+    }
+
+    /// Records the camera model of a frame about to be rendered with its camera.
+    pub fn record_model(&self, model: ActiveCameraModel) {
+        self.count(|status| status.camera_model = Some(model));
     }
 
     /// Forgets every pending sample and closed frame: a restarted capture process
@@ -235,6 +249,22 @@ impl TrackingFeed {
     fn lock(&self) -> MutexGuard<'_, Feed> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Checks one frame's camera at the boundary: an invertible `Ti`, a valid lens
+/// and an invertible frame warp, which needs the frame's own lens.
+pub fn validate(frame: &TrackingFrame) -> Result<(), Error> {
+    Ti::new(rows3(&frame.ti))?;
+    if let Some(lens) = &frame.lens {
+        super::lens::radial(lens)?;
+    }
+    if let Some(rows) = &frame.frame_warp {
+        if frame.lens.is_none() {
+            return Err("a frame warp needs the frame's lens".into());
+        }
+        FrameWarp::new(rows3(rows))?;
+    }
+    Ok(())
 }
 
 /// One captured input frame: RGBA8 BT.709 code values at the native extent, in
@@ -379,10 +409,15 @@ mod tests {
 
     const S: f64 = 0.001;
 
+    fn lens() -> w::RadialLens {
+        crate::calibration::lens::wire([96., 64.], 96., [-0.05, 0., 0.], None).unwrap()
+    }
+
     fn replay() -> TrackingReplay {
         TrackingReplay::new(
             [[0.02, 0., 0.], [0., 0.02, 0.], [0., 0., 1.]],
             [0., 0., -10.],
+            lens(),
             &[
                 [[S, 0., -1.], [0., S, -0.5], [0., 0., 1.]],
                 [[S, 0., -0.9], [0., S, -0.5], [0., 0., 1.]],
@@ -414,18 +449,25 @@ mod tests {
         assert_eq!(replay.frame(2).frame_warp, replay.frame(0).frame_warp);
         assert_ne!(replay.frame(1).frame_warp, replay.frame(0).frame_warp);
         assert_eq!(replay.frame(5).sequence.get(), 5);
+        assert_eq!(
+            replay.frame(4).lens,
+            Some(lens()),
+            "every frame has the lens"
+        );
         let unwarped = TrackingReplay::new(
             [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
             [0., 0., -1.],
+            lens(),
             &[],
         )
         .unwrap();
         assert_eq!(unwarped.frame(3).frame_warp, None);
-        assert!(TrackingReplay::new([[0.; 3]; 3], [0., 0., -1.], &[]).is_err());
+        assert!(TrackingReplay::new([[0.; 3]; 3], [0., 0., -1.], lens(), &[]).is_err());
         assert!(
             TrackingReplay::new(
                 [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
                 [0., 0., -1.],
+                lens(),
                 &[[[0.; 3]; 3]]
             )
             .is_err()
@@ -561,5 +603,14 @@ mod tests {
         let mut bad = replay().frame(11);
         bad.frame_warp = Some(matrix3([[0.; 3]; 3]).unwrap());
         assert!(feed.push(bad).is_err());
+        let mut warp_without_lens = replay().frame(11);
+        warp_without_lens.lens = None;
+        assert!(feed.push(warp_without_lens).is_err());
+        let mut bad_lens = replay().frame(11);
+        bad_lens.lens.as_mut().unwrap().scale_px = w::Finite::try_from(0.).unwrap();
+        assert!(feed.push(bad_lens).is_err());
+        let mut pinhole = replay().frame(11);
+        (pinhole.lens, pinhole.frame_warp) = (None, None);
+        validate(&pinhole).unwrap();
     }
 }

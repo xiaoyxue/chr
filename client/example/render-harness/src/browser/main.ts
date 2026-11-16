@@ -246,6 +246,11 @@ function showTracking(status: TrackingStatus | null): void {
     count("poses reused", "tracking.reused", status.poses_reused, true),
     count("poses unavailable", "tracking.unavailable", status.poses_unavailable, true),
     count("poses overdue", "tracking.overdue", status.poses_overdue, true),
+    [
+      "camera model",
+      status.camera_model === null ? "-" : `${status.camera_model.model} (${status.camera_model.source})`,
+      false,
+    ],
   ]);
 }
 

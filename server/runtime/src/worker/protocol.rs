@@ -4,9 +4,9 @@
 //!
 //! | Direction | `type` | Payload | Purpose |
 //! | --- | --- | --- | --- |
-//! | server → worker | `hello` | – | Program, runtime ID, output mode, assets, tracked lens |
+//! | server → worker | `hello` | – | Program, runtime ID, output mode, assets |
 //! | worker → server | `ready` / `fatal` | – | Startup result |
-//! | server → worker | `render` | input image | One program frame |
+//! | server → worker | `render` | input image | One program frame, with its camera and lens |
 //! | server → worker | `triangle` | – | One frame of the default triangle |
 //! | worker → server | `done` | UYVY frame | Completion of one request, in order |
 //! | worker → server | `failed` | – | Failure of one request, in order |
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::program::spec::ProgramSpec;
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Requests that may be outstanding at once: the server's credits. Each holds
 /// one input image in the worker and, once done, one UYVY frame.
 pub const CREDITS: usize = 4;
@@ -74,20 +74,6 @@ impl WorkerProgram {
     }
 }
 
-/// The lens a tracked program's frames go through.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackedLens {
-    /// The startup lens of the description or manifest, with each frame's warp:
-    /// cameras whose `Ti` maps to the ideal (undistorted) image, such as the
-    /// recorded cameras the replay stand-in returns.
-    #[default]
-    Program,
-    /// No lens: cameras whose `Ti` maps to the real, distorted image, such as
-    /// vchao's `pitch-analysis` estimates (`server/docs/tracking-worker.md`).
-    Identity,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
     pub width: u32,
@@ -107,10 +93,10 @@ pub enum Request {
         /// the worker imports and registers them after installing its program.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         assets: Vec<chr_common::description::Asset>,
-        #[serde(default)]
-        lens: TrackedLens,
     },
     /// The input image, tightly packed as `image` describes it, is the payload.
+    /// A tracked frame's `ti_c` geometry carries its own lens and warp, so the
+    /// worker never holds a lens between frames.
     Render {
         id: u64,
         image: w::ImageDescription,
