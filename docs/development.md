@@ -120,7 +120,7 @@ The root development shell provides:
 | Rust server | Rust/Cargo, rustfmt, and Clippy from `rust-toolchain.toml` via the locked Rust overlay |
 | Build and maintenance | Git, pkg-config, and nixfmt |
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
-| Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
+| Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`, 1.28 or later), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
 
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
 the GStreamer ugly plugins, and Python GObject bindings. It runs the video-only

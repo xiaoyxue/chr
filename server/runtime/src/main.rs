@@ -309,6 +309,8 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<()> {
+    // Fail at once, not on every worker start, if GStreamer cannot carry the workers.
+    chr_runtime::worker::transport::check()?;
     remove_stale_private_dirs();
     if args.software_video.is_some() && !cfg!(all(unix, feature = "gstreamer-media")) {
         return Err("--software-video requires Linux/Unix and the gstreamer-media feature".into());

@@ -4,7 +4,8 @@ The live render server: a Rust + wgpu renderer and the code that runs in the
 same process with it. The live service (`chr-server`, its render worker and
 `chr-monitor`) runs on **Linux**; Windows PCs only preview its SRT output. The
 renderer and viewer also build on Windows for local development; `chr-runtime`
-links GStreamer for its worker transport (`unixfdsink`/`unixfdsrc`, Unix only).
+links GStreamer for its worker transport (`unixfdsink`/`unixfdsrc`, GStreamer 1.28
+or later, Unix only).
 The Cargo workspace is at the repository root; its server crates live here:
 
 | Directory | Crate | Role |

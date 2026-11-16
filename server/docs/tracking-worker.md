@@ -40,8 +40,11 @@ behaviour, not a production policy (see
 ## Transport
 
 Version 2 of the protocol travels over GStreamer's `unixfd` elements
-(gst-plugins-bad, GStreamer ≥ 1.24), the same transport as the render worker
-(`server/runtime/src/worker/transport.rs`). There is one Unix socket per
+(gst-plugins-bad), the same transport as the render worker
+(`server/runtime/src/worker/transport.rs`). chr-server and the bundled workers
+need GStreamer 1.28 or later (`unixfdsink`'s `min-memory-size`) and refuse to
+start with a clear error otherwise; a third-party worker's own `unixfdsink` needs
+1.26 or later for `wait-for-connection`. There is one Unix socket per
 direction, in chr-server's private 0700 directory
 `$XDG_RUNTIME_DIR/chr/tracking-<server pid>/`, removed on shutdown:
 

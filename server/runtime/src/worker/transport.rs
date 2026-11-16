@@ -70,6 +70,43 @@ pub fn init() -> Result<(), Error> {
     .map_err(Into::into)
 }
 
+/// Checks once that GStreamer has the unixfd elements with every property the
+/// transport sets: `wait-for-connection` (GStreamer 1.26) and `min-memory-size`
+/// (1.28) of `unixfdsink`. Setting a missing property would panic, so callers
+/// check first and fail with this error instead.
+pub fn check() -> Result<(), Error> {
+    static CHECKED: OnceLock<Result<(), String>> = OnceLock::new();
+    init()?;
+    CHECKED
+        .get_or_init(|| {
+            let missing = |element| {
+                format!(
+                    "GStreamer has no {element} element; the worker transport needs \
+                     gst-plugins-bad 1.28 or later on GST_PLUGIN_SYSTEM_PATH_1_0"
+                )
+            };
+            gst::ElementFactory::make("unixfdsrc")
+                .build()
+                .map_err(|_| missing("unixfdsrc"))?;
+            let sink = gst::ElementFactory::make("unixfdsink")
+                .build()
+                .map_err(|_| missing("unixfdsink"))?;
+            match ["wait-for-connection", "min-memory-size"]
+                .into_iter()
+                .find(|property| !sink.has_property(property))
+            {
+                Some(property) => Err(format!(
+                    "GStreamer {} is too old for the worker transport: unixfdsink has no \
+                     {property} property; 1.28 or later is required",
+                    gst::version_string()
+                )),
+                None => Ok(()),
+            }
+        })
+        .clone()
+        .map_err(Into::into)
+}
+
 /// Bytes in memfd-backed GStreamer memory, mapped read-only. Every worker it is
 /// sent to receives the same memory as a file descriptor: no copy. Once dropped
 /// and no longer in any buffer (every worker released it), the memory is reused.
@@ -167,7 +204,7 @@ pub struct Sender {
 impl Sender {
     /// Listens on `path`, replacing a socket file that a killed process left behind.
     pub fn listen(path: &Path) -> Result<Self, Error> {
-        init()?;
+        check()?;
         let _ = std::fs::remove_file(path);
         // Never blocks the caller: the queue is checked in `send`.
         let source = AppSrc::builder()
@@ -262,7 +299,7 @@ impl<T> Incoming<T> {
 impl Receiver {
     /// Connects to the sender listening on `path`.
     pub fn connect(path: &Path) -> Result<Self, Error> {
-        init()?;
+        check()?;
         let source = gst::ElementFactory::make("unixfdsrc")
             .property("socket-path", path_str(path)?)
             .build()?;
