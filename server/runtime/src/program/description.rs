@@ -81,10 +81,7 @@ pub fn prepare(
         return Err(format!("unsupported description profile {:?}", description.profile).into());
     }
     let camera = &description.camera;
-    if camera.width > 4096
-        || camera.height > 2160
-        || !camera.width.is_multiple_of(2)
-        || !camera.height.is_multiple_of(2)
+    if !super::fits(camera.width, camera.height, super::MAX_EXTENT)
         || camera.fps != mode.fps
         || u64::from(camera.width) * u64::from(mode.height)
             != u64::from(camera.height) * u64::from(mode.width)
@@ -113,7 +110,7 @@ pub fn prepare(
     config.limits.instances_per_scene = (MAX_INSTANCES + 1) as u32;
     config.shadows.resolution = 2048;
     config.shadows.max_bytes = (128_u64 * 1024 * 1024).into();
-    config.max_intermediate_bytes = (256_u64 * 1024 * 1024).into();
+    config.max_intermediate_bytes = super::composition_budget(extent, config.output_extent).into();
 
     let world: w::Version =
         serde_json::from_value(json!({"id":"description-world","revision":"1"}))?;

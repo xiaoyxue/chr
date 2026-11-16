@@ -334,6 +334,66 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
     owner.await.unwrap();
 }
 
+#[test]
+fn cameras_up_to_4k_render_at_any_output_size_of_their_aspect() {
+    let camera = |width: u32, height: u32| -> d::RenderDescription {
+        serde_json::from_value(json!({
+            "profile": d::PROFILE,
+            "camera": {"width": width, "height": height, "fps": 30,
+                "radial": {"centre_px": [width / 2, height / 2], "scale_px": width,
+                    "coefficients": [-0.05, 0, 0], "support": null}},
+            "scene": {"ground": {"pitch_m": [105, 68]}, "assets": [], "instances": []}
+        }))
+        .unwrap()
+    };
+    let output = |width, height| VideoMode {
+        width,
+        height,
+        fps: 30,
+    };
+    for (native, size) in [
+        ((4096, 2160), (4096, 2160)),
+        ((3840, 2160), (3840, 2160)),
+        ((3840, 2160), (1920, 1080)),
+        ((1920, 1080), (1920, 1080)),
+        ((4096, 2160), (2048, 1080)),
+    ] {
+        let (program, _) = description::prepare(
+            &camera(native.0, native.1),
+            Vec::new(),
+            output(size.0, size.1),
+            runtime_id().unwrap(),
+        )
+        .unwrap_or_else(|error| panic!("{native:?} -> {size:?}: {error}"));
+        assert_eq!(program.configuration.native_extent.width, native.0);
+        assert_eq!(program.configuration.output_extent.width, size.0);
+    }
+    for (native, size) in [
+        // Above DCI 4K, odd, or another aspect than the output.
+        ((4098, 2160), (4098, 2160)),
+        ((4096, 2162), (4096, 2162)),
+        ((7680, 4320), (7680, 4320)),
+        ((7680, 4320), (1920, 1080)),
+        ((3840, 2160), (7680, 4320)),
+        ((1921, 1080), (1920, 1080)),
+        ((1920, 1080), (1280, 1024)),
+    ] {
+        assert!(
+            description::prepare(
+                &camera(native.0, native.1),
+                Vec::new(),
+                output(size.0, size.1),
+                runtime_id().unwrap(),
+            )
+            .is_err(),
+            "{native:?} -> {size:?}"
+        );
+    }
+    // The synthetic demonstration keeps its own 1280x720 limit.
+    assert!(Synthetic::install(output(1920, 1080), runtime_id().unwrap()).is_err());
+    assert!(Synthetic::install(output(1280, 720), runtime_id().unwrap()).is_ok());
+}
+
 #[tokio::test]
 #[ignore = "requires a native hardware GPU"]
 async fn gpu_described_image_quads_are_drawn_unlit_through_the_tracked_camera() {

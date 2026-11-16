@@ -282,6 +282,7 @@ function showMonitor(status: MonitorStatus): void {
     count("skipped", "monitor.skipped", status.frames_skipped, true),
     ["WebRTC viewers", String(status.viewers)],
     ["SRT callers", String(status.srt_callers)],
+    ["preview", `${status.preview_width}x${status.preview_height} ${status.encoder}`],
   ]);
 }
 

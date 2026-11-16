@@ -37,7 +37,7 @@ UYVY conversion, readback) and prints GPU and wall time per frame.
 
 Program (exactly one):
   --synthetic-program     synthetic-program-v1 (max 1280x720)
-  --pitch-demo <json>     Owner-local pitch-demo-v1 manifest (max 1280x720)
+  --pitch-demo <json>     Owner-local pitch-demo-v1 manifest
   --video-scene <json>    Local calibrated-video-v1 scene/lens manifest
   --tracked-scene <json>  The same manifest as tracked-video-v1; the frame carries the
                           manifest's Ti/C and the warp of --frame as its tracked camera
@@ -48,7 +48,7 @@ Options:
   --output <png>          render: output file; refuses to replace it without --overwrite
   --overwrite             render: replace an existing output file
   --frames <n>            bench: frames to time after 10 warm-up frames [default: 300]
-  --size <WxH>            Output size; both even [default: 1280x720]
+  --size <WxH>            Output size; both even, up to 4096x2160 [default: 1280x720]
   --fps <n>               Output rate, 1-120; a video scene needs its clip rate [default: 50]
   --state <json>          chr-common SceneState replacing the program's initial scene
                           (its configuration_id is replaced by the program's)

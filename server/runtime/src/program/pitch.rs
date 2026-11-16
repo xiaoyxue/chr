@@ -153,8 +153,7 @@ impl Prepared {
                 .pitch
                 .iter()
                 .any(|v| !v.is_finite() || *v <= 0.0 || *v > 1000.0)
-            || fixture.width > 4096
-            || fixture.height > 2160
+            || !super::fits(fixture.width, fixture.height, super::MAX_EXTENT)
             || models.is_empty()
             || models.len() > 8
         {
@@ -172,8 +171,8 @@ impl Prepared {
         config.limits.lights_per_scene = 5;
         config.shadows.resolution = 512;
         config.shadows.max_bytes = (32_u64 * 1024 * 1024).into();
-        // Native input is bounded separately; output composition remains <= 1280x720.
-        config.max_intermediate_bytes = (128_u64 * 1024 * 1024).into();
+        config.max_intermediate_bytes =
+            super::composition_budget(config.native_extent, config.output_extent).into();
         let mut registrations = Registrations::default();
         registrations
             .register_world(serde_json::from_value(

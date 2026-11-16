@@ -236,7 +236,7 @@ The same in text, with every channel:
       │     │ ①                 │     │ ②               │ ③ program tap (shm)
       ▼     │                   ▼     │                 ▼
   ┌─────────┴────────────┐  ┌─────────┴────────┐  ┌───────────────────────────────────────┐
-  │ tracking worker      │  │ render worker    │  │ chr-monitor (H.264: x264 or openh264) │── SRT udp :9001 ──► VLC / ffplay
+  │ tracking worker      │  │ render worker    │  │ chr-monitor (≤1080p H.264: NVENC/x264)│── SRT udp :9001 ──► VLC / ffplay
   │ chr-tracking-sim-cli │  │ chr-renderer-cli │  └───────────────────┬───────────────────┘   └► stack.py relay tcp ──► players over SSH
   │ (replay stand-in)    │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
   └──────────────────────┘  └──────────────────┘                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page

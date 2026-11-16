@@ -94,7 +94,7 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
 ```text
 chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
             [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--srt <ip:port>]
-            [--encoder openh264|gstreamer] [--allow-origin <origin>]
+            [--encoder openh264|gstreamer|nvenc|x264] [--allow-origin <origin>]
 ```
 
 - `--size`/`--fps` (defaults 1280x720, 50) must match the server: the ring
@@ -110,8 +110,15 @@ chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
   `chr-common` transport. `chr-server` no longer answers `webrtc.offer`.
 - `--srt` works with any program and either encoder; it no longer requires
   `--software-video`.
-- `--srt` and `--encoder gstreamer` need the `gstreamer-media` feature. The
+- `--srt` and the GStreamer encoders need the `gstreamer-media` feature. The
   monitor's GStreamer helpers are its own; it does not depend on `chr-runtime`.
+- Since #144 the tap stays at the program's size (up to 4096x2160) and the
+  monitor encodes a preview scaled down to fit 1920x1080 (aspect kept, never
+  scaled up, even sides). `gstreamer` scales with `videoconvertscale` and
+  encodes with NVENC `nvh264enc` when a probe frame encodes at start, else x264;
+  `nvenc`/`x264` force one; openh264 samples the nearest pixels. WebRTC and SRT
+  share that stream; `monitor.get_status` adds `encoder`, `preview_width` and
+  `preview_height`.
 - The render harness takes a separate monitor URL for video (`?monitor=`,
   `npm run verify -- --monitor`); control stays on `chr-server`. The development
   launcher `server/scripts/run-live.sh` starts both processes with matching
@@ -352,6 +359,114 @@ buffers were reused across scene revisions (#106). Scene edits during a restart
 were not measured separately. Physical SDI is not verified (#80). The live
 service is Linux-only; SRT preview from a Windows PC in VLC was checked against
 this stack (the Linux host must allow the SRT UDP port through its firewall).
+
+## Resolutions and performance
+
+Since #144 the camera programs take a native camera extent and an output size up
+to DCI 4K (4096x2160, which covers 4K UHD 3840x2160; both even, same aspect;
+`program::MAX_EXTENT`). Onsite the camera is 1080p. Only `--synthetic-program`
+and `--software-video` keep their 1280x720 demonstration limit
+(`program::DEMO_MAX_EXTENT`). The SDI port and the program tap run at the output
+size; `chr-monitor` encodes a preview of at most 1920x1080 (above). 8K UHD was
+evaluated and dropped: alone on the GPU it took 21 ms of GPU and 82 ms of wall
+time per frame in `bench`.
+
+### Memory per resolution
+
+| | 1280x720 | 1920x1080 | 3840x2160 | 4096x2160 |
+| --- | --- | --- | --- | --- |
+| RGBA8 input frame | 3.7 MB | 8.3 MB | 33 MB | 35 MB |
+| UYVY output frame | 1.8 MB | 4.1 MB | 17 MB | 18 MB |
+| Input ring + program tap (8 + 8 slots, in `dir`) | 44 MB | 100 MB | 398 MB | 425 MB |
+| Shared input frames in `chr-server`, about | 70 MB | 158 MB | 630 MB | 672 MB |
+| Frame-resource pool budget (`64 * w * h`) | 59 MB | 133 MB | 531 MB | 566 MB |
+| Composition budget, GPU (`max(256 MiB, (3 * native + output) * 8)`) | 268 MB | 268 MB | 268 MB | 283 MB |
+
+The shared input frames are the capture backlog (the wait in frame periods plus
+two, at least four; five at the default 3-period wait), two ready frames, the
+four frames the render worker may hold and eight released memories kept for
+reuse (`RECYCLED`). Every one of these queues has a fixed length, so memory
+grows with the frame size only. The composition budget covers the native and
+output RGBA16Float canvases and a guard-banded ideal canvas of up to twice the
+native area; MSAA targets and shadow maps are outside it. Description assets
+keep their own limits (64 assets, 1 GiB, 256 MiB per file). A synthetic program's
+own constant input image is only made when it injects one, so a described or
+tracked program no longer allocates it in both `chr-server` and the worker.
+
+### Measurements
+
+Recorded on the RTX 3090 host (i9-10900X, 62 GiB RAM, 6.3 GB `$XDG_RUNTIME_DIR`)
+with nothing else on the GPU, using `server/scripts/resolution_bench.py`: the
+synthetic camera is a testsrc2 clip with a fixed top-down camera, four image
+quads, 4x MSAA and a radial lens; "onsite" is the onsite description with the
+recorded 1080p clip. Every run used the tracking worker and `chr-monitor
+--encoder gstreamer` with an SRT receiver for 60 s at 30 fps.
+
+| | 1280x720 | 1920x1080 | 1920x1080 onsite | 3840x2160 |
+| --- | --- | --- | --- | --- |
+| Render GPU / wall per frame (`bench`, mean) | 0.73 / 2.2 ms | 1.48 / 4.2 ms | | 5.38 / 15.2 ms |
+| Deadline misses / clean feed / repeats | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 4 | 293 / 293 / 915 |
+| Frames tracked per second | 30.0 | 30.0 | 29.9 | 29.9 |
+| CPU: `chr-server` / render worker / monitor | 9 / 10 / 7 % | 13 / 16 / 14 % | 11 / 14 / 12 % | 85 / 23 / 82 % |
+| CPU: tracking worker / `chr-tracking-sim` + `ffmpeg` | 1 / 19 + 36 % | 1 / 39 + 60 % | 1 / 35 + 58 % | 1 / 195 + 249 % |
+| RSS: `chr-server` (shared frames) / render worker | 106 (79) / 193 MiB | 215 (178) / 208 MiB | 207 (170) / 207 MiB | 713 (633) / 291 MiB |
+| Render worker GPU memory | 463 MiB | 465 MiB | 721 MiB | 1021 MiB |
+| `dir` (tmpfs) used | 42 MiB | 95 MiB | 95 MiB | 380 MiB |
+| SRT preview (H.264 Constrained Baseline, NVENC) | 1280x720 | 1920x1080 | 1920x1080 | 1920x1080 |
+
+- **1080p30**, the onsite target, runs with CG on every frame: no deadline miss,
+  no clean feed, every frame tracked, the 1080p NVENC preview over SRT, and
+  about 10–15 % of a core each for `chr-server`, the render worker and the
+  monitor. The monitor's NVENC session takes 286 MiB of GPU memory.
+- **4K (3840x2160) is accepted but not yet sustained at 30 fps with the
+  software camera simulation on this host**: 16 % of the frames (293 in 60 s)
+  went out as clean feed and 915 slots repeated. Rendering fits (15 ms wall in
+  `bench` against the 25 ms deadline); the software camera simulation
+  (`chr-tracking-sim` and its `ffmpeg` decoder, about 4.4 cores) and the CPU it
+  takes from `chr-server` (85 %, partly converting clean feed) and the monitor
+  (82 %, mostly the 4K-to-1080p scaling) do not. A real capture card replaces
+  the simulation's decoding.
+- The monitor's downscale costs about 17 ms of CPU per 4K frame with
+  `videoconvertscale` (bilinear without a chroma pass; 22 ms with it, 8 ms
+  nearest-neighbour).
+
+Repeat the measurements from the repository root inside `nix develop .#media`
+with nothing else on the GPU:
+
+```sh
+for size in 1280x720 1920x1080 3840x2160; do
+  python3 server/scripts/resolution_bench.py prepare $size
+  python3 server/scripts/resolution_bench.py bench $size
+  python3 server/scripts/resolution_bench.py run $size --seconds 60
+done
+python3 server/scripts/resolution_bench.py run 1920x1080 --seconds 60 \
+  --scene <manifest.json> --video <1080p clip> --description <start.json> --asset-root <asset-root>
+cargo run --release -p chr-renderer --example upload_probe   # through nixGL on non-NixOS hosts
+```
+
+### A second Vulkan process on the same GPU (#144 follow-up)
+
+A render process started next to a running render worker on this host spends
+most of each frame in CPU stores into memory mapped from the GPU driver. Copying
+one RGBA8 frame into such memory (`upload_probe`) takes 0.8 ms (1080p) and
+3.4 ms (4K) alone, but about 835 ms (1080p) and 100 ms (4K) as a second process,
+for upload (`MAP_WRITE`) and host-cached (`MAP_READ`) buffers alike, fresh or
+reused. `perf` on the probe as a second process puts about 99 % of the time in
+glibc's `__memset_evex_unaligned_erms` / `__memmove_evex_unaligned_erms`: user
+space stores into the driver mapping, no kernel time. The slowdown is per process
+and depends on the copy size; non-temporal stores stay fast
+(`GLIBC_TUNABLES=glibc.cpu.x86_non_temporal_threshold=0x100000` brings the
+second process's 1080p copy to about 26 ms), which points to how the second
+process's mappings are cached.
+
+The RTX 3090 supports Resizable BAR up to 32 GB (`lspci -vv`: `BAR 1: current
+size: 256MB, supported: 64MB … 32GB`), but the driver runs with
+`EnableResizableBar: 0`. The proposed fix is `options nvidia
+NVreg_EnableResizableBar=1` in `/etc/modprobe.d/`, `update-initramfs -u` and a
+reboot, plus Re-Size BAR in the BIOS if BAR1 stays at 256 MB. Production runs a
+single render worker, so only benchmarks and test stacks next to the live stack
+are hit, and a future tracking worker that uses the GPU would be; re-check both
+after enabling Resizable BAR.
 
 ## Documentation to update with the code
 

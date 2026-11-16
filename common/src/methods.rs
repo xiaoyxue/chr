@@ -271,6 +271,12 @@ pub mod monitor {
         pub viewers: u64,
         /// Connected SRT callers.
         pub srt_callers: u64,
+        /// H.264 encoder of the preview: `nvh264enc` (NVENC), `x264enc` or `openh264`.
+        pub encoder: String,
+        /// Preview size: the program output scaled down to fit 1920x1080, keeping its
+        /// aspect ratio; WebRTC and SRT carry the same stream.
+        pub preview_width: u32,
+        pub preview_height: u32,
     }
 }
 

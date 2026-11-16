@@ -15,7 +15,8 @@
 #   --description <json>  Run chr-server with this render description instead of the
 #                     manifest's scene; the simulator still replays the manifest's cameras.
 #                     Add --asset-root <dir> to let clients load scenes (description.load)
-#   --size <WxH>      Program output size [default: 1280x720]
+#   --size <WxH>      Program output size: even, up to 4096x2160, with the camera's
+#                     aspect ratio; chr-monitor previews at most 1920x1080 [default: 1280x720]
 #   --srt <ip:port>   chr-monitor SRT listener [default: 127.0.0.1:9001]
 #   --sim-arg <arg>   Pass one argument to chr-tracking-sim (repeatable), for example
 #                     --sim-arg --tracking-delay-ms --sim-arg 40
