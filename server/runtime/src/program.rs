@@ -24,6 +24,27 @@ pub mod synthetic;
 pub mod video;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// Largest camera native extent and program output size: 8K UHD.
+pub const MAX_EXTENT: [u32; 2] = [7680, 4320];
+/// The synthetic and software-video demonstrations' own limit.
+pub const DEMO_MAX_EXTENT: [u32; 2] = [1280, 720];
+
+/// True for a nonzero, even extent within `max`.
+pub fn fits(width: u32, height: u32, max: [u32; 2]) -> bool {
+    (1..=max[0]).contains(&width)
+        && (1..=max[1]).contains(&height)
+        && width.is_multiple_of(2)
+        && height.is_multiple_of(2)
+}
+
+/// Composition budget of a program with a lens: the native and output canvases
+/// plus a guard-banded ideal canvas of up to twice the native area, all
+/// RGBA16Float, and never below the renderer's 256 MiB default.
+pub fn composition_budget(native: w::Extent, output: w::Extent) -> u64 {
+    let pixels = |e: w::Extent| u64::from(e.width) * u64::from(e.height);
+    ((3 * pixels(native) + pixels(output)) * 8).max(256 * 1024 * 1024)
+}
+
 /// The parts of one program frame: a bound scene, its camera and the input image.
 pub struct Frame<'a> {
     pub scene: &'a BoundScene,
@@ -351,12 +372,57 @@ pub fn validate_output(config: &w::Configuration) -> Result<(), Error> {
     if config.output_transfer != w::OutputTransfer::Bt709
         || config.output_rate.numerator() != 1
         || !(1..=120).contains(&config.output_rate.denominator())
-        || config.output_extent.width == 0
-        || config.output_extent.height == 0
-        || !config.output_extent.width.is_multiple_of(2)
-        || !config.output_extent.height.is_multiple_of(2)
+        || !fits(
+            config.output_extent.width,
+            config.output_extent.height,
+            MAX_EXTENT,
+        )
     {
-        return Err("program port requires even BT.709 output at integral 1..120 FPS".into());
+        return Err(
+            "program port requires even BT.709 output up to 7680x4320 at integral 1..120 FPS"
+                .into(),
+        );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extents_up_to_8k_fit_and_odd_or_larger_ones_do_not() {
+        for (width, height) in [
+            (7680, 4320),
+            (3840, 2160),
+            (4096, 2160),
+            (1920, 1080),
+            (2, 2),
+        ] {
+            assert!(fits(width, height, MAX_EXTENT), "{width}x{height}");
+        }
+        for (width, height) in [
+            (7682, 4320),
+            (7680, 4322),
+            (1921, 1080),
+            (1920, 1081),
+            (0, 2),
+        ] {
+            assert!(!fits(width, height, MAX_EXTENT), "{width}x{height}");
+        }
+        assert!(fits(1280, 720, DEMO_MAX_EXTENT));
+        assert!(!fits(1920, 1080, DEMO_MAX_EXTENT));
+    }
+
+    #[test]
+    fn composition_budget_covers_canvases_and_guard_band() {
+        let extent = |width, height| w::Extent { width, height };
+        assert_eq!(
+            composition_budget(extent(1920, 1080), extent(1280, 720)),
+            256 * 1024 * 1024
+        );
+        // 8K native and output: 4 x 33.2 MP x 8 bytes, about 1.06 GB.
+        let k8 = extent(7680, 4320);
+        assert_eq!(composition_budget(k8, k8), 4 * 7680 * 4320 * 8);
+    }
 }

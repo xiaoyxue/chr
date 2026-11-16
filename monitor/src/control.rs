@@ -124,7 +124,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             status,
-            json!({"frames_encoded": 0, "frames_skipped": 0, "viewers": 0, "srt_callers": 0})
+            json!({"frames_encoded": 0, "frames_skipped": 0, "viewers": 0, "srt_callers": 0,
+                "encoder": "", "preview_width": 0, "preview_height": 0})
         );
         for (method, params) in [
             (monitor::GET_STATUS, Some(json!({"x": 1}))),

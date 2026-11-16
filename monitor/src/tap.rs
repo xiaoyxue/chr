@@ -20,7 +20,7 @@ use chr_shm::{Read, Reader, SlotHeader, tap::SlotMeta};
 use openh264::{encoder::VuiConfig, formats::YUVSlices};
 
 use crate::{
-    BoxError, Counters, VideoMode,
+    BoxError, Counters, EncoderInfo, VideoMode,
     encoder::{EncodedFrame, H264Encoder, VideoFeed},
 };
 
@@ -31,8 +31,12 @@ const REOPEN_AFTER: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncoderKind {
     OpenH264,
-    /// GStreamer x264; needs the `gstreamer-media` feature.
+    /// GStreamer NVENC when it works, otherwise x264; needs `gstreamer-media`.
     GStreamer,
+    /// GStreamer NVENC only; needs `gstreamer-media`.
+    Nvenc,
+    /// GStreamer x264 only; needs `gstreamer-media`.
+    X264,
 }
 
 enum SlotEncoder {
@@ -49,18 +53,42 @@ impl SlotEncoder {
         if !mode.width.is_multiple_of(2) || !mode.height.is_multiple_of(2) {
             return Err("4:2:0 encoding needs an even width and height".into());
         }
+        #[cfg(all(unix, feature = "gstreamer-media"))]
+        let gstreamer = |choice| -> Result<Self, BoxError> {
+            Ok(Self::GStreamer(crate::gstreamer::Encoder::new(
+                mode, choice,
+            )?))
+        };
         match kind {
             // The SDI frames are BT.709 limited range; signal that to decoders.
             EncoderKind::OpenH264 => Ok(Self::OpenH264 {
                 encoder: Box::new(H264Encoder::new(mode.fps, VuiConfig::bt709())?),
-                planes: I420::new(mode.width as usize, mode.height as usize),
+                planes: I420::new([mode.width, mode.height], mode.preview()),
             }),
             #[cfg(all(unix, feature = "gstreamer-media"))]
-            EncoderKind::GStreamer => Ok(Self::GStreamer(crate::gstreamer::Encoder::new(mode)?)),
+            EncoderKind::GStreamer => gstreamer(crate::gstreamer::Choice::Auto),
+            #[cfg(all(unix, feature = "gstreamer-media"))]
+            EncoderKind::Nvenc => gstreamer(crate::gstreamer::Choice::Nvenc),
+            #[cfg(all(unix, feature = "gstreamer-media"))]
+            EncoderKind::X264 => gstreamer(crate::gstreamer::Choice::X264),
             #[cfg(not(all(unix, feature = "gstreamer-media")))]
-            EncoderKind::GStreamer => {
-                Err("the GStreamer encoder needs Linux/Unix and the gstreamer-media feature".into())
+            EncoderKind::GStreamer | EncoderKind::Nvenc | EncoderKind::X264 => {
+                Err("the GStreamer encoders need Linux/Unix and the gstreamer-media feature".into())
             }
+        }
+    }
+
+    fn info(&self) -> EncoderInfo {
+        match self {
+            Self::OpenH264 { planes, .. } => EncoderInfo {
+                name: "openh264",
+                preview: [planes.width as u32, planes.height as u32],
+            },
+            #[cfg(all(unix, feature = "gstreamer-media"))]
+            Self::GStreamer(encoder) => EncoderInfo {
+                name: encoder.h264().element(),
+                preview: encoder.preview(),
+            },
         }
     }
 
@@ -69,13 +97,14 @@ impl SlotEncoder {
         &mut self,
         frame: u64,
         uyvy: &[u8],
+        source_width: usize,
         keyframe: bool,
     ) -> Result<Option<(Vec<u8>, bool)>, BoxError> {
         match self {
             Self::OpenH264 { encoder, planes } => {
                 // openh264 has no timestamps; RTP and SRT time come from `frame` later.
                 let _ = frame;
-                planes.fill_from_uyvy(uyvy);
+                planes.fill_from_uyvy(uyvy, source_width);
                 let (width, height) = (planes.width, planes.height);
                 let yuv = YUVSlices::new(
                     (&planes.y, &planes.u, &planes.v),
@@ -106,6 +135,15 @@ impl Monitor {
         counters: Arc<Counters>,
     ) -> Result<Self, BoxError> {
         let encoder = SlotEncoder::new(encoder, mode)?;
+        let info = encoder.info();
+        log::info!(
+            "monitor preview {}x{} of {} with {}",
+            info.preview[0],
+            info.preview[1],
+            mode.name(),
+            info.name
+        );
+        let _ = counters.encoder.set(info);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = Arc::clone(&stop);
@@ -169,7 +207,12 @@ fn run(
                 .fetch_add(header.index - last - 1, Ordering::Relaxed);
         }
         last_encoded = Some(header.index);
-        match encoder.encode(frame, &payload, feed.take_keyframe_request()) {
+        match encoder.encode(
+            frame,
+            &payload,
+            mode.width as usize,
+            feed.take_keyframe_request(),
+        ) {
             // RTP and SRT time follow output slots, the cadence the port transmits.
             Ok(Some((data, keyframe))) => {
                 counters.frames_encoded.fetch_add(1, Ordering::Relaxed);
@@ -339,17 +382,28 @@ impl Timeline {
     }
 }
 
-/// Planar 4:2:0, as the encoder takes it.
+/// Planar 4:2:0, as the encoder takes it, at the preview size.
 struct I420 {
     width: usize,
     height: usize,
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+    /// Source column of each preview column, and source row of each preview row.
+    columns: Vec<usize>,
+    rows: Vec<usize>,
 }
 
 impl I420 {
-    fn new(width: usize, height: usize) -> Self {
+    fn new(source: [u32; 2], preview: [u32; 2]) -> Self {
+        // Nearest source pixel to each preview pixel's centre; the identity when
+        // the sizes match.
+        let map = |source: u32, preview: u32| -> Vec<usize> {
+            (0..u64::from(preview))
+                .map(|i| ((2 * i + 1) * u64::from(source) / (2 * u64::from(preview))) as usize)
+                .collect()
+        };
+        let (width, height) = (preview[0] as usize, preview[1] as usize);
         let chroma = (width / 2) * (height / 2);
         Self {
             width,
@@ -357,31 +411,31 @@ impl I420 {
             y: vec![0; width * height],
             u: vec![0; chroma],
             v: vec![0; chroma],
+            columns: map(source[0], preview[0]),
+            rows: map(source[1], preview[1]),
         }
     }
 
-    /// Unpacks UYVY 4:2:2 and halves chroma vertically by averaging row pairs.
-    fn fill_from_uyvy(&mut self, uyvy: &[u8]) {
-        let row_bytes = self.width * 2;
-        let half_width = self.width / 2;
-        for (row_index, row) in uyvy.chunks_exact(row_bytes).take(self.height).enumerate() {
-            let luma = &mut self.y[row_index * self.width..][..self.width];
-            for (pair, group) in row.as_chunks::<4>().0.iter().enumerate() {
-                luma[pair * 2] = group[1];
-                luma[pair * 2 + 1] = group[3];
+    /// Unpacks UYVY 4:2:2 and halves chroma vertically by averaging row pairs,
+    /// sampling the nearest source pixels when the preview is smaller.
+    fn fill_from_uyvy(&mut self, uyvy: &[u8], source_width: usize) {
+        let row_bytes = source_width * 2;
+        let row = |index: usize| &uyvy[self.rows[index] * row_bytes..][..row_bytes];
+        for (index, luma) in self.y.chunks_exact_mut(self.width).enumerate() {
+            let source = row(index);
+            for (value, column) in luma.iter_mut().zip(&self.columns) {
+                *value = source[column * 2 + 1];
             }
         }
+        let half_width = self.width / 2;
         for chroma_row in 0..self.height / 2 {
-            let top = &uyvy[2 * chroma_row * row_bytes..][..row_bytes];
-            let bottom = &uyvy[(2 * chroma_row + 1) * row_bytes..][..row_bytes];
+            let (top, bottom) = (row(2 * chroma_row), row(2 * chroma_row + 1));
             let base = chroma_row * half_width;
             for pair in 0..half_width {
-                let (t, b) = (
-                    &top[pair * 4..pair * 4 + 4],
-                    &bottom[pair * 4..pair * 4 + 4],
-                );
-                self.u[base + pair] = average(t[0], b[0]);
-                self.v[base + pair] = average(t[2], b[2]);
+                // The source pixel pair holding the preview pair's left pixel.
+                let at = self.columns[2 * pair] / 2 * 4;
+                self.u[base + pair] = average(top[at], bottom[at]);
+                self.v[base + pair] = average(top[at + 2], bottom[at + 2]);
             }
         }
     }
@@ -403,11 +457,35 @@ mod tests {
             10, 1, 20, 2, 30, 3, 40, 4, // row 0: (Cb, Y0, Cr, Y1) x 2
             12, 5, 22, 6, 33, 7, 44, 8, // row 1
         ];
-        let mut planes = I420::new(4, 2);
-        planes.fill_from_uyvy(&uyvy);
+        let mut planes = I420::new([4, 2], [4, 2]);
+        planes.fill_from_uyvy(&uyvy, 4);
         assert_eq!(planes.y, [1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(planes.u, [11, 32]);
         assert_eq!(planes.v, [21, 42]);
+    }
+
+    #[test]
+    fn samples_the_nearest_pixels_for_a_smaller_preview() {
+        // 8x4 source, Y = 10 * row + column, U = 100 + pair, V = 200 + row.
+        let uyvy: Vec<u8> = (0..4u8)
+            .flat_map(|row| {
+                (0..4u8).flat_map(move |pair| {
+                    [
+                        100 + pair,
+                        10 * row + 2 * pair,
+                        200 + row,
+                        10 * row + 2 * pair + 1,
+                    ]
+                })
+            })
+            .collect();
+        let mut planes = I420::new([8, 4], [4, 2]);
+        planes.fill_from_uyvy(&uyvy, 8);
+        // Preview pixel (x, y) samples source (2x + 1, 2y + 1).
+        assert_eq!(planes.y, [11, 13, 15, 17, 31, 33, 35, 37]);
+        // Chroma of preview pairs 0 and 1 from source pairs 0 and 2, rows 1 and 3.
+        assert_eq!(planes.u, [100, 102]);
+        assert_eq!(planes.v, [202, 202]);
     }
 
     #[test]

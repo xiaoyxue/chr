@@ -138,7 +138,10 @@ impl Drop for SrtOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{encoder::EncodedFrame, gstreamer::Encoder};
+    use crate::{
+        encoder::EncodedFrame,
+        gstreamer::{Choice, Encoder},
+    };
     use bytes::Bytes;
     use gstreamer_app::AppSink;
     use std::{
@@ -159,7 +162,7 @@ mod tests {
         let feed = Arc::new(VideoFeed::new());
         let counters = Arc::new(Counters::default());
         let output = SrtOutput::spawn(mode, address, feed.clone(), Arc::clone(&counters)).unwrap();
-        let mut encoder = Encoder::new(mode).unwrap();
+        let mut encoder = Encoder::new(mode, Choice::X264).unwrap();
         let mut slot = 0;
         let pixels = [128, 80, 128, 80].repeat(64 * 48 / 2);
         for _ in 0..2 {

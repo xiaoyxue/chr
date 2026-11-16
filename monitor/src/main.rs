@@ -1,7 +1,8 @@
 //! `chr-monitor`: encodes the program output `chr-server` transmits for viewers.
 //!
 //! ```text
-//! chr-server program tap -> chr-monitor: H.264 -> WebRTC (browsers) / SRT (callers)
+//! chr-server program tap -> chr-monitor: scale to <= 1080p, H.264 -> WebRTC (browsers)
+//!                                                                   / SRT (callers)
 //! ```
 //!
 //! Browsers negotiate WebRTC with `webrtc.offer` on this process's own loopback
@@ -12,7 +13,7 @@ use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duratio
 
 use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
 use chr_monitor::{
-    Counters, VideoMode,
+    Counters, MAX_SIZE, VideoMode,
     control::MonitorHandler,
     encoder::VideoFeed,
     tap::{EncoderKind, Monitor},
@@ -27,11 +28,13 @@ Usage: chr-monitor [options]
 Options:
   --tap <path>            Program tap written by chr-server
                           [default: $XDG_RUNTIME_DIR/chr/program.tap]
-  --size <WxH>            Program output size; must match chr-server [default: 1280x720]
+  --size <WxH>            Program output size; must match chr-server, up to 7680x4320.
+                          The preview is scaled down to fit 1920x1080 [default: 1280x720]
   --fps <n>               Program output rate; must match chr-server [default: 50]
   --ws <addr>             Loopback WebSocket for webrtc.offer and monitor.get_status
                           [default: 127.0.0.1:8789]
-  --encoder <name>        openh264, or gstreamer (x264; gstreamer-media feature)
+  --encoder <name>        openh264; or with the gstreamer-media feature gstreamer
+                          (NVENC nvh264enc when it works, else x264), nvenc or x264
                           [default: openh264]
   --srt <ip:port>         Direct MPEG-TS/SRT listener (gstreamer-media feature)
   --webrtc-udp <addr>     Local UDP bind for WebRTC; a wildcard binds every non-loopback
@@ -89,6 +92,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                 args.encoder = match value()?.as_str() {
                     "openh264" => EncoderKind::OpenH264,
                     "gstreamer" => EncoderKind::GStreamer,
+                    "nvenc" => EncoderKind::Nvenc,
+                    "x264" => EncoderKind::X264,
                     other => return Err(format!("unknown encoder {other:?}").into()),
                 }
             }
@@ -104,12 +109,12 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         }
     }
     let mode = args.mode;
-    if mode.width == 0
-        || mode.height == 0
+    if !(1..=MAX_SIZE[0]).contains(&mode.width)
+        || !(1..=MAX_SIZE[1]).contains(&mode.height)
         || !mode.width.is_multiple_of(2)
         || !mode.height.is_multiple_of(2)
     {
-        return Err("--size needs a nonzero, even width and height".into());
+        return Err("--size needs an even width and height up to 7680x4320".into());
     }
     if !(1..=120).contains(&mode.fps) {
         return Err("--fps must be between 1 and 120".into());
@@ -133,9 +138,10 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         return Err("--srt requires a nonzero listen port".into());
     }
     let media = cfg!(all(unix, feature = "gstreamer-media"));
-    if !media && (args.srt.is_some() || args.encoder == EncoderKind::GStreamer) {
+    if !media && (args.srt.is_some() || args.encoder != EncoderKind::OpenH264) {
         return Err(
-            "--srt and --encoder gstreamer need Linux/Unix and the gstreamer-media feature".into(),
+            "--srt and the GStreamer encoders need Linux/Unix and the gstreamer-media feature"
+                .into(),
         );
     }
     args.tap = match tap {
@@ -276,14 +282,19 @@ mod tests {
         assert!(parse(&["--help"]).unwrap().is_none());
         let media = cfg!(all(unix, feature = "gstreamer-media"));
         assert_eq!(parse(&["--srt", "127.0.0.1:9001"]).is_ok(), media);
-        assert_eq!(parse(&["--encoder", "gstreamer"]).is_ok(), media);
+        for encoder in ["gstreamer", "nvenc", "x264"] {
+            assert_eq!(parse(&["--encoder", encoder]).is_ok(), media, "{encoder}");
+        }
+        assert!(parse(&["--size", "7680x4320"]).is_ok());
         for bad in [
             &["--size", "641x360"][..],
             &["--size", "0x0"],
             &["--fps", "0"],
             &["--fps"],
             &["--bogus"],
-            &["--encoder", "nvenc"],
+            &["--encoder", "nvh264enc"],
+            &["--size", "7682x4320"],
+            &["--size", "7680x4322"],
             &["--srt", "127.0.0.1:0"],
             &["--webrtc-udp", "none"],
             &["--webrtc-tcp", "localhost"],

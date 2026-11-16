@@ -155,6 +155,11 @@ export interface MonitorStatus {
   viewers: number;
   /** Connected SRT callers. */
   srt_callers: number;
+  /** H.264 encoder of the preview: `nvh264enc` (NVENC), `x264enc` or `openh264`. */
+  encoder: string;
+  /** Preview size: the program output scaled down to fit 1920x1080; WebRTC and SRT carry it. */
+  preview_width: number;
+  preview_height: number;
 }
 
 export function isTriangleState(value: unknown): value is TriangleState {

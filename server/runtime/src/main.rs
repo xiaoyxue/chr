@@ -49,7 +49,8 @@ Options:
   --ws <addr>             Loopback WebSocket address [default: 127.0.0.1:8787]
   --socket <path>         NativeSocket path [default: $XDG_RUNTIME_DIR/chr/render.sock]
   --no-socket             Do not listen on a NativeSocket
-  --size <WxH>            Render size; both even [default: 1280x720]
+  --size <WxH>            Render size; both even, up to 7680x4320 and with the camera's
+                          aspect for a camera program [default: 1280x720]
   --fps <n>               Frames per second, 1-120 [default: 50]
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
@@ -72,7 +73,7 @@ Options:
                           <path> --output-socket <path>` [default: chr-tracking-sim-cli
                           next to chr-server, a replay]
   --tracking-worker-arg <arg> Pass one argument to the tracking worker (repeatable)
-  --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest (max 1280x720 output)
+  --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
                           [default: $XDG_RUNTIME_DIR/chr/program.tap]

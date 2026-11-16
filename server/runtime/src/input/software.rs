@@ -51,9 +51,9 @@ impl VideoInput {
         validate_mode(
             mode,
             if expected_frames.is_some() {
-                [4096, 2160]
+                crate::program::MAX_EXTENT
             } else {
-                [1280, 720]
+                crate::program::DEMO_MAX_EXTENT
             },
         )?;
         gst::init()?;
@@ -121,6 +121,13 @@ impl VideoInput {
             "scale=w={}:h={}:in_range=tv:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709,format=uyvy422",
             mode.width, mode.height
         );
+        // Two threads per started 1080p frame of pixels, 2..8: a 4K or 8K camera
+        // clip must still decode and convert at its rate.
+        let threads = (mode.width * mode.height)
+            .div_ceil(1920 * 1080)
+            .saturating_mul(2)
+            .clamp(2, 8)
+            .to_string();
         let mut decoder = Decoder(
             Command::new("ffmpeg")
                 .args([
@@ -129,9 +136,9 @@ impl VideoInput {
                     "-loglevel",
                     "error",
                     "-threads",
-                    "2",
+                    &threads,
                     "-filter_threads",
-                    "2",
+                    &threads,
                     "-re",
                     "-stream_loop",
                     "-1",
@@ -144,7 +151,7 @@ impl VideoInput {
                     "-fps_mode",
                     "passthrough",
                     "-threads",
-                    "2",
+                    &threads,
                     "-pix_fmt",
                     "uyvy422",
                     "-c:v",
@@ -164,7 +171,7 @@ impl VideoInput {
             .ok_or("FFmpeg stdout was not piped")?;
         let pipeline = gst::parse::launch(&format!(
             "fdsrc fd={} ! rawvideoparse format=uyvy width={} height={} framerate={}/1 colorimetry=bt709 \
-             ! videoconvert ! video/x-raw,format=RGBA,colorimetry=1:1:5:1 \
+             ! videoconvert n-threads={threads} ! video/x-raw,format=RGBA,colorimetry=1:1:5:1 \
              ! appsink name=frames sync=false max-buffers=2 drop=true wait-on-eos=false",
             pipe.as_raw_fd(), mode.width, mode.height, mode.fps
         ))?.downcast::<gst::Pipeline>().map_err(|_| "input is not a pipeline")?;

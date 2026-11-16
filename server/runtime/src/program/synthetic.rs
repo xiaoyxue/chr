@@ -54,7 +54,8 @@ pub struct Synthetic {
     pub tracking: Option<crate::calibration::tracking::Tracked>,
     /// SHA-256 of each asset a render description registered at startup.
     pub described: Option<std::collections::HashMap<w::Id, String>>,
-    pixels: Vec<u8>,
+    /// Made on first use: a described or tracked program at 8K never injects it.
+    pixels: std::sync::OnceLock<Vec<u8>>,
     next: u64,
     pending: Vec<w::Id>,
     initial_state: w::SceneState,
@@ -70,8 +71,8 @@ impl Synthetic {
         mode: VideoMode,
         runtime: &w::Id,
     ) -> Result<w::Configuration, Error> {
-        if mode.width > 1280 || mode.height > 720 {
-            return Err("synthetic-program-v1 supports at most 1280x720".into());
+        if !super::fits(mode.width, mode.height, super::MAX_EXTENT) {
+            return Err("program output must be even and at most 7680x4320".into());
         }
         let configuration: w::Configuration = serde_json::from_value(json!({
             "runtime_id":runtime, "configuration_id":format!("{}-configuration", runtime.as_str()),
@@ -102,6 +103,9 @@ impl Synthetic {
         runtime: w::Id,
         video: bool,
     ) -> Result<(Self, SceneAdapter), Error> {
+        if !super::fits(mode.width, mode.height, super::DEMO_MAX_EXTENT) {
+            return Err("synthetic-program-v1 supports at most 1280x720".into());
+        }
         let configuration = Self::configuration(mode, &runtime)?;
         let mut registrations = Registrations::default();
         registrations
@@ -245,7 +249,7 @@ impl Synthetic {
                 video_lens: None,
                 tracking: None,
                 described: None,
-                pixels: [32, 64, 96, 255].repeat(e.width as usize * e.height as usize),
+                pixels: std::sync::OnceLock::new(),
                 next: 0,
                 pending: Vec::new(),
                 initial_state,
@@ -284,7 +288,9 @@ impl Synthetic {
     /// The synthetic native input image (RGBA8, BT.709 code values) that
     /// [`Self::inject`] submits.
     pub fn native_pixels(&self) -> &[u8] {
-        &self.pixels
+        let e = self.configuration.native_extent;
+        self.pixels
+            .get_or_init(|| [32, 64, 96, 255].repeat(e.width as usize * e.height as usize))
     }
 
     /// One native frame, submitted through the same strict control queue as both IPCs.
@@ -400,7 +406,7 @@ impl Synthetic {
             .register_pixels(
                 metadata.clone(),
                 input.map_or_else(
-                    || Pixels::Owned(self.pixels.as_slice().into()),
+                    || Pixels::Owned(self.native_pixels().into()),
                     |(_, pixels)| pixels,
                 ),
             )
