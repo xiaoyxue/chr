@@ -3,7 +3,7 @@
 //! with its selected pose, and replaces the worker when it exits, fails or hangs.
 //!
 //! ```text
-//! Starting ──output socket connected──► Ready ──exit / invalid frame / hang / full──► Backoff ──timer──► Starting
+//! Starting ──both sockets connected──► Ready ──exit / invalid frame / hang / full──► Backoff ──timer──► Starting
 //! ```
 //!
 //! Every started worker is a new stream: a new `stream_id`, `frame_id`s from 0.
@@ -247,10 +247,9 @@ impl Tracker {
                 None
             }
             State::Starting { worker, since, .. } => worker.check().or_else(|| {
-                ready = worker.channel.is_connected();
-                (!ready && now.duration_since(*since) > STARTUP_TIMEOUT).then(|| {
-                    "the tracking worker did not listen on its output socket in time".to_owned()
-                })
+                ready = worker.channel.is_connected() && worker.channel.worker_connected();
+                (!ready && now.duration_since(*since) > STARTUP_TIMEOUT)
+                    .then(|| "the tracking worker did not connect both sockets in time".to_owned())
             }),
             State::Ready {
                 worker,
@@ -261,6 +260,9 @@ impl Tracker {
                     self.backoff = FIRST_BACKOFF;
                 }
                 worker.check().or_else(|| {
+                    if !worker.channel.worker_connected() {
+                        return Some("the tracking worker left its input socket".to_owned());
+                    }
                     session
                         .in_flight
                         .front()
@@ -283,8 +285,8 @@ impl Tracker {
         }
     }
 
-    /// The worker listens on its output socket and chr-server is its consumer:
-    /// there is no `ready` message in the VchaoFrame contract.
+    /// chr-server reads the worker's output socket and the worker reads its
+    /// input: there is no `ready` message in the VchaoFrame contract.
     fn become_ready(&mut self) {
         let State::Starting {
             worker, session, ..
@@ -431,6 +433,7 @@ impl Tracker {
             &self.config.socket_dir,
             Some(&wire.caps()),
             self.config.in_flight as u64 + 1,
+            true,
         )?;
         let mut command = Command::new(&self.config.executable);
         command

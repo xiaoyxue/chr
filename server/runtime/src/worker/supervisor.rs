@@ -417,6 +417,7 @@ impl Supervisor {
             &self.config.socket_dir,
             Some(&gstreamer::Caps::new_empty_simple(transport::CAPS)),
             transport::QUEUE,
+            false,
         )?;
         // Waits in the socket until the worker connects.
         channel.send(

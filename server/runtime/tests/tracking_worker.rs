@@ -302,9 +302,9 @@ fn return_frame(
     let mut fixture = Fixture::with(name, Some(idle), &[], Duration::from_secs(5), 8);
     fixture.tracker().poll();
     let sockets = fixture.dir.join("sockets");
-    let output = Sender::listen_with(&sockets.join("output.sock"), None, 4).unwrap();
-    fixture.ready();
+    let output = Sender::listen_live(&sockets.join("output.sock"), None, 4).unwrap();
     let input = Receiver::connect(&sockets.join("input.sock")).unwrap();
+    fixture.ready();
     fixture.tracker().track(3, &Fixture::frame(3));
     let mut frame = Received::decode(input.reader().recv_sample().unwrap().unwrap()).unwrap();
     assert_eq!(

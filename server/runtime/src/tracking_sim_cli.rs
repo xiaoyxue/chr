@@ -162,7 +162,8 @@ fn serve(worker: &Worker) -> Result<()> {
         worker.manifest.display(),
         worker.stream_id
     );
-    let output = Sender::listen_with(&worker.output, None, OUTPUT_QUEUE)?;
+    // As pitch-analysis: frames are returned only to the connected consumer.
+    let output = Sender::listen_live(&worker.output, None, OUTPUT_QUEUE)?;
     let input = Receiver::connect(&worker.input)?;
     let result = forward(&input, &output, worker, replay.ti());
     output.finish(FINISH);

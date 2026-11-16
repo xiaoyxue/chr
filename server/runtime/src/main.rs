@@ -29,7 +29,7 @@ use chr_runtime::calibration::tracking::{
 use chr_runtime::control::ControlHandler;
 use chr_runtime::frame_resources::Pixels;
 use chr_runtime::input::ring::RingInput;
-use chr_runtime::pipeline::{RenderConfig, RenderWorker};
+use chr_runtime::pipeline::{CLEAN_QUEUE, CleanFrame, RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
 use chr_runtime::worker::tracking::supervisor::{Answer, Tracker, TrackerConfig, in_flight_limit};
@@ -504,6 +504,8 @@ fn run(args: Args) -> Result<()> {
         _ => None,
     };
     let feed = tracking.as_ref().map(|(feed, ..)| feed.clone());
+    // Frames without a camera go to the render loop as clean feed.
+    let (clean, clean_frames) = std::sync::mpsc::sync_channel::<CleanFrame>(CLEAN_QUEUE);
     let taps = match &args.monitor_tap {
         Some(path) => {
             let taps = Taps::ring(mode, path)?;
@@ -568,6 +570,7 @@ fn run(args: Args) -> Result<()> {
             worker_config,
             Arc::clone(&status),
             synthetic.scheduler.clone(),
+            tracking.is_some().then_some(clean_frames),
         )?
     } else {
         RenderWorker::spawn(
@@ -665,11 +668,20 @@ fn run(args: Args) -> Result<()> {
                                 join.frame(CapturedFrame { sequence, rgba, arrived });
                             }
                             if let Some(tracker) = tracker { accept_answers(feed, tracker.poll()); }
-                            if let Some((frame, sample)) = join.next(std::time::Instant::now()) {
-                                let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
-                                if let Err(error) = synthetic.inject_pixels(control, capture_offset + frame.sequence, Pixels::Shared(frame.rgba), geometry).await {
-                                    log::warn!("tracked frame {} skipped: {error}", frame.sequence);
+                            match join.next(std::time::Instant::now()) {
+                                Some((frame, Some(sample))) => {
+                                    let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
+                                    if let Err(error) = synthetic.inject_pixels(control, capture_offset + frame.sequence, Pixels::Shared(frame.rgba), geometry).await {
+                                        log::warn!("tracked frame {} skipped: {error}", frame.sequence);
+                                    }
                                 }
+                                Some((frame, None)) => {
+                                    let clean_frame = CleanFrame { sequence: capture_offset + frame.sequence, rgba: frame.rgba, extent: synthetic.configuration.native_extent };
+                                    if clean.try_send(clean_frame).is_err() {
+                                        log::debug!("clean frame {} dropped: the render loop is behind", frame.sequence);
+                                    }
+                                }
+                                None => {}
                             }
                             continue;
                         }

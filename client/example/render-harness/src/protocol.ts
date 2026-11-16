@@ -137,8 +137,10 @@ export interface TrackingStatus {
   samples_late: number;
   /** Input frames submitted for rendering with their camera. */
   frames_joined: number;
-  /** Input frames whose camera did not arrive within the wait; not rendered. */
+  /** Input frames whose camera did not arrive within the wait (also `unavailable` or not sent to a tracking worker). */
   frames_without_tracking: number;
+  /** Input frames transmitted as clean feed (their own pixels, no CG) because they had no camera. */
+  frames_clean_feed: number;
   /** Input frames not rendered because the backlog was full or a newer frame resolved first. */
   frames_dropped: number;
   /** Captured frames the input ring overwrote before the server read them. */

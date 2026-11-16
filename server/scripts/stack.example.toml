@@ -18,10 +18,13 @@ tracking = "worker"
 # The tracking worker executable; empty: chr-tracking-sim-cli, which replays the
 # manifest's recorded Ti through the manifest's or description's lens. Any other
 # worker's Ti is rendered without a lens (vchao estimates against the distorted image).
-# tracking_cli = "/path/to/pitch-analysis"
+# vchao's pitch-analysis (build: docs/operations.md#run-with-vchao-tracking) on a
+# non-NixOS host goes through with-cuda-driver.sh; on NixOS name it directly.
+# tracking_cli = "server/scripts/with-cuda-driver.sh"
 # Its arguments; chr-server adds --stream-id and the two sockets, and replaces
 # "{stream_id}" with each worker session's stream ID (a restarted worker is a new stream).
-# tracking_worker_args = ["--asset-manifest", "/path/to/map/manifest.json",
+# tracking_worker_args = ["output/vchao/pitch-analysis/bin/pitch-analysis",
+#     "--asset-manifest", "/path/to/map/manifest.json",
 #     "--batch-frames", "8", "--estimate-every", "4", "--interpolation", "logh",
 #     "--overload-ms", "500", "--ledger", "/path/to/runs/{stream_id}.arrow"]
 # Station optical centre of every camera: world metres, negative Z up. Default: the

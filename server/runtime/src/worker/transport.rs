@@ -10,8 +10,10 @@
 //! (`unixfdsrc`). The server listens on `input.sock` before it starts the worker
 //! and passes both paths as `--input-socket <path> --output-socket <path>`;
 //! the worker listens on `output.sock` and the server connects once it exists.
-//! Both sinks hold their buffers until a client connects
-//! (`wait-for-connection`), so no message is lost to the startup order.
+//! The render worker's sinks hold their buffers until a client connects
+//! (`wait-for-connection`), so no message is lost to the startup order. The
+//! tracking worker's sinks do not ([`Sender::listen_live`]): each side sends
+//! once its peer is connected.
 //!
 //! On the render worker's sockets every buffer carries exactly one [`META`]
 //! `GstCustomMeta` whose structure has a string field `json`: one protocol
@@ -95,7 +97,7 @@ pub fn check() -> Result<(), Error> {
             let sink = gst::ElementFactory::make("unixfdsink")
                 .build()
                 .map_err(|_| missing("unixfdsink"))?;
-            match ["wait-for-connection", "min-memory-size"]
+            match ["wait-for-connection", "min-memory-size", "num-clients"]
                 .into_iter()
                 .find(|property| !sink.has_property(property))
             {
@@ -203,6 +205,7 @@ impl Deref for SharedPixels {
 pub struct Sender {
     pipeline: gst::Pipeline,
     source: AppSrc,
+    sink: gst::Element,
     queue: u64,
 }
 
@@ -215,8 +218,27 @@ impl Sender {
     }
 
     /// Listens on `path` for buffers with `caps` (or caps set later with
-    /// [`Self::set_caps`]); at most `queue` buffers wait for the peer.
+    /// [`Self::set_caps`]); at most `queue` buffers wait for the peer, which
+    /// they do until it connects.
     pub fn listen_with(path: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
+        Self::open(path, caps, queue, true)
+    }
+
+    /// [`Self::listen_with`] for a live stream, as vchao's producers listen:
+    /// buffers do not wait for a peer, so push only while [`Self::clients`] is 1.
+    /// `unixfdsink` waits for a connection inside `render` holding the base
+    /// sink's preroll lock, so tearing down a waiting sink after its peer was
+    /// lost can deadlock.
+    pub fn listen_live(path: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
+        Self::open(path, caps, queue, false)
+    }
+
+    fn open(
+        path: &Path,
+        caps: Option<&gst::Caps>,
+        queue: u64,
+        wait_for_connection: bool,
+    ) -> Result<Self, Error> {
         check()?;
         let _ = std::fs::remove_file(path);
         // Never blocks the caller: the queue is checked in `push`.
@@ -233,7 +255,7 @@ impl Sender {
         let source = source.build();
         let sink = gst::ElementFactory::make("unixfdsink")
             .property("socket-path", path_str(path)?)
-            .property("wait-for-connection", true)
+            .property("wait-for-connection", wait_for_connection)
             // Payloads must already be fd-backed: fail instead of copying them.
             .property("min-memory-size", -1_i64)
             .property("sync", false)
@@ -246,6 +268,7 @@ impl Sender {
         let sender = Self {
             pipeline,
             source,
+            sink,
             queue,
         };
         sender.pipeline.set_state(gst::State::Playing)?;
@@ -255,6 +278,11 @@ impl Sender {
     /// The caps of the buffers pushed from now on.
     pub fn set_caps(&self, caps: &gst::Caps) {
         self.source.set_caps(Some(caps));
+    }
+
+    /// Receivers connected to the socket.
+    pub fn clients(&self) -> u32 {
+        self.sink.property("num-clients")
     }
 
     /// Queues one message, with `memory` as its payload, without blocking.
@@ -434,15 +462,25 @@ pub struct Channel<M> {
 
 impl<M: Inbound> Channel<M> {
     /// Listens on `input.sock` in `dir` for buffers with `caps`, at most `queue`
-    /// of them waiting for the worker.
-    pub fn open(dir: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
+    /// of them waiting for the worker. A `live` channel's buffers do not wait
+    /// for the worker to connect ([`Sender::listen_live`]).
+    pub fn open(
+        dir: &Path,
+        caps: Option<&gst::Caps>,
+        queue: u64,
+        live: bool,
+    ) -> Result<Self, Error> {
         let input = dir.join("input.sock");
         let output = dir.join("output.sock");
         // Connecting must wait for this worker's socket, not a dead one's.
         let _ = std::fs::remove_file(&output);
         let (forward, events) = mpsc::channel();
         Ok(Self {
-            sender: Sender::listen_with(&input, caps, queue)?,
+            sender: if live {
+                Sender::listen_live(&input, caps, queue)?
+            } else {
+                Sender::listen_with(&input, caps, queue)?
+            },
             input,
             output,
             receiver: None,
@@ -508,8 +546,14 @@ impl<M> Channel<M> {
         self.sender.push(buffer)
     }
 
+    /// Whether chr-server reads the worker's output.
     pub fn is_connected(&self) -> bool {
         self.receiver.is_some()
+    }
+
+    /// Whether the worker reads its input.
+    pub fn worker_connected(&self) -> bool {
+        self.sender.clients() > 0
     }
 
     pub fn try_event(&self) -> Option<Event<M>> {

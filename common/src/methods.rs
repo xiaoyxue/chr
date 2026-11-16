@@ -123,8 +123,13 @@ pub mod tracking {
         pub samples_late: u64,
         /// Input frames submitted for rendering with their camera.
         pub frames_joined: u64,
-        /// Input frames whose camera did not arrive within the wait; not rendered.
+        /// Input frames whose camera did not arrive within the wait, including
+        /// frames a tracking worker returned `unavailable` or never received.
         pub frames_without_tracking: u64,
+        /// Input frames transmitted as clean feed: their own pixels without CG,
+        /// because they had no camera. They keep the output's cadence and delay.
+        #[serde(default)]
+        pub frames_clean_feed: u64,
         /// Input frames not rendered because the bounded input backlog was full, or
         /// because a newer frame resolved in the same output period (the output
         /// stays live instead of falling behind).

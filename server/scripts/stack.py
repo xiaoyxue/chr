@@ -383,7 +383,8 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
         joined = rate("tracking.get_status", "frames_joined")
         lines.append(f"  frames + cameras  {joined:.1f} joined/s, "
                      f"{rate('tracking.get_status', 'frames_without_tracking'):.1f} without camera/s; since start "
-                     f"{join['frames_joined']} joined, {join['frames_without_tracking']} without camera, "
+                     f"{join['frames_joined']} joined, {join['frames_without_tracking']} without camera "
+                     f"({join.get('frames_clean_feed', 0)} sent as clean feed), "
                      f"{join['samples_late']} late cameras, {join['frames_dropped']} dropped")
         if isinstance(tracker, dict) and "error" not in tracker and "poses_fresh" in join:
             lines.append(f"  poses             {join['poses_fresh']} fresh, {join['poses_interpolated']} interpolated, "
