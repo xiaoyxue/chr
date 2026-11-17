@@ -127,11 +127,17 @@ made onsite are stored per match, apart from the Fusion package, so importing a
 newer package keeps them:
 
 - **Fusion 3D placements:** `fitFusionModel` on the loaded GLB's three.js bounds.
-  In chr's basis, the preview's centring becomes the translation `(-cx, -cz,
-  min_y)`, followed by the placement's translation (Z −0.015), yaw and uniform
-  scale.
+  Fusion's heading (`modelPose.yaw`) and size factor fit the footprint into the
+  region; the studio's scale (0.1–5) and rotation (`rz`, about the model's own up
+  axis, glTF +Y) then act about that neutral bottom centre without refitting, so
+  the bottom stays on the ground, rotating keeps the size and the model may leave
+  its region. In chr's basis, the preview's centring becomes the translation
+  `(-cx, -cz, min_y)`, followed by the placement's translation (Z −0.015), yaw and
+  uniform scale.
 - **Fusion 2D placements:** the preview's contain fit of the image in its area,
-  rotated by `rz + assetRotation`, at Z −0.02.
+  rotated by `rz + assetRotation`, at Z −0.02. The studio scales the area (relative
+  to Fusion's size) and rotates it about its centre; the rotated area must stay on
+  the pitch.
 - **Local placements:** drawn in the studio on the pitch (2D, 3D) or on a
   point-cloud plane (2D, 3D, flags). Each lies on a rectangle with unit axes `u`
   (image right) and `v` (image down) and normal `u × v`; the preview and the

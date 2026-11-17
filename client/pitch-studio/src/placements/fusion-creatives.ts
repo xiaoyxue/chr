@@ -5,17 +5,25 @@ import type { Placement, ModelPlacement } from '../shared/types.ts';
 import { resolveFusionAsset } from '../matches/offline-package.ts';
 import type { GlbBounds, SlotGeometry } from '../render/render-description.ts';
 
+/**
+ * Where a Fusion model stands: Fusion's heading (`modelPose.yaw`) and size factor fit
+ * its footprint into the region (the neutral pose). The studio's scale (`scaleX`) and
+ * rotation (`rz`, about the model's own up axis, glTF +Y) then act about the neutral
+ * bottom centre without refitting, so the bottom stays on the ground and the model may
+ * leave its region.
+ */
 export function fitFusionModel(width: number, depth: number, slot: ModelPlacement) {
   const { region, modelPose: pose } = slot;
   if (!region || !pose || ![width, depth].every(Number.isFinite) || width + depth <= 0)
     throw new Error('The Fusion model has no valid ground footprint.');
-  const yaw = (pose.yaw + slot.rz) * Math.PI / 180;
-  const cosine = Math.abs(Math.cos(yaw)), sine = Math.abs(Math.sin(yaw));
+  const heading = pose.yaw * Math.PI / 180;
+  const cosine = Math.abs(Math.cos(heading)), sine = Math.abs(Math.sin(heading));
   const rotatedWidth = width * cosine + depth * sine;
   const rotatedDepth = width * sine + depth * cosine;
-  const scale = Math.min(region.width / Math.max(rotatedWidth, 1e-8), region.height / Math.max(rotatedDepth, 1e-8)) * pose.scale * slot.scaleX;
-  return { scale, yaw, x: slot.x + pose.x * Math.max(0, region.width - rotatedWidth * scale) / 2,
-    y: slot.y + pose.y * Math.max(0, region.height - rotatedDepth * scale) / 2 };
+  const neutral = Math.min(region.width / Math.max(rotatedWidth, 1e-8), region.height / Math.max(rotatedDepth, 1e-8)) * pose.scale;
+  return { scale: neutral * slot.scaleX, yaw: heading + slot.rz * Math.PI / 180,
+    x: slot.x + pose.x * Math.max(0, region.width - rotatedWidth * neutral) / 2,
+    y: slot.y + pose.y * Math.max(0, region.height - rotatedDepth * neutral) / 2 };
 }
 
 function dispose(root: THREE.Object3D, environment?: THREE.Texture) {

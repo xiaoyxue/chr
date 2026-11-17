@@ -14,12 +14,13 @@ bounds), images by their pixel size, and assets read by chr-server from the ZIP.
 Without --camera it writes `{"scene": …}`, the shape `description.load` takes; with
 --camera it writes a complete description for `chr-server --description` or
 `chr-renderer-cli render --description`, using the `camera` of the given file.
---move shifts a placement by metres in pitch coordinates and --scale resizes it before
-converting, as if it had been edited in the studio: a 3D placement's model scale
-(`scaleX`) or a 2D placement's area, in which its image is fitted again.
+--move, --scale and --rotate edit a placement before converting, as the studio's
+inspector does: they move it in pitch metres; scale a 3D model about its bottom centre
+(`scaleX`) or a 2D area about its centre; and turn it by `rz` degrees, a model about its
+own up axis without refitting it, an area about its centre.
 
     uv run server/scripts/fusion_description.py MATCH.zip --camera start.json \\
-        --move PLC-… 0 10 --scale PLC-… 0.5 --output scene.json
+        --move PLC-… 0 10 --scale PLC-… 0.5 --rotate PLC-… 30 --output scene.json
 """
 
 import argparse
@@ -216,16 +217,17 @@ def glb_bounds(gltf):
 
 
 def fit_fusion_model(width, depth, slot):
+    """fitFusionModel: Fusion's heading and size fit the region; scaleX and rz act after it."""
     region, pose = slot["region"], slot["modelPose"]
-    yaw = (pose["yaw"] + slot["rz"]) * math.pi / 180
-    cosine, sine = abs(math.cos(yaw)), abs(math.sin(yaw))
+    heading = pose["yaw"] * math.pi / 180
+    cosine, sine = abs(math.cos(heading)), abs(math.sin(heading))
     rotated_width = width * cosine + depth * sine
     rotated_depth = width * sine + depth * cosine
-    scale = min(region["width"] / max(rotated_width, 1e-8),
-                region["height"] / max(rotated_depth, 1e-8)) * pose["scale"] * slot["scaleX"]
-    return {"scale": scale, "yaw": yaw,
-            "x": slot["x"] + pose["x"] * max(0, region["width"] - rotated_width * scale) / 2,
-            "y": slot["y"] + pose["y"] * max(0, region["height"] - rotated_depth * scale) / 2}
+    neutral = min(region["width"] / max(rotated_width, 1e-8),
+                  region["height"] / max(rotated_depth, 1e-8)) * pose["scale"]
+    return {"scale": neutral * slot["scaleX"], "yaw": heading + slot["rz"] * math.pi / 180,
+            "x": slot["x"] + pose["x"] * max(0, region["width"] - rotated_width * neutral) / 2,
+            "y": slot["y"] + pose["y"] * max(0, region["height"] - rotated_depth * neutral) / 2}
 
 
 def glb_model(slot, bounds):
@@ -251,11 +253,12 @@ def quad_model(slot, width, height):
     return [[c * w, -s * h, 0, slot["x"]], [s * w, c * h, 0, slot["y"]], [0, 0, 1, -0.02], [0, 0, 0, 1]]
 
 
-def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=()):
+def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), rotations=()):
     """The description scene of the ZIP's Fusion placements, assets read from `package_path`."""
     match, assets = read_package(zip_path)
     slots = {slot["id"]: slot for slot in placements(match, assets)}
-    for placement_id in [move[0] for move in moves] + [scale[0] for scale in scales] + list(hidden):
+    edited = [edit[0] for edit in [*moves, *scales, *rotations]]
+    for placement_id in edited + list(hidden):
         require(placement_id in slots, f"Unknown placement {placement_id}.")
     for placement_id, dx, dy in moves:
         slots[placement_id]["x"] += dx
@@ -268,6 +271,8 @@ def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=()):
         else:
             slot["sizeX"] *= factor
             slot["sizeY"] *= factor
+    for placement_id, degrees in rotations:
+        slots[placement_id]["rz"] += degrees
     field = match["field"]
     scene = {"ground": {"pitch_m": [number(field["length"]), number(field["width"])]}, "assets": [], "instances": []}
     for slot in slots.values():
@@ -306,6 +311,8 @@ def main(argv=None):
                         help="shift a placement by DX, DY metres (X along the length, Y along the width)")
     parser.add_argument("--scale", nargs=2, action="append", default=[], metavar=("PLACEMENT", "FACTOR"),
                         help="resize a placement: a 3D model's scale or a 2D placement's area")
+    parser.add_argument("--rotate", nargs=2, action="append", default=[], metavar=("PLACEMENT", "DEGREES"),
+                        help="turn a placement about its up axis (a model) or centre (an area)")
     parser.add_argument("--hide", action="append", default=[], metavar="PLACEMENT",
                         help="send a placement as visible: false")
     parser.add_argument("--output", type=Path, help="output JSON file [default: stdout]")
@@ -313,7 +320,8 @@ def main(argv=None):
     try:
         moves = [(placement, float(dx), float(dy)) for placement, dx, dy in args.move]
         scales = [(placement, float(factor)) for placement, factor in args.scale]
-        scene = describe_scene(args.zip, args.package_path, moves, args.hide, scales)
+        rotations = [(placement, float(degrees)) for placement, degrees in args.rotate]
+        scene = describe_scene(args.zip, args.package_path, moves, args.hide, scales, rotations)
     except (ConversionError, ValueError, KeyError, zipfile.BadZipFile) as error:
         sys.exit(f"error: {error}")
     if args.camera:

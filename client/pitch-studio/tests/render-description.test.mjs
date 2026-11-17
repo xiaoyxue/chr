@@ -35,6 +35,20 @@ test('a GLB stands on its fitted ground point, upright, turned by its yaw', () =
   close(apply(rows, [1, 0, -0.5]), [fit.x, fit.y + fit.scale, -0.015]);
 });
 
+test("the studio's scale and rotation act about the neutral bottom centre without refitting", () => {
+  const slot = { ...pose, id: 'car', name: 'car', type: '3D', x: 3, y: 1, region: { width: 20, height: 19 },
+    modelPose: { x: 0.5, y: -0.5, scale: 0.7, yaw: 90 }, scaleX: 1, scaleY: 1, scaleZ: 1 };
+  const bounds = { min: [-1, 0.5, -2], max: [1, 2, 2] };
+  const neutral = fitFusionModel(2, 4, slot);
+  const edited = { ...slot, rz: 45, scaleX: 3, scaleY: 3, scaleZ: 3 };
+  const fit = fitFusionModel(2, 4, edited);
+  // Larger than the region now, centred where Fusion put it, turned without shrinking.
+  close([fit.x, fit.y, fit.scale, fit.yaw], [neutral.x, neutral.y, neutral.scale * 3, Math.PI * 3 / 4]);
+  const rows = glbModel(edited, bounds);
+  close(apply(rows, [0, 0, -0.5]), [neutral.x, neutral.y, -0.015]);
+  close(apply(rows, [0, 0, -2]), [neutral.x, neutral.y, -0.015 - 1.5 * fit.scale]);
+});
+
 test('placements share their asset and keep their visibility', () => {
   const ad = { id: 'A1', name: 'ad', contentType: 'image/png', url: '/x' };
   const slots = ['p1', 'p2', 'p3'].map((id, i) => ({ ...pose, id, name: id, type: '2D', x: i, sizeX: 2, sizeY: 1, assetRotation: 0, asset: i < 2 ? ad : undefined }));

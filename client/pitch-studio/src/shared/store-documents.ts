@@ -8,7 +8,7 @@ import type { MatchRecord } from './types.ts';
 const MB = 1024 * 1024;
 /** Upload limits by file extension: materials and offline ZIPs. */
 export const FILE_LIMITS: Readonly<Record<string, number>> = {
-  '.png': 64 * MB, '.jpg': 64 * MB, '.jpeg': 64 * MB, '.webp': 64 * MB, '.glb': 64 * MB, '.zip': 1024 * MB,
+  '.png': 64 * MB, '.jpg': 64 * MB, '.jpeg': 64 * MB, '.webp': 64 * MB, '.glb': 256 * MB, '.zip': 1024 * MB,
 };
 
 /** Match ids that can name a directory of the store. */
