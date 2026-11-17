@@ -35,12 +35,17 @@ export interface LightingPreset {
   name: string;
   lights: StudioLight[];
   /** Image-based lighting from an OpenEXR panorama on the onsite server; gain scales it, rotation turns it (degrees). */
-  environment: { path: string | null; gain: number; rotation: number };
+  environment: { enabled: boolean; path: string | null; gain: number; rotation: number };
   /** Uniform fill radiance from every direction, W/(m² sr). */
-  constant: { intensity: number; color: Rgb };
+  constant: { enabled: boolean; intensity: number; color: Rgb };
+  /** Set on built-ins as offered, never stored; `edited` when the library holds the operator's version. */
   builtIn?: true;
+  edited?: true;
 }
-/** The global lighting document: the operator's presets and each match's choice. */
+/**
+ * The global lighting document: the operator's presets, their edits of built-ins (under
+ * the built-in's ID) and each match's choice.
+ */
 export interface LightingLibrary { version: 1; presets: LightingPreset[]; selected: Record<string, string> }
 /** `scene_frame::Lighting` as chr-server reads it. */
 export interface WireLighting {
@@ -54,6 +59,9 @@ export const MAX_LIGHTS = 8;
 export const DEFAULT_PRESET = 'builtin-default';
 export const ORLANDO_PRESET = 'builtin-orlando';
 export const ORLANDO_EXR = 'orlando_stadium_4k.exr';
+/** The panorama the default preset lights with, and the first choice when IBL is switched on. */
+export const DEFAULT_EXR = 'fly-studio-03_4K.exr';
+const BUILT_IN_IDS = [DEFAULT_PRESET, ORLANDO_PRESET];
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MATCH_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 
@@ -75,20 +83,33 @@ function towerRig({ length, width }: FieldDimensions): StudioLight[] {
   return [...spots, sun];
 }
 
-/** The read-only presets: chr-server's default rig, and the Orlando stadium panorama with a fill next to it. */
+/**
+ * The built-in presets: chr-server's default rig lit by the fly-studio panorama, and the
+ * Orlando stadium panorama with a fill next to the same rig.
+ */
 export function builtInPresets(field: FieldDimensions, iblDir: string): LightingPreset[] {
+  const dir = iblDir.replace(/\/+$/, '');
   return [
-    { id: DEFAULT_PRESET, name: '默认：四角灯塔 + 太阳', builtIn: true, lights: towerRig(field),
-      environment: { path: null, gain: 1, rotation: 0 }, constant: { intensity: 0, color: [1, 1, 1] } },
+    { id: DEFAULT_PRESET, name: '默认：四角灯塔 + 太阳 + fly-studio IBL', builtIn: true, lights: towerRig(field),
+      environment: { enabled: true, path: `${dir}/${DEFAULT_EXR}`, gain: 0.5, rotation: 0 }, constant: { enabled: false, intensity: 0.1, color: [1, 1, 1] } },
     { id: ORLANDO_PRESET, name: 'Orlando 球场 IBL + 灯塔 + 太阳 + 常量光', builtIn: true, lights: towerRig(field),
-      environment: { path: `${iblDir.replace(/\/+$/, '')}/${ORLANDO_EXR}`, gain: 0.5, rotation: 0 },
-      constant: { intensity: 0.1, color: [1, 1, 1] } },
+      environment: { enabled: true, path: `${dir}/${ORLANDO_EXR}`, gain: 0.5, rotation: 0 },
+      constant: { enabled: true, intensity: 0.1, color: [1, 1, 1] } },
+  ];
+}
+
+/** Every preset on offer: the built-ins, each replaced by the operator's edit if any, then the operator's own. */
+export function availablePresets(library: LightingLibrary, builtIns: LightingPreset[]): LightingPreset[] {
+  const edits = new Map(library.presets.map((preset) => [preset.id, preset]));
+  return [
+    ...builtIns.map((preset): LightingPreset => edits.has(preset.id) ? { ...edits.get(preset.id), builtIn: true, edited: true } : preset),
+    ...library.presets.filter((preset) => !BUILT_IN_IDS.includes(preset.id)),
   ];
 }
 
 /** The preset `matchId` uses: its choice if it still exists, otherwise the default rig. */
 export function selectedPreset(library: LightingLibrary, builtIns: LightingPreset[], matchId: string) {
-  const all = [...builtIns, ...library.presets];
+  const all = availablePresets(library, builtIns);
   return all.find((preset) => preset.id === library.selected[matchId]) ?? all.find((preset) => preset.id === DEFAULT_PRESET);
 }
 
@@ -114,13 +135,19 @@ export function describeLighting(preset: LightingPreset, environment?: string): 
       inner_angle: radians(light.inner), outer_angle: radians(light.outer) };
   });
   if (lights.length > MAX_LIGHTS) throw new Error(`chr-server 最多绘制 ${MAX_LIGHTS} 盏灯，当前预设启用了 ${lights.length} 盏；请停用部分灯光。`);
-  if (preset.environment.path && !environment) throw new Error('环境贴图尚未登记为渲染素材。');
-  const fill = scaled(preset.constant.color, preset.constant.intensity);
+  const sky = environmentPath(preset);
+  if (sky && !environment) throw new Error('环境贴图尚未登记为渲染素材。');
+  const fill = preset.constant.enabled ? scaled(preset.constant.color, preset.constant.intensity) : [0, 0, 0];
   return {
     lights,
-    environment: preset.environment.path ? { asset_ref: environment, gain: preset.environment.gain, rotation: radians(preset.environment.rotation), visible: false } : null,
-    ...(fill.some((v) => v > 0) ? { constant: fill } : {}),
+    environment: sky ? { asset_ref: environment, gain: preset.environment.gain, rotation: radians(preset.environment.rotation), visible: false } : null,
+    ...(fill.some((v) => v > 0) ? { constant: fill as Rgb } : {}),
   };
+}
+
+/** The panorama a preset lights with, when its IBL is enabled. */
+export function environmentPath(preset: LightingPreset) {
+  return preset.environment.enabled ? preset.environment.path : null;
 }
 
 const finite = (value: unknown, min: number, max: number): value is number => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
@@ -139,16 +166,18 @@ function validLight(light: StudioLight) {
     && (light.target[0] !== light.position[0] || light.target[1] !== light.position[1] || light.position[2] > 0);
 }
 
-/** Whether `preset` is a well-formed operator preset (built-ins are never stored). */
+/** Whether `preset` is a well-formed stored preset: the operator's own, or an edit of a built-in. */
 export function validPreset(preset: LightingPreset) {
   const { environment, constant } = preset ?? {} as LightingPreset;
-  return Boolean(preset) && ID.test(preset.id) && !preset.id.startsWith('builtin-') && !preset.builtIn
+  return Boolean(preset) && ID.test(preset.id) && (!preset.id.startsWith('builtin-') || BUILT_IN_IDS.includes(preset.id))
+    && !preset.builtIn && !preset.edited
     && typeof preset.name === 'string' && preset.name.trim().length > 0 && preset.name.length <= 80
     && Array.isArray(preset.lights) && preset.lights.length <= 32 && preset.lights.every(validLight)
     && new Set(preset.lights.map((light) => light.id)).size === preset.lights.length
-    && Boolean(environment) && (environment.path === null || (typeof environment.path === 'string' && /^\/.+\.exr$/i.test(environment.path)))
+    && Boolean(environment) && typeof environment.enabled === 'boolean' && (environment.path === null || (typeof environment.path === 'string' && /^\/.+\.exr$/i.test(environment.path)))
     && finite(environment.gain, 0, 100) && finite(environment.rotation, -360, 360)
-    && Boolean(constant) && finite(constant.intensity, 0, 100) && rgb(constant.color);
+    && Boolean(constant) && typeof constant.enabled === 'boolean' && finite(constant.intensity, 0, 100) && rgb(constant.color)
+    && (!environment.enabled || environment.path !== null);
 }
 
 /** The stored lighting document, or an error the store returns to the page. */

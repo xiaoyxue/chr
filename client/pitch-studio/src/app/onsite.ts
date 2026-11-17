@@ -25,7 +25,7 @@ import { SOURCE_LABEL, SessionStore, cloudAligned, restorePlan, withAlignment, t
 import type { GroundPlacement, MatchRecord, Placement } from '../shared/types.ts';
 import type { PitchPreview } from '../scene/pitch-preview.ts';
 import { LightingPanel } from '../lighting/lighting-panel.ts';
-import { describeLighting, validateLightingLibrary } from '../lighting/lighting.ts';
+import { describeLighting, environmentPath, validateLightingLibrary } from '../lighting/lighting.ts';
 import type { LocalAnalysis } from '../analysis/ply-result.ts';
 
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
@@ -1431,7 +1431,7 @@ async function renderScene() {
 /** The match's lighting preset as the description carries it; its panorama is hashed by the page server, not downloaded. */
 async function renderLighting() {
   const preset = lightingPanel.preset();
-  const path = preset.environment.path, sha256 = path ? await serverSha256(path) : undefined;
+  const path = environmentPath(preset), sha256 = path ? await serverSha256(path) : undefined;
   const environment = path ? { id: environmentAssetId(sha256), path, sha256 } : undefined;
   return { name: preset.name, described: { lighting: describeLighting(preset, environment?.id), environment } };
 }

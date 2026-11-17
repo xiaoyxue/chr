@@ -221,8 +221,13 @@ newer package keeps them:
   intensities), its panorama as an `environment` asset `IBL-` plus the first 16 hex of
   its SHA-256 (hashed by the page server, not downloaded; `visible: false`), and its
   constant fill. Presets are one global library in the store's `lighting.json`, with
-  the preset each match uses; two built-ins are read-only: chr-server's default rig,
-  and `orlando_stadium_4k.exr` (gain 0.5) with that rig and a constant fill of 0.1.
+  the preset each match uses. Two built-ins are offered: chr-server's default rig lit by
+  `fly-studio-03_4K.exr` (gain 0.5; the panorama IBL picks first when switched on), and
+  `orlando_stadium_4k.exr` (gain 0.5) with that rig and a constant fill of 0.1. Every
+  value of the selected preset is editable at once; editing a built-in stores the
+  operator's version under its ID, which 恢复内置默认 drops. Each light, the IBL and
+  the constant fill have their own 启用 switch; switched off, they keep their values
+  but are not sent.
   A directional light is set by the azimuth (from +X towards +Y) and elevation of
   the side it comes from, a spot by its position, height and aim point on the ground.
 - **Blended GLBs:** a GLB with BLEND materials gets `blend_as: "mask"`, and the
