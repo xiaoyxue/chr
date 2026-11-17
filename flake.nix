@@ -225,6 +225,7 @@
             packages = [
               toolchain
               pkgs.git
+              pkgs.git-lfs
               pkgs.pkg-config
               pkgs.nixfmt
             ]
