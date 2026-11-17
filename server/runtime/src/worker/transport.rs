@@ -201,9 +201,82 @@ impl Deref for SharedPixels {
     }
 }
 
+/// Where a channel's GStreamer elements run.
+#[derive(Clone, Debug, Default)]
+pub enum Host {
+    /// Each direction in a pipeline of its own (the timer-paced render loop).
+    #[default]
+    Standalone,
+    /// Each direction as a bin inside this running pipeline: chr-server's
+    /// GStreamer core (`--pipeline gst`, #154). A bin is added when its worker
+    /// starts and removed with it, so a restarted worker's hop is relinked into
+    /// the running pipeline. Its errors reach that pipeline's bus as messages of
+    /// elements under a bin named `hop-*`, which the core logs and does not act
+    /// on: the supervisors see the worker's exit and its output's end.
+    Bin(gst::Pipeline),
+}
+
+/// One direction's elements and the container they run in.
+struct Hosted {
+    container: gst::Bin,
+    parent: Option<gst::Pipeline>,
+}
+
+impl Hosted {
+    fn new(host: &Host) -> Self {
+        static BINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        match host {
+            Host::Standalone => Self {
+                container: gst::Pipeline::new().upcast(),
+                parent: None,
+            },
+            Host::Bin(parent) => Self {
+                container: gst::Bin::with_name(&format!(
+                    "hop-{}",
+                    BINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                )),
+                parent: Some(parent.clone()),
+            },
+        }
+    }
+
+    /// Plays the elements; a bin joins its parent's state and clock.
+    fn start(&self) -> Result<(), Error> {
+        match &self.parent {
+            None => self.container.set_state(gst::State::Playing).map(drop)?,
+            Some(parent) => {
+                parent.add(&self.container)?;
+                self.container.sync_state_with_parent()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The error that stopped a standalone pipeline; a bin's go to its parent.
+    fn error(&self) -> Option<String> {
+        match &self.parent {
+            None => bus_error(&self.container),
+            Some(_) => None,
+        }
+    }
+
+    fn is_bin(&self) -> bool {
+        self.parent.is_some()
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        let _ = self.container.set_state(gst::State::Null);
+        if let Some(parent) = &self.parent {
+            let _ = parent.remove(&self.container);
+        }
+    }
+}
+
 /// The sending side of one socket: `appsrc ! unixfdsink`, listening on its path.
 pub struct Sender {
-    pipeline: gst::Pipeline,
+    hosted: Hosted,
     source: AppSrc,
     sink: gst::Element,
     queue: u64,
@@ -221,7 +294,7 @@ impl Sender {
     /// [`Self::set_caps`]); at most `queue` buffers wait for the peer, which
     /// they do until it connects.
     pub fn listen_with(path: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
-        Self::open(path, caps, queue, true)
+        Self::open(path, caps, queue, true, &Host::Standalone)
     }
 
     /// [`Self::listen_with`] for a live stream, as vchao's producers listen:
@@ -230,7 +303,7 @@ impl Sender {
     /// sink's preroll lock, so tearing down a waiting sink after its peer was
     /// lost can deadlock.
     pub fn listen_live(path: &Path, caps: Option<&gst::Caps>, queue: u64) -> Result<Self, Error> {
-        Self::open(path, caps, queue, false)
+        Self::open(path, caps, queue, false, &Host::Standalone)
     }
 
     fn open(
@@ -238,6 +311,7 @@ impl Sender {
         caps: Option<&gst::Caps>,
         queue: u64,
         wait_for_connection: bool,
+        host: &Host,
     ) -> Result<Self, Error> {
         check()?;
         let _ = std::fs::remove_file(path);
@@ -262,16 +336,16 @@ impl Sender {
             .property("async", false)
             .property("enable-last-sample", false)
             .build()?;
-        let pipeline = gst::Pipeline::new();
-        pipeline.add_many([source.upcast_ref(), &sink])?;
+        let hosted = Hosted::new(host);
+        hosted.container.add_many([source.upcast_ref(), &sink])?;
         source.link(&sink)?;
         let sender = Self {
-            pipeline,
+            hosted,
             source,
             sink,
             queue,
         };
-        sender.pipeline.set_state(gst::State::Playing)?;
+        sender.hosted.start()?;
         Ok(sender)
     }
 
@@ -298,7 +372,7 @@ impl Sender {
 
     /// Queues one buffer without blocking; fails if the queue is full.
     pub fn push(&self, buffer: gst::Buffer) -> Result<(), Error> {
-        if let Some(error) = bus_error(&self.pipeline) {
+        if let Some(error) = self.hosted.error() {
             return Err(error.into());
         }
         if self.source.current_level_buffers() >= self.queue {
@@ -308,10 +382,12 @@ impl Sender {
         Ok(())
     }
 
-    /// Ends the stream and waits up to `timeout` until the queued messages were sent.
+    /// Ends the stream and waits up to `timeout` until the queued messages were
+    /// sent; a sender in a bin does not wait (its parent's bus holds the end).
     pub fn finish(&self, timeout: Duration) {
         if self.source.end_of_stream().is_ok()
-            && let Some(bus) = self.pipeline.bus()
+            && !self.hosted.is_bin()
+            && let Some(bus) = self.hosted.container.bus()
         {
             let _ = bus.timed_pop_filtered(
                 gst::ClockTime::from_nseconds(timeout.as_nanos() as u64),
@@ -321,15 +397,9 @@ impl Sender {
     }
 }
 
-impl Drop for Sender {
-    fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
-    }
-}
-
 /// The receiving side of one socket: `unixfdsrc ! appsink`, connected to its path.
 pub struct Receiver {
-    pipeline: gst::Pipeline,
+    hosted: Hosted,
     reader: Reader,
 }
 
@@ -356,6 +426,11 @@ impl<T> Incoming<T> {
 impl Receiver {
     /// Connects to the sender listening on `path`.
     pub fn connect(path: &Path) -> Result<Self, Error> {
+        Self::connect_in(path, &Host::Standalone)
+    }
+
+    /// [`Self::connect`] with the elements in `host`.
+    pub fn connect_in(path: &Path, host: &Host) -> Result<Self, Error> {
         check()?;
         let source = gst::ElementFactory::make("unixfdsrc")
             .property("socket-path", path_str(path)?)
@@ -366,14 +441,18 @@ impl Receiver {
             .sync(false)
             .enable_last_sample(false)
             .build();
-        let pipeline = gst::Pipeline::new();
-        pipeline.add_many([&source, sink.upcast_ref()])?;
+        let hosted = Hosted::new(host);
+        if hosted.is_bin() {
+            // Joining a playing pipeline must not wait for a preroll.
+            sink.set_async(false);
+        }
+        hosted.container.add_many([&source, sink.upcast_ref()])?;
         source.link(&sink)?;
         let receiver = Self {
-            pipeline,
+            hosted,
             reader: Reader { sink },
         };
-        receiver.pipeline.set_state(gst::State::Playing)?;
+        receiver.hosted.start()?;
         Ok(receiver)
     }
 
@@ -387,13 +466,7 @@ impl Receiver {
 
     /// The error that stopped the connection, such as a lost sender.
     pub fn error(&self) -> Option<String> {
-        bus_error(&self.pipeline)
-    }
-}
-
-impl Drop for Receiver {
-    fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        self.hosted.error()
     }
 }
 
@@ -455,6 +528,7 @@ pub struct Channel<M> {
     sender: Sender,
     input: PathBuf,
     output: PathBuf,
+    host: Host,
     receiver: Option<Receiver>,
     forward: mpsc::Sender<Event<M>>,
     events: mpsc::Receiver<Event<M>>,
@@ -462,27 +536,27 @@ pub struct Channel<M> {
 
 impl<M: Inbound> Channel<M> {
     /// Listens on `input.sock` in `dir` for buffers with `caps`, at most `queue`
-    /// of them waiting for the worker. A `live` channel's buffers do not wait
-    /// for the worker to connect ([`Sender::listen_live`]).
+    /// of them waiting for the worker, with both directions' elements in `host`.
+    /// A `live` channel's buffers do not wait for the worker to connect
+    /// ([`Sender::listen_live`]).
     pub fn open(
         dir: &Path,
         caps: Option<&gst::Caps>,
         queue: u64,
         live: bool,
+        host: &Host,
     ) -> Result<Self, Error> {
         let input = dir.join("input.sock");
         let output = dir.join("output.sock");
         // Connecting must wait for this worker's socket, not a dead one's.
         let _ = std::fs::remove_file(&output);
         let (forward, events) = mpsc::channel();
+        check()?;
         Ok(Self {
-            sender: if live {
-                Sender::listen_live(&input, caps, queue)?
-            } else {
-                Sender::listen_with(&input, caps, queue)?
-            },
+            sender: Sender::open(&input, caps, queue, !live, host)?,
             input,
             output,
+            host: host.clone(),
             receiver: None,
             forward,
             events,
@@ -495,7 +569,7 @@ impl<M: Inbound> Channel<M> {
         if self.receiver.is_some() || !self.output.exists() {
             return Ok(());
         }
-        let receiver = match Receiver::connect(&self.output) {
+        let receiver = match Receiver::connect_in(&self.output, &self.host) {
             Ok(receiver) => receiver,
             Err(error) => {
                 log::debug!("worker output not connected yet: {error}");
@@ -618,7 +692,7 @@ pub fn decode<T: DeserializeOwned>(buffer: &gst::BufferRef) -> Result<T, Error> 
     Ok(serde_json::from_str(json)?)
 }
 
-fn bus_error(pipeline: &gst::Pipeline) -> Option<String> {
+fn bus_error(pipeline: &gst::Bin) -> Option<String> {
     let message = pipeline.bus()?.pop_filtered(&[gst::MessageType::Error])?;
     match message.view() {
         gst::MessageView::Error(error) => Some(error.error().to_string()),

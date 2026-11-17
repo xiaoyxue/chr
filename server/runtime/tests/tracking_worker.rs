@@ -83,6 +83,7 @@ impl Fixture {
                 socket_dir: dir.join("sockets"),
                 hang,
                 in_flight,
+                host: Default::default(),
             },
             status.clone(),
         )

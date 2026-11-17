@@ -383,6 +383,13 @@ counted by the render worker (`render.get_worker_status`).
 - **Memory:** every waiting frame holds its RGBA8 pixels: 8 MiB at 1080p,
   32 MiB at 4K. The capture backlog holds `wait × fps + 2` frames, about
   0.6 GiB at 1500 ms and 1080p50.
+- **GStreamer core** (`--pipeline gst`, #154, experimental): the same worker
+  and contract, with frames from `chr-sdi-in` instead of the input ring. The
+  program delay is `--program-delay-ms` from capture to output; a frame whose
+  camera and render are not back 4 ms before its slot is due goes out as its
+  own clean feed, and its neighbours keep their CG. The worker's two sockets
+  are bins of the core's pipeline, relinked for every new session
+  ([GStreamer core](gst-core.md)).
 - Without a tracking worker (`tracking.frame`), frames still leave as soon as
   their camera arrives.
 

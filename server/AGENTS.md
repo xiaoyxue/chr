@@ -19,7 +19,8 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   (`lens`), the frame/camera join (`join`) and the replay stand-in's logic
   (`replay`); `runtime/` (`chr-runtime`) builds the `chr-server` render server, its two workers (the
   headless `chr-renderer-cli` and the `chr-tracking-sim-cli` tracking replay
-  stand-in) and the `chr-sdi-sim` SDI capture simulator; `viewer/` (`chr-app`) is the
+  stand-in), the `chr-sdi-sim` SDI capture simulator and `chr-sdi-in`, the input
+  process of the experimental GStreamer core; `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
 - Keep all rendering in `renderer/`. It has no networking, video-device, or
@@ -43,10 +44,15 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   tracking worker's supervisor and the VchaoFrame GStreamer buffer and caps
   glue (`wire.rs`), with the contract itself in `chr-tracker`; `src/sdi.rs` owns the
   simulated output port and writes every transmitted slot into the shared-memory
-  program tap. The root `monitor/` crate (`chr-monitor`, a separate process)
-  encodes that tap and fans it out to WebRTC/SRT. The runtime's GStreamer media
-  helpers serve only the software input and remain private to it; the worker
-  transport is the runtime's only other GStreamer use.
+  program tap. `src/gst_core/` is the experimental GStreamer core
+  (`--pipeline gst`, #154, `docs/gst-core.md`): one pipeline from
+  `chr-sdi-in`'s frames to the output and the program tap, with the per-slot
+  selector, the CG driver over both workers, and the workers' sockets as bins
+  of that pipeline; the timer-paced loop stays the default. The root `monitor/`
+  crate (`chr-monitor`, a separate process) encodes the tap and fans it out to
+  WebRTC/SRT. The runtime's GStreamer media helpers serve only the software
+  input and remain private to it; the worker transport and the GStreamer core
+  are the runtime's other GStreamer uses.
   Live tracking runs in a tracking worker that `chr-server` starts, feeds and
   supervises like the render worker (`docs/tracking-worker.md`). It may hold its
   own GPU device; for now both workers share one GPU. `chr-tracking-sim-cli`

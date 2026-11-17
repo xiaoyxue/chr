@@ -144,7 +144,39 @@ pub struct SdiStats {
     counters: Arc<Counters>,
 }
 
+/// Records the slots of an output driven elsewhere: chr-server's GStreamer
+/// core (`--pipeline gst`, #154), whose output sink takes every slot.
+#[derive(Clone)]
+pub struct SdiRecorder(Arc<Counters>);
+
+impl SdiRecorder {
+    /// One transmitted slot carrying capture frame `source_frame`; a repeat
+    /// of the previous slot's frame if `repeated`.
+    pub fn output(&self, source_frame: u64, repeated: bool) {
+        self.0.frames_output.fetch_add(1, Ordering::Relaxed);
+        if repeated {
+            self.0.repeated.fetch_add(1, Ordering::Relaxed);
+        }
+        self.0
+            .last_source_frame
+            .store(source_frame, Ordering::Relaxed);
+        self.0.has_source_frame.store(true, Ordering::Release);
+    }
+}
+
 impl SdiStats {
+    /// Stats of an output that `SdiRecorder` records.
+    pub fn recorded(mode: VideoMode) -> (Self, SdiRecorder) {
+        let counters = Arc::new(Counters::default());
+        (
+            Self {
+                mode,
+                counters: Arc::clone(&counters),
+            },
+            SdiRecorder(counters),
+        )
+    }
+
     /// Stats for an output that never runs, for tests of status reporting.
     #[cfg(test)]
     pub fn idle(mode: VideoMode) -> Self {

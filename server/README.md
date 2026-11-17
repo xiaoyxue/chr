@@ -12,10 +12,10 @@ The Cargo workspace is at the repository root; its server crates live here:
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
 | `tracker/` | `chr-tracker` | chr's tracking logic, without processes, GStreamer, an async runtime or the GPU renderer: vchao's VchaoFrame v1 mirror with chr's lens extensions and its validation (`protocol`), a returned pose as its frame's camera (`pose`), camera-model selection (`lens`), the frame/camera join with its fixed delay and clean-feed decision (`join`) and the replay stand-in's poses and lens (`replay`). Geometry is validated by the renderer's own checks, which `chr-runtime` passes in (`chr_tracker::Checks`) |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-sdi-sim` simulates the camera |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-sdi-sim` simulates the camera; `chr-sdi-in` is the input of the experimental GStreamer core ([GStreamer core](docs/gst-core.md)) |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
-| `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers, the `stack.py` one-command development stack and the `resolution_bench.py` per-resolution measurement |
+| `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers, the `stack.py` one-command development stack, the `resolution_bench.py` per-resolution measurement and the `gst_fallbackswitch_probe.py` probe behind the GStreamer core's own slot selector |
 
 The video monitor is a separate process, `chr-monitor`, in the repository-root
 `monitor/` crate (not under `server/`: it is optional and may run on another host
@@ -37,6 +37,7 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `worker/` | The unixfd transport shared by both workers (`transport.rs`), the render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
 | `worker/tracking/` | The tracking worker's supervisor in `chr-server` (`supervisor.rs`) and the VchaoFrame contract on GStreamer buffers: caps, meta and frames (`wire.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker's process over `chr_tracker::replay`. Pairing frames with cameras is `chr_tracker::join` |
 | `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
+| `gst_core/` | `--pipeline gst` (#154, experimental): one GStreamer pipeline from `chr-sdi-in` (`input.rs`) through the capture bin (`capture.rs`), the CG driver over both workers (`driver.rs`) and the per-slot selector (`select.rs`) to the simulated output and the program tap (`output.rs`) |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 
 `chr-server` creates no GPU device. As decided in #94, its `chr-render` thread

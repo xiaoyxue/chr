@@ -31,7 +31,7 @@ use super::wire::{Received, Wire, check_caps, now_ns};
 use crate::calibration::lens::CHECKS;
 use crate::worker::{
     supervisor::{Running, create_private_dir},
-    transport::{self, Channel, Event, SharedPixels},
+    transport::{self, Channel, Event, Host, SharedPixels},
 };
 use chr_common::{
     methods::{render_worker::WorkerState, tracking::TrackerStatus},
@@ -86,6 +86,8 @@ pub struct TrackerConfig {
     pub hang: Duration,
     /// Frames the worker may hold at once ([`in_flight_limit`]).
     pub in_flight: usize,
+    /// Where the worker's socket elements run.
+    pub host: Host,
 }
 
 /// Shared with the control plane for `tracking.get_worker_status`.
@@ -192,6 +194,12 @@ impl Tracker {
     /// not sent, so it goes without a camera; a worker that already holds
     /// [`TrackerConfig::in_flight`] frames is replaced.
     pub fn track(&mut self, sequence: u64, rgba: &SharedPixels) {
+        self.track_memory(sequence, rgba.memory());
+    }
+
+    /// [`Self::track`] for a frame already in fd-backed memory, such as a frame
+    /// that the GStreamer core received from its capture process.
+    pub fn track_memory(&mut self, sequence: u64, rgba: gstreamer::Memory) {
         self.maintain();
         let sent = match &mut self.state {
             State::Ready {
@@ -442,6 +450,7 @@ impl Tracker {
             Some(&wire.caps()),
             self.config.in_flight as u64 + 1,
             true,
+            &self.config.host,
         )?;
         let mut command = Command::new(&self.config.executable);
         command
@@ -498,7 +507,7 @@ fn send(
     session: &mut Session,
     limit: usize,
     sequence: u64,
-    rgba: &SharedPixels,
+    rgba: gstreamer::Memory,
 ) -> Result<(), Option<String>> {
     if session.in_flight.len() >= limit {
         return Err(Some(format!(
@@ -512,7 +521,7 @@ fn send(
     let source_ns = now_ns().max(session.last_source_ns + 1);
     session
         .wire
-        .frame(frame_id, source_ns, rgba.memory())
+        .frame(frame_id, source_ns, rgba)
         .and_then(|buffer| worker.channel.push(buffer))
         .map_err(|error| Some(format!("cannot send to the tracking worker: {error}")))?;
     session.next_frame_id += 1;

@@ -3,7 +3,7 @@
 ## Project Structure
 
 - `client/`: Client-side code, primarily written in TypeScript. Source code belongs in `client/src/`; `client/pitch-studio/` is the onsite pitch client (Vite + Three.js), built by the root flake; `client/example/` holds example clients and verification harnesses, each a self-contained npm package.
-- `server/`: The live render server, primarily Rust. The renderer library lives in `server/renderer/` (`chr-renderer`), chr's tracking logic in `server/tracker/` (`chr-tracker`, pure logic: the tracking worker contract, lens selection, the frame/camera join and the replay stand-in's logic), the render server runtime in `server/runtime/` (`chr-runtime`, which builds `chr-server`, its two workers `chr-renderer-cli` and `chr-tracking-sim-cli`, the replay stand-in that the real tracking module will replace, and the `chr-sdi-sim` SDI capture simulator) and the native window/headless shell in `server/viewer/` (`chr-app`); further server crates are added as `server/<name>/`. Offline scene modelling stays outside this repository. Follow `server/AGENTS.md`.
+- `server/`: The live render server, primarily Rust. The renderer library lives in `server/renderer/` (`chr-renderer`), chr's tracking logic in `server/tracker/` (`chr-tracker`, pure logic: the tracking worker contract, lens selection, the frame/camera join and the replay stand-in's logic), the render server runtime in `server/runtime/` (`chr-runtime`, which builds `chr-server`, its two workers `chr-renderer-cli` and `chr-tracking-sim-cli`, the replay stand-in that the real tracking module will replace, the `chr-sdi-sim` SDI capture simulator, and `chr-sdi-in`, the input process of chr-server's experimental GStreamer core) and the native window/headless shell in `server/viewer/` (`chr-app`); further server crates are added as `server/<name>/`. Offline scene modelling stays outside this repository. Follow `server/AGENTS.md`.
 - `monitor/`: The optional video monitor process, Rust crate `chr-monitor`. It reads the program tap written by `chr-server`, encodes it and streams it over WebRTC/SRT; it never controls the program. It sits at the root because it may run on another host from an SDI loop-out.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: The single Rust workspace at the repository root. Its members live under `server/`, `monitor/` (and Rust parts of `common/`); run Cargo commands from the root.
 - `common/`: Shared communication protocols. `common/` is the Rust crate `chr-common` (JSON-RPC 2.0 control messages and the NativeSocket/WebSocket IPC transports) and is the source of truth; TypeScript clients mirror its types. `common/shm/` is the crate `chr-shm`, shared-memory frame rings between processes (the capture input ring and the program tap) and the only crate allowed to use `unsafe` (confined to its mapping module). `chr-server` and its workers talk over GStreamer `unixfdsink`/`unixfdsrc` sockets instead (`server/docs/tracking-worker.md`).
@@ -22,8 +22,10 @@
 - Use the root Nix shell for Linux development tools and dependencies. It provides
   Node.js/npm, TypeScript (`tsc`), the renderer Rust toolchain, Git, pkg-config,
   nixfmt, rendering libraries, and GStreamer core/base/bad (the `unixfd` elements of
-  chr-server's worker transport, a hard dependency of `chr-runtime`). Do not install
-  global npm tools or use an unrelated flake template to replace the existing environment.
+  chr-server's worker transport, a hard dependency of `chr-runtime`) plus the
+  `livesync` and `fallbackswitch` plugins of gst-plugins-rs (chr-server's GStreamer
+  core, #154). Do not install global npm tools or use an unrelated flake template to
+  replace the existing environment.
 - `nix develop .#media` extends the root shell with FFmpeg, the GStreamer ugly
   plugins and Python GObject bindings for the software video-input helper in
   `server/scripts/` and the opt-in `gstreamer-media` feature of `chr-runtime` and

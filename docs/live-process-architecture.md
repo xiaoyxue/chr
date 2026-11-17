@@ -82,7 +82,7 @@ worker runs ([tracked camera simulation](../server/docs/sdi-simulation.md)).
 | Path | Package | Contents |
 | --- | --- | --- |
 | `server/renderer/` | `chr-renderer` | GPU rendering library (unchanged) |
-| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and the `chr-sdi-sim` SDI capture simulator |
+| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, the `chr-sdi-sim` SDI capture simulator and the `chr-sdi-in` input of the GStreamer core (#154) |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
 | `common/shm/` | `chr-shm` | Shared-memory frame rings between processes (capture input ring, program tap); the only crate allowed to use `unsafe` |
@@ -152,9 +152,38 @@ wait.
 - A tracked frame without a camera (no ready tracking worker, an `unavailable`
   pose, or a camera later than the wait) is clean feed too, at the same fixed
   delay as its neighbours (#148).
-- Input-locked output with a fixed delay of D frames, genlock and audio
-  pass-through are part of physical SDI (#80); the simulated output keeps its
-  own clock until then.
+- Input-locked output with a fixed delay D, genlock and audio pass-through
+  are #154 (with physical SDI, #80); the simulated output of the timer-paced
+  loop keeps its own clock. The experimental GStreamer core (`--pipeline gst`,
+  [below](#gstreamer-core-pipeline-154-phase-1-experimental)) already runs the
+  input-locked fixed-D model in simulation.
+
+## GStreamer core pipeline (#154, phase 1, experimental)
+
+`chr-server --pipeline gst` replaces the input ring, the timer-paced render
+loop and the simulated SDI port with **one GStreamer pipeline** owned by
+`chr-server`; the default (`--pipeline timer`) is unchanged. Design, status and
+measurements: [GStreamer core](../server/docs/gst-core.md).
+
+- **Input:** a separate INPUT process, `chr-sdi-in`, plays a file at its own
+  rate (or a test pattern) in real time and sends every frame over a unixfd
+  socket as memfd memory stamped with its identity (VchaoFrame). It stands in
+  for `decklinkvideosrc` (phase 3).
+- **Timing:** each captured frame owns one output slot, due a fixed program
+  delay D (`--program-delay-ms`) after its capture on the pipeline clock. At
+  the slot's deadline a selector puts in the frame's CG if the workers
+  delivered it, else that frame's own clean feed; `livesync` keeps the rate and
+  repeats only when no frame came. The output follows the input frame for
+  frame; the measured capture-to-output delay stays at D through worker
+  crashes and stalls.
+- **Workers:** unchanged protocols and supervisors; each worker session's
+  sockets are bins of the running pipeline, removed with the session and
+  relinked for its replacement, without restarting `chr-server`.
+- **Not used:** `fallbackswitch` (gst-plugins-rs) switches streams on a
+  timeout and cannot give a single late frame its own clean feed.
+
+Phases 2–5 of #154 (fractional and changing rates, DeckLink and genlock,
+audio/ANC/timecode, switch-over) are open.
 
 ## Failure handling
 

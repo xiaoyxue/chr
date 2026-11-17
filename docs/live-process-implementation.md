@@ -206,7 +206,12 @@ stdout joins it, stdin is unused.
   starts the worker; the worker runs `appsrc ! unixfdsink` on `output.sock` and
   `unixfdsrc ! appsink` on `input.sock`; `chr-server` connects its
   `unixfdsrc ! appsink` to `output.sock` once it exists. Sinks wait for their
-  client (`wait-for-connection`), so `hello` and `ready` are not lost.
+  client (`wait-for-connection`), so `hello` and `ready` are not lost. In the
+  GStreamer core (`--pipeline gst`, #154) both directions are bins of the
+  core's pipeline, chr-server's sink does not wait and `hello` goes out once
+  the worker has connected; frames are submitted without waiting and their
+  completions offered to the per-slot selector
+  ([GStreamer core](../server/docs/gst-core.md)).
 - **Messages:** every buffer is one message, held as serde JSON (tagged by
   `type`) in the string field `json` of one `GstCustomMeta` named
   `chr-worker-message`. Pixels are the buffer's single memory, memfd-backed

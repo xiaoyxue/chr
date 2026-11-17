@@ -4,9 +4,12 @@
 //!
 //! [`TrackingFeed`] is the bounded backlog that `tracking.frame` or the tracking
 //! worker fills; [`TrackingJoin`] holds captured frames until their camera
-//! arrives or their wait ends. A frame is never rendered with another frame's
-//! camera: a frame without its camera goes out as clean feed (its own pixels,
-//! no CG), and its late camera is then rejected.
+//! arrives or their wait ends, and paces the timer-driven output.
+//! [`DeadlineJoin`] only pairs, until each frame's deadline, for chr-server's
+//! GStreamer core (#154), whose selector decides each output slot. A frame is
+//! never rendered with another frame's camera: a frame without its camera goes
+//! out as clean feed (its own pixels, no CG), and its late camera is then
+//! rejected.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -317,10 +320,133 @@ impl<P> TrackingJoin<P> {
     }
 }
 
+/// Captured frames waiting for their camera until their own deadline, for
+/// chr-server's GStreamer core (#154). Unlike [`TrackingJoin`] it does not pace
+/// the output: a frame leaves as soon as its camera is in the feed, to be
+/// rendered, or at its deadline without one, and the core's selector puts the
+/// rendered frame or the clean feed into the frame's output slot. Frames leave
+/// in capture order; a tracking worker answers in order, so waiting for the
+/// oldest frame holds back no camera that could still be used.
+pub struct DeadlineJoin<P> {
+    feed: TrackingFeed,
+    capacity: usize,
+    frames: VecDeque<(CapturedFrame<P>, Instant)>,
+}
+
+impl<P> DeadlineJoin<P> {
+    /// Holds at most `capacity` frames; beyond that the oldest is given up.
+    pub fn new(feed: TrackingFeed, capacity: usize) -> Self {
+        Self {
+            feed,
+            capacity,
+            frames: VecDeque::new(),
+        }
+    }
+
+    /// Forgets waiting frames and the feed's samples after a capture restart.
+    pub fn reset(&mut self) {
+        self.frames.clear();
+        self.feed.reset();
+    }
+
+    /// Adds a captured frame whose camera is useful until `deadline`; frames
+    /// arrive in increasing sequence.
+    pub fn frame(&mut self, frame: CapturedFrame<P>, deadline: Instant) {
+        if self.frames.len() == self.capacity
+            && let Some((oldest, _)) = self.frames.pop_front()
+        {
+            self.give_up(oldest.sequence);
+        }
+        self.frames.push_back((frame, deadline));
+    }
+
+    /// The frames whose camera has arrived, oldest first, each with its camera.
+    /// Frames before them whose deadline has passed without a camera are given
+    /// up: they are clean feed.
+    pub fn joined(&mut self, now: Instant) -> Vec<(CapturedFrame<P>, TrackingFrame)> {
+        let mut joined = Vec::new();
+        while let Some((front, deadline)) = self.frames.front() {
+            let has_camera = self.feed.lock().samples.contains_key(&front.sequence);
+            if !has_camera && now < *deadline {
+                break;
+            }
+            let (frame, _) = self.frames.pop_front().expect("front exists");
+            if !has_camera {
+                self.give_up(frame.sequence);
+                continue;
+            }
+            let camera = self
+                .feed
+                .close(frame.sequence)
+                .expect("the camera is in the feed");
+            self.feed.count(|status| status.frames_joined += 1);
+            joined.push((frame, camera));
+        }
+        joined
+    }
+
+    fn give_up(&self, sequence: u64) {
+        let had_camera = self.feed.close(sequence).is_some();
+        self.feed.count(|status| {
+            status.frames_clean_feed += 1;
+            if !had_camera {
+                status.frames_without_tracking += 1;
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{pose::matrix3, replay::tests::replay, tests::CHECKS};
+
+    #[test]
+    fn a_deadline_join_releases_each_frame_with_its_own_camera_or_gives_it_up() {
+        let feed = feed(8);
+        let mut join = DeadlineJoin::new(feed.clone(), 3);
+        let start = Instant::now();
+        let deadline =
+            |sequence: u32| start + Duration::from_millis(100 + 20 * u64::from(sequence));
+        for sequence in 0..3 {
+            join.frame(captured(u64::from(sequence), start), deadline(sequence));
+        }
+        feed.push(replay().frame(1)).unwrap();
+        assert!(join.joined(start).is_empty(), "frame 0 still waits");
+        feed.push(replay().frame(0)).unwrap();
+        let joined: Vec<_> = join
+            .joined(start)
+            .into_iter()
+            .map(|(frame, camera)| (frame.sequence, camera.sequence.get()))
+            .collect();
+        assert_eq!(joined, [(0, 0), (1, 1)], "as soon as the cameras arrive");
+        assert!(
+            join.joined(deadline(2) - Duration::from_millis(1))
+                .is_empty()
+        );
+        assert!(join.joined(deadline(2)).is_empty(), "frame 2 is given up");
+        assert!(
+            feed.push(replay().frame(2)).is_err(),
+            "its camera is too late"
+        );
+        // A full join gives up its oldest frame.
+        for sequence in 3..7 {
+            join.frame(captured(u64::from(sequence), start), deadline(sequence));
+        }
+        feed.push(replay().frame(4)).unwrap();
+        let joined = join.joined(deadline(3));
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].0.sequence, 4, "3 was given up when 6 arrived");
+        let status = feed.status();
+        assert_eq!(
+            (
+                status.frames_joined,
+                status.frames_clean_feed,
+                status.frames_without_tracking
+            ),
+            (3, 2, 2)
+        );
+    }
 
     fn captured(sequence: u64, arrived: Instant) -> CapturedFrame<u64> {
         CapturedFrame {

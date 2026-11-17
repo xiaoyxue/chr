@@ -29,7 +29,8 @@ server/tracker/           chr-tracker: tracking logic without processes, GStream
   src/replay.rs           The replay stand-in's poses and lens from a calibrated-video-v1 manifest
 server/runtime/           chr-runtime: chr-server (render server), its workers chr-renderer-cli (also
                           stills) and chr-tracking-sim-cli (replay stand-in for the tracking module),
-                          and chr-sdi-sim (simulated SDI capture, --send-cameras for recorded cameras)
+                          chr-sdi-sim (simulated SDI capture, --send-cameras for recorded cameras)
+                          and chr-sdi-in (the input of the experimental GStreamer core, #154)
   src/input/              Video acquisition adapters (software MP4, shared-memory input ring)
   src/calibration/        Calibrated clip lens replay; the renderer's lens and geometry checks
   src/program/            Demo scenes and admitted-frame rendering bridge
@@ -37,6 +38,8 @@ server/runtime/           chr-runtime: chr-server (render server), its workers c
   src/worker/             Worker transport (GStreamer unixfd), render worker protocol,
                           the worker side and its supervisor
   src/worker/tracking/    Tracking worker supervisor and VchaoFrame on GStreamer buffers
+  src/gst_core/           Experimental GStreamer core (--pipeline gst): capture, per-slot selector,
+                          CG driver, output and tap; chr-sdi-in's input pipeline
 server/viewer/            chr-app: native window and headless delivery shell
 server/docs/              Server-specific contracts
 server/scripts/           Server-specific development helpers
@@ -136,6 +139,7 @@ The root development shell provides:
 | Build and maintenance | Git, pkg-config, and nixfmt |
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
 | Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`, 1.28 or later), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
+| GStreamer core (#154) | `livesync` and `fallbackswitch` copied out of the pinned gst-plugins-rs (the `chr-gst-livesync` derivation, on the same plugin path) |
 
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
 the GStreamer ugly plugins, and Python GObject bindings. It runs the video-only
@@ -297,8 +301,8 @@ nix fmt -- --check flake.nix
 
 The default package and named `chr-app` package build the renderer viewer,
 `chr-server` builds the headless render server with its workers `chr-renderer-cli`
-and `chr-tracking-sim-cli` (wrapped with the GStreamer plugin path for the unixfd
-transport), and `chr-monitor` builds the video monitor process. `pitch-studio` builds the onsite client: the static
+and `chr-tracking-sim-cli` and the `chr-sdi-in` input (wrapped with the GStreamer
+plugin path for the unixfd transport and the GStreamer core), and `chr-monitor` builds the video monitor process. `pitch-studio` builds the onsite client: the static
 site in `share/pitch-studio/dist` and a `pitch-studio` launcher. The
 default application runs the viewer; `nix run .#pitch-studio` serves the
 client.
@@ -311,7 +315,7 @@ client.
 | `media-source` | Python tests in `server/scripts/`: synthetic MP4 decoding into a GStreamer appsink, pixel integrity, fractional-rate loop timing and short-input failure; `stack.py` configuration, components and process records |
 | `fmt` | Rust workspace formatting |
 | `clippy` | Rust workspace and all targets, with warnings treated as errors |
-| `tests` | Rust workspace CPU tests, including the GStreamer unixfd worker transport and the tracking worker; hardware GPU tests remain explicitly ignored |
+| `tests` | Rust workspace CPU tests, including the GStreamer unixfd worker transport, the tracking worker and the GStreamer core end to end with a solid-frame render worker; hardware GPU tests remain explicitly ignored |
 
 The toolchain smoke check is not a client typecheck or application test. The
 `pitch-studio` check typechecks and builds that client and runs its Node

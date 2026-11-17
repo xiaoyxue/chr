@@ -4,7 +4,7 @@ default-run = "chr-server"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "chr runtime: the chr-server render server, its chr-renderer-cli render worker and chr-tracking-sim-cli tracking worker stand-in, the chr-sdi-sim SDI capture simulator and their shared program logic"
+description = "chr runtime: the chr-server render server, its chr-renderer-cli render worker and chr-tracking-sim-cli tracking worker stand-in, the chr-sdi-sim and chr-sdi-in SDI capture simulators and their shared program logic"
 
 [lints]
 workspace = true
@@ -20,6 +20,10 @@ path = "src/renderer_cli.rs"
 [[bin]]
 name = "chr-sdi-sim"
 path = "src/sdi_sim.rs"
+
+[[bin]]
+name = "chr-sdi-in"
+path = "src/sdi_in.rs"
 
 [[bin]]
 name = "chr-tracking-sim-cli"

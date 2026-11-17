@@ -42,10 +42,20 @@
             pkgs.gst_all_1.gstreamer
             pkgs.gst_all_1.gst-plugins-base
           ];
+          # livesync (and fallbackswitch, for comparison) of chr-server's GStreamer core
+          # (#154), copied out of gst-plugins-rs: the whole package (~55 plugins) would put
+          # gtk4, whisper and more on every registry scan; these two need only GStreamer.
+          liveSync = pkgs.runCommand "chr-gst-livesync" { } ''
+            mkdir -p $out/lib/gstreamer-1.0
+            for plugin in livesync fallbackswitch; do
+              cp ${pkgs.gst_all_1.gst-plugins-rs}/lib/gstreamer-1.0/libgst$plugin.so $out/lib/gstreamer-1.0/
+            done
+          '';
           workerPlugins = pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
             (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
             pkgs.gst_all_1.gst-plugins-base
             pkgs.gst_all_1.gst-plugins-bad
+            liveSync
           ];
           mediaTools = [
             pkgs.ffmpeg
@@ -65,6 +75,7 @@
               pkgs.gst_all_1.gst-plugins-base
               pkgs.gst_all_1.gst-plugins-bad
               pkgs.gst_all_1.gst-plugins-ugly
+              liveSync
             ];
           };
           runtime = with pkgs; [
@@ -151,7 +162,9 @@
                   wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime} \
                     --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
-                wrapProgram $out/bin/chr-tracking-sim-cli --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
+                for program in chr-tracking-sim-cli chr-sdi-in; do
+                  wrapProgram $out/bin/$program --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
+                done
               '';
             }
           );
