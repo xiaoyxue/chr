@@ -94,6 +94,11 @@ SDI 扫描录制 → 高清晰视频 → 离线建模 → 结果接入
 
 ## Domain boundaries
 
+The product ownership and lifecycle candidate is maintained in
+[Business contexts](business-context.md) for #57. Its single-camera profile,
+persistence split and live-operation restrictions remain proposed; the confirmed
+module boundaries above are unchanged.
+
 | Concept | Boundary |
 | --- | --- |
 | 球场与 session | 球场基础信息长期存在，session 的覆盖范围与生命周期仍需定义。 |

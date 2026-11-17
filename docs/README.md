@@ -13,10 +13,12 @@
 | Product | [Business workflow](business-workflow.md) | 四阶段业务流程、参与方、交接和阶段出口。 |
 | Architecture | [System architecture](system-architecture.md) | 产品边界、逻辑模块、数据流及现有实现与目标的区别。 |
 | Responsibilities | [Component responsibilities](component-responsibilities.md) | 各功能的操作、配置、执行和反馈归属。 |
+| Business context | [Business contexts and control ownership](business-context.md) | Proposed identities, state authority and workflow transitions for #57. |
 | Shared protocol | [Protocol conventions](protocol-conventions.md) | 所有方法共用的消息封装、标识、错误、schema 记法及完整消息示例。 |
 | Execution | [Execution model](execution-model.md) | Effect、生效位置、逻辑时间、批处理和模拟重放。 |
 | Business methods | [Cam1 input recording](recording-control.md) | 录制 params、result、state、errors、产物及业务验证场景。 |
 | Business methods | [Calibration records](calibration-control.md) | atlas/Ti/C 记录及 create/get/load 的核心职责。 |
+| Tracking integration | [Tracking service contract](tracking-control.md) | Proposed reference contexts, frame requests, results and resource ownership for #60. |
 | Frame pipeline | [Frame ingestion and rendering](render-frame-input.md) | 首期 pinhole 范围、scene 上下文、帧发布/渲染提交与资源生命周期。 |
 | Live processes | [Live process overview](live-process-overview.md) | 三个进程及其通道的总览图（英文 / 中文）。 |
 | Live processes | [Live process architecture](live-process-architecture.md) / [implementation plan](live-process-implementation.md) | chr-server、渲染 worker 与监看进程的职责、通道、状态归属与故障处理（#94 决定），以及分步实现计划。 |
@@ -72,5 +74,7 @@ Fusion 的现阶段定位见产品架构，不再复制历史远端部署假设�
 其未合并提案不在这里自动升级为已确认决定。已经落地的目录、IPC 和服务端能力
 以当前实现及其契约为准，不因该设计 PR 尚未合并而视为待定。
 
-本组设计由 [tracking issue #1](https://github.com/xiaoyxue/chr/issues/1) 跟踪，
-[draft PR #2](https://github.com/xiaoyxue/chr/pull/2) 持续记录讨论结果。
+The baseline was merged in [PR #2](https://github.com/xiaoyxue/chr/pull/2).
+[Tracking issue #1](https://github.com/xiaoyxue/chr/issues/1) remains open.
+Issues #57-#60 own the control, recording, calibration and tracking candidates;
+technical review does not turn their proposed policies into product approval.

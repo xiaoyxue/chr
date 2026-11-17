@@ -14,6 +14,10 @@
 纯编辑/查看可留在控制侧；影响实际输出的修改应有执行结果反馈。
 配置持久化位置、运行中状态的权威来源和多入口控制仲裁尚未确定。
 
+The concrete ownership candidate is in [Business contexts](business-context.md)
+(#57). Recording, calibration and tracking contract work is tracked separately
+by #58, #59 and #60; this matrix does not approve their candidate policies.
+
 ## Responsibility matrix
 
 | Feature | Control side | Runtime side | Open boundary |

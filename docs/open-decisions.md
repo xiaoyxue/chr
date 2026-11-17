@@ -22,6 +22,20 @@
 
 ## Behavior and data models
 
+Concrete candidates now live in [Business contexts](business-context.md) (#57),
+[Recording](recording-control.md) (#58), [Calibration](calibration-control.md)
+(#59) and [Tracking](tracking-control.md) (#60). Their `proposed` sections are
+review inputs, not resolved entries in this index. Shared identity/error and
+time/effect candidates remain in the protocol and execution documents; #12/#36
+must reconcile them before wire implementation.
+
+| Candidate | Approval still required |
+| --- | --- |
+| #57 | Single-camera/static-content release boundary, catalog/runtime ownership, live edit restrictions, rehearsal isolation and recovery policy. |
+| #58 | Caller-selected task identity, recording profile, exclusive output directory, loss/timeout policy and metadata sufficiency. |
+| #59 | Complete record encoding, local import/storage, immutable versions, load binding and restart behavior. |
+| #60 | Bounded native adapter contract, reference-context lifetime, production transport and tracking-loss/output policy. |
+
 | Topic | Open scope | Owner |
 | --- | --- | --- |
 | Workflow handoffs | 方案发布、校准选择、人工确认、阶段回退及重新测试条件。 | [Business workflow](business-workflow.md) |

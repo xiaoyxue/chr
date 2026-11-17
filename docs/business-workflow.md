@@ -6,6 +6,10 @@
 
 **Depends on:** [System architecture](system-architecture.md)。
 
+The concrete transition and identity candidate for #57 is maintained in
+[Business contexts](business-context.md). It does not turn the open business
+choices below into approved product policy.
+
 ## Goal and participants
 
 目标是在统一的虚拟球场中准备广告内容，经实际场地校准和叠加测试后，

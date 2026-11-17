@@ -1,102 +1,299 @@
 # Calibration records
 
-**Status:** `draft` — 标定产物及 load 即启用的业务方向已明确；任务状态、字段编码和错误细节为 `proposed`。
+**Status:** `draft` - the complete-record boundary and load-as-enable direction
+are confirmed; the #59 schemas and lifecycle below are `proposed`.
 
-**Scope:** 扫描录像到机位标定记录的生成、查询和加载，不定义建模或 tracking 算法。
+**Scope:** Generate, query and enable camera calibration records without defining
+the modelling/tracking algorithm or selecting its technology stack.
 
-**Depends on:** [Protocol conventions](protocol-conventions.md)、[Execution model](execution-model.md)、
-[Cam1 input recording](recording-control.md)、[Coordinate contract](../server/docs/coordinates.md)。
+**Depends on:** [Protocol conventions](protocol-conventions.md),
+[Execution model](execution-model.md), [Recording](recording-control.md),
+[Business contexts](business-context.md),
+[Coordinate contract](../server/docs/coordinates.md).
 
 ## Confirmed decisions
 
-对外的完整 calibration 是某个机位在指定球场坐标系下的静态标定记录：
-
-- `atlas` 是参考图像集合，每张图都带有已完成球场注册的 `Ti`，
-  即球场地面 XY 到该参考图 SNC 的映射，不是尚未注册的任意拼接图。
-- 光心 `C` 位于同一个球场世界坐标系中。
-- `calibration_id` 标识记录，`camera_id` 标识对应机位。
-- 图像尺寸、图像域及球场坐标上下文必须可确定，不能仅凭 ID 猜测。
-
-特征提取、索引、匹配策略和缓存属于建模/tracking 内部，不作为公共业务字段暴露。
-内部可保存额外算法数据，但其布局不成为渲染接口的依赖。
-本阶段使用 pinhole 模型，不加入畸变参数。
-
-`calibration.load` 读取并启用已有完整记录，不引入单独的 `calibration.activate`，
-也不建模“多份已 load 但尚未 active”的集合。磁盘上可以存在多份历史记录。
+- A complete record contains atlas reference images paired with their registered
+  ground-XY-to-image-SNC Ti, plus world camera centre C in the same pitch frame.
+- Camera identity, image extent/domain and world context must be resolvable.
+- Feature descriptors, indexes and matching caches are algorithm internals,
+  not a renderer input or a mandatory public field.
+- `calibration.load` reads and enables a complete record. There is no separate
+  public activate step or collection of loaded-but-inactive calibrations.
+- Initial geometry is pinhole-only; no distortion or ground-only success variant.
 
 ## Methods
 
-以下限定逻辑输入、输出与 effect，不宣称字段级 schema 已冻结。
-
-| Method | Params, logical | Result, logical | Successful effect |
+| Method | Params | Result | Successful effect |
 | --- | --- | --- | --- |
-| `calibration.create` | 扫描视频及可用的配套元数据引用、`camera_id`、可解析的球场坐标上下文。 | 新记录的 `calibration_id`。 | 已受理生成任务，不表示建模完成。 |
-| `calibration.get` | `calibration_id`。 | 任务/记录状态，完成时提供标定产物，失败时提供原因。 | 返回记录快照。 |
-| `calibration.load` | 已完成记录的引用及对应机位绑定上下文。 | 当前使用的 `calibration_id` 和 `camera_id`。 | 记录已读取并成为该机位当前使用的标定。 |
+| `calibration.create` | `CalibrationCreateParams` | `CalibrationReference` | Generation identity and parameters durably accepted, not a completed model or activation. |
+| `calibration.get` | `CalibrationTargetParams` | `CalibrationSnapshot` | Coherent task/record snapshot plus its current active binding, if any. |
+| `calibration.load` | `CalibrationLoadParams` | `CalibrationBinding` | Complete record and tracking resources prepared; the new binding has actually taken effect. |
 
-视频通过路径或资产引用交付的具体方式待定，不在这里规定视频字节的传输方式。
-球场尺寸和坐标上下文若已经由工作上下文绑定，可以不在每次 create 中重复传入。
-同样，load 的机位可从记录解析，但必须检查与目标输入的绑定相容。
+Create uses the shared caller-selected-ID deduplication rule. Identical create
+returns the existing reference even if the task failed; retry generation with a
+new ID. Create never replaces the active calibration. Get of a failed task is
+a successful query, unlike get of an unknown ID.
 
-## Effects and state
+Load validates the expected binding revision both before preparation and at the
+atomic switch. A racing load that wins first makes the other stale. If the same
+record is already bound to the same target and the expected revision matches,
+return the existing binding without another effect. A stale revision is still
+a conflict; do not reinterpret it as a successful historical retry.
 
-候选执行语义：
+## Payload schemas
 
-- create 受理时就分配稳定的 `calibration_id`，以同一 ID 查询进度和最终产物，
-  暂不额外引入独立的任务 ID。create 只生成记录，不隐式替换当前使用的标定。
-- get 区分生成中、完整记录和失败；精确状态值、进度及错误 schema 后续定义。
-- load 成功结果表示切换已生效，而不是只确认读文件请求已入队。
-  读取或验证失败不破坏旧记录；切换过程中不能混用新旧坐标、Ti 或 C。
-- 内部准备和资源切换可以异步执行，但不因此增加公开的 prepare/activate 工作流。
+```typescript
+type Vec3 = [number, number, number];
+type Matrix3 = [
+  number, number, number,
+  number, number, number,
+  number, number, number,
+];
 
-对已在途帧的版本归属、load 的具体生效边界和重复调用行为仍待细化。
-完整产物无法得到时必须报告未完成或失败，不能伪造 Ti 或 C。
-本轮不另加 ground-only 的成功结果变体。
+type WorldContext = {
+  reference: VersionRef;
+  pitch_id: BusinessId;
+  length_m: number;
+  width_m: number;
+  convention: "chr_pitch_negative_z_up_v1";
+};
 
-## Result contents
+type CalibrationCreateParams = {
+  calibration_id: BusinessId;
+  session_id: BusinessId;
+  camera_id: BusinessId;
+  world: WorldContext;
+  input: RecordingArtifacts;
+};
 
-| Item | Required meaning |
-| --- | --- |
-| `calibration_id` | 当前任务及其生成记录的稳定身份。 |
-| `camera_id` | 记录对应的机位身份，不替代输入流实例身份。 |
-| `atlas` | 图像与各自 Ti 的明确配对；图像引用、尺寸及 SNC 图像域可解析。 |
-| `C` | 与全部 Ti 和球场定义相容的世界坐标光心。 |
-| World context | 球场坐标定义、尺寸及必要版本关联，可直接保存或引用。 |
+type CalibrationTargetParams = { calibration_id: BusinessId };
+type CalibrationReference = { calibration_id: BusinessId };
 
-此表是逻辑结果合同，不固定图片容器、矩阵数字编码、记录目录或元数据格式。
-create/load 的引用结果和 get 的状态联合 payload 需在下一轮字段级设计中补齐；
-不能把此表直接视为已经可实现的完整 schema。
+type AtlasImage = {
+  image_id: BusinessId;
+  image: LocalFileRef;
+  width: number;
+  height: number;
+  image_domain: "pinhole_snc";
+  ti: Matrix3;
+};
 
-## Tracking and rendering boundary
+type CalibrationRecord = CalibrationReference & {
+  schema_version: 1;
+  camera_id: BusinessId;
+  world: WorldContext;
+  input: RecordingArtifacts;
+  camera_center: Vec3;
+  atlas: AtlasImage[];
+};
 
-```text
-Scan recording → calibration.create → Calibration record
-Calibration record → calibration.load → Tracking reference context
-Input frame + Tracking reference context → Per-frame Ti
-Input image reference + Ti + compatible C → Rendering
+type CalibrationLoadParams = {
+  session_id: BusinessId;
+  runtime_id: BusinessId;
+  camera_id: BusinessId;
+  stream_id: BusinessId;
+  calibration_id: BusinessId;
+  expected_binding_revision: UInt64Text;
+};
+
+type CalibrationBinding = {
+  session_id: BusinessId;
+  runtime_id: BusinessId;
+  camera_id: BusinessId;
+  stream_id: BusinessId;
+  calibration_id: BusinessId;
+  world: VersionRef;
+  binding_revision: UInt64Text;
+  tracking_context_id: BusinessId;
+  effect: AppliedEffect;
+};
+
+type CalibrationFailure = {
+  kind:
+    | "input_unreadable"
+    | "input_incompatible"
+    | "model_incomplete"
+    | "storage_failed"
+    | "interrupted"
+    | "internal_error";
+  message: string;
+};
+
+type CalibrationSnapshot = CalibrationReference & {
+  active_binding: CalibrationBinding | null;
+} & (
+  | { state: "queued" }
+  | { state: "building"; progress: number | null }
+  | {
+      state: "completed";
+      record: CalibrationRecord;
+      record_file: LocalFileRef;
+    }
+  | { state: "failed"; failure: CalibrationFailure }
+);
 ```
 
-tracking 使用参考图与内部匹配资源；渲染核心只需要当帧图像和已解析的 Ti/C，
-不必加载 atlas 或接受 `calibration_id` 作为必需输入。
-C 可以由运行时从当前机位配置取得，但必须与该帧 Ti 使用的参考系和版本相容。
-静态记录可作为来源信息，不能代替当帧输入或成为隐式的图像匹配步骤。
+All coordinates and matrix entries are finite. World dimensions are positive
+metres; C is above ground (`Cz < 0`) in this candidate camera profile. Image
+dimensions are positive integers. Atlas is nonempty with unique `image_id`s,
+verified image references and nonsingular, defined Ti mappings. Validation
+preserves the imported forward row-major coefficients; it does not transpose,
+invert, renormalize or derive frame identity from atlas order.
+
+`world.reference` must resolve to exactly the declared pitch dimensions and
+coordinate convention. Camera compatibility is not established merely by
+matching the pitch ID. SNC uses the native image extent and `sqrt(width*height)`;
+do not silently fit a recorded image and reinterpret Ti in the fitted extent.
+
+Create verifies both recording artifacts, their hashes and metadata association
+before acceptance; it retains verified immutable inputs for the task lifetime.
+This first candidate requires matching metadata. Importing raw scans without
+metadata is a separate approval gate, not a reason to fabricate provenance.
+Unknown image encodings or unsupported resource sizes are explicit rejections.
+
+`progress` is either a producer-reported fraction in `[0,1]` or `null` when no
+meaningful fraction is available. A value of `1` alone does not mean completion.
+Only a full, validated, durably published record is `completed`. Structural
+completeness does not certify physical calibration accuracy; rehearsal approval
+and quality thresholds are separate product decisions.
+
+`active_binding` reports the current runtime's binding only when this record is
+active. It is not persisted as part of the immutable artifact. It is `null` for
+noncompleted records, inactive records and after restart until another load.
+The initial single-camera profile has at most one binding; multi-camera queries
+will require an explicitly extended profile, not an overloaded null value.
+
+## Storage and recovery
+
+The runtime service owns a configured local record store. The public record is
+a UTF-8 JSON `CalibrationRecord` with `schema_version: 1`, stored under a
+service-managed calibration directory; image files and the original recording
+references are explicit `LocalFileRef`s. Get returns the record and its verified
+`record_file` reference. Clients cannot choose arbitrary internal task paths.
+
+Persist the create identity/parameters before acceptance. Queue/build failures
+are retained under the same ID. Publish the complete record only after images,
+hashes and the record file are valid and durable; incomplete output never
+replaces an existing record. Completed records are immutable: another modelling
+attempt or a coordinate correction receives a new calibration ID.
+
+On restart, queued/building tasks become `failed: interrupted`; terminal records
+remain queryable. No task or live calibration automatically resumes. Existing
+completed records can be loaded again only with the new runtime ID.
+
+A portable export must copy referenced bytes and rewrite host-local paths while
+preserving their digests and identities. A JSON file containing old absolute
+paths is not a portable package. An externally produced record may be registered
+only through the same validation boundary; discovery/import/export commands and
+retention are explicitly outside this first method set.
+
+There is no cancellation RPC in this candidate. Clients cannot assume that
+disconnecting cancels generation. A later cancellation method must specify
+terminal state and partial-file ownership rather than reusing load or stop.
+
+## Atomic load and in-flight frames
+
+1. Resolve the complete immutable record and target session/camera/stream. Reject
+   world or image-domain incompatibility and live-stage changes prohibited by
+   the control candidate.
+2. Prepare the tracker reference resources without replacing the old binding.
+   The adapter must explicitly support the source/reference image domains and
+   extents; IDs alone do not prove compatibility.
+3. Under the same effect-serialization boundary used by session transitions,
+   recheck runtime, source, expected binding revision and the complete target
+   compatibility, including the session's current stage and world revision.
+   If entry into live won during preparation, reject the load as `invalid_state`
+   and release its temporary resources. Otherwise publish the fresh tracking
+   context and record/C/world as one binding with a new `AppliedEffect`. Clear
+   old rehearsal approval and increment the session-runtime revision together
+   with the binding revision.
+4. Return the applied binding. Retain the old immutable context/resources until
+   its in-flight tracker and render consumers finish.
+
+The initial unbound revision is `"0"`; each actual replacement increments the
+revision without wrapping. State is authoritative in the runtime, not in an
+atlas directory or the client's selected row.
+
+At frame admission to tracking, the runtime snapshots one complete binding.
+That frame retains its original context and compatible C through rendering,
+even if another load happens meanwhile. A not-yet-admitted frame uses the new
+binding. Calibration switches do not automatically create a new capture stream;
+they change context/binding provenance. #22 must reject incompatible
+scene/world submissions, not repair them with current C or a stale Ti.
+
+A preparation, validation or compare-and-swap failure leaves the old binding
+valid and releases only the new temporary resources. An uncertain reply is
+resolved by reading current session state and `calibration.get`; clients do not
+blindly repeat load with the latest revision.
 
 ## Errors
 
-需区分视频不可读取、机位/球场上下文不相容、建模无法形成完整结果、
-记录不存在或不完整、加载资源失败等情况。
-任务生成失败与 create/get/load 操作被拒绝分别表达；具体错误码及 data 尚未分配。
+Use standard errors and the shared `1000` state/revision/runtime rejections, plus:
+
+| Code | Message | Required data | Methods |
+| --- | --- | --- | --- |
+| `1101` | `Calibration not found` | `{ calibration_id: BusinessId }` | get/load |
+| `1102` | `Calibration incomplete` | `{ calibration_id: BusinessId }` | load |
+| `1103` | `Calibration context incompatible` | `{ camera_id: BusinessId, kind: "world" \| "camera" \| "image_domain" }` | create/load |
+| `1104` | `Calibration resources unavailable` | `{ calibration_id: BusinessId }` | create/load |
+
+Unreadable/hash-invalid create input is `Invalid params` before acceptance;
+later producer failures belong to `CalibrationFailure`. Failure to prepare
+tracking resources rejects load without publishing a partial binding.
+
+## Payload examples
+
+```typescript
+const calibrationLoadExample: CalibrationLoadParams = {
+  session_id: "session-01",
+  runtime_id: "runtime-01",
+  camera_id: "camera-main",
+  stream_id: "stream-01",
+  calibration_id: "calibration-01",
+  expected_binding_revision: "0",
+};
+
+const calibrationBoundExample: CalibrationBinding = {
+  session_id: "session-01",
+  runtime_id: "runtime-01",
+  camera_id: "camera-main",
+  stream_id: "stream-01",
+  calibration_id: "calibration-01",
+  world: { id: "pitch-world", revision: "1" },
+  binding_revision: "1",
+  tracking_context_id: "tracking-context-01",
+  effect: { runtime_id: "runtime-01", sequence: "12" },
+};
+```
 
 ## Simulation acceptance
 
-- 使用合成视频和合成标定结果验证 create/get/load，不依赖真实 SDI 或特定建模算法。
-- 检查每张参考图与 Ti 配对，并拒绝参考系不相容的结果。
-- 模拟 load 失败，旧记录继续有效；成功切换不让同一帧混用新旧参数。
-- 直接提供匹配的图像、Ti 和 C，可在没有 atlas 的条件下驱动渲染。
+- Synthetic generation returns a stable task ID without replacing the active
+  record; duplicates query the original task and conflicts create nothing.
+- Reject swapped image/Ti pairs, mismatched declared image extents, modified
+  file content and incompatible world/camera references at clear boundaries.
+  Structural checks do not claim to detect every physically wrong calibration.
+- Fail model generation after acceptance: get returns a failed task; load rejects
+  it and preserves the old active record.
+- Race two loads from revision `3`: only one becomes revision `4`; the other
+  rejects without invalidating either the winner or older in-flight frames.
+- Start preparing a load during approved rehearsal, then enter live: the pending
+  load must fail its commit-time stage check. In the opposite order, loading
+  clears approval and advances session revision, so the stale live-entry request
+  cannot succeed.
+- Deliver an old-context result after a successful load: resolve C from that
+  context, not from the newly active record, or reject incompatible submission.
+- Restart with incomplete work: retained failure is queryable and live binding
+  is absent. No atlas is required for direct renderer tests with valid Ti/C.
 
 ## Open decisions
 
-- 视频/记录引用、球场上下文和机位绑定的精确表示。
-- 任务状态、进度、错误码及完整 response payload schema。
-- 记录存储、版本、重试、取消及恢复行为。
-- load 生效边界、在途帧归属和坐标系现场修正。
+- Product approval of the local record profile, input-metadata requirement and
+  caller-selected IDs; shared schema alignment with #12/#36.
+- Concrete modelling adapter, measurable progress/quality criteria, resource
+  limits and operator correction workflow, without choosing an algorithm stack.
+- Portable package/import/discovery, retention, cancellation and later
+  multi-camera behavior.
+- Production reference-resource preparation and failure protection policy for
+  the tracking adapter. This draft cannot claim full #59 acceptance without it.
