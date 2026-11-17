@@ -1,0 +1,332 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Converts a Fusion offline ZIP into a chr-render-description-v1 scene.
+
+It follows the pitch-studio client's conversion of a match's Fusion placements
+(client/pitch-studio/src/render/render-description.ts, describeScene with no local
+placements), so the result equals the client's 导出渲染描述 for the same package: GLB
+bounds as three.js reports them (Box3.setFromObject over GLTFLoader's accessor
+bounds), images by their pixel size, and assets read by chr-server from the ZIP.
+
+Without --camera it writes `{"scene": …}`, the shape `description.load` takes; with
+--camera it writes a complete description for `chr-server --description` or
+`chr-renderer-cli render --description`, using the `camera` of the given file.
+--move shifts a placement by metres in pitch coordinates and --scale resizes it before
+converting, as if it had been edited in the studio: a 3D placement's model scale
+(`scaleX`) or a 2D placement's area, in which its image is fitted again.
+
+    uv run server/scripts/fusion_description.py MATCH.zip --camera start.json \\
+        --move PLC-… 0 10 --scale PLC-… 0.5 --output scene.json
+"""
+
+import argparse
+import hashlib
+import json
+import math
+import re
+import struct
+import sys
+import zipfile
+from pathlib import Path
+
+ENTRY = re.compile(r"^(?:manifest\.json|assets/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(?:png|jpg|webp|glb))$")
+EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "model/gltf-binary": ".glb"}
+MAX_INSTANCES = 63
+# GLTFLoader's getNormalizedComponentScale, by accessor componentType.
+NORMALIZED_SCALE = {5120: 1 / 127, 5121: 1 / 255, 5122: 1 / 32767, 5123: 1 / 65535}
+
+
+class ConversionError(Exception):
+    pass
+
+
+def require(condition, message):
+    if not condition:
+        raise ConversionError(message)
+
+
+def number(value):
+    require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value),
+            "Invalid Fusion number.")
+    return value
+
+
+def read_package(path):
+    """The manifest's match and the bytes of each asset, verified as parseOfflinePackage does."""
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        require(len(names) == len(set(names)) and all(ENTRY.match(name) for name in names),
+                "The offline ZIP contains duplicate or unexpected files.")
+        files = {name: archive.read(name) for name in names}
+    require("manifest.json" in files, "The offline package is missing manifest.json.")
+    manifest = json.loads(files["manifest.json"].decode("utf-8"))
+    require(manifest.get("packageVersion") == 1, "Unsupported offline package version.")
+    match, hashes = manifest["match"], manifest["sha256"]
+    assets = {}
+    for asset in match["assets"]:
+        entry = f"assets/{asset['id']}{EXTENSIONS.get(asset['contentType'], '')}"
+        data = files.get(entry)
+        require(asset.get("contentPath") == entry and data is not None and asset.get("byteLength") == len(data),
+                f"Offline asset {asset['id']} is missing or has invalid metadata.")
+        digest = hashlib.sha256(data).hexdigest()
+        require(hashes.get(entry) == digest, f"Material checksum failed: {asset['id']}.")
+        assets[asset["id"]] = {"contentType": asset["contentType"], "entry": entry, "sha256": digest, "data": data}
+    require(len(files) == len(assets) + 1 and len(hashes) == len(assets),
+            "The package contains missing or unreferenced materials.")
+    return match, assets
+
+
+def placements(match, assets):
+    """The match's placements as mapFusionMatch builds them (z, rx, ry and rz are 0)."""
+    coordinates = match["coordinates"]
+    require(match.get("schemaVersion") == 1 and match.get("sport") == "football"
+            and coordinates.get("unit") == "meters" and coordinates.get("origin") == "field-center"
+            and coordinates.get("x") == "right" and coordinates.get("y") == "down-in-top-view"
+            and coordinates.get("modelUp") == "gltf-y-up", "Unsupported Fusion sport or coordinate convention.")
+    result = []
+    for ad in match["ads"]:
+        require(ad["type"] in ("2D", "3D"), "Unsupported Fusion Ad type.")
+        for source in ad["placements"]:
+            require(source.get("coordinateSpace") == "pitch", f"Placement {source['id']} uses a legacy canvas.")
+            asset_ids = source.get("assetIds", [])
+            require(len(asset_ids) <= 1, f"Placement {source['id']} has multiple legacy assets.")
+            asset = assets.get(asset_ids[0]) if asset_ids else None
+            require(not asset_ids or asset is not None, f"Assigned asset for {source['id']} is missing.")
+            require(asset is None or (asset["contentType"] == "model/gltf-binary") == (ad["type"] == "3D"),
+                    "Fusion placement material does not match its Ad type.")
+            width, height = number(source["width"]), number(source["height"])
+            require(width > 0 and height > 0, "Invalid Fusion placement dimensions.")
+            slot = {"id": source["id"], "type": ad["type"], "asset": asset_ids[0] if asset_ids else None,
+                    "x": number(source["x"]), "y": number(source["y"]), "z": 0, "rz": 0}
+            if ad["type"] == "2D":
+                rotation = number(source["assetRotation"])
+                require(rotation in (0, 90, 180, 270), "Invalid image rotation.")
+                slot.update(sizeX=width, sizeY=height, assetRotation=rotation)
+            else:
+                pose = {key: number(source["modelPose"][key]) for key in ("x", "y", "scale", "yaw")}
+                require(abs(pose["x"]) <= 1 and abs(pose["y"]) <= 1 and 0.01 <= pose["scale"] <= 1
+                        and 0 <= pose["yaw"] < 360, "Invalid Fusion model pose.")
+                slot.update(region={"width": width, "height": height}, modelPose=pose, scaleX=1)
+            result.append(slot)
+    return result
+
+
+def image_size(data, content_type):
+    """Pixel width and height of a PNG or JPEG, the image kinds chr-server imports."""
+    if content_type == "image/png":
+        require(data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR", "Invalid PNG material.")
+        return struct.unpack(">II", data[16:24])
+    require(content_type == "image/jpeg", f"chr-server does not import {content_type} images.")
+    offset = 2
+    while offset + 9 < len(data):
+        require(data[offset] == 0xFF, "Invalid JPEG material.")
+        marker = data[offset + 1]
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            height, width = struct.unpack(">HH", data[offset + 5:offset + 9])
+            return width, height
+        offset += 2 + struct.unpack(">H", data[offset + 2:offset + 4])[0]
+    raise ConversionError("JPEG material has no frame header.")
+
+
+def glb_json(data):
+    require(data[:4] == b"glTF" and data[16:20] == b"JSON", "Invalid embedded GLB material.")
+    (length,) = struct.unpack("<I", data[12:16])
+    return json.loads(data[20:20 + length])
+
+
+def blended_materials(gltf):
+    """Names of the GLB's materials with alphaMode BLEND (blendedMaterials)."""
+    return [material.get("name", "unnamed") for material in gltf.get("materials", [])
+            if material.get("alphaMode") == "BLEND"]
+
+
+def matmul(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def node_matrix(node):
+    """A glTF node's local transform, row-major."""
+    if "matrix" in node:
+        m = node["matrix"]
+        return [[m[j * 4 + i] for j in range(4)] for i in range(4)]
+    x, y, z, w = node.get("rotation", [0, 0, 0, 1])
+    sx, sy, sz = node.get("scale", [1, 1, 1])
+    tx, ty, tz = node.get("translation", [0, 0, 0])
+    return [
+        [(1 - 2 * (y * y + z * z)) * sx, 2 * (x * y - z * w) * sy, 2 * (x * z + y * w) * sz, tx],
+        [2 * (x * y + z * w) * sx, (1 - 2 * (x * x + z * z)) * sy, 2 * (y * z - x * w) * sz, ty],
+        [2 * (x * z - y * w) * sx, 2 * (y * z + x * w) * sy, (1 - 2 * (x * x + y * y)) * sz, tz],
+        [0, 0, 0, 1],
+    ]
+
+
+def primitive_box(gltf, primitive):
+    """GLTFLoader's computeBounds: the POSITION accessor's bounds, widened by morph targets."""
+    accessors = gltf["accessors"]
+    position = primitive["attributes"].get("POSITION")
+    if position is None:
+        return None
+    accessor = accessors[position]
+    require("min" in accessor and "max" in accessor, "A GLB POSITION accessor has no min/max.")
+    scale = NORMALIZED_SCALE[accessor["componentType"]] if accessor.get("normalized") else 1
+    low, high = [v * scale for v in accessor["min"][:3]], [v * scale for v in accessor["max"][:3]]
+    displacement = [0.0, 0.0, 0.0]
+    for target in primitive.get("targets", []):
+        if "POSITION" not in target:
+            continue
+        morph = accessors[target["POSITION"]]
+        if "min" not in morph or "max" not in morph:
+            continue
+        morph_scale = NORMALIZED_SCALE[morph["componentType"]] if morph.get("normalized") else 1
+        displacement = [max(d, max(abs(a), abs(b)) * morph_scale)
+                        for d, a, b in zip(displacement, morph["min"], morph["max"])]
+    return [a - d for a, d in zip(low, displacement)], [b + d for b, d in zip(high, displacement)]
+
+
+def glb_bounds(gltf):
+    """Box3.setFromObject(gltf.scene): each primitive's box transformed by its node's world matrix."""
+    low, high = [math.inf] * 3, [-math.inf] * 3
+    nodes = gltf.get("nodes", [])
+    pending = [(index, [[float(i == j) for j in range(4)] for i in range(4)])
+               for index in gltf["scenes"][gltf.get("scene", 0)]["nodes"]]
+    while pending:
+        index, parent = pending.pop()
+        node = nodes[index]
+        require("skin" not in node and "EXT_mesh_gpu_instancing" not in node.get("extensions", {}),
+                "Skinned or instanced GLB meshes are not supported.")
+        world = matmul(parent, node_matrix(node))
+        if "mesh" in node:
+            for primitive in gltf["meshes"][node["mesh"]]["primitives"]:
+                box = primitive_box(gltf, primitive)
+                if box is None:
+                    continue
+                for corner in ((x, y, z) for x in (box[0][0], box[1][0])
+                               for y in (box[0][1], box[1][1]) for z in (box[0][2], box[1][2])):
+                    w = sum(world[3][k] * corner[k] for k in range(3)) + world[3][3]
+                    for i in range(3):
+                        value = (sum(world[i][k] * corner[k] for k in range(3)) + world[i][3]) / w
+                        low[i], high[i] = min(low[i], value), max(high[i], value)
+        pending.extend((child, world) for child in node.get("children", []))
+    require(all(map(math.isfinite, low + high)) and (high[0] - low[0]) + (high[2] - low[2]) > 0,
+            "The model has no finite ground footprint.")
+    return {"min": low, "max": high}
+
+
+def fit_fusion_model(width, depth, slot):
+    region, pose = slot["region"], slot["modelPose"]
+    yaw = (pose["yaw"] + slot["rz"]) * math.pi / 180
+    cosine, sine = abs(math.cos(yaw)), abs(math.sin(yaw))
+    rotated_width = width * cosine + depth * sine
+    rotated_depth = width * sine + depth * cosine
+    scale = min(region["width"] / max(rotated_width, 1e-8),
+                region["height"] / max(rotated_depth, 1e-8)) * pose["scale"] * slot["scaleX"]
+    return {"scale": scale, "yaw": yaw,
+            "x": slot["x"] + pose["x"] * max(0, region["width"] - rotated_width * scale) / 2,
+            "y": slot["y"] + pose["y"] * max(0, region["height"] - rotated_depth * scale) / 2}
+
+
+def glb_model(slot, bounds):
+    """glbModel: centre the glTF scene on its footprint, stand it on the ground and fit it."""
+    low, high = bounds["min"], bounds["max"]
+    fit = fit_fusion_model(high[0] - low[0], high[2] - low[2], slot)
+    c, s = math.cos(fit["yaw"]) * fit["scale"], math.sin(fit["yaw"]) * fit["scale"]
+    centre = [-(low[0] + high[0]) / 2, -(low[2] + high[2]) / 2, low[1]]
+    return [
+        [c, -s, 0, fit["x"] + c * centre[0] - s * centre[1]],
+        [s, c, 0, fit["y"] + s * centre[0] + c * centre[1]],
+        [0, 0, fit["scale"], slot["z"] - 0.015 + fit["scale"] * centre[2]],
+        [0, 0, 0, 1],
+    ]
+
+
+def quad_model(slot, width, height):
+    """quadModel: the unit image quad contain-fitted in the placement, image top towards -Y."""
+    rotated = slot["assetRotation"] in (90, 270)
+    scale = min(slot["sizeX"] / (height if rotated else width), slot["sizeY"] / (width if rotated else height))
+    angle = (slot["rz"] + slot["assetRotation"]) * math.pi / 180
+    c, s, w, h = math.cos(angle), math.sin(angle), width * scale, height * scale
+    return [[c * w, -s * h, 0, slot["x"]], [s * w, c * h, 0, slot["y"]], [0, 0, 1, -0.02], [0, 0, 0, 1]]
+
+
+def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=()):
+    """The description scene of the ZIP's Fusion placements, assets read from `package_path`."""
+    match, assets = read_package(zip_path)
+    slots = {slot["id"]: slot for slot in placements(match, assets)}
+    for placement_id in [move[0] for move in moves] + [scale[0] for scale in scales] + list(hidden):
+        require(placement_id in slots, f"Unknown placement {placement_id}.")
+    for placement_id, dx, dy in moves:
+        slots[placement_id]["x"] += dx
+        slots[placement_id]["y"] += dy
+    for placement_id, factor in scales:
+        require(factor > 0, f"Scale of {placement_id} must be positive.")
+        slot = slots[placement_id]
+        if slot["type"] == "3D":
+            slot["scaleX"] *= factor
+        else:
+            slot["sizeX"] *= factor
+            slot["sizeY"] *= factor
+    field = match["field"]
+    scene = {"ground": {"pitch_m": [number(field["length"]), number(field["width"])]}, "assets": [], "instances": []}
+    for slot in slots.values():
+        if slot["asset"] is None:
+            continue
+        asset = assets[slot["asset"]]
+        described = {"id": slot["asset"], "source": {"package": str(package_path or Path(zip_path).resolve()),
+                                                     "entry": asset["entry"]}, "sha256": asset["sha256"]}
+        if slot["type"] == "3D":
+            gltf = glb_json(asset["data"])
+            model = glb_model(slot, glb_bounds(gltf))
+            described["kind"] = "glb"
+            if blended_materials(gltf):
+                described["blend_as"] = "mask"
+        else:
+            model = quad_model(slot, *image_size(asset["data"], asset["contentType"]))
+            described["kind"] = "image_quad"
+        if not any(listed["id"] == described["id"] for listed in scene["assets"]):
+            scene["assets"].append({key: described[key] for key in ("id", "kind", "source", "sha256", "blend_as")
+                                    if key in described})
+        scene["instances"].append({"id": slot["id"], "asset": slot["asset"], "model": model,
+                                   "visible": slot["id"] not in hidden})
+    require(len(scene["instances"]) <= MAX_INSTANCES,
+            f"chr-server places at most {MAX_INSTANCES} instances; this match has {len(scene['instances'])}.")
+    return scene
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("zip", type=Path, help="Fusion offline ZIP")
+    parser.add_argument("--camera", type=Path,
+                        help="a render description whose camera to use; writes a complete description")
+    parser.add_argument("--package-path",
+                        help="the ZIP's path as chr-server reads it [default: the ZIP's absolute path]")
+    parser.add_argument("--move", nargs=3, action="append", default=[], metavar=("PLACEMENT", "DX", "DY"),
+                        help="shift a placement by DX, DY metres (X along the length, Y along the width)")
+    parser.add_argument("--scale", nargs=2, action="append", default=[], metavar=("PLACEMENT", "FACTOR"),
+                        help="resize a placement: a 3D model's scale or a 2D placement's area")
+    parser.add_argument("--hide", action="append", default=[], metavar="PLACEMENT",
+                        help="send a placement as visible: false")
+    parser.add_argument("--output", type=Path, help="output JSON file [default: stdout]")
+    args = parser.parse_args(argv)
+    try:
+        moves = [(placement, float(dx), float(dy)) for placement, dx, dy in args.move]
+        scales = [(placement, float(factor)) for placement, factor in args.scale]
+        scene = describe_scene(args.zip, args.package_path, moves, args.hide, scales)
+    except (ConversionError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        sys.exit(f"error: {error}")
+    if args.camera:
+        camera = json.loads(args.camera.read_text())["camera"]
+        document = {"profile": "chr-render-description-v1", "camera": camera, "scene": scene}
+    else:
+        document = {"scene": scene}
+    text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    if args.output:
+        args.output.write_text(text)
+    else:
+        sys.stdout.write(text)
+
+
+if __name__ == "__main__":
+    main()

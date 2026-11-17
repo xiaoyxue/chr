@@ -230,6 +230,20 @@ enabled (no `--description` / `--asset-root`). **导出渲染描述** writes `{"
 block for a startup file, for example
 `jq -s '.[0] + {scene: .[1].scene}' camera.json scene.json`.
 
+Without the page, `server/scripts/fusion_description.py` converts a Fusion offline
+ZIP the same way (Fusion placements only, all enabled, no local placements); its
+output equals the page's export for an unedited package. `--camera <json>` takes the
+`camera` of another description and writes a complete one, and `--move <placement>
+<dx> <dy>` shifts a placement in pitch metres first, for example to render a still:
+
+```sh
+uv run server/scripts/fusion_description.py match.zip --camera start.json \
+  --move PLC-… 0 10 --output output/description/moved.json
+cargo run --locked --release -p chr-runtime --bin chr-renderer-cli -- render \
+  --description output/description/moved.json --fps 30 --size 1920x1080 \
+  --output output/renderer-cli/moved.png
+```
+
 ## Run
 
 ```sh
