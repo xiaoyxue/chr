@@ -50,31 +50,35 @@ tracking worker's channel is defined in
 WebUI / CLI / tests ────────────────────────────────► chr-server
 chr-sdi-in ──unixfd: memfd frames + audio──────────► │ GStreamer core: capture, per-slot
  (file / test pattern / DeckLink)                     │ deadline (capture + D), clean feed
-                                                      │ authoritative scene state, health
+optical centre C (--tracking-centre) ───────────────► │ authoritative scene state, health
                                                       │ output on the pipeline clock
   unixfd sockets: JSON in GstCustomMeta + memfd       │
         ┌───────────────────────┬─────────────────────┤
         ▼                       ▼                     │ chr-shm tap ring (read-only for readers)
 chr-renderer-cli worker   tracking worker             ▼
-  chr-renderer: upload →    frame → Ti, C, warp     chr-monitor (optional)
-  composite → readback      (chr-tracking-sim-cli     H.264 → WebRTC / SRT
-  killable, restartable,     replays until the real   own signalling WebSocket
-  stateless                  module replaces it)
+  chr-renderer: upload →    frame → Ti or unavailable chr-monitor (optional)
+  composite → readback      pitch-analysis (vchao),   H.264 → WebRTC / SRT
+  killable, restartable,    V/Q map loaded at start;  own signalling WebSocket
+  stateless                 or chr-tracking-sim-cli
+                            (replays recorded Ti)
 ```
 
 | Process | Owns | Must not |
 | --- | --- | --- |
 | `chr-server` | Input adapters, frame identity, admission, deadlines, clean feed, output clock/port, JSON-RPC control, scene state, worker supervision, health | Create a GPU device; wait on the monitor |
 | `chr-renderer-cli worker` | GPU device, renderer resources, composition of one frame per request | Hold authoritative state; touch input/output devices; decide timing |
-| Tracking worker (`chr-tracking-sim-cli` until the real module) | The tracking reference, per-frame estimation (the stand-in replays), its own GPU device if it needs one (one GPU is shared for now) | Hold authoritative state; touch input/output devices; decide timing or reuse another frame's camera |
+| Tracking worker (vchao's `pitch-analysis`, or the `chr-tracking-sim-cli` replay stand-in) | The tracking reference (the station's V/Q map, loaded at start; the stand-in reads a clip's recorded cameras), per-frame estimation (the stand-in replays), its own GPU device if it needs one (one GPU is shared for now) | Hold authoritative state; touch input/output devices; decide timing or reuse another frame's camera |
 | `chr-monitor` | Reading the tap, encoding, WebRTC/SRT fan-out, its own signalling endpoint | Feed anything back into program output |
 
 Tracking runs out of process as a worker that `chr-server` supervises like the
 render worker (#128). `chr-server` hands it every captured frame, the same
 shared memory the render worker receives, and joins its cameras with the frames
 by capture sequence; see
-[tracking worker](../server/docs/tracking-worker.md). The protocol is
-language-neutral, so the real tracking module can replace the replay stand-in.
+[tracking worker](../server/docs/tracking-worker.md). The protocol is vchao's
+language-neutral VchaoFrame contract, so vchao's `pitch-analysis` replaces the
+replay stand-in unchanged (#148). It loads a V/Q map built offline for the
+station, and `chr-server` gets that station's optical centre C from
+`--tracking-centre` ([vchao atlas, V, Ti and T_ref](vchao-atlas.md)).
 #60 keeps the questions this does not settle: the tracking reference lifecycle
 (#59), `FrameKey` versus capture sequence, and production missing/late policy.
 An external tracker can still send cameras as `tracking.frame` when no tracking
