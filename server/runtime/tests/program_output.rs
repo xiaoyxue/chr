@@ -19,7 +19,7 @@ fn mode() -> VideoMode {
     VideoMode {
         width: 192,
         height: 128,
-        fps: 50,
+        fps: chr_common::rate::Rate::fps(50),
     }
 }
 async fn call(control: &SceneControl, method: &str, params: Value) -> Value {
@@ -273,7 +273,7 @@ fn calibrated_video_rejects_mismatched_or_invalid_geometry() {
     for edit in 0..4 {
         let mut manifest = video_manifest();
         match edit {
-            0 => manifest.fps = 30,
+            0 => manifest.fps = chr_common::rate::Rate::fps(30),
             1 => manifest.frame_warps.clear(),
             2 => manifest.frame_warps[0] = [[0.; 3]; 3],
             _ => manifest.height_m = 0.,
@@ -356,7 +356,7 @@ async fn gpu_calibrated_video_warps_cg_not_plate_and_repeats_exact_loop() {
         VideoMode {
             width: 96,
             height: 64,
-            fps: 50,
+            fps: chr_common::rate::Rate::fps(50),
         },
         runtime_id().unwrap(),
     )
@@ -368,7 +368,7 @@ async fn gpu_calibrated_video_warps_cg_not_plate_and_repeats_exact_loop() {
     let output = VideoMode {
         width: 96,
         height: 64,
-        fps: 50,
+        fps: chr_common::rate::Rate::fps(50),
     };
     let (sdi, tap) = {
         let (taps, tap) = Taps::observed();
@@ -546,7 +546,7 @@ async fn gpu_tracked_frames_match_the_calibrated_replay() {
     let output = VideoMode {
         width: 96,
         height: 64,
-        fps: 50,
+        fps: chr_common::rate::Rate::fps(50),
     };
     let plate = [20, 100, 40, 255].repeat(192 * 128);
     let mut frames = Vec::new();
@@ -686,6 +686,11 @@ async fn explicit_profile_keeps_input_and_submission_bounded() {
     assert!(chr_runtime::program::validate_output(&invalid).is_err());
     invalid.output_transfer = w::OutputTransfer::Bt709;
     invalid.output_rate = w::TimeBase::new(1001, 60000).unwrap();
+    assert!(
+        chr_runtime::program::validate_output(&invalid).is_ok(),
+        "59.94 is an output rate"
+    );
+    invalid.output_rate = w::TimeBase::new(1, 121).unwrap();
     assert!(chr_runtime::program::validate_output(&invalid).is_err());
     drop(control);
     owner.await.unwrap();
@@ -895,13 +900,7 @@ async fn gpu_program_pixels_controls_provenance_and_tap() {
     assert!(header.index >= first_slot);
     assert_eq!(
         chr_shm::tap::SlotMeta::from_meta(header.meta),
-        chr_shm::tap::SlotMeta {
-            source_frame: 0,
-            program: true,
-            width: mode().width,
-            height: mode().height,
-            fps: mode().fps,
-        }
+        mode().tap_meta(0, true)
     );
     assert_eq!(tapped, *baseline, "the tap carries the transmitted pixels");
     let repeated = receive(&tap, 0);

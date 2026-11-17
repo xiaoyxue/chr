@@ -12,11 +12,8 @@ pub(crate) fn validate_mode(mode: VideoMode, max: [u32; 2]) -> Result<(), Error>
         || mode.height > max[1]
         || !mode.width.is_multiple_of(2)
         || !mode.height.is_multiple_of(2)
-        || !(1..=120).contains(&mode.fps)
     {
-        return Err(
-            "video mode requires even dimensions within the profile limit and 1..120 FPS".into(),
-        );
+        return Err("video mode requires even dimensions within the profile limit".into());
     }
     Ok(())
 }

@@ -2,7 +2,10 @@
 
 use std::f64::consts::TAU;
 
-use chr_common::methods::triangle::{DEFAULT_ANGULAR_VELOCITY_RAD_PER_S, TriangleState};
+use chr_common::{
+    methods::triangle::{DEFAULT_ANGULAR_VELOCITY_RAD_PER_S, TriangleState},
+    rate::Rate,
+};
 
 /// The rotating triangle. Only the render loop owns and mutates it.
 ///
@@ -10,7 +13,7 @@ use chr_common::methods::triangle::{DEFAULT_ANGULAR_VELOCITY_RAD_PER_S, Triangle
 /// the same frames yields the same angles in real time, slowed down, or stepped.
 #[derive(Debug, Clone)]
 pub struct Scene {
-    fps: u32,
+    fps: Rate,
     frame: u64,
     rotating: bool,
     angle_rad: f64,
@@ -18,7 +21,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn new(fps: u32) -> Self {
+    pub fn new(fps: Rate) -> Self {
         Self {
             fps,
             frame: 0,
@@ -67,7 +70,7 @@ impl Scene {
     pub fn advance(&mut self) {
         self.frame += 1;
         if self.rotating {
-            let step = self.angular_velocity_rad_per_s / f64::from(self.fps);
+            let step = self.angular_velocity_rad_per_s / self.fps.as_f64();
             self.angle_rad = (self.angle_rad + step).rem_euclid(TAU);
         }
     }
@@ -79,7 +82,7 @@ mod tests {
 
     #[test]
     fn rotation_advances_per_frame_and_stops_in_place() {
-        let mut scene = Scene::new(4);
+        let mut scene = Scene::new(Rate::fps(4));
         scene.advance();
         assert_eq!(scene.state().angle_rad, 0.0, "idle scene must not rotate");
 
@@ -98,7 +101,7 @@ mod tests {
 
     #[test]
     fn angle_wraps_and_supports_reverse_rotation() {
-        let mut scene = Scene::new(1);
+        let mut scene = Scene::new(Rate::fps(1));
         scene.start_rotation(Some(-1.0)).unwrap();
         scene.advance();
         assert!((scene.angle_rad() - (TAU - 1.0)).abs() < 1e-12);

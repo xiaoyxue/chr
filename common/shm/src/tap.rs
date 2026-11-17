@@ -34,7 +34,9 @@ pub struct SlotMeta {
     pub program: bool,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    /// Frame rate `rate_num / rate_den` frames per second.
+    pub rate_num: u32,
+    pub rate_den: u32,
 }
 
 impl SlotMeta {
@@ -43,7 +45,7 @@ impl SlotMeta {
             self.source_frame,
             u64::from(self.program),
             (u64::from(self.width) << 32) | u64::from(self.height),
-            u64::from(self.fps),
+            (u64::from(self.rate_num) << 32) | u64::from(self.rate_den),
         ]
     }
 
@@ -53,7 +55,8 @@ impl SlotMeta {
             program: meta[1] != 0,
             width: (meta[2] >> 32) as u32,
             height: meta[2] as u32,
-            fps: meta[3] as u32,
+            rate_num: (meta[3] >> 32) as u32,
+            rate_den: meta[3] as u32,
         }
     }
 }
@@ -69,7 +72,8 @@ mod tests {
             program: true,
             width: 1920,
             height: 1080,
-            fps: 50,
+            rate_num: 60000,
+            rate_den: 1001,
         };
         assert_eq!(SlotMeta::from_meta(meta.to_meta()), meta);
         assert_eq!(layout(1920, 1080).slot_bytes, 1920 * 1080 * 2);

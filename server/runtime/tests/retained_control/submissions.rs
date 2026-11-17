@@ -805,7 +805,7 @@ mod real_ipc {
             VideoMode {
                 width: 4,
                 height: 4,
-                fps: 50,
+                fps: chr_common::rate::Rate::fps(50),
             },
             Taps::default(),
         )

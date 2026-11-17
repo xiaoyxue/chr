@@ -76,7 +76,8 @@ if [[ -z $scene || -z $video ]]; then
   echo "usage: $0 --scene <json> --video <mp4> [--size <WxH>] [--srt <ip:port>] [--dir <path>] [--no-monitor] [--sim-arg <arg>]... [--monitor-arg <arg>]... [chr-server options]" >&2
   exit 2
 fi
-fps=$(tr -d ' \n' <"$scene" | sed -n 's/.*"fps":\([0-9]*\).*/\1/p')
+# The manifest's rate: an integer (50) or a string ("30000/1001").
+fps=$(tr -d ' \n' <"$scene" | sed -n 's/.*"fps":"\{0,1\}\([0-9./]*\).*/\1/p')
 
 cargo build --locked --release -p chr-runtime -p chr-monitor \
   --features chr-runtime/gstreamer-media,chr-monitor/gstreamer-media

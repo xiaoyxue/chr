@@ -33,7 +33,7 @@ fn mode() -> VideoMode {
     VideoMode {
         width: 640,
         height: 360,
-        fps: 25,
+        fps: chr_common::rate::Rate::fps(25),
     }
 }
 fn fixture() -> CameraFixture {

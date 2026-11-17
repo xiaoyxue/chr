@@ -3,7 +3,10 @@
 //!
 //! The monitor polls at half the frame period. Slots it never read because a newer one
 //! was already there are counted as skipped; the server never waits for it. When the
-//! server restarts it replaces the tap file, so an idle tap is reopened.
+//! server restarts it replaces the tap file, so an idle tap is reopened. Every slot
+//! carries its mode: when it changes (chr-server's GStreamer core follows its
+//! input's rate, #154), the monitor restarts its encoder in the new mode, and the
+//! media time of the encoded stream runs on without a jump.
 
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +26,7 @@ use crate::{
     BoxError, Counters, EncoderInfo, VideoMode,
     encoder::{EncodedFrame, H264Encoder, VideoFeed},
 };
+use chr_common::rate::Rate;
 
 /// How long a tap may stay idle before the monitor checks whether it was replaced.
 const REOPEN_AFTER: Duration = Duration::from_secs(1);
@@ -95,15 +99,16 @@ impl SlotEncoder {
     /// Annex B bytes and whether they form a keyframe, if a frame was produced.
     fn encode(
         &mut self,
-        frame: u64,
+        pts: Duration,
+        duration: Duration,
         uyvy: &[u8],
         source_width: usize,
         keyframe: bool,
     ) -> Result<Option<(Vec<u8>, bool)>, BoxError> {
         match self {
             Self::OpenH264 { encoder, planes } => {
-                // openh264 has no timestamps; RTP and SRT time come from `frame` later.
-                let _ = frame;
+                // openh264 has no timestamps; RTP and SRT time come from `pts` later.
+                let _ = (pts, duration);
                 planes.fill_from_uyvy(uyvy, source_width);
                 let (width, height) = (planes.width, planes.height);
                 let yuv = YUVSlices::new(
@@ -114,7 +119,7 @@ impl SlotEncoder {
                 Ok(encoder.encode_yuv(&yuv, keyframe)?)
             }
             #[cfg(all(unix, feature = "gstreamer-media"))]
-            Self::GStreamer(encoder) => Ok(Some(encoder.encode(frame, uyvy, keyframe)?)),
+            Self::GStreamer(encoder) => Ok(Some(encoder.encode(pts, duration, uyvy, keyframe)?)),
         }
     }
 }
@@ -134,16 +139,10 @@ impl Monitor {
         feed: Arc<VideoFeed>,
         counters: Arc<Counters>,
     ) -> Result<Self, BoxError> {
-        let encoder = SlotEncoder::new(encoder, mode)?;
-        let info = encoder.info();
-        log::info!(
-            "monitor preview {}x{} of {} with {}",
-            info.preview[0],
-            info.preview[1],
-            mode.name(),
-            info.name
-        );
-        let _ = counters.encoder.set(info);
+        let kind = encoder;
+        let encoder = SlotEncoder::new(kind, mode)?;
+        log_encoder(&encoder, mode);
+        counters.set_encoder(encoder.info());
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = Arc::clone(&stop);
@@ -151,9 +150,9 @@ impl Monitor {
                 .name("chr-monitor".into())
                 .spawn(move || {
                     run(
-                        Follower::new(path, mode),
+                        Follower::new(path),
                         mode,
-                        encoder,
+                        (kind, encoder),
                         &feed,
                         &counters,
                         &stop,
@@ -176,25 +175,55 @@ impl Drop for Monitor {
     }
 }
 
+fn log_encoder(encoder: &SlotEncoder, mode: VideoMode) {
+    let info = encoder.info();
+    log::info!(
+        "monitor preview {}x{} of {} with {}",
+        info.preview[0],
+        info.preview[1],
+        mode.name(),
+        info.name
+    );
+}
+
 fn run(
     mut tap: Follower,
-    mode: VideoMode,
-    mut encoder: SlotEncoder,
+    mut mode: VideoMode,
+    (kind, mut encoder): (EncoderKind, SlotEncoder),
     feed: &VideoFeed,
     counters: &Counters,
     stop: &AtomicBool,
 ) {
-    let poll = mode.frame_duration() / 2;
     let mut payload = Vec::new();
     let mut timeline = Timeline::default();
     // Last slot index encoded in the current viewing run, for counting skipped slots.
     let mut last_encoded: Option<u64> = None;
     while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(poll);
-        let Some(header) = tap.newest(&mut payload) else {
+        std::thread::sleep(mode.frame_duration() / 2);
+        let Some((header, slot_mode)) = tap.newest(&mut payload) else {
             continue;
         };
-        let frame = timeline.map(header.index);
+        if slot_mode != mode {
+            match SlotEncoder::new(kind, slot_mode) {
+                Ok(restarted) => {
+                    log::info!(
+                        "program mode changed from {} to {}",
+                        mode.name(),
+                        slot_mode.name()
+                    );
+                    encoder = restarted;
+                    log_encoder(&encoder, slot_mode);
+                    counters.set_encoder(encoder.info());
+                    counters.mode_changes.fetch_add(1, Ordering::Relaxed);
+                    mode = slot_mode;
+                }
+                Err(error) => {
+                    tap.report(format!("cannot encode {}: {error}", slot_mode.name()));
+                    continue;
+                }
+            }
+        }
+        let (frame, pts) = timeline.map(header.index, mode.fps);
         if !feed.has_viewers() {
             last_encoded = None;
             continue;
@@ -208,7 +237,8 @@ fn run(
         }
         last_encoded = Some(header.index);
         match encoder.encode(
-            frame,
+            pts,
+            mode.frame_duration(),
             &payload,
             mode.width as usize,
             feed.take_keyframe_request(),
@@ -218,6 +248,8 @@ fn run(
                 counters.frames_encoded.fetch_add(1, Ordering::Relaxed);
                 feed.publish(EncodedFrame {
                     frame,
+                    pts,
+                    duration: mode.frame_duration(),
                     keyframe,
                     data: Bytes::from(data),
                 });
@@ -234,7 +266,6 @@ fn run(
 /// Reads the newest slot of the tap at `path`, reopening it when it was replaced.
 struct Follower {
     path: PathBuf,
-    mode: VideoMode,
     reader: Option<Reader>,
     /// Identity of the file `reader` maps, if the platform reports one.
     file: Option<FileId>,
@@ -246,10 +277,9 @@ struct Follower {
 }
 
 impl Follower {
-    fn new(path: PathBuf, mode: VideoMode) -> Self {
+    fn new(path: PathBuf) -> Self {
         Self {
             path,
-            mode,
             reader: None,
             file: None,
             seen: 0,
@@ -258,8 +288,9 @@ impl Follower {
         }
     }
 
-    /// The newest slot written since the last call, with its payload in `payload`.
-    fn newest(&mut self, payload: &mut Vec<u8>) -> Option<SlotHeader> {
+    /// The newest slot written since the last call and its mode, with its payload
+    /// in `payload`.
+    fn newest(&mut self, payload: &mut Vec<u8>) -> Option<(SlotHeader, VideoMode)> {
         if self.reader.is_none() || self.idle_since.elapsed() >= REOPEN_AFTER {
             self.reopen();
         }
@@ -281,20 +312,23 @@ impl Follower {
             }
         };
         let meta = SlotMeta::from_meta(header.meta);
-        let mode = VideoMode {
-            width: meta.width,
-            height: meta.height,
-            fps: meta.fps,
-        };
-        if mode != self.mode {
+        let mode = VideoMode::of_slot(&meta).filter(|mode| {
+            mode.width.is_multiple_of(2)
+                && mode.height.is_multiple_of(2)
+                && payload.len() as u64 == u64::from(mode.width) * u64::from(mode.height) * 2
+        });
+        let Some(mode) = mode else {
             self.report(format!(
-                "program tap carries {}, the monitor expects {}",
-                mode.name(),
-                self.mode.name()
+                "program tap slot of {}x{} at {}/{} fps with {} bytes is not a UYVY frame",
+                meta.width,
+                meta.height,
+                meta.rate_num,
+                meta.rate_den,
+                payload.len()
             ));
             return None;
-        }
-        Some(header)
+        };
+        Some((header, mode))
     }
 
     fn reopen(&mut self) {
@@ -317,15 +351,6 @@ impl Follower {
                 return;
             }
         };
-        let expected = chr_shm::tap::layout(self.mode.width, self.mode.height);
-        if reader.layout() != expected {
-            self.report(format!(
-                "program tap layout {:?} does not match {} (expected {expected:?})",
-                reader.layout(),
-                self.mode.name()
-            ));
-            return;
-        }
         // A newly opened tap is followed from its next slot.
         self.seen = reader.write_count();
         if self.reader.is_none() || self.problem.is_some() {
@@ -361,24 +386,43 @@ fn file_id(_path: &Path) -> Option<FileId> {
     None
 }
 
-/// Output slot indices restart with `chr-server`; encoders and RTP need monotonic time.
+/// Output slot indices restart with `chr-server`, and the rate may change;
+/// encoders and RTP need monotonic frames and media time.
 #[derive(Default)]
 struct Timeline {
     offset: u64,
-    last: Option<u64>,
+    last: Option<(u64, Duration, Rate)>,
+    /// Frame, media time and rate from which the current rate counts.
+    epoch: Option<(u64, Duration, Rate)>,
 }
 
 impl Timeline {
-    fn map(&mut self, index: u64) -> u64 {
+    /// The monotonic frame and media time of slot `index` at `rate`.
+    fn map(&mut self, index: u64, rate: Rate) -> (u64, Duration) {
         let mut frame = index.saturating_add(self.offset);
-        if let Some(last) = self.last
+        if let Some((last, ..)) = self.last
             && frame <= last
         {
             self.offset = last + 1 - index;
             frame = last + 1;
         }
-        self.last = Some(frame);
-        frame
+        let pts = match (self.epoch, self.last) {
+            (Some((start, pts, epoch_rate)), _) if epoch_rate == rate => {
+                pts + rate.frame_time(frame - start)
+            }
+            // A new rate starts where the old one's slots end.
+            (_, Some((last, last_pts, last_rate))) => {
+                let pts = last_pts + last_rate.frame_time(frame - last);
+                self.epoch = Some((frame, pts, rate));
+                pts
+            }
+            (_, None) => {
+                self.epoch = Some((0, Duration::ZERO, rate));
+                rate.frame_time(frame)
+            }
+        };
+        self.last = Some((frame, pts, rate));
+        (frame, pts)
     }
 }
 
@@ -489,17 +533,33 @@ mod tests {
     }
 
     #[test]
-    fn timeline_stays_monotonic_across_server_restarts() {
+    fn timeline_stays_monotonic_across_server_restarts_and_rate_changes() {
+        let fifty = Rate::fps(50);
         let mut timeline = Timeline::default();
-        assert_eq!([5, 6, 9].map(|index| timeline.map(index)), [5, 6, 9]);
+        let mut map = |index, rate| {
+            let (frame, pts) = timeline.map(index, rate);
+            (frame, pts.as_nanos() as u64)
+        };
+        assert_eq!(
+            [5, 6, 9].map(|index| map(index, fifty)),
+            [(5, 100_000_000), (6, 120_000_000), (9, 180_000_000)]
+        );
         // The server restarted: its slots count from zero again.
-        assert_eq!([0, 1, 3].map(|index| timeline.map(index)), [10, 11, 13]);
+        assert_eq!(
+            [0, 1, 3].map(|index| map(index, fifty)),
+            [(10, 200_000_000), (11, 220_000_000), (13, 260_000_000)]
+        );
+        // 29.97 from slot 14: one 50 fps slot after slot 13, then exact steps.
+        let ntsc = Rate::new(30000, 1001).unwrap();
+        assert_eq!(map(4, ntsc), (14, 280_000_000));
+        assert_eq!(map(5, ntsc), (15, 280_000_000 + 33_366_666));
+        assert_eq!(map(3004, ntsc), (3014, 280_000_000 + 100_100_000_000));
     }
 
     const MODE: VideoMode = VideoMode {
         width: 64,
         height: 32,
-        fps: 50,
+        fps: Rate::fps(50),
     };
 
     fn push(tap: &mut Writer, index: u64, mode: VideoMode) {
@@ -508,7 +568,8 @@ mod tests {
             program: false,
             width: mode.width,
             height: mode.height,
-            fps: mode.fps,
+            rate_num: mode.fps.num(),
+            rate_den: mode.fps.den(),
         };
         let uyvy = [128, 100, 128, 100].repeat((mode.width * mode.height / 2) as usize);
         tap.push(
@@ -541,15 +602,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("chr-monitor-idle-{}", std::process::id()));
         let path = dir.join("program.tap");
         let mut tap = Writer::create(&path, chr_shm::tap::layout(MODE.width, MODE.height)).unwrap();
-        let mut follower = Follower::new(path, MODE);
+        let mut follower = Follower::new(path);
         let mut payload = Vec::new();
         assert!(follower.newest(&mut payload).is_none());
         push(&mut tap, 1, MODE);
-        assert_eq!(follower.newest(&mut payload).unwrap().index, 1);
+        assert_eq!(follower.newest(&mut payload).unwrap().0.index, 1);
         // A 1 fps server: the next slot arrives just as the tap counts as idle.
         std::thread::sleep(REOPEN_AFTER + Duration::from_millis(50));
         push(&mut tap, 2, MODE);
-        assert_eq!(follower.newest(&mut payload).unwrap().index, 2);
+        assert_eq!(follower.newest(&mut payload).unwrap().0.index, 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -601,7 +662,12 @@ mod tests {
         for index in index + 1..=last {
             push(&mut tap, index, MODE);
         }
-        while recv(&mut viewer).frame != last {}
+        let before = loop {
+            let frame = recv(&mut viewer);
+            if frame.frame == last {
+                break frame;
+            }
+        };
         std::thread::sleep(Duration::from_millis(50));
         let encoded = counters.frames_encoded.load(Ordering::Relaxed) - encoded;
         let skipped = counters.frames_skipped.load(Ordering::Relaxed) - skipped;
@@ -611,10 +677,24 @@ mod tests {
             "every slot is encoded or counted as skipped"
         );
 
-        // A slot in another mode is not encoded.
-        push(&mut tap, last + 1, VideoMode { fps: 25, ..MODE });
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(viewer.try_recv().is_err());
+        // A slot at another rate restarts the encoder: the next frame is a
+        // keyframe, and media time runs on.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let quarter = VideoMode {
+            fps: Rate::fps(25),
+            ..MODE
+        };
+        let changed = loop {
+            push(&mut tap, last + 1, quarter);
+            if let Ok(frame) = viewer.try_recv() {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "the new mode is not encoded");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(changed.keyframe && changed.pts > before.pts);
+        assert_eq!(changed.duration, Duration::from_millis(40));
+        assert_eq!(counters.mode_changes.load(Ordering::Relaxed), 1);
 
         // A restarted server replaces the tap and counts from zero.
         drop(tap);

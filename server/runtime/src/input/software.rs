@@ -10,6 +10,7 @@ use std::{
     },
 };
 
+use chr_common::rate::Rate;
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::AppSink;
 use gstreamer_video as video;
@@ -80,7 +81,8 @@ impl VideoInput {
             .ok_or("source has no video stream")?;
         let width = stream["width"].as_u64().ok_or("missing source width")?;
         let height = stream["height"].as_u64().ok_or("missing source height")?;
-        let rate = format!("{}/1", mode.fps);
+        // ffprobe reports reduced fractions, `50/1` and `30000/1001`.
+        let rate = format!("{}/{}", mode.fps.num(), mode.fps.den());
         if let Some(expected) = expected_frames
             && (stream["nb_read_frames"]
                 .as_str()
@@ -112,10 +114,10 @@ impl VideoInput {
             return Err("software video requires progressive square-pixel BT.709 limited input matching --fps and the output aspect ratio".into());
         }
         log::info!(
-            "software input: {width}x{height} -> {}x{} at {} FPS; video only, no physical SDI",
+            "software input: {width}x{height} -> {}x{} at {} fps; video only, no physical SDI",
             mode.width,
             mode.height,
-            mode.fps
+            mode.fps.label()
         );
         let filter = format!(
             "scale=w={}:h={}:in_range=tv:out_range=tv:in_color_matrix=bt709:out_color_matrix=bt709,format=uyvy422",
@@ -170,10 +172,10 @@ impl VideoInput {
             .take()
             .ok_or("FFmpeg stdout was not piped")?;
         let pipeline = gst::parse::launch(&format!(
-            "fdsrc fd={} ! rawvideoparse format=uyvy width={} height={} framerate={}/1 colorimetry=bt709 \
+            "fdsrc fd={} ! rawvideoparse format=uyvy width={} height={} framerate={}/{} colorimetry=bt709 \
              ! videoconvert n-threads={threads} ! video/x-raw,format=RGBA,colorimetry=1:1:5:1 \
              ! appsink name=frames sync=false max-buffers=2 drop=true wait-on-eos=false",
-            pipe.as_raw_fd(), mode.width, mode.height, mode.fps
+            pipe.as_raw_fd(), mode.width, mode.height, mode.fps.num(), mode.fps.den()
         ))?.downcast::<gst::Pipeline>().map_err(|_| "input is not a pipeline")?;
         let sink = pipeline
             .by_name("frames")
@@ -245,7 +247,7 @@ impl VideoInput {
 fn validate_clip_timeline(
     metadata: &serde_json::Value,
     count: usize,
-    fps: u32,
+    fps: Rate,
 ) -> Result<(), Error> {
     let frames = metadata["frames"]
         .as_array()
@@ -256,7 +258,7 @@ fn validate_clip_timeline(
                 .as_str()
                 .and_then(|v| v.parse::<f64>().ok())
                 .is_none_or(|pts| {
-                    !pts.is_finite() || (pts - i as f64 / f64::from(fps)).abs() > 0.00001
+                    !pts.is_finite() || (pts - fps.frame_ns(i as u64) as f64 / 1e9).abs() > 0.00001
                 })
         })
     {
@@ -285,12 +287,12 @@ mod tests {
             {"best_effort_timestamp_time":"0.033333"},
             {"best_effort_timestamp_time":"0.066667"}
         ]});
-        assert!(validate_clip_timeline(&valid, 3, 30).is_ok());
-        assert!(validate_clip_timeline(&valid, 4, 30).is_err());
+        assert!(validate_clip_timeline(&valid, 3, Rate::fps(30)).is_ok());
+        assert!(validate_clip_timeline(&valid, 4, Rate::fps(30)).is_err());
         for bad in ["0.000000", "0.040000", "NaN"] {
             let mut metadata = valid.clone();
             metadata["frames"][1]["best_effort_timestamp_time"] = bad.into();
-            assert!(validate_clip_timeline(&metadata, 3, 30).is_err());
+            assert!(validate_clip_timeline(&metadata, 3, Rate::fps(30)).is_err());
         }
     }
 }

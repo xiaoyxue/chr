@@ -6,7 +6,7 @@
 //! | --- | --- | --- | --- |
 //! | server → worker | `hello` | – | Program, runtime ID, output mode, assets |
 //! | worker → server | `ready` / `fatal` | – | Startup result |
-//! | server → worker | `render` | input image | One program frame, with its camera and lens |
+//! | server → worker | `render` | input image | One program frame, with its camera, lens and time base |
 //! | server → worker | `triangle` | – | One frame of the default triangle |
 //! | worker → server | `done` | UYVY frame | Completion of one request, in order |
 //! | worker → server | `failed` | – | Failure of one request, in order |
@@ -15,12 +15,15 @@
 
 use std::path::PathBuf;
 
-use chr_common::scene_frame as w;
+use chr_common::{rate::Rate, scene_frame as w};
 use serde::{Deserialize, Serialize};
 
 use crate::program::spec::ProgramSpec;
 
-pub const VERSION: u32 = 3;
+/// 4: rates are [`Rate`]s (`"30000/1001"`), and each `render` carries the time
+/// base of its frame's position (#154 phase 2: the rate may change while a
+/// worker runs).
+pub const VERSION: u32 = 4;
 /// Requests that may be outstanding at once: the server's credits. Each holds
 /// one input image in the worker and, once done, one UYVY frame.
 pub const CREDITS: usize = 4;
@@ -78,7 +81,7 @@ impl WorkerProgram {
 pub struct Output {
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: Rate,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,12 +99,15 @@ pub enum Request {
     },
     /// The input image, tightly packed as `image` describes it, is the payload.
     /// A tracked frame's `ti_c` geometry carries its own lens and warp, so the
-    /// worker never holds a lens between frames.
+    /// worker never holds a lens between frames. The frame's media time is
+    /// `frame.position.ticks` × `time_base` seconds, so neither the image's
+    /// extent nor the rate is fixed by `hello`.
     Render {
         id: u64,
         image: w::ImageDescription,
         frame: w::FrameInput,
         scene: Box<w::SceneSnapshot>,
+        time_base: w::TimeBase,
     },
     Triangle {
         id: u64,

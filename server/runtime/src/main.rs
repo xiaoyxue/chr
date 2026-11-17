@@ -21,6 +21,7 @@
 use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use chr_common::{
+    rate::Rate,
     scene_frame as w,
     server::{IpcServer, ServerConfig, WebSocketListener},
 };
@@ -58,7 +59,9 @@ Options:
   --no-socket             Do not listen on a NativeSocket
   --size <WxH>            Render size; both even, up to 4096x2160 and with the camera's
                           aspect for a camera program [default: 1280x720]
-  --fps <n>               Frames per second, 1-120 [default: 50]
+  --fps <rate>            Frames per second, 1-120: an integer, N/D (30000/1001) or one of
+                          23.976, 29.97, 47.95, 59.94, 119.88 [default: 50]. With
+                          --pipeline gst the nominal rate: the input's caps set the rate
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
@@ -98,12 +101,16 @@ Options:
   --tracking-lens-support <min_x> <min_y> <max_x> <max_y> Its validated ideal-pixel
                           rectangle [default: none]
   --pipeline <timer|gst>  timer: the timer-paced render loop with the input ring and the
-                          simulated SDI port. gst (#154 phase 1, experimental): one
-                          GStreamer pipeline, from frames chr-sdi-in sends over unixfd,
-                          with a fixed program delay and per-slot clean feed (requires
-                          --tracked-scene or --description and --tracking-worker; the
-                          input's extent and rate must be the program camera's and --fps)
-                          [default: timer]
+                          simulated SDI port. gst (#154, experimental): one GStreamer
+                          pipeline, from frames chr-sdi-in sends over unixfd, with a
+                          fixed program delay and per-slot clean feed (requires
+                          --tracked-scene or --description and --tracking-worker). The
+                          input's caps set its rate and extent, which may change at any
+                          time; frames whose extent is not the program camera's go out
+                          as clean feed [default: timer]
+  --output-rate <follow|fixed:<rate>> The program output's rate (--pipeline gst): the
+                          input's, changing with it, or a fixed rate such as fixed:50,
+                          repeating or dropping input frames [default: follow]
   --capture-socket <path> The unixfd socket of chr-sdi-in (--pipeline gst)
                           [default: $XDG_RUNTIME_DIR/chr/capture.sock]
   --program-delay-ms <n>  Capture to output, every frame (--pipeline gst); a frame
@@ -128,7 +135,7 @@ struct Args {
     socket: Option<PathBuf>,
     width: u32,
     height: u32,
-    fps: u32,
+    fps: Rate,
     monitor_tap: Option<PathBuf>,
     renderer_cli: Option<PathBuf>,
     render_deadline_ms: Option<u64>,
@@ -156,6 +163,7 @@ struct Args {
     gst: bool,
     capture_socket: Option<PathBuf>,
     program_delay_ms: Option<u64>,
+    output_rate: Option<chr_runtime::gst_core::OutputRate>,
 }
 
 /// Reads `N` finite numbers that follow `flag`.
@@ -179,7 +187,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         socket: None,
         width: 1280,
         height: 720,
-        fps: 50,
+        fps: Rate::fps(50),
         monitor_tap: None,
         renderer_cli: None,
         render_deadline_ms: None,
@@ -204,6 +212,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         gst: false,
         capture_socket: None,
         program_delay_ms: None,
+        output_rate: None,
     };
     let mut lens_given = false;
     let (mut lens_k, mut lens_centre, mut lens_scale, mut lens_support) = (None, None, None, None);
@@ -268,6 +277,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             }
             "--capture-socket" => args.capture_socket = Some(value()?.into()),
             "--program-delay-ms" => args.program_delay_ms = Some(value()?.parse()?),
+            "--output-rate" => args.output_rate = Some(value()?.parse()?),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--renderer-cli" => args.renderer_cli = Some(value()?.into()),
@@ -384,8 +394,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                     .ok_or("XDG_RUNTIME_DIR is not set; pass --capture-socket <path>")?,
             );
         }
-    } else if args.capture_socket.is_some() || args.program_delay_ms.is_some() {
-        return Err("--capture-socket and --program-delay-ms require --pipeline gst".into());
+    } else if args.capture_socket.is_some()
+        || args.program_delay_ms.is_some()
+        || args.output_rate.is_some()
+    {
+        return Err(
+            "--capture-socket, --program-delay-ms and --output-rate require --pipeline gst".into(),
+        );
     }
     if tracked && args.input_ring.is_none() && !args.gst {
         args.input_ring = Some(
@@ -395,9 +410,6 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if args.render_deadline_ms == Some(0) || args.worker_hang_ms == 0 {
         return Err("--render-deadline-ms and --worker-hang-ms must be positive".into());
-    }
-    if !(1..=120).contains(&args.fps) {
-        return Err("--fps must be between 1 and 120".into());
     }
     if use_socket && args.socket.is_none() {
         args.socket = Some(default_socket_path()?);
@@ -874,13 +886,13 @@ fn run(args: Args) -> Result<()> {
     stopped.map_err(Into::into)
 }
 
-/// `--pipeline gst`: chr-server's GStreamer core (#154, phase 1). The control
+/// `--pipeline gst`: chr-server's GStreamer core (#154). The control
 /// plane, the program and the workers are those of the timer-paced loop; the
 /// input ring, the render loop and the simulated SDI port are replaced by one
 /// GStreamer pipeline ([`chr_runtime::gst_core`]).
 fn run_gst(args: Args) -> Result<()> {
     use chr_runtime::gst_core::{
-        Core, CoreConfig,
+        Core, CoreConfig, OutputRate,
         driver::{Driver, Program},
     };
     ImageExtent::new(args.width, args.height)?;
@@ -900,14 +912,20 @@ fn run_gst(args: Args) -> Result<()> {
     let delay = args
         .program_delay_ms
         .map_or(mode.frame_duration() * 3, Duration::from_millis);
-    let (sdi_stats, recorder) = chr_runtime::sdi::SdiStats::recorded(mode);
+    let output_rate = args.output_rate.unwrap_or(OutputRate::Follow);
+    let output = match output_rate {
+        OutputRate::Follow => mode,
+        OutputRate::Fixed(fps) => VideoMode { fps, ..mode },
+    };
+    let (sdi_stats, recorder) = chr_runtime::sdi::SdiStats::recorded(output);
     let (core, frames) = Core::start(CoreConfig {
         capture: VideoMode {
             width: native.width,
             height: native.height,
             fps: mode.fps,
         },
-        output: mode,
+        output,
+        output_rate,
         capture_socket: args.capture_socket.clone().expect("defaulted when parsing"),
         program_delay: delay,
         tap: args.monitor_tap.clone(),
@@ -1054,11 +1072,8 @@ fn run_gst(args: Args) -> Result<()> {
             log::info!("websocket listening on ws://{}", websocket.local_addr()?);
             let native = serve_native(&server, args.socket.as_deref()).await?;
             let program = Program::new(&synthetic, control.clone())?;
-            let slots = core
-                .config()
-                .program_delay
-                .as_nanos()
-                .div_ceil(mode.frame_duration().as_nanos());
+            // Frames in a program delay at the highest rate the input may switch to.
+            let slots = Rate::fps(chr_common::rate::MAX_FPS).frames_in(core.config().program_delay);
             let driver = Driver::new(
                 &core,
                 tracker,
@@ -1244,7 +1259,12 @@ mod tests {
         ])
         .unwrap()
         .unwrap();
-        assert_eq!((args.width, args.height, args.fps), (640, 360, 60));
+        assert_eq!(
+            (args.width, args.height, args.fps),
+            (640, 360, Rate::fps(60))
+        );
+        let ntsc = parse(&["--fps", "30000/1001"]).unwrap().unwrap();
+        assert_eq!(ntsc.fps, Rate::new(30000, 1001).unwrap());
         assert_eq!(
             args.socket.as_deref(),
             Some(std::path::Path::new("/tmp/x.sock"))
@@ -1493,17 +1513,32 @@ mod tests {
             "--capture-socket",
             "/run/c.sock",
         ];
-        let core = parse(&[&gst[..], &["--program-delay-ms", "80"]].concat())
-            .unwrap()
-            .unwrap();
+        let core = parse(
+            &[
+                &gst[..],
+                &["--program-delay-ms", "80", "--output-rate", "fixed:59.94"],
+            ]
+            .concat(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             (
                 core.gst,
                 core.capture_socket,
                 core.program_delay_ms,
-                core.input_ring
+                core.input_ring,
+                core.output_rate
             ),
-            (true, Some(PathBuf::from("/run/c.sock")), Some(80), None)
+            (
+                true,
+                Some(PathBuf::from("/run/c.sock")),
+                Some(80),
+                None,
+                Some(chr_runtime::gst_core::OutputRate::Fixed(
+                    Rate::new(60000, 1001).unwrap()
+                ))
+            )
         );
         for bad in [
             &gst[..2],
@@ -1514,8 +1549,12 @@ mod tests {
             &[&gst[..], &["--program-delay-ms", "4"]].concat(),
             &[&gst[..], &["--program-delay-ms", "1501"]].concat(),
             &["--pipeline", "fast"],
+            &[&gst[..], &["--output-rate", "fixed:0"]].concat(),
+            &[&gst[..], &["--output-rate", "50"]].concat(),
             &["--program-delay-ms", "80"],
             &["--capture-socket", "/run/c.sock"],
+            &["--output-rate", "follow"],
+            &["--fps", "29.9"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }

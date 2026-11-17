@@ -11,7 +11,10 @@
 
 use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use chr_common::server::{IpcServer, ServerConfig, WebSocketListener};
+use chr_common::{
+    rate::Rate,
+    server::{IpcServer, ServerConfig, WebSocketListener},
+};
 use chr_monitor::{
     Counters, MAX_SIZE, VideoMode,
     control::MonitorHandler,
@@ -28,9 +31,12 @@ Usage: chr-monitor [options]
 Options:
   --tap <path>            Program tap written by chr-server
                           [default: $XDG_RUNTIME_DIR/chr/program.tap]
-  --size <WxH>            Program output size; must match chr-server, up to 4096x2160.
-                          The preview is scaled down to fit 1920x1080 [default: 1280x720]
-  --fps <n>               Program output rate; must match chr-server [default: 50]
+  --size <WxH>            Program output size, up to 4096x2160, until the tap's slots
+                          give theirs. The preview is scaled down to fit 1920x1080
+                          [default: 1280x720]
+  --fps <rate>            Program output rate until the tap's slots give theirs: an
+                          integer, N/D (30000/1001) or 29.97, 59.94 ... [default: 50].
+                          The monitor follows the tap's mode when chr-server changes it
   --ws <addr>             Loopback WebSocket for webrtc.offer and monitor.get_status
                           [default: 127.0.0.1:8789]
   --encoder <name>        openh264; or with the gstreamer-media feature gstreamer
@@ -64,7 +70,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         mode: VideoMode {
             width: 1280,
             height: 720,
-            fps: 50,
+            fps: Rate::fps(50),
         },
         ws: "127.0.0.1:8789".parse()?,
         encoder: EncoderKind::OpenH264,
@@ -115,9 +121,6 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         || !mode.height.is_multiple_of(2)
     {
         return Err("--size needs an even width and height up to 4096x2160".into());
-    }
-    if !(1..=120).contains(&mode.fps) {
-        return Err("--fps must be between 1 and 120".into());
     }
     if args.ice.udp.is_none() && args.ice.tcp_base.is_none() {
         return Err("WebRTC needs UDP or TCP; do not disable both".into());
@@ -182,12 +185,7 @@ fn run(args: Args) -> Result<()> {
     let srt = args
         .srt
         .map(|bind| {
-            chr_monitor::srt::SrtOutput::spawn(
-                args.mode,
-                bind,
-                Arc::clone(&feed),
-                Arc::clone(&counters),
-            )
+            chr_monitor::srt::SrtOutput::spawn(bind, Arc::clone(&feed), Arc::clone(&counters))
         })
         .transpose()?;
     let monitor = Monitor::spawn(
@@ -208,7 +206,7 @@ fn run(args: Args) -> Result<()> {
         .enable_all()
         .build()?;
     let served = runtime.block_on(async {
-        let hub = Arc::new(WebRtcHub::new(feed, args.mode.fps, args.ice.clone()));
+        let hub = Arc::new(WebRtcHub::new(feed, args.ice.clone()));
         let server = IpcServer::new(
             Arc::new(MonitorHandler::new(hub, counters)),
             ServerConfig {
@@ -253,7 +251,7 @@ mod tests {
             "--size",
             "640x360",
             "--fps",
-            "60",
+            "59.94",
             "--ws",
             "127.0.0.1:9000",
             "--webrtc-udp",
@@ -271,7 +269,7 @@ mod tests {
             VideoMode {
                 width: 640,
                 height: 360,
-                fps: 60
+                fps: Rate::new(60000, 1001).unwrap()
             }
         );
         assert_eq!(args.ws.port(), 9000);

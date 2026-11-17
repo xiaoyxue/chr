@@ -254,7 +254,7 @@ mod tests {
         let mode = VideoMode {
             width: 64,
             height: 36,
-            fps: 30,
+            fps: chr_common::rate::Rate::fps(30),
         };
         ControlHandler::new(commands, SdiStats::idle(mode))
     }
@@ -263,7 +263,7 @@ mod tests {
     fn fake_worker() -> (ControlHandler, tokio::task::JoinHandle<Scene>) {
         let (commands, mut receiver) = mpsc::channel(4);
         let worker = tokio::spawn(async move {
-            let mut scene = Scene::new(30);
+            let mut scene = Scene::new(chr_common::rate::Rate::fps(30));
             while let Some(command) = receiver.recv().await {
                 match command {
                     Command::StartRotation {

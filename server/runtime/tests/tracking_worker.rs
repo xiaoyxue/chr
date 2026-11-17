@@ -78,7 +78,7 @@ impl Fixture {
                 args: worker_args,
                 width: WIDTH,
                 height: HEIGHT,
-                fps: 50,
+                fps: chr_common::rate::Rate::fps(50),
                 camera_center: CENTRE,
                 socket_dir: dir.join("sockets"),
                 hang,

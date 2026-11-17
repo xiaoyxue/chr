@@ -109,7 +109,6 @@ mod tests {
     fn handler() -> MonitorHandler {
         let hub = Arc::new(WebRtcHub::new(
             Arc::new(VideoFeed::new()),
-            30,
             IceConfig::default(),
         ));
         MonitorHandler::new(hub, Arc::default())
@@ -125,7 +124,7 @@ mod tests {
         assert_eq!(
             status,
             json!({"frames_encoded": 0, "frames_skipped": 0, "viewers": 0, "srt_callers": 0,
-                "encoder": "", "preview_width": 0, "preview_height": 0})
+                "encoder": "", "preview_width": 0, "preview_height": 0, "mode_changes": 0})
         );
         for (method, params) in [
             (monitor::GET_STATUS, Some(json!({"x": 1}))),

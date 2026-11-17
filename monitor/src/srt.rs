@@ -1,5 +1,5 @@
 //! Direct MPEG-TS/SRT fan-out of the monitor's H.264 access units.
-use crate::{BoxError, Counters, VideoMode, encoder::VideoFeed};
+use crate::{BoxError, Counters, encoder::VideoFeed};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::AppSrc;
 use std::{
@@ -16,8 +16,9 @@ pub struct SrtOutput {
 }
 
 impl SrtOutput {
+    /// Timestamps come from each encoded frame, so the stream follows the
+    /// program's rate when it changes.
     pub fn spawn(
-        mode: VideoMode,
         bind: SocketAddr,
         feed: Arc<VideoFeed>,
         counters: Arc<Counters>,
@@ -39,7 +40,6 @@ impl SrtOutput {
             &gst::Caps::builder("video/x-h264")
                 .field("stream-format", "byte-stream")
                 .field("alignment", "au")
-                .field("framerate", gst::Fraction::new(mode.fps as i32, 1))
                 .build(),
         ));
         let sink = pipeline.by_name("output").ok_or("missing SRT sink")?;
@@ -86,12 +86,12 @@ impl SrtOutput {
                         waiting_for_keyframe = false;
                         let mut buffer = gst::Buffer::from_slice(frame.data.clone());
                         let writable = buffer.get_mut().expect("new SRT buffer");
-                        let pts = gst::ClockTime::from_nseconds(
-                            (u128::from(frame.frame) * 1_000_000_000 / u128::from(mode.fps)) as u64,
-                        );
+                        let pts = gst::ClockTime::from_nseconds(frame.pts.as_nanos() as u64);
                         writable.set_pts(pts);
                         writable.set_dts(pts);
-                        writable.set_duration(gst::ClockTime::SECOND / u64::from(mode.fps));
+                        writable.set_duration(gst::ClockTime::from_nseconds(
+                            frame.duration.as_nanos() as u64,
+                        ));
                         if let Err(error) = source.push_buffer(buffer) {
                             if !*stopping.borrow() {
                                 log::error!("SRT output stopped: {error}");
@@ -139,10 +139,12 @@ impl Drop for SrtOutput {
 mod tests {
     use super::*;
     use crate::{
+        VideoMode,
         encoder::EncodedFrame,
         gstreamer::{Choice, Encoder},
     };
     use bytes::Bytes;
+    use chr_common::rate::Rate;
     use gstreamer_app::AppSink;
     use std::{
         net::UdpSocket,
@@ -157,11 +159,11 @@ mod tests {
         let mode = VideoMode {
             width: 64,
             height: 48,
-            fps: 30,
+            fps: Rate::new(30000, 1001).unwrap(),
         };
         let feed = Arc::new(VideoFeed::new());
         let counters = Arc::new(Counters::default());
-        let output = SrtOutput::spawn(mode, address, feed.clone(), Arc::clone(&counters)).unwrap();
+        let output = SrtOutput::spawn(address, feed.clone(), Arc::clone(&counters)).unwrap();
         let mut encoder = Encoder::new(mode, Choice::X264).unwrap();
         let mut slot = 0;
         let pixels = [128, 80, 128, 80].repeat(64 * 48 / 2);
@@ -180,11 +182,14 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut received = None;
             while Instant::now() < deadline {
+                let (pts, duration) = (mode.fps.frame_time(slot), mode.frame_duration());
                 let (data, keyframe) = encoder
-                    .encode(slot, &pixels, feed.take_keyframe_request())
+                    .encode(pts, duration, &pixels, feed.take_keyframe_request())
                     .unwrap();
                 feed.publish(EncodedFrame {
                     frame: slot,
+                    pts,
+                    duration,
                     keyframe,
                     data: Bytes::from(data),
                 });

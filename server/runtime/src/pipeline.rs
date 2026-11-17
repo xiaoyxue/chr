@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chr_common::{methods::triangle::TriangleState, scene_frame as w};
+use chr_common::{methods::triangle::TriangleState, rate::Rate, scene_frame as w};
 use chr_renderer::{ChannelOrder, coordinates::ImageExtent, uyvy_from_bt709};
 use tokio::sync::{mpsc, oneshot};
 
@@ -57,7 +57,7 @@ pub const COMMAND_QUEUE_CAPACITY: usize = 64;
 /// Answers the triangle's commands without a render loop, for chr-server's
 /// GStreamer core (`--pipeline gst`), which renders only its program: the
 /// triangle's state is kept and reported but never drawn.
-pub async fn answer_commands(mut commands: mpsc::Receiver<Command>, fps: u32) {
+pub async fn answer_commands(mut commands: mpsc::Receiver<Command>, fps: Rate) {
     let mut scene = Scene::new(fps);
     while let Some(command) = commands.recv().await {
         match command {
@@ -193,12 +193,14 @@ struct Pipeline {
 impl Pipeline {
     fn run(&mut self) -> Result<(), BoxError> {
         let frame_duration = self.config.mode.frame_duration();
-        let mut deadline = Instant::now();
+        // Frame deadlines count from `epoch`, so the rational cadence never drifts.
+        let (mut epoch, mut frames) = (Instant::now(), 0_u64);
         while !self.stop.load(Ordering::Relaxed) {
             if !self.apply_commands() {
                 break;
             }
-            deadline += frame_duration;
+            frames += 1;
+            let deadline = epoch + self.config.mode.fps.frame_time(frames);
             // The worker may use the frame's render deadline, but never the time the
             // loop needs to reach the next frame.
             let render_deadline = (Instant::now() + self.config.render_deadline).min(deadline);
@@ -211,7 +213,7 @@ impl Pipeline {
             } else if now.duration_since(deadline) > frame_duration {
                 // Too far behind to catch up: drop the backlog instead of bursting frames.
                 log::debug!("render loop behind by {:?}", now.duration_since(deadline));
-                deadline = now;
+                (epoch, frames) = (now, 0);
             }
         }
         Ok(())
@@ -309,6 +311,7 @@ impl Pipeline {
                 pixels,
                 &execution.provenance.input,
                 execution.scene.snapshot(),
+                self.config.mode.fps.time_base(),
                 deadline,
             ),
             Err(error) => Err(Miss::Failed(error.to_string())),
@@ -446,7 +449,7 @@ mod tests {
         let mode = VideoMode {
             width: 2,
             height: 2,
-            fps: 30,
+            fps: Rate::fps(30),
         };
         // Columns 0..4 have red 0, 100, 200, 250; the output samples between pairs.
         let pixels: Vec<u8> = (0..2)

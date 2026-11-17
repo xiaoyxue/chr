@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chr_common::rate::Rate;
 use chr_renderer::Gpu;
 use chr_runtime::{
     program::{
@@ -49,7 +50,8 @@ Options:
   --overwrite             render: replace an existing output file
   --frames <n>            bench: frames to time after 10 warm-up frames [default: 300]
   --size <WxH>            Output size; both even, up to 4096x2160 [default: 1280x720]
-  --fps <n>               Output rate, 1-120; a video scene needs its clip rate [default: 50]
+  --fps <rate>            Output rate, 1-120 fps: an integer, N/D (30000/1001) or 29.97,
+                          59.94 ...; a video scene needs its clip rate [default: 50]
   --state <json>          chr-common SceneState replacing the program's initial scene
                           (its configuration_id is replaced by the program's)
   --background <png>      Native input image, read as BT.709 RGBA code values
@@ -98,7 +100,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         mode: VideoMode {
             width: 1280,
             height: 720,
-            fps: 50,
+            fps: Rate::fps(50),
         },
         output: PathBuf::new(),
         overwrite: false,
@@ -164,9 +166,6 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Subcommand
         || !mode.height.is_multiple_of(2)
     {
         return Err("--size needs a nonzero, even width and height".into());
-    }
-    if !(1..=120).contains(&mode.fps) {
-        return Err("--fps must be between 1 and 120".into());
     }
     Ok(Some(Subcommand::Render(args)))
 }
@@ -371,7 +370,7 @@ mod tests {
             "--size",
             "640x360",
             "--fps",
-            "25",
+            "29.97",
             "--state",
             "state.json",
             "--background",
@@ -391,7 +390,7 @@ mod tests {
                 mode: VideoMode {
                     width: 640,
                     height: 360,
-                    fps: 25
+                    fps: Rate::new(30000, 1001).unwrap()
                 },
                 output: "out.png".into(),
                 overwrite: true,
@@ -417,7 +416,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (defaults.mode.width, defaults.mode.height, defaults.mode.fps),
-            (1280, 720, 50)
+            (1280, 720, Rate::fps(50))
         );
         assert!(!defaults.overwrite);
         assert!(parse(&[]).unwrap().is_none());

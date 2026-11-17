@@ -206,6 +206,7 @@ function showSdi(status: SdiStatus): void {
     count("repeated", "sdi.repeated", status.repeated_frames, true),
     count("dropped", "sdi.dropped", status.dropped_frames, true),
     ["source frame", String(status.last_source_frame ?? "-")],
+    ["format changes", `${status.format_changes} (${status.transition_clean_slots} clean slots)`],
   ]);
 }
 

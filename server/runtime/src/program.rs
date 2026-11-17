@@ -370,11 +370,10 @@ impl ProgramRenderer {
     }
 }
 
-/// The existing output/encoder accepts opaque BT.709 and integral positive FPS only.
+/// The existing output/encoder accepts opaque BT.709 at a rate of 1 to 120 fps only.
 pub fn validate_output(config: &w::Configuration) -> Result<(), Error> {
     if config.output_transfer != w::OutputTransfer::Bt709
-        || config.output_rate.numerator() != 1
-        || !(1..=120).contains(&config.output_rate.denominator())
+        || chr_common::rate::Rate::from_time_base(config.output_rate).is_err()
         || !fits(
             config.output_extent.width,
             config.output_extent.height,
@@ -382,8 +381,7 @@ pub fn validate_output(config: &w::Configuration) -> Result<(), Error> {
         )
     {
         return Err(
-            "program port requires even BT.709 output up to 4096x2160 at integral 1..120 FPS"
-                .into(),
+            "program port requires even BT.709 output up to 4096x2160 at 1 to 120 fps".into(),
         );
     }
     Ok(())

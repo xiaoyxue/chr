@@ -6,9 +6,11 @@ use crate::{
     VideoMode,
     gstreamer_support::{Error, check_bus, validate_mode},
 };
+use chr_common::rate::Rate;
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSrc};
 use gstreamer_video as video;
+use std::time::Duration;
 
 /// A GStreamer H.264 encoder element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +71,11 @@ impl H264 {
     }
 
     /// The encoder and its output caps, in `gst-launch` syntax.
-    fn pipeline(self, preview: [u32; 2], fps: u32) -> String {
+    fn pipeline(self, preview: [u32; 2], fps: Rate) -> String {
         // About 4 Mbit/s for 720p, scaled with the preview's pixels.
         let kbit =
             (u64::from(preview[0]) * u64::from(preview[1]) * 4000 / (1280 * 720)).clamp(1000, 8000);
-        let gop = fps * 2;
+        let gop = fps.frames_in(Duration::from_secs(2));
         let encoder = match self {
             Self::Nvenc => format!(
                 "nvh264enc name=encoder preset=p1 tune=ultra-low-latency rc-mode=cbr \
@@ -159,11 +161,11 @@ impl Encoder {
         let threads = (mode.width * mode.height).div_ceil(1920 * 1080).clamp(1, 4);
         let pipeline = gst::parse::launch(&format!(
             "appsrc name=input is-live=true format=time block=false max-buffers=2 \
-             caps=video/x-raw,format=UYVY,width={},height={},framerate={}/1,colorimetry=bt709,interlace-mode=progressive \
+             caps=video/x-raw,format=UYVY,width={},height={},framerate={}/{},colorimetry=bt709,interlace-mode=progressive \
              ! videoconvertscale method=bilinear chroma-mode=none n-threads={threads} dither=none \
              ! video/x-raw,format={},width={},height={},pixel-aspect-ratio=1/1,colorimetry=bt709 \
              ! {} ! appsink name=encoded sync=false max-buffers=2 drop=false wait-on-eos=false",
-            mode.width, mode.height, mode.fps, h264.input_format(), preview[0], preview[1],
+            mode.width, mode.height, mode.fps.num(), mode.fps.den(), h264.input_format(), preview[0], preview[1],
             h264.pipeline(preview, mode.fps)
         ))?.downcast::<gst::Pipeline>().map_err(|_| "encoder is not a pipeline")?;
         let input = pipeline
@@ -202,9 +204,11 @@ impl Encoder {
         self.preview
     }
 
+    /// Encodes one slot of media time `pts` lasting `duration`.
     pub fn encode(
         &mut self,
-        slot: u64,
+        pts: Duration,
+        duration: Duration,
         pixels: &[u8],
         keyframe: bool,
     ) -> Result<(Vec<u8>, bool), Error> {
@@ -225,9 +229,7 @@ impl Encoder {
                 return Err("encoder rejected keyframe request".into());
             }
         }
-        let pts = gst::ClockTime::from_nseconds(
-            (u128::from(slot) * 1_000_000_000 / u128::from(self.mode.fps)).try_into()?,
-        );
+        let pts = gst::ClockTime::from_nseconds(pts.as_nanos().try_into()?);
         let mut buffer = match self.spare.take() {
             Some(buffer) if buffer.is_writable() => buffer,
             _ => gst::Buffer::with_size(pixels.len())?,
@@ -237,7 +239,9 @@ impl Encoder {
             .copy_from_slice(0, pixels)
             .map_err(|_| "could not fill the encoder input")?;
         writable.set_pts(pts);
-        writable.set_duration(gst::ClockTime::SECOND / u64::from(self.mode.fps));
+        writable.set_duration(gst::ClockTime::from_nseconds(
+            duration.as_nanos().try_into()?,
+        ));
         self.input.push_buffer(buffer.clone())?;
         let sample = self.output.try_pull_sample(gst::ClockTime::from_seconds(1));
         check_bus(&self.pipeline)?;
@@ -306,18 +310,24 @@ mod tests {
     fn encodes_slots_and_forces_keyframes(mode: VideoMode, choice: Choice) -> Encoder {
         let mut encoder = Encoder::new(mode, choice).unwrap();
         let pixels = [128, 80, 128, 80].repeat((mode.width * mode.height / 2) as usize);
-        let (first, keyframe) = encoder.encode(7, &pixels, true).unwrap();
+        let period = mode.frame_duration();
+        let at = |slot: u64| mode.fps.frame_time(slot);
+        let (first, keyframe) = encoder.encode(at(7), period, &pixels, true).unwrap();
         assert!(keyframe);
         assert!(openh264::nal_units(&first).any(|unit| {
             unit.iter()
                 .position(|byte| *byte == 1)
                 .is_some_and(|start| unit.get(start + 1).is_some_and(|header| header & 31 == 5))
         }));
-        let (_, keyframe) = encoder.encode(8, &pixels, false).unwrap();
+        let (_, keyframe) = encoder.encode(at(8), period, &pixels, false).unwrap();
         assert!(!keyframe);
-        let (_, keyframe) = encoder.encode(19, &pixels, true).unwrap();
+        let (_, keyframe) = encoder.encode(at(19), period, &pixels, true).unwrap();
         assert!(keyframe);
-        assert!(encoder.encode(20, &pixels[..100], false).is_err());
+        assert!(
+            encoder
+                .encode(at(20), period, &pixels[..100], false)
+                .is_err()
+        );
         encoder
     }
 
@@ -326,7 +336,7 @@ mod tests {
         let mode = VideoMode {
             width: 64,
             height: 48,
-            fps: 30,
+            fps: Rate::new(30000, 1001).unwrap(),
         };
         let encoder = encodes_slots_and_forces_keyframes(mode, Choice::Auto);
         assert_eq!(encoder.h264(), H264::X264);
@@ -338,7 +348,7 @@ mod tests {
         let mode = VideoMode {
             width: 3840,
             height: 2160,
-            fps: 30,
+            fps: Rate::fps(30),
         };
         let encoder = encodes_slots_and_forces_keyframes(mode, Choice::X264);
         assert_eq!(encoder.preview(), [1920, 1080]);
@@ -351,7 +361,7 @@ mod tests {
         let mode = VideoMode {
             width: 3840,
             height: 2160,
-            fps: 30,
+            fps: Rate::fps(30),
         };
         let encoder = encodes_slots_and_forces_keyframes(mode, Choice::Nvenc);
         assert_eq!(encoder.h264(), H264::Nvenc);

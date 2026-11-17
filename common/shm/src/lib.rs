@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! file header (64 bytes)
-//!   magic        8 bytes  "CHRSHM01"
+//!   magic        8 bytes  "CHRSHM02"
 //!   slot_count   u32
 //!   reserved     u32
 //!   slot_bytes   u64      payload capacity per slot
@@ -38,7 +38,7 @@ use std::{
 use mapping::Region;
 
 /// File magic, including the layout version.
-pub const MAGIC: [u8; 8] = *b"CHRSHM01";
+pub const MAGIC: [u8; 8] = *b"CHRSHM02";
 
 const HEADER_BYTES: u64 = 64;
 const SLOT_HEADER_BYTES: u64 = 64;

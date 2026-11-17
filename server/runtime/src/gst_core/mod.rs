@@ -1,4 +1,4 @@
-//! chr-server's GStreamer core (#154, phase 1, experimental): `--pipeline gst`.
+//! chr-server's GStreamer core (#154, phases 1 and 2, experimental): `--pipeline gst`.
 //!
 //! One GStreamer pipeline carries the program from the capture process to the
 //! output, timed by the pipeline clock (the system clock in simulation, the
@@ -29,6 +29,11 @@
 //!   pipeline. A dead or stalled worker only costs CG: its frames' slots get
 //!   clean feed.
 //! - **Capture** is a bin too, rebuilt when the capture process goes away.
+//! - **Rates and formats** come from the capture's caps and may change at any
+//!   time: deadlines do not depend on the rate, the program follows the input's
+//!   rate ([`OutputRate::Follow`]) or converts it to a fixed one
+//!   ([`OutputRate::Fixed`]), and a new format starts a new tracking stream
+//!   (`server/docs/gst-core.md`).
 //!
 //! `fallbackswitch` is not used: it switches streams after a timeout, so a
 //! single late CG frame costs output slots and never shows that slot's clean
@@ -42,9 +47,11 @@ pub mod select;
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, atomic::AtomicU64},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
+
+use chr_common::rate::Rate;
 
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSrc};
@@ -113,12 +120,38 @@ impl Timeline {
     }
 }
 
+/// The program output's rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputRate {
+    /// The input's rate, changing with it.
+    Follow,
+    /// This rate whatever the input's: frames are repeated or dropped.
+    Fixed(Rate),
+}
+
+impl std::str::FromStr for OutputRate {
+    type Err = String;
+
+    /// `follow` or `fixed:<rate>`.
+    fn from_str(text: &str) -> Result<Self, String> {
+        match text.split_once(':') {
+            None if text == "follow" => Ok(Self::Follow),
+            Some(("fixed", rate)) => Ok(Self::Fixed(rate.parse().map_err(|e| format!("{e}"))?)),
+            _ => Err(format!(
+                "the output rate is follow or fixed:<rate> (fixed:50, fixed:59.94), not {text:?}"
+            )),
+        }
+    }
+}
+
 pub struct CoreConfig {
-    /// Extent and rate of the captured frames: the program's camera. The rate
-    /// is an integer in phase 1; caps with another one are refused.
+    /// The program camera's extent and nominal rate: frames of another extent
+    /// go out as their clean feed.
     pub capture: VideoMode,
-    /// Extent and rate of the program output.
+    /// Extent of the program output and its rate at start (the fixed rate,
+    /// with [`OutputRate::Fixed`]).
     pub output: VideoMode,
+    pub output_rate: OutputRate,
     /// The capture process's unixfd socket.
     pub capture_socket: PathBuf,
     /// Capture to output: every frame's slot is due this long after its capture.
@@ -138,8 +171,8 @@ pub struct Core {
     capture: Mutex<CaptureState>,
     config: CoreConfig,
     frames: tokio::sync::mpsc::Sender<capture::Captured>,
-    /// One past the highest program sequence of every capture session so far.
-    next_sequence: Arc<AtomicU64>,
+    /// The numbering and formats of every capture session's streams.
+    streams: Arc<capture::Streams>,
 }
 
 struct CaptureState {
@@ -232,17 +265,33 @@ impl Core {
         ));
         output::attach(&output, &output_sink, &tap_sink);
         let selector = select::Selector::start(
-            program,
+            select::Program {
+                appsrc: program,
+                output: config.output,
+                policy: config.output_rate,
+                recorder: config.recorder.clone(),
+            },
             timeline.clone(),
-            select::Timing::new(config.program_delay, config.output.frame_duration()),
+            select::Timing::new(config.program_delay),
         )?;
+        let streams = Arc::new(capture::Streams::new(on_format(
+            selector.clone(),
+            config.recorder.clone(),
+            config.output,
+            config.output_rate,
+        )));
         let (frames, captured) = tokio::sync::mpsc::channel(CAPTURED_QUEUE);
         log::info!(
-            "GStreamer core: capture {} from {}, program {} delayed {:?}, each slot decided \
-             {:?} before it is due",
-            config.capture.name(),
+            "GStreamer core: capture from {} (program camera {}), program {}x{} at {} delayed \
+             {:?}, each slot decided {:?} before it is due",
             config.capture_socket.display(),
-            config.output.name(),
+            config.capture.name(),
+            config.output.width,
+            config.output.height,
+            match config.output_rate {
+                OutputRate::Follow => "the input's rate".to_owned(),
+                OutputRate::Fixed(rate) => format!("a fixed {} fps", rate.label()),
+            },
             config.program_delay,
             DECISION_MARGIN,
         );
@@ -259,7 +308,7 @@ impl Core {
                 }),
                 config,
                 frames,
-                next_sequence: Arc::new(AtomicU64::new(0)),
+                streams,
             },
             captured,
         ))
@@ -283,9 +332,9 @@ impl Core {
         self.selector.timing().deadline(capture)
     }
 
-    /// Offers the rendered frame `sequence` for its slot.
-    pub fn offer_cg(&self, sequence: u64, capture: gst::ClockTime, frame: gst::Buffer) {
-        self.selector.cg(sequence, capture, frame);
+    /// Offers a rendered frame for its slot.
+    pub fn offer_cg(&self, key: select::Frame, frame: gst::Buffer) {
+        self.selector.cg(key, frame);
     }
 
     /// Handles bus messages and keeps a capture connected. Returns true when a
@@ -309,11 +358,10 @@ impl Core {
             return Ok(false);
         }
         state.retry_at = Instant::now() + CAPTURE_RETRY;
-        let session = capture::Session::new(Arc::clone(&self.next_sequence));
         match capture::Capture::open(
             &self.pipeline,
             &self.config,
-            session,
+            Arc::clone(&self.streams),
             self.frames.clone(),
             self.selector.clone(),
         ) {
@@ -404,13 +452,47 @@ impl Drop for Core {
     }
 }
 
+/// What the core does when the capture's format changes: a transition in the
+/// selector, and the output's mode in the status.
+fn on_format(
+    selector: select::Selector,
+    recorder: crate::sdi::SdiRecorder,
+    output: VideoMode,
+    policy: OutputRate,
+) -> capture::OnFormat {
+    Box::new(move |first, format, changed| {
+        let program = match policy {
+            OutputRate::Follow => VideoMode {
+                fps: format.fps,
+                ..output
+            },
+            OutputRate::Fixed(_) => output,
+        };
+        if changed {
+            log::info!(
+                "capture format now {} from frame {first}: program {}",
+                format.name(),
+                program.name()
+            );
+            selector.begin_transition(first);
+            recorder.format_changed(program);
+        } else {
+            log::info!("capture format {} from frame {first}", format.name());
+            recorder.set_mode(program);
+        }
+    })
+}
+
 /// Packed 8-bit UYVY, BT.709 limited range, at `mode`.
 pub fn uyvy_caps(mode: VideoMode) -> gst::Caps {
     gst::Caps::builder("video/x-raw")
         .field("format", "UYVY")
         .field("width", mode.width as i32)
         .field("height", mode.height as i32)
-        .field("framerate", gst::Fraction::new(mode.fps as i32, 1))
+        .field(
+            "framerate",
+            crate::worker::tracking::wire::fraction(mode.fps),
+        )
         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .field("interlace-mode", "progressive")
         .field("colorimetry", "bt709")
@@ -429,4 +511,22 @@ fn queue(buffers: u32, leaky: bool) -> Result<gst::Element, Error> {
         queue.set_property_from_str("leaky", "downstream");
     }
     Ok(queue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_rates_parse() {
+        assert_eq!("follow".parse(), Ok(OutputRate::Follow));
+        assert_eq!(
+            "fixed:59.94".parse(),
+            Ok(OutputRate::Fixed(Rate::new(60000, 1001).unwrap()))
+        );
+        assert_eq!("fixed:50".parse(), Ok(OutputRate::Fixed(Rate::fps(50))));
+        for bad in ["fixed", "fixed:", "fixed:0", "follow:50", "50", ""] {
+            assert!(bad.parse::<OutputRate>().is_err(), "{bad}");
+        }
+    }
 }

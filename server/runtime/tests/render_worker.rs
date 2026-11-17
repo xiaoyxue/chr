@@ -28,7 +28,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 const MODE: VideoMode = VideoMode {
     width: 192,
     height: 128,
-    fps: 50,
+    fps: chr_common::rate::Rate::fps(50),
 };
 const CLI: &str = env!("CARGO_BIN_EXE_chr-renderer-cli");
 
@@ -81,6 +81,7 @@ async fn gpu_worker_renders_exactly_what_the_in_process_bridge_renders() {
                 execution.input.stored().unwrap(),
                 &execution.provenance.input,
                 execution.scene.snapshot(),
+                MODE.fps.time_base(),
                 Instant::now() + Duration::from_secs(10),
             )
             .unwrap()

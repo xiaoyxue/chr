@@ -98,16 +98,15 @@ impl RingInput {
             match read {
                 Ok(Read::Frame(header)) => {
                     let meta = SlotMeta::from_meta(header.meta);
-                    if (meta.width, meta.height, meta.fps)
-                        == (self.mode.width, self.mode.height, self.mode.fps)
-                    {
+                    if meta == self.mode.input_meta() {
                         polled.frames.push((header.index, payload));
                     } else {
                         problem = Some(format!(
-                            "input ring carries {}x{}p{}, the program expects {}",
+                            "input ring carries {}x{} at {}/{} fps, the program expects {}",
                             meta.width,
                             meta.height,
-                            meta.fps,
+                            meta.rate_num,
+                            meta.rate_den,
                             self.mode.name()
                         ));
                     }
@@ -187,20 +186,17 @@ fn file_id(_path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chr_common::rate::Rate;
     use chr_shm::{SlotHeader, Writer};
 
     const MODE: VideoMode = VideoMode {
         width: 4,
         height: 2,
-        fps: 30,
+        fps: Rate::fps(30),
     };
 
     fn push(writer: &mut Writer, sequence: u64, mode: VideoMode) {
-        let meta = SlotMeta {
-            width: mode.width,
-            height: mode.height,
-            fps: mode.fps,
-        };
+        let meta = mode.input_meta();
         writer
             .push(
                 SlotHeader {
@@ -237,7 +233,14 @@ mod tests {
         for sequence in 10..20 {
             push(&mut writer, sequence, MODE);
         }
-        push(&mut writer, 20, VideoMode { fps: 25, ..MODE });
+        push(
+            &mut writer,
+            20,
+            VideoMode {
+                fps: Rate::fps(25),
+                ..MODE
+            },
+        );
         let polled = input.poll();
         assert_eq!(polled.overwritten, 3, "eleven writes into eight slots");
         let sequences: Vec<_> = polled.frames.iter().map(|(s, _)| *s).collect();
