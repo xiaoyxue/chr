@@ -34,8 +34,12 @@ export interface LightingPreset {
   id: string;
   name: string;
   lights: StudioLight[];
-  /** Image-based lighting from an OpenEXR panorama on the onsite server; gain scales it, rotation turns it (degrees). */
-  environment: { enabled: boolean; path: string | null; gain: number; rotation: number };
+  /**
+   * Image-based lighting from an OpenEXR panorama on the onsite server; gain scales it, rotation
+   * turns it (degrees). `maxRadiance` clamps brighter panorama texels before gain, to drop a sun the
+   * directional light already carries (#177); absent or null keeps the panorama whole.
+   */
+  environment: { enabled: boolean; path: string | null; gain: number; rotation: number; maxRadiance?: number | null };
   /** Uniform fill radiance from every direction, W/(m² sr). */
   constant: { enabled: boolean; intensity: number; color: Rgb };
   /** Set on built-ins as offered, never stored; `edited` when the library holds the operator's version. */
@@ -50,7 +54,7 @@ export interface LightingLibrary { version: 1; presets: LightingPreset[]; select
 /** `scene_frame::Lighting` as chr-server reads it. */
 export interface WireLighting {
   lights: Record<string, unknown>[];
-  environment: { asset_ref: string; gain: number; rotation: number; visible: boolean } | null;
+  environment: { asset_ref: string; gain: number; rotation: number; visible: boolean; max_radiance?: number } | null;
   constant?: Rgb;
 }
 
@@ -61,6 +65,11 @@ export const ORLANDO_PRESET = 'builtin-orlando';
 export const ORLANDO_EXR = 'orlando_stadium_4k.exr';
 /** The panorama the default preset lights with, and the first choice when IBL is switched on. */
 export const DEFAULT_EXR = 'fly-studio-03_4K.exr';
+/**
+ * The cap the Orlando preset sets and switching the cap on starts from: its sun and floodlights
+ * hold over half of the panorama's energy above it, a studio panorama's softboxes about 1 %.
+ */
+export const DEFAULT_MAX_RADIANCE = 50;
 const BUILT_IN_IDS = [DEFAULT_PRESET, ORLANDO_PRESET];
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MATCH_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
@@ -85,7 +94,7 @@ function towerRig({ length, width }: FieldDimensions): StudioLight[] {
 
 /**
  * The built-in presets: chr-server's default rig lit by the fly-studio panorama, and the
- * Orlando stadium panorama with a fill next to the same rig.
+ * Orlando stadium panorama, its sun capped off, with a fill next to the same rig.
  */
 export function builtInPresets(field: FieldDimensions, iblDir: string): LightingPreset[] {
   const dir = iblDir.replace(/\/+$/, '');
@@ -93,7 +102,7 @@ export function builtInPresets(field: FieldDimensions, iblDir: string): Lighting
     { id: DEFAULT_PRESET, name: '默认：四角灯塔 + 太阳 + fly-studio IBL', builtIn: true, lights: towerRig(field),
       environment: { enabled: true, path: `${dir}/${DEFAULT_EXR}`, gain: 0.5, rotation: 0 }, constant: { enabled: false, intensity: 0.1, color: [1, 1, 1] } },
     { id: ORLANDO_PRESET, name: 'Orlando 球场 IBL + 灯塔 + 太阳 + 常量光', builtIn: true, lights: towerRig(field),
-      environment: { enabled: true, path: `${dir}/${ORLANDO_EXR}`, gain: 0.5, rotation: 0 },
+      environment: { enabled: true, path: `${dir}/${ORLANDO_EXR}`, gain: 0.5, rotation: 0, maxRadiance: DEFAULT_MAX_RADIANCE },
       constant: { enabled: true, intensity: 0.1, color: [1, 1, 1] } },
   ];
 }
@@ -140,7 +149,8 @@ export function describeLighting(preset: LightingPreset, environment?: string): 
   const fill = preset.constant.enabled ? scaled(preset.constant.color, preset.constant.intensity) : [0, 0, 0];
   return {
     lights,
-    environment: sky ? { asset_ref: environment, gain: preset.environment.gain, rotation: radians(preset.environment.rotation), visible: false } : null,
+    environment: sky ? { asset_ref: environment, gain: preset.environment.gain, rotation: radians(preset.environment.rotation), visible: false,
+      ...(preset.environment.maxRadiance ? { max_radiance: preset.environment.maxRadiance } : {}) } : null,
     ...(fill.some((v) => v > 0) ? { constant: fill as Rgb } : {}),
   };
 }
@@ -176,6 +186,7 @@ export function validPreset(preset: LightingPreset) {
     && new Set(preset.lights.map((light) => light.id)).size === preset.lights.length
     && Boolean(environment) && typeof environment.enabled === 'boolean' && (environment.path === null || (typeof environment.path === 'string' && /^\/.+\.exr$/i.test(environment.path)))
     && finite(environment.gain, 0, 100) && finite(environment.rotation, -360, 360)
+    && (environment.maxRadiance == null || (finite(environment.maxRadiance, 0, 1e6) && environment.maxRadiance > 0))
     && Boolean(constant) && typeof constant.enabled === 'boolean' && finite(constant.intensity, 0, 100) && rgb(constant.color)
     && (!environment.enabled || environment.path !== null);
 }

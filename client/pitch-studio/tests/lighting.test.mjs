@@ -31,12 +31,12 @@ test("the built-in default preset is chr-server's default rig lit by the fly-stu
   close(sun.irradiance, [2.5, 2.35, 2.1], 1e-9);
 });
 
-test('the Orlando preset adds its panorama and a constant fill', () => {
+test('the Orlando preset adds its panorama, capped below its sun, and a constant fill', () => {
   const orlando = builtInPresets(field, '/srv/ibl/').find((preset) => preset.id === ORLANDO_PRESET);
   assert.equal(orlando.environment.path, '/srv/ibl/orlando_stadium_4k.exr');
   assert.throws(() => describeLighting(orlando), /素材/);
   const lighting = describeLighting(orlando, 'IBL-abc');
-  assert.deepEqual(lighting.environment, { asset_ref: 'IBL-abc', gain: 0.5, rotation: 0, visible: false });
+  assert.deepEqual(lighting.environment, { asset_ref: 'IBL-abc', gain: 0.5, rotation: 0, visible: false, max_radiance: 50 });
   assert.deepEqual(lighting.constant, [0.1, 0.1, 0.1]);
   assert.equal(lighting.lights.length, 5);
   // Switched off, the panorama and the fill keep their values but are not sent.
@@ -85,7 +85,14 @@ test('operator presets: disabled lights, shadows off, the light limit and the st
   assert.equal(validateLightingLibrary(library), library);
   assert.equal(selectedPreset(library, builtInPresets(field, '/x'), 'MATCH-1').name, 'Night');
   assert.equal(selectedPreset(library, builtInPresets(field, '/x'), 'MATCH-2').id, DEFAULT_PRESET);
+  // Presets stored before the cap existed have none and stay valid.
+  const uncapped = structuredClone(preset);
+  delete uncapped.environment.maxRadiance;
+  assert.ok(validateLightingLibrary({ ...library, presets: [uncapped] }));
+  assert.equal(describeLighting({ ...preset, environment: { ...preset.environment, maxRadiance: null } }, 'IBL-fly').environment.max_radiance, undefined);
   for (const broken of [
+    { ...preset, environment: { ...preset.environment, maxRadiance: 0 } },
+    { ...preset, environment: { ...preset.environment, maxRadiance: -5 } },
     { ...preset, id: 'builtin-unknown' },
     { ...preset, lights: preset.lights.map((light) => light.kind === 'spot' ? { ...light, inner: 50, outer: 40 } : light) },
     { ...preset, environment: { enabled: true, path: 'relative.exr', gain: 1, rotation: 0 } },

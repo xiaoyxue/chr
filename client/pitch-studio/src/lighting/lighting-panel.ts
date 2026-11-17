@@ -4,7 +4,7 @@
 import { StoreConflict, type StoredDocument } from '../shared/studio-store.ts';
 import type { FieldDimensions } from '../shared/types.ts';
 import {
-  DEFAULT_EXR, MAX_LIGHTS, availablePresets, builtInPresets, emptyLibrary, environmentPath, selectedPreset,
+  DEFAULT_EXR, DEFAULT_MAX_RADIANCE, MAX_LIGHTS, availablePresets, builtInPresets, emptyLibrary, environmentPath, selectedPreset,
   type LightingLibrary, type LightingPreset, type Rgb, type StudioLight,
 } from './lighting.ts';
 
@@ -112,7 +112,8 @@ export class LightingPanel {
     };
     const panoramas = [...new Set([...this.panoramas, ...(preset.environment.path ? [preset.environment.path] : [])])];
     const skyPath = environmentPath(preset);
-    const sky = skyPath ? `IBL ${skyPath.split('/').pop()} × ${round(preset.environment.gain)}` : 'IBL 关闭';
+    const cap = preset.environment.maxRadiance;
+    const sky = skyPath ? `IBL ${skyPath.split('/').pop()} × ${round(preset.environment.gain)}${cap ? `（上限 ${round(cap)}）` : ''}` : 'IBL 关闭';
     const fill = preset.constant.enabled ? `常量光 ${round(preset.constant.intensity)}` : '常量光关闭';
     this.summary.textContent = `本场使用“${preset.name}”${preset.edited ? '（已修改）' : ''}：${enabled.length} 盏灯 · ${sky} · ${fill}。预设库所有场次共用，发送到渲染器时一并发送。`;
     const toggle = (field: string, on: boolean) =>
@@ -130,10 +131,12 @@ export class LightingPanel {
               ${builtIn ? (preset.edited ? '<button class="on-button" type="button" data-lighting-action="reset">恢复内置默认</button>' : '')
                 : '<button class="on-button" type="button" data-lighting-action="rename">重命名</button><button class="on-button" type="button" data-lighting-action="delete">删除</button>'}</div>
             <p class="on-help" role="status">${escape(this.status) || (builtIn ? '内置预设可直接修改，修改保存为它的现场版本，可恢复内置默认。' : '修改即时保存到现场服务器。')}</p></div></section>
-        <section class="on-card ${preset.environment.enabled ? '' : 'is-off'}"><div class="on-card-head"><div><h2>环境光 IBL</h2><p class="on-help">EXR 全景图照明，无阴影、不显示背景；图中有太阳时可降低 gain，避免与平行光重复。</p></div>${toggle('environmentEnabled', preset.environment.enabled)}</div>
+        <section class="on-card ${preset.environment.enabled ? '' : 'is-off'}"><div class="on-card-head"><div><h2>环境光 IBL</h2><p class="on-help">EXR 全景图照明，无阴影、不显示背景。图中有太阳时开启亮度上限，截掉太阳，避免与平行光重复并在金属上闪点。</p></div>${toggle('environmentEnabled', preset.environment.enabled)}</div>
           <div class="on-card-body"><label>环境贴图<select data-field="environment"><option value="">无</option>${panoramas.map((path) =>
             `<option value="${escape(path)}" ${path === preset.environment.path ? 'selected' : ''}>${escape(path.split('/').pop())}</option>`).join('')}</select></label>
-            <div class="on-field-grid">${number('gain', 'gain', preset.environment.gain, 'min="0" max="100"')}${number('rotation', '旋转 / °', preset.environment.rotation, 'min="-360" max="360"')}</div></div></section>
+            <div class="on-field-grid">${number('gain', 'gain', preset.environment.gain, 'min="0" max="100"')}${number('rotation', '旋转 / °', preset.environment.rotation, 'min="-360" max="360"')}
+              <label>亮度上限（gain 前）<span class="on-inline-field"><input type="checkbox" data-field="maxRadianceEnabled" aria-label="启用亮度上限" ${cap ? 'checked' : ''} />
+                <input type="number" step="any" data-field="maxRadiance" value="${round(cap ?? DEFAULT_MAX_RADIANCE)}" min="0" aria-label="亮度上限" ${cap ? '' : 'disabled'} /></span></label></div></div></section>
         <section class="on-card ${preset.constant.enabled ? '' : 'is-off'}"><div class="on-card-head"><div><h2>常量光</h2><p class="on-help">各方向均匀补光，无阴影，与环境光叠加，整体提亮暗部。</p></div>${toggle('constantEnabled', preset.constant.enabled)}</div>
           <div class="on-card-body"><div class="on-field-grid">${number('constant', '强度 / W·m⁻²·sr⁻¹', preset.constant.intensity, 'min="0" max="100"')}
             <label>颜色<input type="color" data-field="constantColor" value="${toHex(preset.constant.color)}" /></label></div></div></section>
@@ -187,6 +190,8 @@ export class LightingPanel {
       } else if (field === 'constantEnabled') preset.constant.enabled = (target as HTMLInputElement).checked;
       else if (field === 'gain') preset.environment.gain = value;
       else if (field === 'rotation') preset.environment.rotation = value;
+      else if (field === 'maxRadianceEnabled') preset.environment.maxRadiance = (target as HTMLInputElement).checked ? DEFAULT_MAX_RADIANCE : null;
+      else if (field === 'maxRadiance' && value > 0) preset.environment.maxRadiance = value;
       else if (field === 'constant') preset.constant.intensity = value;
       else if (field === 'constantColor') preset.constant.color = fromHex(target.value) ?? preset.constant.color;
       const light = preset.lights.find((item) => item.id === lightId);
