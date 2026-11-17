@@ -22,7 +22,7 @@ import '../styles/onsite.css';
 import { anchorPoint, moveAnchor, parseAspect, resizeSide, uniformScale, withAspect, type Anchor } from '../placements/ground-edit.ts';
 import { UndoStack } from '../shared/undo-stack.ts';
 import { SOURCE_LABEL, SessionStore, cloudAligned, restorePlan, withAlignment, type SessionSource, type SourceKind } from './session.ts';
-import type { MatchRecord, Placement } from '../shared/types.ts';
+import type { GroundPlacement, MatchRecord, Placement } from '../shared/types.ts';
 import type { PitchPreview } from '../scene/pitch-preview.ts';
 import type { LocalAnalysis } from '../analysis/ply-result.ts';
 
@@ -221,7 +221,7 @@ function renderLists() {
     const enabled = !hidden.has(slot.id), active = slot.id === selectedId, unlocked = active && slot.id === unlockedId;
     return `<div class="on-slot-row ${active ? 'active' : ''} ${enabled ? '' : 'is-hidden'}">
     <button type="button" class="on-slot" aria-pressed="${active}" data-select-id="${escapeHTML(slot.id)}">
-      <span class="on-badge ${slot.type === '3D' ? 'amber' : ''}">${slot.type}</span><span><strong>${escapeHTML(slot.name)}</strong><small>${escapeHTML(slot.id)}<br />X ${slot.x.toFixed(2)} / Y ${slot.y.toFixed(2)} m${slot.type === '2D' ? ` · ${slot.sizeX.toFixed(2)} × ${slot.sizeY.toFixed(2)} m` : ` · ×${slot.scaleX.toFixed(2)}`}</small></span>
+      <span class="on-badge ${slot.type === '3D' ? 'amber' : ''}">${slot.type}</span><span><strong>${escapeHTML(slot.name)}</strong><small>${escapeHTML(slot.id)}<br />X ${slot.x.toFixed(2)} / Y ${slot.y.toFixed(2)} m${slot.type === '2D' ? ` · ${slot.sizeX.toFixed(2)} × ${slot.sizeY.toFixed(2)} m` : ` · ×${slot.scaleX.toFixed(2)}`}${slot.rz ? ` · ${slot.rz.toFixed(1)}°` : ''}</small></span>
       ${active ? `<span class="on-lock-state ${unlocked ? 'unlocked' : ''}" title="${unlocked ? '已解锁，可编辑' : '已锁定'}">${unlocked ? '🔓' : '🔒'}</span>` : ''}
     </button>
     <button type="button" class="on-visibility-toggle" role="switch" aria-checked="${enabled}" aria-label="启用广告位 ${escapeHTML(slot.name)}" title="${enabled ? '停用：不在预览和渲染器中显示' : '启用此广告位'}" data-visibility-id="${escapeHTML(slot.id)}" ${enginePending ? 'disabled' : ''}>
@@ -484,16 +484,17 @@ function renderInspector() {
       <div class="on-aspect-row"><label>宽高比 W:H<input name="aspect" type="text" inputmode="decimal" value="${metres(slot.sizeX / slot.sizeY)}" aria-label="宽高比，如 16:9 或 1.78" /></label>
       <label class="on-check"><input type="checkbox" name="keepAspect" ${keepAspect ? 'checked' : ''} /> 锁定宽高比</label></div>
       <p class="on-help">输入 16:9 或 1.78 后按 Enter：保持长 X 和锚点，按比例调整宽 Y。</p></div>
-      ${readonly(`旋转 Z ${slot.rz.toFixed(1)}° · 暂不支持调整旋转`)}`;
+      <div class="on-inspector-group"><h3>缩放与旋转</h3>
+      <div class="on-field-grid">${field('scale', '缩放 / ×', fusionScale(slot), 'min="0.01"')}${field('rz', '旋转 / °', slot.rz, 'min="-180" max="180"')}</div>
+      <p class="on-help">绕中心等比缩放（相对 Fusion 原尺寸）和旋转；旋转后的整个区域须在球场内。</p></div>`;
   } else {
-    const maximum = slot.region ? Math.min(5, 1 / slot.modelPose.scale) : 5;
     $('#placement-fields').innerHTML = `<div class="on-inspector-group"><h3>位置（世界坐标）</h3>
       <div class="on-field-grid">${field('x', `${slot.region ? '区域' : ''}中心 X / m`, slot.x)}${field('y', `${slot.region ? '区域' : ''}中心 Y / m`, slot.y)}</div></div>
-      <div class="on-inspector-group"><h3>整体缩放</h3>
-      <div class="on-field-grid">${field('scale', '缩放 / ×', slot.scaleX, `min="0.1" max="${metres(maximum)}"`)}</div>
-      <p class="on-help">按比例整体缩放，范围 0.1–${metres(maximum)} 倍${slot.region ? '，模型始终限制在区域内' : ''}。</p></div>
+      <div class="on-inspector-group"><h3>缩放与旋转</h3>
+      <div class="on-field-grid">${field('scale', '缩放 / ×', slot.scaleX, 'min="0.1" max="5"')}${field('rz', '旋转 / °', slot.rz, 'min="-180" max="180"')}</div>
+      <p class="on-help">绕模型底部中心等比缩放（0.1–5 倍）和绕模型自身竖直轴（glTF Y）旋转：底部始终贴地，旋转不改变大小，模型可超出区域${slot.modelPose ? `；Fusion 初始朝向 ${slot.modelPose.yaw.toFixed(1)}°` : ''}。</p></div>
       <p id="inspector-footprint" class="on-readonly"></p>
-      ${readonly(`高度 Z ${slot.z.toFixed(2)} m · 旋转 X / Y / Z ${slot.rx.toFixed(1)}° / ${slot.ry.toFixed(1)}° / ${slot.rz.toFixed(1)}° · 暂不支持调整旋转`)}`;
+      ${readonly(`高度 Z ${slot.z.toFixed(2)} m · 只支持绕竖直轴旋转`)}`;
     renderFootprint();
   }
   // Re-rendering replaces the inputs; keep keyboard focus where the operator was.
@@ -511,9 +512,23 @@ function renderFootprint() {
     : `模型尚未加载或已停用；俯视图中的${slot.region ? '黄色框是广告位区域' : '圆环是广告位中心'}，不是模型本身。`;
 }
 
+/** A 2D placement's size relative to its Fusion original, by its X side. */
+function fusionScale(slot: GroundPlacement) {
+  const original = current().match.placements.find((item) => item.id === slot.id);
+  return original?.type === '2D' ? slot.sizeX / original.sizeX : 1;
+}
+
+/** Degrees in [-180, 180). */
+const normalAngle = (degrees: number) => ((degrees + 180) % 360 + 360) % 360 - 180;
+
 /** The selected placement with one inspector field set to `value`. */
 function editedSlot(slot: Placement, name: string, value: number): { next: Placement; action: string } {
+  if (name === 'rz') return { next: { ...slot, rz: normalAngle(value) }, action: '旋转' };
   if (slot.type === '2D') {
+    if (name === 'scale') {
+      const factor = value / fusionScale(slot);
+      return { next: { ...slot, sizeX: slot.sizeX * factor, sizeY: slot.sizeY * factor }, action: '缩放' };
+    }
     if (name === 'aspect') return { next: withAspect(slot, anchor, value), action: '设置宽高比' };
     if (name === 'anchorX' || name === 'anchorY') {
       const point = anchorPoint(slot, anchor);

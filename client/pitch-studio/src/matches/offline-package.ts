@@ -60,7 +60,7 @@ export async function parseOfflinePackage(file: Blob): Promise<OfflinePackage> {
         throw new Error('The offline ZIP contains duplicate or unexpected files.');
       names.add(entry.name);
       const maximum = entry.name === 'manifest.json' ? MAX_MANIFEST_BYTES
-        : entry.name.endsWith('.glb') ? 50 * 1024 * 1024 : 4 * 1024 * 1024;
+        : entry.name.endsWith('.glb') ? MAX_MATERIAL_BYTES : 4 * 1024 * 1024;
       if (!Number.isSafeInteger(entry.originalSize) || entry.originalSize <= 0 || entry.originalSize > maximum
         || (total += entry.originalSize) > MAX_MATERIAL_BYTES + MAX_MANIFEST_BYTES)
         throw new Error('The offline package exceeds its material size limits.');

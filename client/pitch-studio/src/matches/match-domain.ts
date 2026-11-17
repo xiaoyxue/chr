@@ -52,7 +52,7 @@ export function validatePlacement(slot: unknown, field: FieldDimensions): Placem
       || !isRecord(modelPose) || !hasNumbers(modelPose, ['x', 'y', 'scale', 'yaw'])
       || Math.abs(modelPose.x) > 1 || Math.abs(modelPose.y) > 1 || modelPose.scale < 0.01 || modelPose.scale > 1
       || modelPose.yaw < 0 || modelPose.yaw >= 360 || slot.scaleX !== slot.scaleY || slot.scaleX !== slot.scaleZ
-      || modelPose.scale * slot.scaleX > 1 || slot.z !== 0 || slot.rx !== 0 || slot.ry !== 0
+      || slot.z !== 0 || slot.rx !== 0 || slot.ry !== 0
       || !isPlacementInside({ x: slot.x, y: slot.y, sizeX: region.width, sizeY: region.height }, field))
       throw new Error('Invalid bounded Fusion model pose or region.');
     return { ...pose, ...scales, id, name, type, region: { width: region.width, height: region.height },

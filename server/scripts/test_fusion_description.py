@@ -102,6 +102,15 @@ class DescribeSceneTests(unittest.TestCase):
         self.assertAlmostEqual(scaled[1]["model"][1][0], base[1]["model"][1][0] * 1.25)
         self.assertEqual(scaled[1]["model"][0][3], base[1]["model"][0][3])
 
+    def test_rotate_turns_models_without_refitting(self):
+        # A 4 x 2 footprint: refitting at 90 degrees would shrink it to fit the 10 x 4 region.
+        model = glb([{"mesh": 0}], {"componentType": 5126, "min": [-2, 0, -1], "max": [2, 1, 1]})
+        base = self.describe(model)["instances"][0]["model"]
+        turned = self.describe(model, rotations=[("PLC-model", 90)])["instances"][0]["model"]
+        self.assertAlmostEqual(turned[2][2], base[2][2])
+        self.assertAlmostEqual(turned[0][0], -base[1][0])
+        self.assertAlmostEqual(turned[1][0], base[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()
