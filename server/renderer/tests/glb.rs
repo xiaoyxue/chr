@@ -192,3 +192,30 @@ fn material_map_changes_preserve_older_views() {
             .is_none()
     );
 }
+
+#[test]
+fn normal_mapped_primitives_without_tangents_get_gltf_handed_tangents() {
+    let (json, bin) = fixture();
+    let tangents = |uvs: [f32; 6]| {
+        let mut bin = bin.clone();
+        for (i, value) in uvs.into_iter().enumerate() {
+            bin[72 + 4 * i..76 + 4 * i].copy_from_slice(&value.to_le_bytes());
+        }
+        import_glb(&pack(&json, &bin))
+            .unwrap()
+            .mesh
+            .attributes()
+            .tangents[..4]
+            .to_vec()
+    };
+    let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+    // U along glTF +X; V growing up (+Y) runs against the texture's up, so w = -1.
+    let upward = tangents([0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+    assert!(close(upward[0], [1.0, 0.0, 0.0, -1.0]), "{upward:?}");
+    // The second primitive has no normal map and keeps the shader's derivative frame.
+    assert_eq!(upward[3], [0.0, 0.0, 0.0, 1.0]);
+    let downward = tangents([0.0, 1.0, 1.0, 1.0, 0.0, 0.0]);
+    assert!(close(downward[0], [1.0, 0.0, 0.0, 1.0]), "{downward:?}");
+    // Without a UV gradient the tangent stays zero for the shader to derive.
+    assert_eq!(tangents([0.5; 6])[0], [0.0, 0.0, 0.0, 1.0]);
+}

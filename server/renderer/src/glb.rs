@@ -188,6 +188,15 @@ pub fn import_glb_with(bytes: &[u8], options: ImportOptions) -> Result<GlbAsset,
                 "textured primitive without TEXCOORD_0".into(),
             ));
         }
+        let tangents = match (tangents, &uvs) {
+            (None, Some(uvs)) if material.maps.normal.is_some() => Some(derive_tangents(
+                &source,
+                normals.as_deref(),
+                uvs,
+                &source_indices,
+            )),
+            (tangents, _) => tangents,
+        };
         let expanded = normals.is_none();
         let order: Vec<u32> = if expanded {
             source_indices.clone()
@@ -232,7 +241,8 @@ pub fn import_glb_with(bytes: &[u8], options: ImportOptions) -> Result<GlbAsset,
             attributes
                 .colors
                 .push(colors.as_ref().map_or([1.0; 4], |v| v[i]));
-            let tangent = if let Some(t) = &tangents {
+            // A zero tangent (no usable UV gradient) defers to the shader's derivative frame.
+            let tangent = if let Some(t) = tangents.as_ref().filter(|t| t[i][..3] != [0.0; 3]) {
                 let xyz =
                     std::array::from_fn(|r| (0..3).map(|c| world[r][c] * f64::from(t[i][c])).sum());
                 let n = ModelMatrix::IDENTITY.transform_normal(xyz)?;
@@ -420,4 +430,74 @@ fn load_map(
 
 fn multiply(a: [[f64; 4]; 4], b: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
     std::array::from_fn(|r| std::array::from_fn(|c| (0..4).map(|i| a[r][i] * b[i][c]).sum()))
+}
+
+/// Per-vertex tangents for normal-mapped primitives without `TANGENT`, in the
+/// primitive's own space. `w` follows glTF: the bitangent `cross(n, t) * w` points
+/// towards decreasing V, the texture's up, where normal maps put +Y.
+fn derive_tangents(
+    positions: &[[f32; 3]],
+    normals: Option<&[[f32; 3]]>,
+    uvs: &[[f32; 2]],
+    indices: &[u32],
+) -> Vec<[f32; 4]> {
+    let mut sums = vec![[[0.0f64; 3]; 3]; positions.len()];
+    for face in indices.as_chunks::<3>().0 {
+        let [a, b, c] = face.map(|i| i as usize);
+        let p = |i: usize| positions[i].map(f64::from);
+        let uv = |i: usize| uvs[i].map(f64::from);
+        let e1: [f64; 3] = std::array::from_fn(|k| p(b)[k] - p(a)[k]);
+        let e2: [f64; 3] = std::array::from_fn(|k| p(c)[k] - p(a)[k]);
+        let d1: [f64; 2] = std::array::from_fn(|k| uv(b)[k] - uv(a)[k]);
+        let d2: [f64; 2] = std::array::from_fn(|k| uv(c)[k] - uv(a)[k]);
+        let det = d1[0] * d2[1] - d1[1] * d2[0];
+        let face_normal = cross(e1, e2);
+        for i in [a, b, c] {
+            sums[i][2] = std::array::from_fn(|k| sums[i][2][k] + face_normal[k]);
+        }
+        if det.abs() <= 1e-20 {
+            continue;
+        }
+        let dpdu: [f64; 3] = std::array::from_fn(|k| (e1[k] * d2[1] - e2[k] * d1[1]) / det);
+        let dpdv: [f64; 3] = std::array::from_fn(|k| (e2[k] * d1[0] - e1[k] * d2[0]) / det);
+        for i in [a, b, c] {
+            sums[i][0] = std::array::from_fn(|k| sums[i][0][k] + dpdu[k]);
+            sums[i][1] = std::array::from_fn(|k| sums[i][1][k] + dpdv[k]);
+        }
+    }
+    sums.iter()
+        .enumerate()
+        .map(|(i, [dpdu, dpdv, face_normal])| {
+            let n = normals.map_or(*face_normal, |n| n[i].map(f64::from));
+            let n = scaled(n, 1.0 / dot(n, n).sqrt());
+            let t: [f64; 3] = std::array::from_fn(|k| dpdu[k] - n[k] * dot(n, *dpdu));
+            let length = dot(t, t).sqrt();
+            if !length.is_finite() || length <= 1e-12 {
+                return [0.0, 0.0, 0.0, 1.0];
+            }
+            let t = scaled(t, 1.0 / length);
+            let w = if dot(cross(n, t), *dpdv) > 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            [t[0] as f32, t[1] as f32, t[2] as f32, w]
+        })
+        .collect()
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a.into_iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn scaled(a: [f64; 3], s: f64) -> [f64; 3] {
+    a.map(|x| x * s)
 }

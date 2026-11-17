@@ -24,7 +24,10 @@ The existing triangle path is unchanged.
 maps without filesystem access. Default node transforms and the glTF-to-chr
 axis rotation are baked once; material parts, normals, UV0, tangents, vertex
 colours and sampler metadata are retained. Missing normals use flat triangle
-normals. Decoded RGBA8 images are shared across maps/materials.
+normals. Normal-mapped primitives without `TANGENT` get per-vertex tangents at
+import (#178): UV gradients accumulated over adjacent triangles, Gram-Schmidt
+against the vertex normal, with glTF handedness, so the bitangent
+`cross(n, t) * w` points towards decreasing V, the texture's up. Decoded RGBA8 images are shared across maps/materials.
 Skins, morphs, alpha blending, external resources and unsupported extensions are
 reported as unsupported; animation clips are ignored with a diagnostic. The
 explicit `glb::ImportOptions::blend_as_mask` opt-in imports alpha-blended
@@ -49,8 +52,9 @@ Socket/WebSocket acceptance.
 
 `MeshRenderer::prepare_pbr` now evaluates metallic-roughness PBR using GGX,
 height-correlated Smith visibility and Burley diffuse. It binds base-colour,
-metallic-roughness, normal and emissive maps, authored or derivative tangent
-frames, vertex colours, alpha masks and double-sided/mirrored surfaces.
+metallic-roughness, normal and emissive maps, authored, imported or
+derivative tangent frames (the screen-derivative fallback, for vertices without
+a UV gradient, uses the same orthogonal glTF-handed frame), vertex colours, alpha masks and double-sided/mirrored surfaces.
 Colour textures and their mipmaps are filtered in linear light; data maps stay
 linear. Trilinear samplers also filter anisotropically (16x), so ground ads seen at
 a broadcast camera's grazing angle keep their detail across the view. Occlusion maps are retained for indirect lighting and do not darken
@@ -329,8 +333,8 @@ not material opacity. Wireframe derives line-list indices from each indexed
 triangle, retaining material-part ranges; it shows all triangle edges (not a
 hidden-line or silhouette-only mode). It needs no polygon-line device feature
 and does not mistake shared vertex IDs for per-triangle barycentrics.
-Normals encode the normalized world inverse-transpose geometric normal as
-`(n + 1) / 2`, with winding-aware derivative normals when attributes are absent;
+Normals encode the normalized, interpolated world inverse-transpose vertex
+normal as `(n + 1) / 2`, with winding-aware derivative normals when attributes are absent;
 normal maps and face-forward lighting flips are intentionally excluded.
 Depth encodes normalized GPU depth `[0,1]`, near black/far white, **not metric
 distance or a calibration export**. These diagnostic values pass through the

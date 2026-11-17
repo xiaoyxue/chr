@@ -8,7 +8,7 @@ pub enum DiagnosticView {
     #[default]
     Shaded = 0,
     Wireframe = 1,
-    /// World-space geometric normals, encoded as `(normal + 1) / 2`.
+    /// World-space interpolated vertex normals before normal maps, encoded as `(normal + 1) / 2`.
     Normals = 2,
     /// Normalized GPU depth: near = 0, far = 1 (not metric distance).
     Depth = 3,
