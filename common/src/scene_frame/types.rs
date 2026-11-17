@@ -143,12 +143,54 @@ object!(
     speed: Finite,
     material: FlagMaterial,
 });
+strings!(RotationMode { Swing => "swing", Continuous => "continuous" });
+strings!(Playback { Once => "once", Loop => "loop", PingPong => "ping_pong" });
+object!(
+    /// Rotation of a whole instance about a fixed world axis through the motion's pivot.
+    MotionRotation {
+    /// World direction of the axis; it need not be unit length. Positive angles turn
+    /// right-handed about it (about +Z, from +X towards +Y).
+    axis: Vec3,
+    mode: RotationMode,
+    /// `swing`: radians on each side of the neutral pose, `amplitude * sin(2 pi t / period)`,
+    /// in (0, pi]. Ignored by `continuous`, which turns a full circle every period.
+    amplitude: Finite,
+    /// Seconds, 0.1 to 60.
+    period: Finite,
+});
+object!(
+    /// One end of a motion path: a world offset of the pivot in metres and a uniform
+    /// scale multiplier of the neutral pose.
+    MotionKey { offset: Vec3, scale: Finite });
+object!(
+    /// Linear motion from `start` to `end` over `duration` seconds. `once` holds the end,
+    /// `loop` restarts at the start, `ping_pong` returns over another `duration`.
+    MotionPath {
+    start: MotionKey, end: MotionKey, duration: Finite, playback: Playback,
+});
+object!(
+    /// Rigid animation of a whole instance (#157). At a time `t` the instance's model is
+    /// `T(pivot + offset(t)) * scale(t) * R(axis, angle(t)) * T(-pivot) * model`: the
+    /// path moves the pivot in fixed world axes, independent of heading and rotation,
+    /// and scale and rotation act about the pivot. `t` counts seconds from the first
+    /// frame rendered with this scene.
+    Motion {
+    /// World point that rotation and scale act about, such as a model's bottom centre.
+    pivot: Vec3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rotation: Option<MotionRotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path: Option<MotionPath>,
+});
 object!(Instance {
     instance_id: Id, asset_ref: Id, model: Matrix4, visible: bool,
     material_overrides: Vec<MaterialOverride>,
     /// Required for flag assets and rejected for every other asset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flag: Option<Flag>,
+    /// Rigid animation of the whole instance; boxed, as few instances move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    motion: Option<Box<Motion>>,
 });
 
 // Keep common fields on each variant: flatten + deny_unknown_fields is not a

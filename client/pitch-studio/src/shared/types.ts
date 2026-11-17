@@ -4,7 +4,22 @@ export interface GroundRectangle extends Point { sizeX: number; sizeY: number; r
 export interface Pose extends Point { z: number; rx: number; ry: number; rz: number }
 export type AssetRole = 'car' | 'bank-left' | 'bank-right';
 export interface FusionAsset { id: string; name: string; contentType: string; url: string }
-export interface FusionModelPose { x: number; y: number; scale: number; yaw: number }
+/** One end of a Fusion model motion: field-space offset of its bottom centre in metres (z down) and a scale multiplier. */
+export interface FusionMotionKey { x: number; y: number; z: number; scale: number }
+export interface FusionModelMotion { enabled: boolean; start: FusionMotionKey; end: FusionMotionKey; duration: number; playback: 'once' | 'loop' | 'ping-pong' }
+/**
+ * Fusion's model pose: normalized offsets in the region, size factor and heading in degrees,
+ * then optional whole-model animation (#157): rotation about a fixed field axis (`swing`
+ * by ±amplitude degrees, or `continuous`, every `swingPeriod` seconds) and a timed motion.
+ */
+export interface FusionModelPose {
+  x: number; y: number; scale: number; yaw: number;
+  swingAxis?: 'x' | 'y' | 'z' | null;
+  swingAmplitude?: number;
+  swingPeriod?: number;
+  rotationMode?: 'swing' | 'continuous';
+  motion?: FusionModelMotion;
+}
 interface SlotBase extends Pose { id: string; name: string; adId?: string; adName?: string; asset?: FusionAsset; assetRotation?: number }
 export interface GroundPlacement extends SlotBase { type: '2D'; sizeX: number; sizeY: number; assetRole?: never }
 export interface ModelPlacement extends SlotBase {

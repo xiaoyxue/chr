@@ -4,6 +4,7 @@
 //! The normal triangle daemon does not install this synthetic integration profile.
 
 mod mapping;
+mod motion;
 mod owner;
 mod rotation;
 

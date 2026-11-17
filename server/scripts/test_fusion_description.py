@@ -27,7 +27,7 @@ def png(width, height):
     return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + bytes(5)
 
 
-def package(model, image):
+def package(model, image, pose=None):
     contents = {f"assets/{GLB_ID}.glb": model, f"assets/{PNG_ID}.png": image}
     placement = {"coordinateSpace": "pitch", "x": 1, "y": 2, "width": 10, "height": 4}
     match = {
@@ -36,7 +36,7 @@ def package(model, image):
                         "y": "down-in-top-view", "modelUp": "gltf-y-up"},
         "ads": [
             {"id": "AD-3D", "type": "3D", "placements": [{**placement, "id": "PLC-model", "assetIds": [GLB_ID],
-             "modelPose": {"x": 0, "y": 0, "scale": 0.5, "yaw": 90}}]},
+             "modelPose": pose or {"x": 0, "y": 0, "scale": 0.5, "yaw": 90}}]},
             {"id": "AD-2D", "type": "2D", "placements": [{**placement, "id": "PLC-image", "assetIds": [PNG_ID],
              "assetRotation": 90}]},
         ],
@@ -55,10 +55,10 @@ def package(model, image):
 
 
 class DescribeSceneTests(unittest.TestCase):
-    def describe(self, model, **options):
+    def describe(self, model, pose=None, **options):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "match.zip"
-            path.write_bytes(package(model, png(200, 100)))
+            path.write_bytes(package(model, png(200, 100), pose))
             return fusion_description.describe_scene(path, "/srv/match.zip", **options)
 
     def test_glb_bounds_follow_node_transforms_like_three(self):
@@ -110,6 +110,24 @@ class DescribeSceneTests(unittest.TestCase):
         self.assertAlmostEqual(turned[2][2], base[2][2])
         self.assertAlmostEqual(turned[0][0], -base[1][0])
         self.assertAlmostEqual(turned[1][0], base[0][0])
+
+    def test_model_animation_becomes_motion_about_the_bottom_centre(self):
+        model = glb([{"mesh": 0}], {"componentType": 5126, "min": [-1, 0, -1], "max": [1, 1, 1]})
+        self.assertNotIn("motion", self.describe(model)["instances"][0])
+        pose = {"x": 0, "y": 0, "scale": 0.5, "yaw": 90, "swingAxis": "z", "swingAmplitude": 45,
+                "swingPeriod": 2, "rotationMode": "continuous",
+                "motion": {"enabled": True, "start": {"x": -8, "y": 2, "z": 0, "scale": 0.5},
+                           "end": {"x": 16, "y": -6, "z": -4, "scale": 1.5}, "duration": 4, "playback": "ping-pong"}}
+        motion = self.describe(model, pose)["instances"][0]["motion"]
+        self.assertEqual(motion["pivot"], [1, 2, -0.015])
+        self.assertEqual(motion["rotation"], {"axis": [0, 0, 1], "mode": "continuous",
+                                              "amplitude": math.pi / 4, "period": 2})
+        self.assertEqual(motion["path"], {"start": {"offset": [-8, 2, 0], "scale": 0.5},
+                                          "end": {"offset": [16, -6, -4], "scale": 1.5},
+                                          "duration": 4, "playback": "ping_pong"})
+        pose["motion"]["enabled"] = False
+        pose["swingAxis"] = None
+        self.assertNotIn("motion", self.describe(model, pose)["instances"][0])
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{
     incompatible,
-    mapping::{NativeSettings, Registrations},
+    mapping::{Animated, NativeSettings, Registrations},
     reject,
     rotation::{Request as RotationRequest, Rotation},
     value,
@@ -19,6 +19,7 @@ use super::{
 pub struct BoundScene {
     snapshot: w::SceneSnapshot,
     scene: SceneView,
+    animated: Vec<Animated>,
     camera: Option<Camera>,
     settings: NativeSettings,
     generation: Arc<()>,
@@ -30,6 +31,19 @@ impl BoundScene {
     }
     pub fn scene(&self) -> &SceneView {
         &self.scene
+    }
+    /// The scene `seconds` after it started playing: animated instances moved, or the
+    /// bound view itself when nothing moves, so its caches stay valid.
+    pub fn scene_at(&self, seconds: f64) -> Result<SceneView, String> {
+        if self.animated.is_empty() {
+            return Ok(self.scene.clone());
+        }
+        let models = self
+            .animated
+            .iter()
+            .map(|(id, model, motion)| Ok((*id, motion.model(*model, seconds)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        self.scene.with_models(models).map_err(|e| e.to_string())
     }
     pub fn manual_camera(&self) -> Option<&Camera> {
         self.camera.as_ref()
@@ -320,7 +334,7 @@ impl SceneAdapter {
         effect: w::Effect,
         generation: Arc<()>,
     ) -> Result<BoundScene, ErrorObject> {
-        let (scene, camera) = self.registrations.prepare(&self.config, &state)?;
+        let (scene, camera, animated) = self.registrations.prepare(&self.config, &state)?;
         let settings = NativeSettings::new(&self.config, state.shadow_mode)?;
         Ok(BoundScene {
             snapshot: w::SceneSnapshot {
@@ -331,6 +345,7 @@ impl SceneAdapter {
                 state,
             },
             scene,
+            animated,
             camera,
             settings,
             generation,

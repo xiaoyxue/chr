@@ -240,6 +240,24 @@ type RenderInstance = {
     speed: number;
     material: "simple" | "pbr";
   };
+  // Extension (#157): rigid animation of the whole instance; may be omitted. At t
+  // seconds after the scene's first rendered frame the model is
+  // T(pivot + offset(t)) * scale(t) * R(axis, angle(t)) * T(-pivot) * model.
+  motion?: {
+    pivot: RenderVec3;
+    rotation?: {
+      axis: RenderVec3; // world axis, right-handed angles
+      mode: "swing" | "continuous";
+      amplitude: number; // swing: radians each side, (0, pi]
+      period: number; // seconds, 0.1..60
+    };
+    path?: {
+      start: { offset: RenderVec3; scale: number };
+      end: { offset: RenderVec3; scale: number };
+      duration: number; // seconds, > 0
+      playback: "once" | "loop" | "ping_pong";
+    };
+  };
 };
 type RenderLight = {
   light_id: RenderId;

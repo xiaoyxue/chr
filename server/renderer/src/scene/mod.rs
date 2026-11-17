@@ -182,6 +182,26 @@ impl SceneView {
     pub fn lighting(&self) -> &Lighting {
         &self.state.lighting
     }
+
+    /// This view with some instances moved, for animation evaluated per frame: a new
+    /// view (view-keyed caches such as shadow maps see a change), bounds following the
+    /// new models. Meshes and materials stay shared.
+    pub fn with_models(
+        &self,
+        models: impl IntoIterator<Item = (InstanceId, ModelMatrix)>,
+    ) -> Result<Self, SceneError> {
+        let mut state = State::clone(&self.state);
+        for (id, model) in models {
+            let mut instance = state.instances.get(id.0)?.as_ref().clone();
+            instance.bounds =
+                Instance::bounds_of(state.meshes.get(instance.mesh.0)?, instance.flag, model)?;
+            instance.model = model;
+            state.instances.replace(id.0, instance)?;
+        }
+        Ok(Self {
+            state: Arc::new(state),
+        })
+    }
 }
 
 impl Scene {

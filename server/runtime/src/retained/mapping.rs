@@ -13,7 +13,10 @@ use chr_renderer::{
 };
 use w::Validate;
 
-use super::{incompatible, reject};
+use super::{incompatible, motion::Motion, reject};
+
+/// An animated instance: its neutral model and its motion.
+pub(super) type Animated = (scene::InstanceId, ModelMatrix, Motion);
 use chr_tracker::pose::rows3;
 
 /// Immutable native binding for a declared calibration context. No calibration is inferred.
@@ -117,7 +120,7 @@ impl Registrations {
         &self,
         config: &w::Configuration,
         state: &w::SceneState,
-    ) -> Result<(SceneView, Option<Camera>), ErrorObject> {
+    ) -> Result<(SceneView, Option<Camera>, Vec<Animated>), ErrorObject> {
         state.validate().map_err(incompatible)?;
         self.world(&state.world)?;
         if state.configuration_id != config.configuration_id {
@@ -139,6 +142,7 @@ impl Registrations {
         };
         let mut scene = Scene::new().map_err(incompatible)?;
         let mut meshes = HashMap::new();
+        let mut animated = Vec::new();
         for instance in &state.instances {
             let asset = self.models.get(&instance.asset_ref).ok_or_else(|| {
                 reject(w::RejectionKind::NotFound, "model asset is not registered")
@@ -193,6 +197,12 @@ impl Registrations {
                 scene
                     .set_flag(id, Some(native_flag(flag)?))
                     .map_err(incompatible)?;
+            }
+            if let Some(motion) = &instance.motion {
+                let motion = Motion::new(motion).map_err(|e| {
+                    incompatible(format!("instance {}: {e}", instance.instance_id.as_str()))
+                })?;
+                animated.push((id, model, motion));
             }
         }
         let lights = state
@@ -255,7 +265,7 @@ impl Registrations {
         }
         scene.set_lighting(lighting).map_err(incompatible)?;
         shadow_budget(config, state)?;
-        Ok((scene.snapshot(), camera))
+        Ok((scene.snapshot(), camera, animated))
     }
 
     pub(super) fn frame_camera(

@@ -1,3 +1,4 @@
+import { validateModelPose } from '../placements/model-motion.ts';
 import type { FusionAdapter, Match, Placement, FusionAsset } from '../shared/types.ts';
 import { validateMatch } from './match-domain.ts';
 
@@ -66,10 +67,9 @@ export function mapFusionMatch(value: unknown, requestedId: string, offlinePacka
         if (![0, 90, 180, 270].includes(rotation)) throw new Error('Invalid image rotation.');
         placements.push({ ...common, type: '2D', sizeX: width, sizeY: height, assetRotation: rotation });
       } else {
-        const pose = object(source.modelPose);
-        const modelPose = { x: number(pose.x), y: number(pose.y), scale: number(pose.scale), yaw: number(pose.yaw) };
-        if (Math.abs(modelPose.x) > 1 || Math.abs(modelPose.y) > 1 || modelPose.scale < 0.01
-          || modelPose.scale > 1 || modelPose.yaw < 0 || modelPose.yaw >= 360) throw new Error('Invalid Fusion model pose.');
+        let modelPose;
+        try { modelPose = validateModelPose(source.modelPose); }
+        catch (error) { throw new Error(`Placement ${sourceId}: ${(error as Error).message}`); }
         placements.push({ ...common, type: '3D', region: { width, height }, modelPose, scaleX: 1, scaleY: 1, scaleZ: 1 });
       }
     }

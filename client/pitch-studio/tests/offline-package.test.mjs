@@ -47,6 +47,16 @@ test('whole-match ZIP preserves transforms, shared original materials and unassi
   assert.equal(result.match.placements[0].asset.url, `/fusion-offline/packages/${result.id}/assets/ASSET-image`);
   assert.deepEqual(new Uint8Array(await result.assets.get('ASSET-image').arrayBuffer()), image);
 });
+test("a ZIP's model animation (#157) survives import unchanged, and an invalid one names its field", async () => {
+  const animated = { x: 0, y: 0, scale: 0.7, yaw: 30, swingAxis: 'z', swingAmplitude: 45, swingPeriod: 2, rotationMode: 'continuous',
+    motion: { enabled: true, start: { x: -8, y: 2, z: 0, scale: 0.5 }, end: { x: 16, y: -6, z: -4, scale: 1.5 }, duration: 4, playback: 'ping-pong' } };
+  const package_ = fixture();
+  package_.manifest.match.ads[1].placements[0].modelPose = animated;
+  const result = await parseOfflinePackage(archive(package_));
+  assert.deepEqual(result.match.placements[3].modelPose, animated);
+  package_.manifest.match.ads[1].placements[0].modelPose = { ...animated, motion: { ...animated.motion, playback: 'bounce' } };
+  await assert.rejects(parseOfflinePackage(archive(package_)), /playback/);
+});
 test('rejects unsupported versions, missing files, bad checksums, invalid metadata and extra files', async () => {
   for (const change of [
     ({ manifest }) => { manifest.packageVersion = 2; },

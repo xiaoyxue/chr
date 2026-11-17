@@ -262,6 +262,9 @@ fn scene_state(
         if let Some(flag) = &instance.flag {
             native["flag"] = json!(flag);
         }
+        if let Some(motion) = &instance.motion {
+            native["motion"] = json!(motion);
+        }
         native
     }));
     Ok(serde_json::from_value(json!({

@@ -157,6 +157,9 @@ struct Program {
     renderer: ProgramRenderer,
     /// The last bound scene; reused while requests carry the same snapshot.
     scene: Option<Arc<BoundScene>>,
+    /// Media seconds of the first frame rendered with `scene`: its motion's time zero,
+    /// so a newly loaded scene plays from its start (#157).
+    started: f64,
 }
 
 fn start(requests: &Receiver) -> Result<Worker, Error> {
@@ -221,6 +224,7 @@ fn start(requests: &Receiver) -> Result<Worker, Error> {
                 adapter: installed.adapter,
                 renderer,
                 scene: None,
+                started: 0.0,
             }))
         }
     };
@@ -286,7 +290,9 @@ impl Worker {
             adapter,
             renderer,
             scene,
+            started,
         } = &mut **program;
+        let seconds = crate::program::media_seconds(time_base, frame.position.ticks.get());
         let pixels = request.payload()?;
         if pixels.len() != image_bytes(image) {
             return Err("input image size does not match its description".into());
@@ -300,6 +306,7 @@ impl Worker {
             *scene = Some(Arc::new(
                 adapter.bind(snapshot.clone()).map_err(|e| e.to_string())?,
             ));
+            *started = seconds;
         }
         let bound = scene.as_ref().expect("bound above");
         let camera = adapter
@@ -315,7 +322,8 @@ impl Worker {
                 key: &frame.frame,
                 lens: crate::program::frame_lens(&frame.geometry)?,
                 frame_warp: crate::program::frame_warp(&frame.geometry),
-                seconds: crate::program::media_seconds(time_base, frame.position.ticks.get()),
+                seconds,
+                motion_seconds: seconds - *started,
             },
         )?;
         Ok(())

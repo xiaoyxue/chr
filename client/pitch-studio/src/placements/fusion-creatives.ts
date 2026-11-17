@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import type { Placement, ModelPlacement } from '../shared/types.ts';
 import { resolveFusionAsset } from '../matches/offline-package.ts';
 import type { GlbBounds, SlotGeometry } from '../render/render-description.ts';
+import { motionRows, wireMotion, type WireMotion } from './model-motion.ts';
 
 /**
  * Where a Fusion model stands: Fusion's heading (`modelPose.yaw`) and size factor fit
@@ -42,7 +43,9 @@ function dispose(root: THREE.Object3D, environment?: THREE.Texture) {
 
 export class FusionCreatives {
   readonly group = new THREE.Group();
-  private readonly models = new Map<string, { group: THREE.Group; width: number; depth: number; bounds: GlbBounds }>();
+  private readonly models = new Map<string, { group: THREE.Group; width: number; depth: number; bounds: GlbBounds; motion?: WireMotion }>();
+  /** Preview time zero of the models' motion: the first animated frame after loading. */
+  private started?: number;
   private readonly planes = new Map<string, THREE.Group>();
   private active = true;
   private slots: Placement[] = [];
@@ -118,6 +121,8 @@ export class FusionCreatives {
             upright.add(centered);
             upright.rotation.x = -Math.PI / 2;
             const holder = new THREE.Group();
+            // Its matrix is set from the neutral pose and, when animated, its motion.
+            holder.matrixAutoUpdate = false;
             holder.visible = !this.hiddenPlacementIds.has(slot.id);
             holder.add(upright);
             holder.userData.placementId = slot.id;
@@ -168,8 +173,27 @@ export class FusionCreatives {
         model.group.position.set(fit.x, fit.y, slot.z - 0.015);
         model.group.rotation.set(0, 0, fit.yaw);
         model.group.scale.setScalar(fit.scale);
+        model.group.updateMatrix();
+        model.motion = slot.modelPose && wireMotion(slot.modelPose, [fit.x, fit.y, slot.z - 0.015]);
       }
     }
+  }
+  /**
+   * Poses animated models at preview time `seconds` (#157), as chr-server does from the
+   * scene's first frame; returns whether any model moves, so the caller keeps rendering.
+   */
+  animate(seconds: number) {
+    let moving = false;
+    for (const model of this.models.values()) {
+      if (!model.motion || !model.group.visible) continue;
+      this.started ??= seconds;
+      model.group.updateMatrix();
+      // motionRows is row-major; fromArray reads column-major.
+      model.group.matrix.premultiply(new THREE.Matrix4().fromArray(motionRows(model.motion, seconds - this.started).flat()).transpose());
+      model.group.matrixWorldNeedsUpdate = true;
+      moving = true;
+    }
+    return moving;
   }
   /**
    * The world XY axis-aligned bounding box of a placement's loaded model, from its
