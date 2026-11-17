@@ -5,136 +5,291 @@ own documents are authoritative; this page follows the pinned submodule
 `external/vchao` (`f209fc9`).
 
 **Scope:** what "atlas" means in vchao, the three products the word is used for,
-and the formulas that connect K, R, C, H, V, q, T_ref and Ti. It does not define
-a chr protocol. The paired translation is [vchao-atlas.zh-CN.md](vchao-atlas.zh-CN.md).
+and a formal statement of the geometry that connects $K$, $R$, $C$, $H$, $V$,
+$q$, $T_{\mathrm{ref}}$ and $T_i$ (vchao's `Ti`). It does not define a chr
+protocol. The paired translation is [vchao-atlas.zh-CN.md](vchao-atlas.zh-CN.md).
 
 Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
-(the preamble before the contents, and sections 3, 6, 8 and 9), `projective-atlas/README.md` and
-`atlas-vq-estimate/README.md`.
+(the preamble before the contents, and sections 3, 6, 8 and 9),
+`projective-atlas/README.md` and `atlas-vq-estimate/README.md`.
 
 ## Three things called "atlas"
 
 | | vchao name | Reference coordinates | Contents | Pixels | State |
 |---|---|---|---|---|---|
-| ① | **`Atlas`** (canonical) | The station's **physical** directions (calibrated) | Per camera station: square charts, 12 headings x 3 pitches, `K=I`, 90° FOV; chart rotations, static reference imagery, coverage | Yes | Design only, not implemented |
-| ② | Uncalibrated projective panorama (output of `projective-atlas`) | **An arbitrary chosen frame**, displayed as if `K=I` | The same 36-chart layout filled with the per-channel temporal median of the registered frames' RGB | Yes | Implemented; for display and evaluation |
+| ① | **`Atlas`** (canonical) | The station's **physical** directions (calibrated) | Per camera station: square charts, 12 headings x 3 pitches, K = I, 90° FOV; chart rotations, static reference imagery, coverage | Yes | Design only, not implemented |
+| ② | Uncalibrated projective panorama (output of `projective-atlas`) | **An arbitrary chosen frame**, displayed as if K = I | The same 36-chart layout filled with the per-channel temporal median of the registered frames' RGB | Yes | Implemented; for display and evaluation |
 | ③ | Anchored **V/Q map** (the manifest read by `atlas-vq-estimate`) | The reference plane chosen when the map was built | Landmarks q with descriptors, each view's V, and T_ref | **No** | Implemented; **this is what live Ti estimation uses** |
 
 - In vchao, `Atlas` strictly means ①. vchao calls the panorama ② distinct from
   the canonical Atlas. The V/Q map ③ is a separate projective, uncalibrated
-  product, not the canonical Atlas either. ② and ③ use the same kind of
-  reference-plane registration (section 3 below), but not necessarily the same
-  V: the V/Q map keeps its own fitted V and q, which must stay together.
+  product, not the canonical Atlas either. ② and ③ are both registrations in the
+  sense of Definition 3 below, but not necessarily the same one: the V/Q map
+  keeps its own fitted $V$ and $q$, which must stay together.
 - "We need an atlas to estimate Ti live" refers to the V/Q map **③**.
 - chr's business documents ([calibration records](calibration-control.md),
   [system architecture](system-architecture.md)) use "atlas" loosely for
   "reference images, each with its pitch Ti, plus C". That is closest to the V/Q
-  map's `views` table (frames with V and an optional Ti) and is not vchao's
+  map's `views` table (frames with $V$ and an optional $T_i$) and is not vchao's
   canonical `Atlas`.
 
-## Formulas
+## Formal statement
 
-Matrices act on homogeneous column vectors. Image coordinates are SNC
-([coordinate contract](../server/docs/coordinates.md)).
+### 0. Notation
 
-### 1. One frame's camera
+- $\mathbb{P}^2 = (\mathbb{R}^3 \setminus \lbrace 0 \rbrace)/\mathbb{R}^\times$
+  is the real projective plane. For $x, y \in \mathbb{R}^3 \setminus \lbrace 0 \rbrace$,
+  $x \sim y$ means $x = \lambda y$ for some $\lambda \neq 0$; $[x]$ is the class of $x$.
+- $\mathrm{PGL}(3) = \mathrm{GL}(3)/\mathbb{R}^\times$ acts on $\mathbb{P}^2$ by
+  $[x] \mapsto [Mx]$ (column vectors). Because $3$ is odd,
+  $\mathrm{SL}(3) \to \mathrm{PGL}(3)$ is a bijection, and
+  $\operatorname{canon}(M) = M / \sqrt[3]{\det M}$ (real cube root) is the
+  determinant-one representative vchao stores.
+- The world is $W = \mathbb{R}^3$ in pitch metres, with ground plane
+  $\Pi_0 = \lbrace Z = 0 \rbrace$ and standard basis $e_1, e_2, e_3$
+  (up is $-e_3$, see the [coordinate contract](../server/docs/coordinates.md)).
+- Each frame $i$ has an image plane $\mathcal{I}_i \cong \mathbb{P}^2$ in
+  undistorted SNC coordinates. Lens distortion $\psi_i$ acts after projection
+  and is omitted below.
+- $\varphi(x) = (x_1/x_3,\ x_2/x_3)$ is dehomogenisation.
+- For $h \in \mathbb{R}$ and $C \in \mathbb{R}^3$,
 
-K is the intrinsics, R the world-to-camera rotation and C the optical centre in
-pitch metres.
+$$
+G_h(C) = \begin{bmatrix} e_1 & e_2 & h\,e_3 - C \end{bmatrix} \in \mathbb{R}^{3\times 3},
+\qquad \det G_h(C) = h - C_z .
+$$
 
-```text
-D_i  = R_iᵀ K_i⁻¹                         image → world direction
-P_i  = K_i R_i [I | −C_i]                  world 3D → image
-Ti_i = P_i E_0 = K_i R_i [e1 e2 −C_i]      pitch ground (X, Y) → image
-A_i,h = P_i E_h = D_i⁻¹ [e1 e2 (h·e3 − C_i)]   horizontal plane at height h → image
-```
+### 1. Cameras
 
-`E_h` lifts plane coordinates `(X, Y, 1)` to `(X, Y, h, 1)`. A point above the
-ground needs C; Ti alone covers only `h = 0`.
+**Definition 1 (pinhole camera).** Frame $i$ has intrinsics $K_i$ (upper
+triangular, $f_x, f_y > 0$, $(K_i)_{33} = 1$), world-to-camera rotation
+$R_i \in \mathrm{SO}(3)$ and optical centre $C_i \in W$. Its projection and
+direction matrices are
 
-### 2. Fixed optical centre: frames differ by a homography
+$$
+P_i = K_i R_i \begin{bmatrix} I & -C_i \end{bmatrix} \in \mathbb{R}^{3\times 4},
+\qquad
+D_i = R_i^\top K_i^{-1} \in \mathrm{GL}(3).
+$$
 
-```text
-H[j←i] = D_j⁻¹ D_i = K_j R_j R_iᵀ K_i⁻¹
-```
+An image point $[p] \in \mathcal{I}_i$ back-projects to the ray
+$\lbrace C_i + t\,D_i p : t \in \mathbb{R} \rbrace$.
 
-C cancels. Every frame of a camera that only pans, tilts and zooms is related
-to every other frame by a pure H.
+**Proposition 1 (plane homographies).** Let
+$E_h : (X, Y, 1)^\top \mapsto (X, Y, h, 1)^\top$ embed the horizontal plane at
+height $h$. Then
 
-### 3. The reference plane and V
+$$
+A_{i,h} := P_i E_h = D_i^{-1} G_h(C_i),
+$$
 
-Choose a reference r. The reference plane (the "panorama plane") is an abstract
-projective plane (RP²), not a top-down view and not 3D. When r is a real frame:
+which lies in $\mathrm{PGL}(3)$ if and only if $h \neq C_{i,z}$. The pitch
+homography is
 
-```text
-V_i = X_i = H[i←r] = K_i R_i R_rᵀ K_r⁻¹    reference plane → frame i
-U_i = V_i⁻¹                                  frame i → reference plane
-H[j←i] = V_j V_i⁻¹
-```
+$$
+T_i := A_{i,0} = D_i^{-1} G_0(C_i) = K_i R_i \begin{bmatrix} e_1 & e_2 & -C_i \end{bmatrix}.
+$$
 
-vchao's graph code calls the node `X_i` and the panorama map `U_i`; the V/Q map
-calls it V. Without calibration only `V_i ~ D_i⁻¹ A` is known, with A unknown
-(the gauge), and right-multiplying every `V_i` by the same matrix M leaves all H
-unchanged.
+*Proof.* $\begin{bmatrix} I & -C \end{bmatrix} E_h = G_h(C)$ and $K_i R_i = D_i^{-1}$. $\square$
 
-### 4. Landmarks q (part of the V/Q map ③)
+**Proposition 2 (3D points from $T_i$ and $C$).** If $C_{i,z} \neq 0$, every
+$X \in W \setminus \lbrace C_i \rbrace$ projects to
 
-```text
-x_ik ~ V_i q_k      where landmark k appears in frame i
-```
+$$
+p \sim T_i\, G_0(C_i)^{-1} (X - C_i).
+$$
 
-The map stores fitted V and q produced outside vchao; vchao does not document
-how they are built. Conceptually, building it means fitting all V_i and q_k so
-that every observation satisfies the relation above. q is a homogeneous point on the reference plane, not a metric 3D point; its
-third component may be zero.
+*Proof.* $P_i (X, 1)^\top = D_i^{-1}(X - C_i)$, and $T_i = D_i^{-1} G_0(C_i)$ with
+$G_0(C_i)$ invertible gives $D_i^{-1} = T_i\, G_0(C_i)^{-1}$. $\square$
+
+So rendering objects above the ground needs exactly $(T_i, C_i)$.
+
+### 2. Stations
+
+**Definition 2 (station).** A station is a set of frames $F$ with a common
+optical centre: $C_i = C$ for all $i \in F$.
+
+**Proposition 3.** For $i, j \in F$, corresponding image points are related by
+
+$$
+H_{j \leftarrow i} = \left[ D_j^{-1} D_i \right] \in \mathrm{PGL}(3),
+$$
+
+independently of scene depth.
+
+*Proof.* For $X = C + t\,D_i p$ with $t \neq 0$,
+$P_j (X, 1)^\top = D_j^{-1}(X - C) = t\, D_j^{-1} D_i\, p$. $\square$
+
+### 3. Registrations and the reference plane
+
+**Definition 3 (registration).** A registration of a station $F$ is a family
+$(V_i)_{i \in F} \subset \mathrm{PGL}(3)$ with
+
+$$
+H_{j \leftarrow i} = V_j V_i^{-1} \qquad \text{for all } i, j \in F .
+$$
+
+The common domain $\Sigma \cong \mathbb{P}^2$ of the maps $V_i : \Sigma \to \mathcal{I}_i$
+is the **reference plane** (the panorama plane), and $U_i := V_i^{-1}$.
+
+**Proposition 4 (existence and gauge).**
+
+1. For every $A \in \mathrm{GL}(3)$, $V_i = [D_i^{-1} A]$ is a registration.
+2. Two registrations $V, V'$ of the same station satisfy $V'_i = V_i M$ for one
+   $M \in \mathrm{PGL}(3)$ and all $i$. The registrations form a right
+   $\mathrm{PGL}(3)$-torsor.
+3. Every registration has the form $V_i = [D_i^{-1} A]$, with $A = D_r V_r$ for
+   any $r \in F$.
+
+*Proof.* (1) $V_j V_i^{-1} = D_j^{-1} A A^{-1} D_i = H_{j \leftarrow i}$.
+(2) $V'_j V'^{-1}_i = V_j V_i^{-1}$ gives $V_j^{-1} V'_j = V_i^{-1} V'_i$, a
+constant $M$. (3) $D_i^{-1} D_r V_r = H_{i \leftarrow r} V_r = V_i V_r^{-1} V_r = V_i$. $\square$
+
+**Interpretation.** A point $[s] \in \Sigma$ is the ray through $C$ with
+direction $[A s]$, because $p = V_i s$ gives $D_i p = A s$. So $\Sigma$ is the
+space of rays at the optical centre, coordinatised by $A$; it is neither a
+top-down view nor 3D. With the root fixed by $V_r = I$, $A = D_r$ and $\Sigma$
+is frame $r$'s image plane.
+
+**Identifiability.** The family $\lbrace H_{j \leftarrow i} \rbrace$ does not
+determine $A$. The angle between the rays of $s, s' \in \Sigma$ is
+
+$$
+\cos \angle(s, s') = \frac{s^\top \omega_\Sigma\, s'}{\sqrt{s^\top \omega_\Sigma\, s}\ \sqrt{s'^\top \omega_\Sigma\, s'}},
+\qquad \omega_\Sigma := A^\top A ,
+$$
+
+and in an uncalibrated registration $\omega_\Sigma$ is unknown.
+
+### 4. Landmarks (the V/Q map ③)
+
+**Definition 4 (landmark).** A landmark is a point $q_k \in \Sigma$ with a
+descriptor $d_k \in \mathbb{R}^{128}$. Its observation in frame $i$ satisfies
+
+$$
+x_{ik} \sim V_i\, q_k \qquad \text{(up to measurement noise).}
+$$
+
+$q_k$ is a ray, not a metric 3D point; $q_{k,3} = 0$ is allowed and is a point
+at infinity of $\Sigma$'s affine chart.
+
+Building a map is the estimation problem
+
+$$
+\min_{\lbrace V_i \rbrace,\ \lbrace q_k \rbrace}\ \sum_{i,k} \rho\left( \left\lVert \varphi(V_i q_k) - x_{ik} \right\rVert \right),
+$$
+
+whose solution is unique only up to the gauge
+$(V_i, q_k) \mapsto (V_i M, M^{-1} q_k)$. vchao consumes a built map and does
+not document how it is produced.
 
 ### 5. Anchoring to the pitch
 
-With one anchor frame a whose Ti is known:
+**Proposition 5.** Let $C_z \neq 0$ and let $V$ be a registration. There is a
+unique $T_{\mathrm{ref}} \in \mathrm{PGL}(3)$ with
 
-```text
-T_ref = V_a⁻¹ Ti_a = K_r R_r [e1 e2 −C]    the reference plane's own Ti, a constant
-Ti_i  = V_i T_ref
-```
+$$
+T_i = V_i\, T_{\mathrm{ref}} \qquad \text{for all } i \in F,
+$$
 
-Check: `V_i T_ref = K_i R_i R_rᵀ K_r⁻¹ · K_r R_r [e1 e2 −C] = K_i R_i [e1 e2 −C] = Ti_i`.
-In general (`V_i ~ D_i⁻¹ A`), `T_ref ~ A⁻¹ [e1 e2 −C]`, and the same check holds
-because A cancels. The anchor fixes T_ref. A then follows as
-`A ~ [e1 e2 −C] T_ref⁻¹` once C is known (`C_z ≠ 0`); without C, the anchor
-alone does not determine A.
+namely
+
+$$
+T_{\mathrm{ref}} = \left[ A^{-1} G_0(C) \right] = V_a^{-1} T_a \qquad \text{for any anchor } a \in F .
+$$
+
+*Proof.* Existence: $V_i A^{-1} G_0(C) = D_i^{-1} G_0(C) = T_i$. Uniqueness:
+$V_i$ is invertible. The anchor form follows from $T_a = V_a T_{\mathrm{ref}}$. $\square$
+
+$T_{\mathrm{ref}} : \Pi_0 \to \Sigma$ sends a ground point to the ray through
+it. Under the gauge $V_i \mapsto V_i M$, $T_{\mathrm{ref}} \mapsto M^{-1} T_{\mathrm{ref}}$
+and $V_i T_{\mathrm{ref}}$ is unchanged.
+
+**Proposition 6 (recovering $A$).** If $C$ is known and $C_z \neq 0$, then
+
+$$
+A \sim G_0(C)\, T_{\mathrm{ref}}^{-1}, \qquad D_i^{-1} \sim V_i A^{-1},
+$$
+
+and the RQ decomposition of $V_i A^{-1}$, with the sign fixed by $\det R_i = 1$
+and the scale by $(K_i)_{33} = 1$, gives $K_i$ and $R_i$ uniquely. Without $C$,
+the anchor alone does not determine $A$; constraints on $K$ (zero skew, square
+pixels) are needed to solve for $C$ and $A$ together.
 
 ### 6. Live estimation (`atlas-vq-estimate`)
 
-```text
-new frame → ALIKED features → match against the V/Q map's landmarks q → (x, q) pairs
-          → RANSAC, then damped Gauss-Newton on a Huber loss for V_query only (8 DOF);
-            all other V and q stay fixed
-          → Ti_query = V_query · T_ref
-```
+Given a V/Q map $\lbrace (q_k, d_k) \rbrace$, $T_{\mathrm{ref}}$ and a new frame $f$:
 
-It outputs neither C nor K nor R. 3D objects also need C, which comes from a
-separate calibration (for example `C_world_metres` in a calibration package).
+**Step 1 (matching).** ALIKED features of $f$ are matched to the descriptors
+$d_k$ (mutual nearest neighbours with ratio tests), giving correspondences
+$\lbrace (x_m, q_{k(m)}) \rbrace$.
 
-### 7. Canonical Atlas ①: replace the unknown A with physical directions
+**Step 2 (resection).** RANSAC initialises, then damped Gauss-Newton solves the
+homography resection $\Sigma \to \mathcal{I}_f$ (8 degrees of freedom, at least
+4 correspondences). Residuals are measured in native pixels and $\rho_3$ is
+the Huber loss with a 3-pixel threshold:
 
-```text
-S_k     = station k's reference rotation: z towards the pitch centre, gravity up
-Q_a     = rotation of chart a relative to the station
-D_a     = S_k Q_a                       (K_a = I)
-H[a←i]  = D_a⁻¹ D_i = Q_aᵀ S_kᵀ D_i     frame → chart
-P_a E_0 = the pitch's projection on the chart; fixed, independent of the frame's pan, tilt and zoom
-```
+$$
+\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi(V q_{k(m)}) - x_m \right\rVert \right).
+$$
 
-From the panorama ② or the V/Q map ③ to the Atlas ①: solve for the unknown A
-(calibration), then `D_i = canon(A · V_i⁻¹)`. The projective product becomes
-the canonical Atlas, with physical angles and the real optical centre.
+**Step 3 (output).**
+
+$$
+T_f = \operatorname{canon}\left( \hat V_f\, T_{\mathrm{ref}} \right).
+$$
+
+The map's $V_i$, $q_k$ and $T_{\mathrm{ref}}$ stay fixed. $C$, $K$ and $R$ are
+not estimated.
+
+### 7. The canonical Atlas ① and the panorama ②
+
+**Definition 5 (canonical Atlas).** For a station with centre $C$, let
+$u = (0, 0, -1)^\top$ be world up and $O$ the pitch centre, and define
+
+$$
+b_3 = \frac{O - C}{\lVert O - C \rVert}, \qquad
+b_1 = \frac{b_3 \times u}{\lVert b_3 \times u \rVert}, \qquad
+b_2 = b_3 \times b_1, \qquad
+S = \begin{bmatrix} b_1 & b_2 & b_3 \end{bmatrix} \in \mathrm{SO}(3).
+$$
+
+Chart $a$ with rotation $Q_a \in \mathrm{SO}(3)$ relative to the station is the
+registration with
+
+$$
+A = D_a := S\, Q_a \quad (K_a = I), \qquad
+H_{a \leftarrow i} = D_a^{-1} D_i = Q_a^\top S^\top D_i ,
+$$
+
+and the pitch projects onto it by $T_{\mathrm{ref}}^{(a)} = D_a^{-1} G_0(C)$,
+independently of any frame. Here $\omega_\Sigma = A^\top A = I$ and the
+orientation is known, so Euclidean angles on the chart are physical ray angles.
+
+**Definition 6 (projective panorama).** Choose a root $r$ with $V_r = I$ and
+**assume** $\omega_\Sigma = I$. A display chart $c$ with rotation $R_c$ sends
+chart point $u$ to $V_i R_c u$ in frame $i$, and its colour is the per-channel
+median of the frames' colours $\mathrm{RGB}_i$
+
+$$
+B_c(u) = \operatorname{median} \left\lbrace \mathrm{RGB}_i\left( V_i R_c u \right) : V_i R_c u \text{ inside frame } i \right\rbrace .
+$$
+
+The true value is $\omega_\Sigma = D_r^\top D_r = K_r^{-\top} K_r^{-1} \neq I$
+in general, so chart angles are not physical.
+
+**Relation.** ② and ③ are registrations (Definition 3) with unknown $A$; ① is
+the registration whose $A$ is a known physical rotation. Upgrading ② or ③ to ①
+needs exactly the conditions of Proposition 6.
 
 ## Summary
 
-- V, q and T_ref live on one reference plane; this reference-plane registration
-  is the common idea behind all three products.
-- Keep only q, descriptors, V and T_ref: that is the V/Q map ③, used to solve Ti live.
-- Warp each frame's pixels back with V: that is the panorama ②, used to inspect and evaluate
-  the registration.
-- Calibrate the reference plane to the station's physical directions: that is
-  ①, the canonical `Atlas`, not yet implemented.
+- $V$, $q$ and $T_{\mathrm{ref}}$ live on one reference plane $\Sigma$, the ray
+  space at the station's optical centre; this registration is the common idea
+  behind all three products.
+- Keep only $q$, descriptors, $V$ and $T_{\mathrm{ref}}$: that is the V/Q map ③,
+  used to solve $T_f$ live.
+- Warp each frame's pixels back with $V$: that is the panorama ②, used to
+  inspect and evaluate the registration.
+- Fix $A$ to the station's physical directions: that is ①, the canonical
+  `Atlas`, not yet implemented.
