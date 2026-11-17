@@ -234,7 +234,8 @@ This worktree incorporates the upstream renderer's #84–#88 changes; the public
 scene/frame protocol is unchanged.
 
 The startup-only JSON has these fields (paths are relative to the manifest):
-`width`, `height` (native pixels), `fps`, `ti` (forward row-major 3x3 ground-to-SNC),
+`width`, `height` (native pixels), `fps` (an integer, or a string such as
+`"30000/1001"`), `ti` (forward row-major 3x3 ground-to-SNC),
 `center` (world metres), `radial` (`centre_px`, `scale_px`, three `coefficients`,
 nullable `support` as `[min_xy,max_xy]`), `frame_warps` (one row-major 3x3
 reference-native-pixel-to-frame-SNC matrix per decoded presentation frame),
@@ -760,9 +761,12 @@ ones. It waits for the tap if it does not exist yet and reopens it when
 `chr-server` restarts. Its loopback WebSocket (default `ws://127.0.0.1:8789`)
 serves `webrtc.offer` (previews close with that connection) and
 `monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`,
-`srt_callers`, `encoder`, `preview_width`, `preview_height`); it has no program
-control. `--size` and `--fps` must match `chr-server` (up to 4096x2160); slots in
-another mode are skipped and logged.
+`srt_callers`, `encoder`, `preview_width`, `preview_height`, `mode_changes`); it
+has no program control. `--size` and `--fps` (up to 4096x2160; an integer,
+`30000/1001` or `29.97`) are the mode it starts with; every tap slot carries the
+program's mode, and when chr-server changes it (its GStreamer core follows the
+input's rate) the monitor restarts its encoder in the new one, keeping WebRTC and
+SRT time monotonic.
 
 The tap stays at the program's native size. The monitor scales its preview down
 to fit 1920x1080, keeping the aspect ratio and never scaling up (3840x2160 becomes
@@ -779,7 +783,7 @@ instead. Encoding still follows a CPU readback of the program, not a GPU-to-enco
 path or physical SDI loop-out (#80).
 
 ```text
-chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
+chr-monitor [--tap <path>] [--size <WxH>] [--fps <rate>] [--ws <addr>]
             [--encoder openh264|gstreamer|nvenc|x264] [--srt <ip:port>]
             [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--allow-origin <origin>]
 ```

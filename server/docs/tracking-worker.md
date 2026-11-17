@@ -140,7 +140,7 @@ worker. The worker returns it unchanged; it must only read it.
 The caps are vchao's `wire_caps` for a source-stage stream:
 
 ```text
-video/x-raw, format=RGBA, width=<w>, height=<h>, framerate=<fps>/1,
+video/x-raw, format=RGBA, width=<w>, height=<h>, framerate=<num>/<den>,
   pixel-aspect-ratio=1/1, interlace-mode=progressive,
   vchao-stream-id=<id>, vchao-clock-domain=same-host-absolute-gst-system-clock-v1,
   vchao-layout=packed-rgba-v1, vchao-stage=source,
@@ -149,7 +149,10 @@ video/x-raw, format=RGBA, width=<w>, height=<h>, framerate=<fps>/1,
 
 chr's capture is a live stream, not a looped clip. vchao's caps nevertheless
 require a positive replay window, so chr sends a one-frame window.
-`pitch-analysis` only passes it on. The caps never change within a stream.
+`pitch-analysis` only passes it on. The caps never change within a stream: the
+framerate is the exact fraction (`30000/1001` for 29.97), and a new extent or
+rate is a new stream, a new worker session (the GStreamer core's format
+changes, [gst-core](gst-core.md#a-change-of-format-at-runtime)).
 
 ### `VchaoFrame` meta
 
@@ -164,7 +167,7 @@ string field `json`. Both sides register the meta before receiving, or
 | `frame_id` | 0, 1, 2, … within the session | The same, in the same order |
 | `source_ns` | Capture time on the same-host `GstSystemClock` (`CLOCK_MONOTONIC`); strictly increasing | The same |
 | `clock_domain` | `same-host-absolute-gst-system-clock-v1` | The same |
-| `duration_ns` | `1e9 / fps`, rounded down; equals the buffer duration | The same |
+| `duration_ns` | `1e9 × den / num` (one frame), rounded down; equals the buffer duration | The same |
 | `selection` | `null` | `{selected_ns, overdue, pose}` |
 
 - `selected_ns` is when the choice became final.

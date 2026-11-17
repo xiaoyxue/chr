@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::rate::Rate;
 use crate::scene_frame::{Flag, Id, Lighting, Matrix4, ShadowMode, U64};
 
 pub const PROFILE: &str = "chr-render-description-v1";
@@ -38,7 +39,9 @@ pub struct Camera {
     /// Native pixels.
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    /// The camera's nominal frame rate: an integer or a string such as
+    /// `"30000/1001"` ([`Rate`]).
+    pub fps: Rate,
     pub radial: Radial,
     /// A fixed camera for still renders (`chr-renderer-cli render --frame <n>`); the
     /// live server ignores it.

@@ -11,7 +11,7 @@ import { parseArgs } from "node:util";
 import { RTCPeerConnection, RTCRtpCodecParameters } from "werift";
 import { type AccessUnit, H264Depacketizer } from "../node/h264.ts";
 import { connectNativeSocket } from "../node/native-socket.ts";
-import { ErrorCode, Methods } from "../protocol.ts";
+import { ErrorCode, Methods, rateFps } from "../protocol.ts";
 import { RpcClient, RpcError, connectWebSocket } from "../rpc.ts";
 
 const HELP = `Usage: npm run verify -- [options]
@@ -19,7 +19,7 @@ const HELP = `Usage: npm run verify -- [options]
   --ws <url>          chr-server WebSocket    [env CHR_WS_URL, default ws://127.0.0.1:8787]
   --monitor <url>     chr-monitor WebSocket   [env CHR_MONITOR_URL, default ws://127.0.0.1:8789]
   --socket <path>     NativeSocket path       [env CHR_SOCKET, default $XDG_RUNTIME_DIR/chr/render.sock]
-  --fps <n>           Server frame rate       [default 50]
+  --fps <rate>        Server frame rate, 50 or 30000/1001 [default 50]
   --seconds <n>       Capture time per phase  [default 2]
   --out <dir>         Captured H.264 output   [default <repo>/output/render-harness]
   --skip-native       Skip NativeSocket checks
@@ -102,7 +102,7 @@ async function verifyWebSocket(ws: RpcClient): Promise<void> {
     const later = await ws.getState();
     const frames = later.frame - started.frame;
     assert(frames > 0, "frame did not advance");
-    const expected = (started.angle_rad + (Math.PI * frames) / Number(args.fps)) % TAU;
+    const expected = (started.angle_rad + (Math.PI * frames) / rateFps(args.fps)) % TAU;
     const error = Math.abs(later.angle_rad - expected);
     assert(Math.min(error, TAU - error) < 1e-6, `angle ${later.angle_rad} != ${expected}`);
     return `${frames} frames, angle ${started.angle_rad.toFixed(3)} -> ${later.angle_rad.toFixed(3)} rad`;
@@ -210,7 +210,7 @@ async function verifySdi(ws: RpcClient): Promise<void> {
     assert(before.pixel_format.startsWith("UYVY"), `unexpected format ${before.pixel_format}`);
     await sleep(1000);
     const after = await ws.getSdiStatus();
-    const fps = Number(args.fps);
+    const fps = rateFps(args.fps);
     const slots = after.frames_output - before.frames_output;
     assert(Math.abs(slots - fps) <= fps * 0.2, `${slots} slots in 1 s, expected about ${fps}`);
     assert(
@@ -258,7 +258,7 @@ async function verifyStream(
   names: { connect: string; stream: string; content: string; status: string },
 ): Promise<void> {
 
-  const fps = Number(args.fps);
+  const fps = rateFps(args.fps);
   const phaseMs = Number(args.seconds) * 1000;
   const captured: Captured[] = [];
   const depacketizer = new H264Depacketizer();

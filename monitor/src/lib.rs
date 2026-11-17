@@ -27,31 +27,42 @@ pub mod webrtc;
 
 use std::{
     sync::{
-        OnceLock,
+        Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use chr_common::methods::monitor::MonitorStatus;
+use chr_common::{methods::monitor::MonitorStatus, rate::Rate};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The program output's video mode; it must match `chr-server`'s.
+/// The program output's video mode. The monitor starts with the one it is given
+/// and follows the mode of the program tap's slots when `chr-server` changes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoMode {
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: Rate,
 }
 
 impl VideoMode {
+    /// For example `1920x1080p50` or `1920x1080p59.94`.
     pub fn name(&self) -> String {
-        format!("{}x{}p{}", self.width, self.height, self.fps)
+        format!("{}x{}p{}", self.width, self.height, self.fps.label())
     }
 
     pub fn frame_duration(&self) -> Duration {
-        Duration::from_secs_f64(1.0 / f64::from(self.fps))
+        self.fps.period()
+    }
+
+    /// The mode of a program tap slot, if it is a valid one.
+    pub fn of_slot(meta: &chr_shm::tap::SlotMeta) -> Option<Self> {
+        Some(Self {
+            width: meta.width,
+            height: meta.height,
+            fps: Rate::new(meta.rate_num, meta.rate_den).ok()?,
+        })
     }
 
     /// The preview's size: this mode scaled down to fit [`PREVIEW_MAX`] with its
@@ -94,21 +105,33 @@ pub struct Counters {
     pub frames_encoded: AtomicU64,
     pub frames_skipped: AtomicU64,
     pub srt_callers: AtomicU64,
-    /// Set once the encoder is chosen.
-    pub encoder: OnceLock<EncoderInfo>,
+    /// Changes of the program's mode the monitor followed.
+    pub mode_changes: AtomicU64,
+    /// The encoder in use, once chosen; replaced when the mode changes.
+    pub encoder: Mutex<Option<EncoderInfo>>,
 }
 
 impl Counters {
     pub fn status(&self, viewers: usize) -> MonitorStatus {
+        let encoder = self
+            .encoder
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         MonitorStatus {
             frames_encoded: self.frames_encoded.load(Ordering::Relaxed),
             frames_skipped: self.frames_skipped.load(Ordering::Relaxed),
             viewers: viewers as u64,
             srt_callers: self.srt_callers.load(Ordering::Relaxed),
-            encoder: self.encoder.get().map_or("", |info| info.name).to_owned(),
-            preview_width: self.encoder.get().map_or(0, |info| info.preview[0]),
-            preview_height: self.encoder.get().map_or(0, |info| info.preview[1]),
+            encoder: encoder.as_ref().map_or("", |info| info.name).to_owned(),
+            preview_width: encoder.as_ref().map_or(0, |info| info.preview[0]),
+            preview_height: encoder.as_ref().map_or(0, |info| info.preview[1]),
+            mode_changes: self.mode_changes.load(Ordering::Relaxed),
         }
+    }
+
+    fn set_encoder(&self, info: EncoderInfo) {
+        *self.encoder.lock().unwrap_or_else(PoisonError::into_inner) = Some(info);
     }
 }
 
@@ -122,7 +145,7 @@ mod tests {
             VideoMode {
                 width,
                 height,
-                fps: 30,
+                fps: Rate::fps(30),
             }
             .preview()
         };

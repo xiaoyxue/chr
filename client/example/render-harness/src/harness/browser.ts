@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { rateFps } from "../protocol.ts";
 
 const HELP = `Usage: npm run verify:browser -- [options]
 
@@ -16,7 +17,7 @@ const HELP = `Usage: npm run verify:browser -- [options]
                       [default http://localhost:5173/]
   --chrome <path>     Chrome binary            [env CHROME, default google-chrome]
   --seconds <n>       Stream time to observe   [default 4]
-  --fps <n>           Server frame rate        [default 50]
+  --fps <rate>        Server frame rate, 50 or 30000/1001 [default 50]
   --tcp-only          Open the page with ?transport=tcp and require an ICE-TCP path,
                       as through an SSH port forward (needs chr-monitor --webrtc-tcp)
   --screenshot <png>  Save a screenshot        [default <repo>/output/render-harness/browser.png]`;
@@ -193,7 +194,7 @@ async function main(): Promise<number> {
       return 1;
     }
 
-    const fps = Number(args.fps);
+    const fps = rateFps(args.fps);
     let failed = 0;
     for (const stats of JSON.parse(report) as PreviewStats[]) {
       const problems = [

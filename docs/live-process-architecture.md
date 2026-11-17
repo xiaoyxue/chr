@@ -155,10 +155,10 @@ wait.
 - Input-locked output with a fixed delay D, genlock and audio pass-through
   are #154 (with physical SDI, #80); the simulated output of the timer-paced
   loop keeps its own clock. The experimental GStreamer core (`--pipeline gst`,
-  [below](#gstreamer-core-pipeline-154-phase-1-experimental)) already runs the
+  [below](#gstreamer-core-pipeline-154-phases-1-and-2-experimental)) already runs the
   input-locked fixed-D model in simulation.
 
-## GStreamer core pipeline (#154, phase 1, experimental)
+## GStreamer core pipeline (#154, phases 1 and 2, experimental)
 
 `chr-server --pipeline gst` replaces the input ring, the timer-paced render
 loop and the simulated SDI port with **one GStreamer pipeline** owned by
@@ -181,9 +181,17 @@ measurements: [GStreamer core](../server/docs/gst-core.md).
   relinked for its replacement, without restarting `chr-server`.
 - **Not used:** `fallbackswitch` (gst-plugins-rs) switches streams on a
   timeout and cannot give a single late frame its own clean feed.
+- **Rates and formats** (phase 2): rates are exact fractions everywhere
+  (`chr_common::rate::Rate`: `50`, `30000/1001`); the core takes the frame's
+  extent and rate from the capture's caps, which may change at runtime. A new
+  format is a new tracking stream (a restarted tracking worker, as vchao
+  requires) with clean feed until its first CG, deadlines and D stay as they
+  are, and the output follows the input's rate (`--output-rate follow`) or
+  converts it to a fixed one (`fixed:<rate>`); chr-monitor follows the tap's
+  mode without a restart.
 
-Phases 2–5 of #154 (fractional and changing rates, DeckLink and genlock,
-audio/ANC/timecode, switch-over) are open.
+Phases 3–5 of #154 (DeckLink and genlock, audio/ANC/timecode, switch-over) are
+open.
 
 ## Failure handling
 

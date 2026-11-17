@@ -35,6 +35,7 @@ use crate::worker::{
 };
 use chr_common::{
     methods::{render_worker::WorkerState, tracking::TrackerStatus},
+    rate::Rate,
     scene_frame as w,
 };
 use chr_tracker::{
@@ -64,8 +65,8 @@ pub const STREAM_ID_PLACEHOLDER: &str = "{stream_id}";
 /// (`wait` at `fps`) plus a margin. A worker holding more answers too late for
 /// any of them to be rendered, so it is replaced rather than sent fewer frames:
 /// a VchaoFrame stream has no gaps.
-pub fn in_flight_limit(wait: Duration, fps: u32) -> usize {
-    let frames = ((wait + IN_FLIGHT_MARGIN).as_nanos() * u128::from(fps)).div_ceil(1_000_000_000);
+pub fn in_flight_limit(wait: Duration, fps: Rate) -> usize {
+    let frames = fps.frames_in(wait + IN_FLIGHT_MARGIN);
     usize::try_from(frames).map_or(usize::MAX, |n| n.max(MIN_IN_FLIGHT))
 }
 
@@ -77,7 +78,7 @@ pub struct TrackerConfig {
     pub args: Vec<String>,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: Rate,
     /// The station's optical centre for every camera: world metres, negative Z up.
     pub camera_center: [f64; 3],
     /// Private directory for the worker's two sockets; removed with the tracker.
@@ -117,6 +118,9 @@ pub struct Tracker {
     answered: Vec<Answer>,
     /// Workers started so far; numbers the streams.
     sessions: u64,
+    /// The next worker starts a new format's stream rather than replacing a
+    /// failed one: it is not a restart.
+    reconfigured: bool,
     backoff: Duration,
 }
 
@@ -181,6 +185,7 @@ impl Tracker {
             },
             answered: Vec::new(),
             sessions: 0,
+            reconfigured: false,
             backoff: FIRST_BACKOFF,
         })
     }
@@ -239,6 +244,42 @@ impl Tracker {
             }
         }
         self.answered.clear();
+    }
+
+    /// Takes frames of another extent or rate from now on: a new stream, as
+    /// vchao takes a caps change within a stream as fatal. The current worker
+    /// is killed (its frames get no answer) and the next one starts at once
+    /// with the new caps; vchao's `pitch-analysis` reloads its model for
+    /// it. `in_flight` is the limit at the new rate ([`in_flight_limit`]).
+    pub fn reconfigure(&mut self, width: u32, height: u32, fps: Rate, in_flight: usize) {
+        let config = &mut self.config;
+        if (config.width, config.height, config.fps, config.in_flight)
+            == (width, height, fps, in_flight)
+        {
+            return;
+        }
+        log::info!(
+            "tracking worker: frames now {width}x{height} at {fps} fps; starting a new stream"
+        );
+        (config.width, config.height, config.fps, config.in_flight) =
+            (width, height, fps, in_flight);
+        if let State::Starting { worker, .. } | State::Ready { worker, .. } = std::mem::replace(
+            &mut self.state,
+            State::Backoff {
+                until: Instant::now(),
+            },
+        ) {
+            // At once, as a failed worker: the next one's sockets take the
+            // same paths, and the core must not wait for it.
+            worker.kill();
+        }
+        self.answered.clear();
+        self.reconfigured = true;
+        self.backoff = FIRST_BACKOFF;
+        let mut status = self.status();
+        status.state = WorkerState::Backoff;
+        status.pid = None;
+        status.stream_id = None;
     }
 
     /// Handles returned frames, then replaces an exited, failed, hung or
@@ -415,7 +456,7 @@ impl Tracker {
     }
 
     fn spawn(&mut self) {
-        if self.sessions > 0 {
+        if self.sessions > 0 && !std::mem::take(&mut self.reconfigured) {
             self.status().restarts += 1;
         }
         self.sessions += 1;
@@ -561,12 +602,18 @@ mod tests {
     #[test]
     fn the_in_flight_limit_covers_the_wait() {
         let ms = Duration::from_millis;
+        let fps = Rate::fps;
         // 1.5 s + 0.25 s at 50 fps.
-        assert_eq!(in_flight_limit(ms(1500), 50), 88);
+        assert_eq!(in_flight_limit(ms(1500), fps(50)), 88);
         // pitch-analysis holds up to ceil(500 ms / frame) + 8 + 2 frames: 25 at 30 fps.
-        assert!(in_flight_limit(ms(600), 30) >= 25);
-        assert_eq!(in_flight_limit(ms(1000), 30), 38);
-        assert_eq!(in_flight_limit(ms(60), 50), 16);
-        assert_eq!(in_flight_limit(Duration::ZERO, 1), MIN_IN_FLIGHT);
+        assert!(in_flight_limit(ms(600), fps(30)) >= 25);
+        assert_eq!(in_flight_limit(ms(1000), fps(30)), 38);
+        // 1.25 s at 59.94: 74.925 frames.
+        assert_eq!(
+            in_flight_limit(ms(1000), Rate::new(60000, 1001).unwrap()),
+            75
+        );
+        assert_eq!(in_flight_limit(ms(60), fps(50)), 16);
+        assert_eq!(in_flight_limit(Duration::ZERO, fps(1)), MIN_IN_FLIGHT);
     }
 }

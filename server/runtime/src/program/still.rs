@@ -239,7 +239,7 @@ mod tests {
     const MODE: VideoMode = VideoMode {
         width: 64,
         height: 32,
-        fps: 50,
+        fps: chr_common::rate::Rate::fps(50),
     };
 
     fn still() -> Still {
@@ -316,7 +316,7 @@ mod tests {
         let too_large = VideoMode {
             width: 1920,
             height: 1080,
-            fps: 50,
+            fps: chr_common::rate::Rate::fps(50),
         };
         assert!(
             prepare(Still {

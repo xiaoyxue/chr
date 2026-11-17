@@ -277,8 +277,11 @@ pub mod sdi {
     /// whether or not a new rendered frame is ready.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct SdiStatus {
-        /// For example `1280x720p30`.
+        /// For example `1280x720p30` or `1920x1080p59.94`.
         pub video_mode: String,
+        /// The output's frame rate now: an integer or a string such as
+        /// `"60000/1001"`.
+        pub rate: crate::rate::Rate,
         /// For example `UYVY 4:2:2 8-bit, BT.709 limited range`.
         pub pixel_format: String,
         /// Output slots sent, including repeats.
@@ -289,6 +292,14 @@ pub mod sdi {
         pub dropped_frames: u64,
         /// Render frame index of the most recent output slot.
         pub last_source_frame: Option<u64>,
+        /// Input format (rate or extent) changes followed at runtime
+        /// (`--pipeline gst`).
+        #[serde(default)]
+        pub format_changes: u64,
+        /// Slots sent as clean feed while a format change was in progress: from
+        /// the first frame in the new format to its first CG frame.
+        #[serde(default)]
+        pub transition_clean_slots: u64,
     }
 }
 
@@ -353,6 +364,10 @@ pub mod monitor {
         /// aspect ratio; WebRTC and SRT carry the same stream.
         pub preview_width: u32,
         pub preview_height: u32,
+        /// Changes of the program tap's mode (rate or extent) that the monitor
+        /// followed by restarting its encoder.
+        #[serde(default)]
+        pub mode_changes: u64,
     }
 }
 

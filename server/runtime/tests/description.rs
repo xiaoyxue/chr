@@ -22,7 +22,7 @@ use std::{
 const MODE: VideoMode = VideoMode {
     width: 192,
     height: 128,
-    fps: 50,
+    fps: chr_common::rate::Rate::fps(50),
 };
 
 fn png(rgba: [u8; 4]) -> Vec<u8> {
@@ -349,7 +349,7 @@ fn cameras_up_to_4k_render_at_any_output_size_of_their_aspect() {
     let output = |width, height| VideoMode {
         width,
         height,
-        fps: 30,
+        fps: chr_common::rate::Rate::fps(30),
     };
     for (native, size) in [
         ((4096, 2160), (4096, 2160)),

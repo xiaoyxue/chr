@@ -706,7 +706,7 @@ mod ipc {
             VideoMode {
                 width: 1280,
                 height: 720,
-                fps: 50,
+                fps: chr_common::rate::Rate::fps(50),
             },
             Taps::default(),
         )

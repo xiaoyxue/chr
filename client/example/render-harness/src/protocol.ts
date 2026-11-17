@@ -100,9 +100,25 @@ export interface SessionDescription {
   sdp: string;
 }
 
+/**
+ * A frame rate, as chr-common's `Rate` serializes it: an integer (`50`) or a
+ * fraction string (`"30000/1001"`).
+ */
+export type Rate = number | string;
+
+/** Frames per second of a {@link Rate}: `50`, `29.97002997…`. */
+export function rateFps(rate: Rate): number {
+  if (typeof rate === "number") return rate;
+  const [numerator, denominator = "1"] = rate.split("/");
+  return Number(numerator) / Number(denominator);
+}
+
 /** Simulated SDI output counters since the server started. */
 export interface SdiStatus {
+  /** For example `1280x720p30` or `1920x1080p59.94`. */
   video_mode: string;
+  /** The output's rate now. */
+  rate: Rate;
   pixel_format: string;
   /** Output slots sent, including repeats. */
   frames_output: number;
@@ -111,6 +127,10 @@ export interface SdiStatus {
   /** Rendered frames discarded because the output queue was full. */
   dropped_frames: number;
   last_source_frame: number | null;
+  /** Input format changes followed at runtime (`--pipeline gst`). */
+  format_changes: number;
+  /** Clean-feed slots while a format change was in progress. */
+  transition_clean_slots: number;
 }
 
 /** The render worker process supervised by chr-server. */
@@ -181,6 +201,8 @@ export interface MonitorStatus {
   /** Preview size: the program output scaled down to fit 1920x1080; WebRTC and SRT carry it. */
   preview_width: number;
   preview_height: number;
+  /** Changes of the program's mode the monitor followed. */
+  mode_changes: number;
 }
 
 export function isTriangleState(value: unknown): value is TriangleState {

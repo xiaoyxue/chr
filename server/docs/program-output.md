@@ -42,13 +42,16 @@ Never retain handles across restarts. Configuration is immutable until restart.
 The flag selects explicit integration settings, **not production defaults**:
 even native/output dimensions at most 1280×720 (a limit of this demonstration
 and `--software-video` only; the camera programs built on the same configuration
-take native and output extents up to 4096×2160), integral 1–120 FPS,
+take native and output extents up to 4096×2160), 1–120 fps, integer or
+fractional (`--fps 30000/1001`, `29.97`, `59.94`),
 contain fit, BT.709 display background/output, exposure multiplier 1, ACES,
 one raster sample, 256-pixel shadow maps, 9-tap PCF, one cascade, bounded
 PCSS settings, 16 MiB shadow/canvas budgets and a 1 MiB environment budget.
 The complete values are returned by `render.get_configuration`.
-The port rejects sRGB output and fractional-rate configurations rather than
-silently relabeling or overriding them. Input descriptors retain their real
+The port rejects sRGB output and rates outside 1–120 fps rather than
+silently relabeling or overriding them; its slots run at exact rational times
+(slot `n` at `n × den / num` s from its start), so a fractional rate does not
+drift. Input descriptors retain their real
 RGBA8/BGRA8/RGBA16F format, transfer and alpha convention.
 
 There are 4 scene slots, 8 instances/scene, 4 lights/scene, 8 operations/mutation,

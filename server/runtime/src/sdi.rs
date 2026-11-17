@@ -13,7 +13,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
     },
@@ -23,6 +23,7 @@ use std::{
 
 use crate::frame_submissions::{OutputFrame, OutputPort, Provenance};
 use chr_common::methods::sdi::SdiStatus;
+use chr_common::rate::Rate;
 use chr_common::scene_frame as w;
 
 pub const PIXEL_FORMAT: &str = "UYVY 4:2:2 8-bit, BT.709 limited range";
@@ -37,16 +38,41 @@ pub const POLL: Duration = Duration::from_millis(100);
 pub struct VideoMode {
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: Rate,
 }
 
 impl VideoMode {
+    /// For example `1920x1080p50` or `1920x1080p59.94`.
     pub fn name(&self) -> String {
-        format!("{}x{}p{}", self.width, self.height, self.fps)
+        format!("{}x{}p{}", self.width, self.height, self.fps.label())
     }
 
+    /// One frame, rounded down to the nanosecond; schedules use
+    /// [`Rate::frame_time`], which does not drift.
     pub fn frame_duration(&self) -> Duration {
-        Duration::from_secs_f64(1.0 / f64::from(self.fps))
+        self.fps.period()
+    }
+
+    /// The input ring's metadata of a frame in this mode.
+    pub fn input_meta(&self) -> chr_shm::input::SlotMeta {
+        chr_shm::input::SlotMeta {
+            width: self.width,
+            height: self.height,
+            rate_num: self.fps.num(),
+            rate_den: self.fps.den(),
+        }
+    }
+
+    /// The program tap's metadata of a slot in this mode.
+    pub fn tap_meta(&self, source_frame: u64, program: bool) -> chr_shm::tap::SlotMeta {
+        chr_shm::tap::SlotMeta {
+            source_frame,
+            program,
+            width: self.width,
+            height: self.height,
+            rate_num: self.fps.num(),
+            rate_den: self.fps.den(),
+        }
     }
 }
 
@@ -82,6 +108,8 @@ struct Counters {
     dropped: AtomicU64,
     last_source_frame: AtomicU64,
     has_source_frame: AtomicBool,
+    format_changes: AtomicU64,
+    transition_clean_slots: AtomicU64,
 }
 
 /// The pipeline's handle for submitting frames.
@@ -140,56 +168,82 @@ impl SdiInput {
 /// Read-only view of the output counters.
 #[derive(Clone)]
 pub struct SdiStats {
-    mode: VideoMode,
+    mode: Arc<Mutex<VideoMode>>,
     counters: Arc<Counters>,
 }
 
 /// Records the slots of an output driven elsewhere: chr-server's GStreamer
 /// core (`--pipeline gst`, #154), whose output sink takes every slot.
 #[derive(Clone)]
-pub struct SdiRecorder(Arc<Counters>);
+pub struct SdiRecorder {
+    mode: Arc<Mutex<VideoMode>>,
+    counters: Arc<Counters>,
+}
 
 impl SdiRecorder {
     /// One transmitted slot carrying capture frame `source_frame`; a repeat
     /// of the previous slot's frame if `repeated`.
     pub fn output(&self, source_frame: u64, repeated: bool) {
-        self.0.frames_output.fetch_add(1, Ordering::Relaxed);
+        let counters = &self.counters;
+        counters.frames_output.fetch_add(1, Ordering::Relaxed);
         if repeated {
-            self.0.repeated.fetch_add(1, Ordering::Relaxed);
+            counters.repeated.fetch_add(1, Ordering::Relaxed);
         }
-        self.0
+        counters
             .last_source_frame
             .store(source_frame, Ordering::Relaxed);
-        self.0.has_source_frame.store(true, Ordering::Release);
+        counters.has_source_frame.store(true, Ordering::Release);
+    }
+
+    /// The output's mode from its next slot on.
+    pub fn set_mode(&self, output: VideoMode) {
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = output;
+    }
+
+    /// One change of the input's format, whether or not the output's mode
+    /// follows it.
+    pub fn format_changed(&self) {
+        self.counters.format_changes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One more slot of clean feed during a format change.
+    pub fn transition_clean(&self) {
+        self.counters
+            .transition_clean_slots
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
 impl SdiStats {
+    fn new(mode: VideoMode, counters: Arc<Counters>) -> Self {
+        Self {
+            mode: Arc::new(Mutex::new(mode)),
+            counters,
+        }
+    }
+
     /// Stats of an output that `SdiRecorder` records.
     pub fn recorded(mode: VideoMode) -> (Self, SdiRecorder) {
-        let counters = Arc::new(Counters::default());
-        (
-            Self {
-                mode,
-                counters: Arc::clone(&counters),
-            },
-            SdiRecorder(counters),
-        )
+        let stats = Self::new(mode, Arc::default());
+        let recorder = SdiRecorder {
+            mode: Arc::clone(&stats.mode),
+            counters: Arc::clone(&stats.counters),
+        };
+        (stats, recorder)
     }
 
     /// Stats for an output that never runs, for tests of status reporting.
     #[cfg(test)]
     pub fn idle(mode: VideoMode) -> Self {
-        Self {
-            mode,
-            counters: Arc::default(),
-        }
+        Self::new(mode, Arc::default())
     }
 
     pub fn status(&self) -> SdiStatus {
         let counters = &self.counters;
+        let mode = *self.mode.lock().unwrap_or_else(PoisonError::into_inner);
         SdiStatus {
-            video_mode: self.mode.name(),
+            video_mode: mode.name(),
+            rate: mode.fps,
             pixel_format: PIXEL_FORMAT.to_owned(),
             frames_output: counters.frames_output.load(Ordering::Relaxed),
             repeated_frames: counters.repeated.load(Ordering::Relaxed),
@@ -198,6 +252,8 @@ impl SdiStats {
                 .has_source_frame
                 .load(Ordering::Acquire)
                 .then(|| counters.last_source_frame.load(Ordering::Relaxed)),
+            format_changes: counters.format_changes.load(Ordering::Relaxed),
+            transition_clean_slots: counters.transition_clean_slots.load(Ordering::Relaxed),
         }
     }
 }
@@ -270,7 +326,7 @@ impl SdiOutput {
                 frame_bytes: mode.width as usize * mode.height as usize * 2,
                 program_enabled,
             },
-            stats: SdiStats { mode, counters },
+            stats: SdiStats::new(mode, counters),
             stop,
             thread: Some(thread),
         })
@@ -315,7 +371,9 @@ fn run_output(
     };
     let period = mode.frame_duration();
     // Two slots of preroll let the queue absorb jitter between the two clocks.
-    let mut deadline = Instant::now() + period * 2;
+    // Slot deadlines count from `epoch`, so the rational cadence never drifts.
+    let (mut epoch, mut epoch_slot) = (Instant::now() + period * 2, 0u64);
+    let mut deadline = epoch;
     let mut slot = 0u64;
     while !stop.load(Ordering::Relaxed) {
         if let Some(wait) = deadline.checked_duration_since(Instant::now()) {
@@ -344,13 +402,7 @@ fn run_output(
             }
         });
         if let Some(ring) = &mut taps.ring {
-            let meta = chr_shm::tap::SlotMeta {
-                source_frame: current.source_frame,
-                program: current.program.is_some(),
-                width: mode.width,
-                height: mode.height,
-                fps: mode.fps,
-            };
+            let meta = mode.tap_meta(current.source_frame, current.program.is_some());
             let header = chr_shm::SlotHeader {
                 index: slot,
                 meta: meta.to_meta(),
@@ -375,13 +427,13 @@ fn run_output(
             return;
         };
         slot = next;
-        deadline += period;
+        deadline = epoch + mode.fps.frame_time(slot - epoch_slot);
         let now = Instant::now();
         if now > deadline + period {
             // A stalled process cannot send late slots in a burst; real hardware would
             // have kept ticking, so the missed slots are simply gone.
             log::debug!("SDI output stalled for {:?}", now - deadline);
-            deadline = now;
+            (epoch, epoch_slot, deadline) = (now, slot, now);
         }
     }
 }
@@ -400,7 +452,7 @@ mod tests {
         let mode = VideoMode {
             width: 16,
             height: 16,
-            fps: 50,
+            fps: Rate::fps(50),
         };
         let (mut synthetic, adapter) = Synthetic::install(mode, runtime_id().unwrap()).unwrap();
         let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
@@ -482,7 +534,7 @@ mod tests {
         let mode = VideoMode {
             width: 64,
             height: 32,
-            fps: 100,
+            fps: Rate::fps(100),
         };
         let (taps, observer) = Taps::observed();
         let output = SdiOutput::spawn(mode, taps).unwrap();
@@ -525,7 +577,7 @@ mod tests {
         let mode = VideoMode {
             width: 16,
             height: 16,
-            fps: 200,
+            fps: Rate::fps(100),
         };
         let dir = std::env::temp_dir().join(format!("chr-sdi-tap-{}", std::process::id()));
         let path = dir.join("program.tap");
@@ -557,13 +609,7 @@ mod tests {
         );
         assert_eq!(
             chr_shm::tap::SlotMeta::from_meta(header.meta),
-            chr_shm::tap::SlotMeta {
-                source_frame: 3,
-                program: false,
-                width: 16,
-                height: 16,
-                fps: 200
-            }
+            mode.tap_meta(3, false)
         );
         assert_eq!(payload, *frame);
         std::fs::remove_dir_all(dir).unwrap();

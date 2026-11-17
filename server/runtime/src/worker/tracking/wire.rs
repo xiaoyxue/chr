@@ -9,6 +9,7 @@
 //! It carries exactly one `GstCustomMeta` named [`META`] whose structure has a
 //! string field `json`: a [`FrameMeta`].
 
+use chr_common::rate::Rate;
 use chr_tracker::protocol::{self, CLOCK_DOMAIN, FrameMeta, LAYOUT, META, STAGE};
 use gstreamer::{self as gst, prelude::*};
 
@@ -20,19 +21,22 @@ pub fn now_ns() -> u64 {
 }
 
 /// One stream of frames: a worker session. A restarted worker gets a new stream,
-/// whose `frame_id`s start at 0 again.
+/// whose `frame_id`s start at 0 again, and so does a new extent or rate: vchao
+/// takes a caps change within a stream as fatal.
 #[derive(Clone, Debug)]
 pub struct Wire {
     pub stream_id: String,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: Rate,
 }
 
 impl Wire {
-    /// Nanoseconds per frame, rounded down.
+    /// Nanoseconds per frame, rounded down: every frame's VchaoFrame
+    /// `duration_ns`. Timestamps come from the clock, so this rounding never
+    /// accumulates.
     pub fn duration_ns(&self) -> u64 {
-        1_000_000_000 / u64::from(self.fps)
+        self.fps.period_ns()
     }
 
     pub fn frame_bytes(&self) -> usize {
@@ -47,7 +51,7 @@ impl Wire {
             .field("format", "RGBA")
             .field("width", self.width as i32)
             .field("height", self.height as i32)
-            .field("framerate", gst::Fraction::new(self.fps as i32, 1))
+            .field("framerate", fraction(self.fps))
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .field("interlace-mode", "progressive")
             .field("vchao-stream-id", self.stream_id.as_str())
@@ -80,6 +84,17 @@ impl Wire {
         )?;
         Ok(buffer)
     }
+}
+
+/// `rate` as a GStreamer fraction; [`Rate`]'s terms are 31-bit.
+pub fn fraction(rate: Rate) -> gst::Fraction {
+    gst::Fraction::new(rate.num() as i32, rate.den() as i32)
+}
+
+/// The rate of a caps `framerate` fraction.
+pub fn rate_of(fraction: gst::Fraction) -> Result<Rate, Error> {
+    let (num, den) = (fraction.numer(), fraction.denom());
+    Ok(Rate::new(u32::try_from(num)?, u32::try_from(den)?)?)
 }
 
 /// Sets the buffer's meta, replacing one it already carries.
@@ -169,7 +184,7 @@ mod tests {
             stream_id: "chr-test".into(),
             width: 4,
             height: 2,
-            fps: 50,
+            fps: Rate::fps(50),
         }
     }
 
@@ -217,6 +232,26 @@ mod tests {
         );
         check_caps(&wire().caps(), "chr-test").unwrap();
         assert!(check_caps(&wire().caps(), "another").is_err());
+    }
+
+    #[test]
+    fn fractional_rates_are_caps_fractions_and_a_rounded_duration() {
+        gst::init().unwrap();
+        let ntsc = Wire {
+            fps: Rate::new(60000, 1001).unwrap(),
+            ..wire()
+        };
+        let caps = ntsc.caps();
+        let structure = caps.structure(0).unwrap();
+        let framerate = structure.get::<gst::Fraction>("framerate").unwrap();
+        assert_eq!((framerate.numer(), framerate.denom()), (60000, 1001));
+        assert_eq!(rate_of(framerate).unwrap(), ntsc.fps);
+        assert_eq!(ntsc.duration_ns(), 16_683_333);
+        assert_eq!(
+            structure.get::<u64>("vchao-replay-duration-ns").unwrap(),
+            16_683_333
+        );
+        assert!(rate_of(gst::Fraction::new(0, 1)).is_err());
     }
 
     #[test]

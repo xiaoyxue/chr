@@ -127,7 +127,7 @@ fn run(args: Args) -> Result<()> {
         calibration::lens::CHECKS, input::software::VideoInput, program::video::Manifest,
         sdi::VideoMode,
     };
-    use chr_shm::{SlotHeader, Writer, input::SlotMeta};
+    use chr_shm::{SlotHeader, Writer};
     use chr_tracker::replay::TrackingReplay;
 
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(&args.scene)?)?;
@@ -151,12 +151,7 @@ fn run(args: Args) -> Result<()> {
         &args.input_ring,
         chr_shm::input::layout(mode.width, mode.height),
     )?;
-    let meta = SlotMeta {
-        width: mode.width,
-        height: mode.height,
-        fps: mode.fps,
-    }
-    .to_meta();
+    let meta = mode.input_meta().to_meta();
     if !args.send_cameras {
         log::info!(
             "simulating a {} SDI input: frames into {}; the server's tracking worker supplies cameras",

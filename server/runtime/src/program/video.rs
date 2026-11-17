@@ -28,7 +28,7 @@ use std::{fs, path::Path, path::PathBuf, sync::Arc};
 pub struct Manifest {
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: chr_common::rate::Rate,
     pub ti: [[f64; 3]; 3],
     pub center: [f64; 3],
     pub radial: Radial,

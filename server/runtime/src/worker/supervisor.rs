@@ -253,6 +253,7 @@ impl Supervisor {
         pixels: &Pixels,
         frame: &w::FrameInput,
         scene: &w::SceneSnapshot,
+        time_base: w::TimeBase,
         deadline: Instant,
     ) -> Result<Vec<u8>, Miss> {
         let id = self.reserve()?;
@@ -269,6 +270,7 @@ impl Supervisor {
                 image: image.clone(),
                 frame: frame.clone(),
                 scene: Box::new(scene.clone()),
+                time_base,
             },
             Some(memory),
             deadline,
@@ -285,6 +287,7 @@ impl Supervisor {
         memory: gstreamer::Memory,
         frame: &w::FrameInput,
         scene: &w::SceneSnapshot,
+        time_base: w::TimeBase,
     ) -> Result<u64, Miss> {
         let id = self.reserve()?;
         let request = Request::Render {
@@ -292,6 +295,7 @@ impl Supervisor {
             image: image.clone(),
             frame: frame.clone(),
             scene: Box::new(scene.clone()),
+            time_base,
         };
         let State::Ready { worker, .. } = &mut self.state else {
             unreachable!("reserved while ready");
@@ -679,7 +683,7 @@ mod tests {
             output: Output {
                 width: 16,
                 height: 16,
-                fps: 50,
+                fps: chr_common::rate::Rate::fps(50),
             },
             socket_dir: dir.join("sockets"),
             hang: Duration::from_millis(200),

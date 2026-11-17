@@ -155,9 +155,6 @@ struct Triangle {
 struct Program {
     adapter: SceneAdapter,
     renderer: ProgramRenderer,
-    /// Seconds per tick of request positions: the server's program frames tick at
-    /// the output rate.
-    time_base: w::TimeBase,
     /// The last bound scene; reused while requests carry the same snapshot.
     scene: Option<Arc<BoundScene>>,
 }
@@ -222,7 +219,6 @@ fn start(requests: &Receiver) -> Result<Worker, Error> {
             Renderer::Program(Box::new(Program {
                 adapter: installed.adapter,
                 renderer,
-                time_base: installed.program.configuration.output_rate,
                 scene: None,
             }))
         }
@@ -251,7 +247,8 @@ impl Worker {
                 image,
                 frame,
                 scene,
-            } => (*id, self.render(request, image, frame, scene)),
+                time_base,
+            } => (*id, self.render(request, image, frame, scene, *time_base)),
         };
         Ok((
             id,
@@ -279,6 +276,7 @@ impl Worker {
         image: &w::ImageDescription,
         frame: &w::FrameInput,
         snapshot: &w::SceneSnapshot,
+        time_base: w::TimeBase,
     ) -> Result<(), Error> {
         let Renderer::Program(program) = &mut self.renderer else {
             return Err("this worker renders the triangle, not a program".into());
@@ -286,7 +284,6 @@ impl Worker {
         let Program {
             adapter,
             renderer,
-            time_base,
             scene,
         } = &mut **program;
         let pixels = request.payload()?;
@@ -317,7 +314,7 @@ impl Worker {
                 key: &frame.frame,
                 lens: crate::program::frame_lens(&frame.geometry)?,
                 frame_warp: crate::program::frame_warp(&frame.geometry),
-                seconds: crate::program::media_seconds(*time_base, frame.position.ticks.get()),
+                seconds: crate::program::media_seconds(time_base, frame.position.ticks.get()),
             },
         )?;
         Ok(())

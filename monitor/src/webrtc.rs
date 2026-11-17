@@ -82,7 +82,6 @@ impl IceConfig {
 
 pub struct WebRtcHub {
     feed: Arc<VideoFeed>,
-    fps: u32,
     ice: IceConfig,
     state: Mutex<HubState>,
 }
@@ -118,10 +117,9 @@ impl PeerConnectionEventHandler for PeerEvents {
 
 impl WebRtcHub {
     /// Every peer streams `feed`, the encoded program output.
-    pub fn new(feed: Arc<VideoFeed>, fps: u32, ice: IceConfig) -> Self {
+    pub fn new(feed: Arc<VideoFeed>, ice: IceConfig) -> Self {
         Self {
             feed,
-            fps,
             ice,
             state: Mutex::new(HubState::default()),
         }
@@ -323,11 +321,10 @@ impl WebRtcHub {
             .map(|codec| codec.payload_type)
             .ok_or("no negotiated video codec")?;
 
-        let frame_duration = Duration::from_secs_f64(1.0 / f64::from(self.fps));
         let mut frames = feed.subscribe();
         feed.request_keyframe();
         let mut need_keyframe = true;
-        let mut last_frame: Option<u64> = None;
+        let mut last_pts: Option<Duration> = None;
         loop {
             tokio::select! {
                 changed = state.changed() => {
@@ -345,13 +342,16 @@ impl WebRtcHub {
                             continue;
                         }
                         need_keyframe = false;
-                        // RTP time follows logical frames, so dropped frames keep their slot.
-                        let elapsed_frames = last_frame
-                            .map_or(1, |last| frame.frame.saturating_sub(last).max(1));
-                        last_frame = Some(frame.frame);
+                        // RTP time follows the slots' media time, so dropped
+                        // frames keep their time, also across a change of rate.
+                        let elapsed = last_pts
+                            .map(|last| frame.pts.saturating_sub(last))
+                            .filter(|elapsed| !elapsed.is_zero())
+                            .unwrap_or(frame.duration);
+                        last_pts = Some(frame.pts);
                         let sample = Sample {
                             data: frame.data.clone(),
-                            duration: frame_duration * elapsed_frames as u32,
+                            duration: elapsed,
                             ..Sample::new(Instant::now())
                         };
                         track

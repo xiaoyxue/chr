@@ -1,15 +1,19 @@
 //! The program's consumers after `livesync`: the simulated OUTPUT, an `appsink`
 //! that takes every slot on the clock as an SDI card would (phase 3 puts
 //! `decklinkvideosink` here), with cadence and delay statistics; and the
-//! shared-memory program tap that chr-monitor reads, so the monitor works
-//! unchanged. Neither can delay the other: the tap's queue drops.
+//! shared-memory program tap that chr-monitor reads. Both take each slot's
+//! rate from its caps, which change with the input's rate when the output
+//! follows it; the tap's slots carry it to chr-monitor, which follows it.
+//! Neither can delay the other: the tap's queue drops.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 
-use super::{PROGRAM_META, Timeline};
+use chr_common::rate::Rate;
+
+use super::{PROGRAM_META, Timeline, capture::format_of};
 use crate::sdi::{SdiRecorder, VideoMode};
 
 /// One program slot as the output took it.
@@ -74,13 +78,14 @@ impl Summary {
             .sqrt()
     }
 
-    /// `min/mean/max ms (sd)`, or `-` without values.
+    /// `min/mean/max ms (sd)`, or `-` without values; the mean to 0.1 µs, to
+    /// show a cadence's exact average.
     pub fn ms(&self) -> String {
         if self.count == 0 {
             return "-".to_owned();
         }
         format!(
-            "{:.3}/{:.3}/{:.3} ms (sd {:.3})",
+            "{:.3}/{:.4}/{:.3} ms (sd {:.3})",
             self.min as f64 / 1e6,
             self.mean() / 1e6,
             self.max as f64 / 1e6,
@@ -90,18 +95,22 @@ impl Summary {
 }
 
 /// Output cadence and capture-to-output delay over a series of slots.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Totals {
-    pub period_ns: u64,
     pub slots: u64,
     pub cg: u64,
     pub clean: u64,
+    /// Slots `livesync` filled with the previous frame: no frame came.
     pub repeats: u64,
+    /// Slots showing the previous slot's frame again by design: the fixed
+    /// output rate is above the input's.
+    pub duplicates: u64,
     /// Captured frames that never reached the output between two that did.
     pub skipped: u64,
-    /// Time between consecutive slots.
-    pub interval: Summary,
-    /// Slots more than a quarter period off the period.
+    /// Time between consecutive slots at each rate, the current one last; the
+    /// interval across a change of rate is in none.
+    pub intervals: Vec<(Rate, Summary)>,
+    /// Slots more than a quarter period off their rate's period.
     pub irregular: u64,
     /// Output time minus due time.
     pub lateness: Summary,
@@ -112,26 +121,49 @@ pub struct Totals {
 }
 
 impl Totals {
-    pub fn new(period_ns: u64) -> Self {
-        Self {
-            period_ns,
-            ..Self::default()
-        }
+    /// The intervals at `rate`.
+    pub fn interval(&self, rate: Rate) -> Option<&Summary> {
+        self.intervals
+            .iter()
+            .find(|(at, _)| *at == rate)
+            .map(|(_, summary)| summary)
     }
 
-    pub fn record(&mut self, slot: &Rendered) {
+    /// One slot of the output at `rate`.
+    pub fn record(&mut self, slot: &Rendered, rate: Rate) {
         self.slots += 1;
+        if self.intervals.last().is_none_or(|(last, _)| *last != rate) {
+            self.last_at = None;
+            if self.interval(rate).is_none() {
+                self.intervals.push((rate, Summary::default()));
+            }
+        }
         if let Some(last) = self.last_at {
             let interval = slot.at_ns as i64 - last as i64;
-            self.interval.add(interval);
-            if (interval - self.period_ns as i64).unsigned_abs() > self.period_ns / 4 {
+            let period = rate.frame_ns(1) as i64;
+            let (_, summary) = self
+                .intervals
+                .iter_mut()
+                .find(|(at, _)| *at == rate)
+                .expect("added above");
+            summary.add(interval);
+            if (interval - period).unsigned_abs() > period.unsigned_abs() / 4 {
                 self.irregular += 1;
             }
+        }
+        // Keep the rate's place last, so the next slot at it counts on.
+        if let Some(index) = self.intervals.iter().position(|(at, _)| *at == rate) {
+            let entry = self.intervals.remove(index);
+            self.intervals.push(entry);
         }
         self.last_at = Some(slot.at_ns);
         self.lateness.add(slot.at_ns as i64 - slot.due_ns as i64);
         if slot.repeat {
             self.repeats += 1;
+            return;
+        }
+        if self.last_sequence == Some(slot.sequence) {
+            self.duplicates += 1;
             return;
         }
         if slot.cg {
@@ -149,15 +181,25 @@ impl Totals {
     }
 
     pub fn report(&self) -> String {
+        let intervals: Vec<String> = self
+            .intervals
+            .iter()
+            .map(|(rate, summary)| format!("at {} fps {}", rate.label(), summary.ms()))
+            .collect();
         format!(
-            "output: {} slots ({} CG, {} clean feed, {} repeats, {} frames skipped), interval \
-             min/mean/max {}, {} irregular, delay {}, lateness {}",
+            "output: {} slots ({} CG, {} clean feed, {} repeats, {} duplicates, {} frames \
+             skipped), interval min/mean/max {}, {} irregular, delay {}, lateness {}",
             self.slots,
             self.cg,
             self.clean,
             self.repeats,
+            self.duplicates,
             self.skipped,
-            self.interval.ms(),
+            if intervals.is_empty() {
+                "-".to_owned()
+            } else {
+                intervals.join(", ")
+            },
             self.irregular,
             self.delay.ms(),
             self.lateness.ms()
@@ -176,6 +218,7 @@ struct Tap {
 }
 
 pub struct Output {
+    /// The output's extent; each slot's rate comes from its caps.
     mode: VideoMode,
     timeline: Timeline,
     window: Mutex<Totals>,
@@ -191,12 +234,11 @@ impl Output {
         tap: Option<chr_shm::Writer>,
         recorder: SdiRecorder,
     ) -> Self {
-        let period = mode.frame_duration().as_nanos() as u64;
         Self {
             mode,
             timeline,
-            window: Mutex::new(Totals::new(period)),
-            totals: Mutex::new(Totals::new(period)),
+            window: Mutex::default(),
+            totals: Mutex::default(),
             tap: Mutex::new(tap.map(|ring| Tap {
                 ring,
                 slot: 0,
@@ -207,32 +249,45 @@ impl Output {
         }
     }
 
-    fn rendered(&self, buffer: &gst::BufferRef) {
+    /// The rate of a sample's caps, else the output's at start.
+    fn rate(&self, sample: &gst::Sample) -> Rate {
+        sample
+            .caps()
+            .and_then(|caps| format_of(caps).ok())
+            .map_or(self.mode.fps, |format| format.fps)
+    }
+
+    fn rendered(&self, sample: &gst::Sample) {
         let at = self.timeline.clock.time();
-        let Some(slot) = Rendered::of(buffer, at, &self.timeline) else {
+        let Some(slot) = sample
+            .buffer()
+            .and_then(|buffer| Rendered::of(buffer, at, &self.timeline))
+        else {
             log::warn!("an output slot without its program meta");
             return;
         };
-        lock(&self.window).record(&slot);
-        lock(&self.totals).record(&slot);
+        let rate = self.rate(sample);
+        lock(&self.window).record(&slot, rate);
+        lock(&self.totals).record(&slot, rate);
         self.recorder.output(slot.sequence, slot.repeat);
     }
 
-    fn tapped(&self, buffer: &gst::BufferRef) {
+    fn tapped(&self, sample: &gst::Sample) {
         let mut tap = lock(&self.tap);
         let Some(writer) = tap.as_mut() else {
+            return;
+        };
+        let Some(buffer) = sample.buffer() else {
             return;
         };
         let Some(slot) = Rendered::of(buffer, gst::ClockTime::ZERO, &self.timeline) else {
             return;
         };
-        let meta = chr_shm::tap::SlotMeta {
-            source_frame: slot.sequence,
-            program: slot.cg,
-            width: self.mode.width,
-            height: self.mode.height,
-            fps: self.mode.fps,
-        };
+        let meta = VideoMode {
+            fps: self.rate(sample),
+            ..self.mode
+        }
+        .tap_meta(slot.sequence, slot.cg);
         let header = chr_shm::SlotHeader {
             index: writer.slot,
             meta: meta.to_meta(),
@@ -261,8 +316,7 @@ impl Output {
 
     /// The output since the last report, and the tap's slot delay.
     pub fn report(&self) -> String {
-        let period = self.mode.frame_duration().as_nanos() as u64;
-        let window = std::mem::replace(&mut *lock(&self.window), Totals::new(period));
+        let window = std::mem::take(&mut *lock(&self.window));
         let tap = lock(&self.tap);
         match tap.as_ref() {
             Some(tap) => format!(
@@ -276,7 +330,7 @@ impl Output {
     }
 
     pub fn totals(&self) -> Totals {
-        *lock(&self.totals)
+        lock(&self.totals).clone()
     }
 }
 
@@ -287,9 +341,7 @@ pub fn attach(output: &Arc<Output>, output_sink: &AppSink, tap_sink: &AppSink) {
         AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Flushing)?;
-                if let Some(buffer) = sample.buffer() {
-                    rendering.rendered(buffer);
-                }
+                rendering.rendered(&sample);
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),
@@ -299,9 +351,7 @@ pub fn attach(output: &Arc<Output>, output_sink: &AppSink, tap_sink: &AppSink) {
         AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Flushing)?;
-                if let Some(buffer) = sample.buffer() {
-                    tapping.tapped(buffer);
-                }
+                tapping.tapped(&sample);
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),
@@ -329,11 +379,12 @@ mod tests {
 
     #[test]
     fn totals_count_cadence_repeats_and_skips() {
-        let mut totals = Totals::new(20_000_000);
-        totals.record(&slot(1000, 0, true, false));
-        totals.record(&slot(1020, 1, false, false));
-        totals.record(&slot(1040, 1, false, true));
-        totals.record(&slot(1070, 3, true, false));
+        let fifty = Rate::fps(50);
+        let mut totals = Totals::default();
+        totals.record(&slot(1000, 0, true, false), fifty);
+        totals.record(&slot(1020, 1, false, false), fifty);
+        totals.record(&slot(1040, 1, false, true), fifty);
+        totals.record(&slot(1070, 3, true, false), fifty);
         assert_eq!(
             (
                 totals.slots,
@@ -344,15 +395,30 @@ mod tests {
             ),
             (4, 2, 1, 1, 1)
         );
-        assert_eq!(
-            (totals.interval.min, totals.interval.max),
-            (20_000_000, 30_000_000)
-        );
+        let interval = totals.interval(fifty).unwrap();
+        assert_eq!((interval.min, interval.max), (20_000_000, 30_000_000));
         assert_eq!(totals.irregular, 1);
         assert_eq!(totals.delay.count, 3, "repeats have no delay of their own");
         assert_eq!(
             (totals.delay.min, totals.delay.max),
             (100_000_000, 100_000_000)
         );
+    }
+
+    #[test]
+    fn totals_keep_intervals_per_rate_and_count_duplicates() {
+        let (fifty, quarter) = (Rate::fps(50), Rate::fps(25));
+        let mut totals = Totals::default();
+        totals.record(&slot(1000, 0, true, false), quarter);
+        totals.record(&slot(1040, 1, true, false), quarter);
+        // The input switched to 50 fps: the first interval at it is in neither.
+        totals.record(&slot(1080, 2, true, false), fifty);
+        totals.record(&slot(1100, 3, true, false), fifty);
+        // A fixed output above the input's rate shows a frame twice.
+        totals.record(&slot(1120, 3, true, false), fifty);
+        assert_eq!(totals.interval(quarter).unwrap().count, 1);
+        assert_eq!(totals.interval(fifty).unwrap().count, 2);
+        assert_eq!(totals.interval(fifty).unwrap().mean(), 20_000_000.0);
+        assert_eq!((totals.irregular, totals.duplicates, totals.cg), (0, 1, 4));
     }
 }

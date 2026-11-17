@@ -1,11 +1,15 @@
 //! H.264 encoding and the bounded fan-out of encoded frames to WebRTC viewers.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use bytes::Bytes;
+use chr_common::rate::Rate;
 use openh264::{
     OpenH264API,
     encoder::{
@@ -19,8 +23,12 @@ use tokio::sync::broadcast;
 /// One encoded H.264 access unit in Annex B format.
 #[derive(Debug)]
 pub struct EncodedFrame {
-    /// Output slot index; consecutive slots are one frame duration apart.
+    /// Output slot index, monotonic for the monitor's lifetime.
     pub frame: u64,
+    /// Media time of the slot: monotonic, following the program's rate.
+    pub pts: Duration,
+    /// The slot's duration at the program's rate.
+    pub duration: Duration,
     /// True for IDR frames, which carry SPS/PPS and start a decodable sequence.
     pub keyframe: bool,
     pub data: Bytes,
@@ -85,15 +93,16 @@ pub type EncodeResult = Result<Option<(Vec<u8>, bool)>, openh264::Error>;
 impl H264Encoder {
     /// `vui` signals the YCbCr matrix and range decoders must use; it has to match how
     /// the encoded YUV was produced. The frame size comes from each encoded frame.
-    pub fn new(fps: u32, vui: VuiConfig) -> Result<Self, openh264::Error> {
+    pub fn new(fps: Rate, vui: VuiConfig) -> Result<Self, openh264::Error> {
+        let gop = u32::try_from(fps.frames_in(Duration::from_secs(2))).unwrap_or(u32::MAX);
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
             .profile(Profile::Baseline)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(4_000_000))
-            .max_frame_rate(FrameRate::from_hz(fps as f32))
+            .max_frame_rate(FrameRate::from_hz(fps.as_f64() as f32))
             // A periodic IDR bounds recovery time if a keyframe request is ever missed.
-            .intra_frame_period(IntraFramePeriod::from_num_frames(fps.saturating_mul(2)))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(gop))
             .skip_frames(false)
             .vui(vui);
         Ok(Self {
@@ -135,7 +144,7 @@ mod tests {
     #[test]
     fn first_and_forced_frames_are_idr_with_parameter_sets() {
         let (width, height) = (64, 48);
-        let mut encoder = H264Encoder::new(30, VuiConfig::bt709()).unwrap();
+        let mut encoder = H264Encoder::new(Rate::fps(30), VuiConfig::bt709()).unwrap();
         let mut frame = YUVBuffer::new(width as usize, height as usize);
         let (first, keyframe) = encoder.encode_yuv(&frame, false).unwrap().unwrap();
         assert!(keyframe);

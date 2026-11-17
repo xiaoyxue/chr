@@ -4,7 +4,8 @@
 //! solid frames (`CHR_WORKER_TEST_SOLID`). Every slot leaves at its capture
 //! time plus the program delay, with CG or its own clean feed; a killed or
 //! stalled worker costs CG only, and its restart is relinked into the running
-//! pipeline.
+//! pipeline. A change of the input's rate is followed (or converted to a
+//! fixed output rate) without a restart, with a new tracking stream.
 
 use std::{
     path::{Path, PathBuf},
@@ -12,11 +13,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chr_common::methods::{render_worker::WorkerStatus, tracking::TrackerStatus};
+use chr_common::{
+    methods::{render_worker::WorkerStatus, tracking::TrackerStatus},
+    rate::Rate,
+};
 use chr_runtime::{
     calibration::lens::CHECKS,
     gst_core::{
-        Core, CoreConfig,
+        Core, CoreConfig, OutputRate,
         driver::{Driver, Program},
         input::{Input, Source},
         output::Totals,
@@ -29,7 +33,7 @@ use chr_runtime::{
         protocol::{Output, WorkerProgram},
         serve::{DELAY_ENV, SOLID_ENV},
         supervisor::{Supervisor, WorkerConfig, status_handle},
-        tracking::supervisor::{Tracker, TrackerConfig},
+        tracking::supervisor::{Tracker, TrackerConfig, in_flight_limit},
     },
 };
 use chr_tracker::{join::TrackingFeed, lens::LensSelection};
@@ -38,7 +42,7 @@ use serde_json::json;
 const MODE: VideoMode = VideoMode {
     width: 192,
     height: 128,
-    fps: 50,
+    fps: chr_common::rate::Rate::fps(50),
 };
 const DELAY: Duration = Duration::from_millis(100);
 
@@ -112,11 +116,27 @@ impl Workers {
     fn tracking_pid(&self) -> Option<u32> {
         self.tracking.lock().unwrap().pid
     }
+
+    fn tracking_stream(&self) -> Option<String> {
+        self.tracking.lock().unwrap().stream_id.clone()
+    }
 }
 
-/// Runs the core on `fixture` while `scenario` runs, then returns what it
-/// returns. The capture runs in this process.
-async fn with_core<T>(fixture: &Fixture, scenario: impl AsyncFnOnce(&Core, &Workers) -> T) -> T {
+/// What a scenario sees: the core, its workers, its capture and its status.
+struct Run<'a> {
+    core: &'a Core,
+    workers: &'a Workers,
+    input: std::cell::RefCell<Input>,
+    sdi: SdiStats,
+}
+
+/// Runs the core on `fixture` with the output at `policy` while `scenario`
+/// runs, then returns what it returns. The capture runs in this process.
+async fn with_core_at<T>(
+    fixture: &Fixture,
+    policy: OutputRate,
+    scenario: impl AsyncFnOnce(&Run<'_>) -> T,
+) -> T {
     let input = Input::start(&Source::TestPattern(MODE), &fixture.path("capture.sock"), 4).unwrap();
     let installed = ProgramSpec::Description {
         path: fixture.path("description.json"),
@@ -124,10 +144,15 @@ async fn with_core<T>(fixture: &Fixture, scenario: impl AsyncFnOnce(&Core, &Work
     .install(MODE, chr_runtime::program::synthetic::runtime_id().unwrap())
     .unwrap();
     let (synthetic, adapter) = (installed.program, installed.adapter);
-    let (_, recorder) = SdiStats::recorded(MODE);
+    let output = match policy {
+        OutputRate::Follow => MODE,
+        OutputRate::Fixed(fps) => VideoMode { fps, ..MODE },
+    };
+    let (sdi, recorder) = SdiStats::recorded(output);
     let (core, frames) = Core::start(CoreConfig {
         capture: MODE,
-        output: MODE,
+        output,
+        output_rate: policy,
         capture_socket: fixture.path("capture.sock"),
         program_delay: DELAY,
         tap: Some(fixture.path("program.tap")),
@@ -151,7 +176,7 @@ async fn with_core<T>(fixture: &Fixture, scenario: impl AsyncFnOnce(&Core, &Work
             camera_center: [0., 0., -8.],
             socket_dir: fixture.path("tracking"),
             hang: Duration::from_millis(500),
-            in_flight: 16,
+            in_flight: in_flight_limit(DELAY, MODE.fps),
             host: core.host(),
         },
         Arc::clone(&workers.tracking),
@@ -189,15 +214,30 @@ async fn with_core<T>(fixture: &Fixture, scenario: impl AsyncFnOnce(&Core, &Work
         program,
         16,
     );
+    let run = Run {
+        core: &core,
+        workers: &workers,
+        input: std::cell::RefCell::new(input),
+        sdi,
+    };
     let result = tokio::select! {
         result = driver.run(frames) => panic!("the driver stopped: {result:?}"),
-        result = scenario(&core, &workers) => result,
+        result = scenario(&run) => result,
     };
     control.shutdown().await;
     drop(control);
     owner.await.unwrap();
+    let input = run.input;
     drop((core, input));
     result
+}
+
+/// [`with_core_at`] with the output following the input's rate.
+async fn with_core<T>(fixture: &Fixture, scenario: impl AsyncFnOnce(&Core, &Workers) -> T) -> T {
+    with_core_at(fixture, OutputRate::Follow, async move |run| {
+        scenario(run.core, run.workers).await
+    })
+    .await
 }
 
 /// Waits until `done` holds, at most `limit`.
@@ -214,7 +254,7 @@ async fn over(core: &Core, period: Duration) -> (Totals, Counters) {
     let (output, selector) = (core.output_totals(), core.selector_counters());
     tokio::time::sleep(period).await;
     let (after, decided) = (core.output_totals(), core.selector_counters());
-    let mut totals = after;
+    let mut totals = after.clone();
     (totals.slots, totals.cg, totals.clean, totals.repeats) = (
         after.slots - output.slots,
         after.cg - output.cg,
@@ -286,7 +326,7 @@ async fn every_slot_leaves_at_the_program_delay_with_its_cg() {
             ms(delay.min),
             ms(delay.max)
         );
-        let interval = totals.interval;
+        let interval = *totals.interval(MODE.fps).unwrap();
         assert!(
             (ms(interval.mean() as i64) - 20.).abs() < 0.5,
             "{interval:?}"
@@ -374,6 +414,111 @@ async fn a_killed_or_stopped_worker_gives_clean_feed_and_cg_resumes_after_relink
             "the delay stayed constant: {}",
             after.report()
         );
+    })
+    .await;
+}
+
+/// The core's statistics once `count` more CG slots came after a change of
+/// the input to `mode`: the transition is over.
+async fn switch(run: &Run<'_>, mode: VideoMode) {
+    let transitions = run.core.selector_counters().transitions;
+    run.input.borrow_mut().switch(mode).unwrap();
+    until(Duration::from_secs(5), || {
+        run.core.selector_counters().transitions > transitions
+    })
+    .await;
+    let cg = run.core.selector_counters().cg;
+    until(Duration::from_secs(10), || {
+        run.core.selector_counters().cg > cg + 25
+    })
+    .await;
+}
+
+fn assert_mean_period(totals: &Totals, rate: Rate) {
+    let interval = totals.interval(rate).expect("slots at the rate");
+    let period = rate.frame_ns(1) as f64;
+    assert!(
+        interval.count > 20 && (interval.mean() - period).abs() < period * 0.02,
+        "at {rate} fps: {}",
+        totals.report()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_output_follows_a_change_of_rate_with_a_new_tracking_stream() {
+    let fixture = Fixture::new("follow", 0);
+    with_core_at(&fixture, OutputRate::Follow, async |run| {
+        let core = run.core;
+        until(Duration::from_secs(10), || core.selector_counters().cg > 25).await;
+        let stream = run.workers.tracking_stream().unwrap();
+        let ntsc = Rate::new(30000, 1001).unwrap();
+        for fps in [Rate::fps(25), ntsc] {
+            switch(run, VideoMode { fps, ..MODE }).await;
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let status = run.sdi.status();
+            assert_eq!(status.rate, fps, "the output follows: {status:?}");
+        }
+        let totals = core.output_totals();
+        for fps in [MODE.fps, Rate::fps(25), ntsc] {
+            assert_mean_period(&totals, fps);
+        }
+        assert_eq!(totals.repeats, 0, "{}", totals.report());
+        assert!(
+            totals.delay.max - totals.delay.min < 10_000_000,
+            "D stays constant: {}",
+            totals.report()
+        );
+        let counters = core.selector_counters();
+        assert_eq!(counters.transitions, 2, "{counters:?}");
+        let status = run.sdi.status();
+        assert_eq!(
+            (status.format_changes, status.transition_clean_slots),
+            (2, counters.transition_clean)
+        );
+        assert!(
+            run.workers
+                .tracking_stream()
+                .is_some_and(|now| now != stream),
+            "a new format is a new tracking stream"
+        );
+        assert_eq!(
+            run.workers.tracking.lock().unwrap().restarts,
+            0,
+            "a new stream is no restart"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fixed_output_rate_converts_every_input_rate() {
+    let fixture = Fixture::new("fixed", 0);
+    let fixed = Rate::fps(50);
+    with_core_at(&fixture, OutputRate::Fixed(fixed), async |run| {
+        let core = run.core;
+        until(Duration::from_secs(10), || core.selector_counters().cg > 25).await;
+        for fps in [Rate::fps(25), Rate::new(30000, 1001).unwrap()] {
+            switch(run, VideoMode { fps, ..MODE }).await;
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+        let totals = core.output_totals();
+        assert_eq!(
+            totals.intervals.len(),
+            1,
+            "one output rate: {}",
+            totals.report()
+        );
+        assert_mean_period(&totals, fixed);
+        assert_eq!(totals.irregular, 0, "{}", totals.report());
+        assert!(
+            totals.duplicates > 20,
+            "slower input repeats: {}",
+            totals.report()
+        );
+        assert_eq!(run.sdi.status().rate, fixed);
+        let counters = core.selector_counters();
+        assert_eq!(counters.transitions, 2, "{counters:?}");
+        assert!(counters.rate_repeats > 20, "{counters:?}");
     })
     .await;
 }

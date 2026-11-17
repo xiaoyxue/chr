@@ -2,9 +2,10 @@
 //! sequence: the same measurement for chr-server's timer-paced loop and its
 //! GStreamer core (#154).
 //!
-//! `cargo run --release -p chr-shm --example tap_stats -- <tap> <seconds> <fps>`
+//! `cargo run --release -p chr-shm --example tap_stats -- <tap> <seconds>`
 //!
-//! It polls the tap every 200 µs, so intervals include up to that much of
+//! The expected period comes from each slot's rate; a change of rate starts a
+//! new segment with its own interval statistics. It polls the tap every 200 µs, so intervals include up to that much of
 //! polling jitter. A slot repeats the previous one's frame (`source_frame`) or
 //! skips frames; `slot - frame` is the output's delay in slots, which stays
 //! constant while the output follows the input frame for frame. Every change
@@ -20,16 +21,15 @@ use chr_shm::{Read, Reader, tap::SlotMeta};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [path, seconds, fps] = args.as_slice() else {
-        return Err("usage: tap_stats <tap> <seconds> <fps>".into());
+    let [path, seconds, ..] = args.as_slice() else {
+        return Err("usage: tap_stats <tap> <seconds>".into());
     };
-    let period = 1e3 / fps.parse::<f64>()?;
     let tap = Reader::open(path.as_ref())?;
     let end = Instant::now() + Duration::from_secs(seconds.parse()?);
     let (mut seen, mut payload) = (tap.write_count(), Vec::new());
     let (mut last_at, mut last_frame): (Option<Instant>, Option<u64>) = (None, None);
     let (mut slots, mut missed, mut repeats, mut skipped, mut program) = (0_u64, 0, 0, 0, 0);
-    let (mut intervals, mut irregular) = (Vec::new(), 0_u64);
+    let mut segments: Vec<Segment> = Vec::new();
     let mut deltas: BTreeMap<i64, u64> = BTreeMap::new();
     let (start, mut changes, mut last_program) = (Instant::now(), Vec::new(), None);
     while Instant::now() < end {
@@ -52,10 +52,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             changes.push((at.duration_since(start).as_secs_f64(), slots, meta.program));
         }
         last_program = Some(meta.program);
+        let rate = (meta.rate_num, meta.rate_den);
+        if segments.last().is_none_or(|segment| segment.rate != rate) {
+            segments.push(Segment {
+                rate,
+                start: at.duration_since(start).as_secs_f64(),
+                slots: 0,
+                intervals: Vec::new(),
+                irregular: 0,
+            });
+            // The first interval of a new rate belongs to neither.
+            last_at = None;
+        }
+        let segment = segments.last_mut().expect("pushed above");
+        segment.slots += 1;
         if let Some(last) = last_at {
             let ms = at.duration_since(last).as_secs_f64() * 1e3;
-            intervals.push(ms);
-            irregular += u64::from((ms - period).abs() > period / 4.);
+            let period = 1e3 * f64::from(rate.1) / f64::from(rate.0);
+            segment.intervals.push(ms);
+            segment.irregular += u64::from((ms - period).abs() > period / 4.);
         }
         last_at = Some(at);
         match last_frame {
@@ -68,20 +83,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .entry(header.index as i64 - meta.source_frame as i64)
             .or_default() += 1;
     }
-    let n = intervals.len().max(1) as f64;
-    let mean = intervals.iter().sum::<f64>() / n;
-    let sd = (intervals.iter().map(|ms| (ms - mean).powi(2)).sum::<f64>() / n).sqrt();
-    let (min, max) = intervals.iter().fold((f64::MAX, f64::MIN), |(lo, hi), ms| {
-        (lo.min(*ms), hi.max(*ms))
-    });
     println!(
         "slots {slots} (missed by the reader {missed}), program (CG) {program}, \
          repeats {repeats}, frames skipped {skipped}"
     );
-    println!(
-        "interval min/mean/max {min:.3}/{mean:.3}/{max:.3} ms, sd {sd:.3} ms, \
-         {irregular} off by more than a quarter period"
-    );
+    for segment in &segments {
+        let intervals = &segment.intervals;
+        let n = intervals.len().max(1) as f64;
+        let mean = intervals.iter().sum::<f64>() / n;
+        let sd = (intervals.iter().map(|ms| (ms - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let (min, max) = intervals.iter().fold((f64::MAX, f64::MIN), |(lo, hi), ms| {
+            (lo.min(*ms), hi.max(*ms))
+        });
+        let (num, den) = segment.rate;
+        println!(
+            "from t={:.2}s at {num}/{den} fps ({:.6} ms): {} slots, interval \
+             min/mean/max {min:.3}/{mean:.6}/{max:.3} ms, sd {sd:.3} ms, {} off by more than a \
+             quarter period",
+            segment.start,
+            1e3 * f64::from(den) / f64::from(num),
+            segment.slots,
+            segment.irregular
+        );
+    }
     println!("slot - frame: {deltas:?}");
     for pair in changes.windows(2).filter(|pair| !pair[0].2) {
         let ((at, from, _), (_, to, _)) = (pair[0], pair[1]);
@@ -91,4 +115,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("t={at:.2}s: {} slots without CG to the end", slots - from);
     }
     Ok(())
+}
+
+/// Slots at one rate.
+struct Segment {
+    rate: (u32, u32),
+    /// Seconds after the start of the measurement.
+    start: f64,
+    slots: u64,
+    intervals: Vec<f64>,
+    irregular: u64,
 }

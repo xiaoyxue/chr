@@ -79,7 +79,7 @@ impl Synthetic {
             "profile":"scene_frame_v1",
             "native_extent":{"width":mode.width,"height":mode.height},
             "output_extent":{"width":mode.width,"height":mode.height},
-            "output_rate":{"numerator":1,"denominator":mode.fps},
+            "output_rate":mode.fps.time_base(),
             "fit":"contain","input_stage":"display_background","output_transfer":"bt709",
             "exposure":1,"tone_map":"aces","sample_count":1,
             "shadows":{"resolution":256,"filter_radius":2,"pcf_samples":9,

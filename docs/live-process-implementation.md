@@ -51,7 +51,7 @@ crate; data moves through explicit copies and atomics.
 
 ```text
 file header (64 bytes)
-  magic        8 bytes  "CHRSHM01"
+  magic        8 bytes  "CHRSHM02"
   slot_count   u32
   reserved     u32
   slot_bytes   u64      payload capacity per slot
@@ -82,8 +82,9 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
   `$XDG_RUNTIME_DIR/chr/program.tap`). The SDI output thread writes every
   transmitted slot, repeats included, into an 8-slot ring:
   `index` = output slot, `meta[0]` = source frame, `meta[1]` = 1 when the slot
-  carries a program frame, `meta[2]` = `width << 32 | height`, `meta[3]` = fps
-  (`chr_shm::tap`, shared by both processes).
+  carries a program frame, `meta[2]` = `width << 32 | height`, `meta[3]` =
+  the rate `num << 32 | den` (`chr_shm::tap`, shared by both processes; layout
+  `CHRSHM02` since rates became fractions, #154 phase 2).
 - The output thread's monitor channel and `monitor_dropped_frames` are gone;
   `sdi.get_status` dropped that field (Rust and TypeScript mirror). An optional
   in-process observer remains for tests that check slot provenance.
@@ -92,18 +93,20 @@ slot i (64-byte header + slot_bytes payload, 64-byte aligned)
 ### `chr-monitor`
 
 ```text
-chr-monitor [--tap <path>] [--size <WxH>] [--fps <n>] [--ws <addr>]
+chr-monitor [--tap <path>] [--size <WxH>] [--fps <rate>] [--ws <addr>]
             [--webrtc-udp <addr|none>] [--webrtc-tcp <addr>] [--srt <ip:port>]
             [--encoder openh264|gstreamer|nvenc|x264] [--allow-origin <origin>]
 ```
 
-- `--size`/`--fps` (defaults 1280x720, 50) must match the server: the ring
-  layout is checked on open and each slot's `meta` mode before encoding;
-  mismatches are skipped and logged once. The monitor polls at half the frame
-  period and encodes the newest slot while anyone watches; skipped indices are
-  counted. It waits for a missing tap and reopens an idle one, because a
-  restarted `chr-server` replaces the file; encoder and RTP time stay monotonic
-  across such restarts.
+- `--size`/`--fps` (defaults 1280x720, 50) are the mode it starts with; each
+  slot's `meta` carries the program's mode, and when it changes (the GStreamer
+  core follows its input's rate, #154 phase 2) the monitor restarts its encoder
+  in the new mode (`mode_changes` in `monitor.get_status`). A slot whose
+  payload does not match its mode is skipped and logged once. The monitor polls
+  at half the frame period and encodes the newest slot while anyone watches;
+  skipped indices are counted. It waits for a missing tap and reopens an idle
+  one, because a restarted `chr-server` replaces the file; encoder, RTP and SRT
+  time stay monotonic across such restarts and rate changes.
 - Serves JSON-RPC `webrtc.offer` (same params/result as before) and a new
   `monitor.get_status` (`frames_encoded`, `frames_skipped`, `viewers`,
   `srt_callers`) on its own WebSocket, default `127.0.0.1:8789`, using the
@@ -223,10 +226,10 @@ stdout joins it, stdin is unused.
 
 | Direction | `type` | Payload | Fields |
 | --- | --- | --- | --- |
-| server → worker | `hello` | – | `version` (3), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`), `assets` |
+| server → worker | `hello` | – | `version` (4), `program` (program specification), `runtime_id`, `output` (`width`, `height`, `fps`: an integer or `"30000/1001"`), `assets` |
 | worker → server | `ready` | – | `adapter` (logged GPU adapter) |
 | worker → server | `fatal` | – | `message`; the worker then exits |
-| server → worker | `render` | input image | `id`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`) |
+| server → worker | `render` | input image | `id`, `image` (`ImageDescription`), `frame` (`FrameInput`: frame key and geometry), `scene` (`SceneSnapshot`), `time_base` (seconds per tick of `frame.position`; version 4) |
 | server → worker | `triangle` | – | `id`, `frame`, `angle_rad` (default triangle mode) |
 | worker → server | `done` | UYVY frame | `id` |
 | worker → server | `failed` | – | `id`, `message` |
