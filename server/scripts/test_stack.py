@@ -77,6 +77,13 @@ class ComponentTests(unittest.TestCase):
         render = by_name["render"].command
         self.assertNotIn("github:nix-community/nixGL#nixGLNvidia", render)
         self.assertEqual(render[render.index("--asset-root") + 1], "/assets")
+        with tempfile.TemporaryDirectory() as ibl:
+            lit = stack.Config(scene="s.json", video="v.mp4", asset_root="/assets", ibl_dir=ibl)
+            lit_components = {component.name: component for component in stack.components(lit)}
+            command = lit_components["render"].command
+            roots = [arg for i, arg in enumerate(command[1:]) if command[i] == "--asset-root"]
+            self.assertEqual(roots, ["/assets", ibl], "chr-server reads the panoramas the studio offers")
+            self.assertEqual(lit_components["pitch-studio"].env["STUDIO_IBL_DIR"], ibl)
         self.assertNotIn("--description", render)
         self.assertIn("--tracking-worker", render, "the tracking worker is the default")
         external = stack.Config(scene="s.json", video="v.mp4", tracking="external")

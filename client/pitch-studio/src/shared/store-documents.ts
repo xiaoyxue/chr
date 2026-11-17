@@ -3,6 +3,7 @@
 import { validateLibrary } from '../matches/match-domain.ts';
 import { validateStoredLocalAds } from '../placements/local-ad.ts';
 import { validateSession } from '../app/session.ts';
+import { validateLightingLibrary } from '../lighting/lighting.ts';
 import type { MatchRecord } from './types.ts';
 
 const MB = 1024 * 1024;
@@ -33,6 +34,7 @@ export function validatePackagePaths(data: unknown): Record<string, string> {
 export function documentValidator(name: string): ((data: unknown) => unknown) | undefined {
   if (name === 'matches') return validateMatchLibrary;
   if (name === 'package-paths') return validatePackagePaths;
+  if (name === 'lighting') return validateLightingLibrary;
   const [root, matchId, kind, ...rest] = name.split('/');
   if (root !== 'matches' || !MATCH_ID.test(matchId ?? '') || rest.length) return undefined;
   return kind === 'local-ads' ? validateStoredLocalAds : kind === 'session' ? validateSession : undefined;

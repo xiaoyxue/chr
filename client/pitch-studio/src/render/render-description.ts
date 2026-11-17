@@ -9,6 +9,7 @@ import { flagModel } from '../placements/flag.ts';
 import { adRoot, modelFit } from '../placements/local-ad-transform.ts';
 import type { LocalAd } from '../placements/local-ad.ts';
 import type { FieldDimensions, GroundPlacement, ModelPlacement, Placement } from '../shared/types.ts';
+import type { WireLighting } from '../lighting/lighting.ts';
 
 export type Rows = [number, number, number, number][];
 /** Axis-aligned bounds of a loaded GLB in its own Y-up glTF space, as three.js reports them. */
@@ -41,9 +42,15 @@ export interface FlagParameters {
 }
 export interface DescriptionScene {
   ground: { pitch_m: [number, number] };
-  assets: { id: string; kind: DescribedAsset['kind'] | 'flag'; source: { package: string; entry: string } | { path: string }; sha256: string; blend_as?: 'mask' }[];
+  assets: { id: string; kind: DescribedAsset['kind'] | 'flag' | 'environment'; source: { package: string; entry: string } | { path: string }; sha256: string; blend_as?: 'mask' }[];
   instances: { id: string; asset: string; model: Rows; visible: boolean; flag?: FlagParameters }[];
+  /** Absent: chr-server's default rig. */
+  lighting?: WireLighting;
 }
+/** A lighting preset as the description carries it, with the OpenEXR panorama it names, if any. */
+export interface DescribedLighting { lighting: WireLighting; environment?: { id: string; path: string; sha256: string } }
+/** One asset per distinct panorama, by its content. */
+export const environmentAssetId = (sha256: string) => `IBL-${sha256.slice(0, 16)}`;
 /** chr-server places at most this many instances per description. */
 export const MAX_INSTANCES = 63;
 /** One asset per distinct local material and kind: flags `FLAG-`, images and models `LOCAL-`. */
@@ -127,6 +134,7 @@ export function describeScene(options: {
   assets: ReadonlyMap<string, DescribedAsset>;
   packagePath: string;
   locals?: readonly DescribedLocal[];
+  lighting?: DescribedLighting;
 }): DescriptionScene {
   const scene: DescriptionScene = { ground: { pitch_m: [options.field.length, options.field.width] }, assets: [], instances: [] };
   for (const slot of options.slots) {
@@ -153,6 +161,11 @@ export function describeScene(options: {
     } else {
       scene.instances.push({ id: `local-${ad.id}`, asset, model: ad.type === '2D' ? localQuadModel(ad) : localGlbModel(ad, bounds), visible: ad.visible });
     }
+  }
+  if (options.lighting) {
+    const { lighting, environment } = options.lighting;
+    if (environment) scene.assets.push({ id: environment.id, kind: 'environment', source: { path: environment.path }, sha256: environment.sha256 });
+    scene.lighting = lighting;
   }
   if (scene.instances.length > MAX_INSTANCES)
     throw new Error(`chr-server 每个场景最多放置 ${MAX_INSTANCES} 个实例，当前有 ${scene.instances.length} 个（含停用的广告位）；请删除部分后再发送。`);
