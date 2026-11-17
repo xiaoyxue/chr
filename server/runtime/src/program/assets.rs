@@ -138,9 +138,12 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Opacity every image quad's alpha is multiplied by, so the pitch shows through ads.
+const IMAGE_QUAD_OPACITY: f32 = 0.5;
+
 /// The unit image quad of `AssetKind::ImageQuad`: UV (0, 0) is the image's top-left
 /// texel at (-0.5, -0.5), so the image reads upright in a top view with +Y down. It is
-/// an unlit ground decal blended by the image's alpha.
+/// an unlit ground decal blended by the image's alpha times `IMAGE_QUAD_OPACITY`.
 fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
     let texture = image_texture(bytes)?;
     let mesh = MeshData::new(
@@ -162,6 +165,7 @@ fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
         mesh,
         materials: vec![ImportedMaterial {
             factors: PbrMaterial {
+                base_color: [1.0, 1.0, 1.0, IMAGE_QUAD_OPACITY],
                 unlit: true,
                 double_sided: true,
                 decal: true,

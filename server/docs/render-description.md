@@ -62,7 +62,7 @@ are shared.
 | --- | --- | --- |
 | `glb` | The importer's basis: glTF +Y-up turned to -Z-up, `(x, y, z) -> (x, z, -y)`, node transforms baked | As authored. `alphaMode: BLEND` is rejected unless `blend_as: "mask"`, which imports it as an alpha mask (cutoff 0.5) and logs a warning. The renderer has no translucent pass. |
 | `flag` (PNG, JPEG) | Flag-local metres: X along the width from the left edge, Y down from the top edge, Z = X × Y. The image's top-left texel is at the origin and reads upright from the -Z side, mirrored from the other. Size comes from the instance's `flag` | Double-sided artwork; texels with alpha below 0.5 are cut out. `material: "simple"` lights it like SimpleWave under a fixed key light above the viewer; `"pbr"` uses the scene's lights, environment and shadows. It casts shadows that follow the wave |
-| `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended by the image's alpha over the opaque CG (`alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
+| `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended over the opaque CG by the image's alpha times a fixed opacity of 0.5 (`alpha = 0.5 * image alpha`, `alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
 
 ### Flags
 
