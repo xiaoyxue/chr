@@ -33,6 +33,17 @@ Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
   map's `views` table (frames with $V$ and an optional $T_i$) and is not vchao's
   canonical `Atlas`.
 
+## Naming
+
+- **V/Q map** is vchao's name (`atlas-vq-estimate`) for the stored pair of
+  **V**, the views' homographies $V_i : \Sigma \to \mathcal{I}_i$ (table `views`,
+  column `v`), and **Q**, the landmarks (table `landmarks`, column `q`), plus the
+  observations linking them and a manifest with the anchor and $T_{\mathrm{ref}}$.
+- This page writes one landmark as $q_k$: one row of vchao's Q. It is a ray from
+  the optical centre (Definition 4), not a 3D or pitch point.
+- $Q_a$ in Definition 5 is a chart rotation (vchao's `camera-geometry.md`
+  notation), unrelated to the landmarks Q. The gauge matrix is $M$.
+
 ## Formal statement
 
 ### 0. Notation

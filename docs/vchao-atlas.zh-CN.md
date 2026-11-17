@@ -28,6 +28,16 @@ $H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的几何关�
   「每张都带有球场 Ti 的参考图像，加上光心 C」。它最接近 V/Q map 的 `views` 表
   （带 $V$ 和可选 $T_i$ 的帧），不是 vchao 的 canonical `Atlas`。
 
+## 命名
+
+- **V/Q map** 是 vchao（`atlas-vq-estimate`）对一组存储内容的命名：**V** 指各视图的单应
+  $V_i : \Sigma \to \mathcal{I}_i$（`views` 表的 `v` 列），**Q** 指特征点（`landmarks` 表的 `q` 列），
+  另外还有连接两者的观测，以及记录锚点和 $T_{\mathrm{ref}}$ 的 manifest。
+- 本页把单个特征点记作 $q_k$，即 vchao 的 Q 中的一行。它是从光心出发的一条射线（定义 4），
+  不是三维点，也不是球场坐标点。
+- 定义 5 中的 $Q_a$ 是图块旋转（沿用 vchao `camera-geometry.md` 的记号），与特征点 Q 无关。
+  规范变换矩阵记作 $M$。
+
 ## 形式化表述
 
 ### 0. 记号
