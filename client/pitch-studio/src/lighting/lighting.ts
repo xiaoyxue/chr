@@ -1,4 +1,4 @@
-// Lighting presets of the studio: what the operator edits in the 灯光 tab and what a
+// Lighting presets of the studio: what the operator edits in 广告位预览 › 场景灯光 and what a
 // render description's `scene.lighting` becomes (server/docs/render-description.md#lighting).
 // Positions are chr world metres: X along the length, Y across (down in the top view),
 // heights above the ground (chr Z is negative up). Colours are linear RGB multipliers

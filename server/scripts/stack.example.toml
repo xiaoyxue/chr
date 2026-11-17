@@ -80,7 +80,7 @@ pitch_studio_port = 4173   # built pitch-studio under vite preview (send to rend
 # ZIPs (the "studio store"). Put it inside asset_root so chr-server can read the
 # uploads; without it the studio uses the repository's ignored output/pitch-studio.
 # studio_data_dir = "/path/to/packages/studio"
-# Folder of the OpenEXR panoramas the studio's 灯光 (lighting) tab offers; chr-server
+# Folder of the OpenEXR panoramas the studio's 场景灯光 (scene lighting) offers; chr-server
 # also reads it as an asset root. Default: the asset/ibl submodule of this checkout
 # (git submodule update --init asset). The studio serves no path with hidden segments,
 # so from a .worktree/ checkout point it at the main checkout's asset/ibl.

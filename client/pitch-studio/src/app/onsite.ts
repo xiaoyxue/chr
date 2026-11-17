@@ -38,7 +38,7 @@ const packagePathDocument = new StoredDocument('package-paths', validatePackageP
 const lightingDocument = new StoredDocument('lighting', validateLightingLibrary);
 /** The onsite server folder of the OpenEXR panoramas (STUDIO_IBL_DIR). */
 let iblDir = '';
-const lightingPanel = new LightingPanel($('#lighting-panel'), lightingDocument, {
+const lightingPanel = new LightingPanel($('#lighting-panel'), $('#lighting-summary'), lightingDocument, {
   matchId: () => currentId, field: () => current()?.match.field, iblDir: () => iblDir, onError: (error) => showError(error),
 });
 const scanFiles = new Map<string, File>();
@@ -598,6 +598,7 @@ async function redoLast() {
 function renderRecord() {
   const record = current();
   if (!record) return;
+  lightingPanel.render();
   const { match } = record;
   $('#match-title').textContent = match.name;
   $('#match-meta').textContent = `${match.date.replace('T', ' ')}　·　${match.venue}　·　场地 ${match.venueId}`;
@@ -809,18 +810,18 @@ async function ensureEngine() {
 }
 
 function setActiveTab(tab: string) {
-  const next = ['preview', 'scan', 'adjust', 'lighting'].includes(tab) ? tab : 'preview';
+  const next = ['preview', 'scan', 'adjust'].includes(tab) ? tab : 'preview';
   if (next !== activeTab) setUnlocked(undefined);
   activeTab = next;
   // One inspector serves both tabs that edit placements.
-  if (activeTab === 'preview' || activeTab === 'adjust') $(`#${activeTab}-inspector-slot`).append($('#placement-inspector'));
-  for (const name of ['preview', 'scan', 'adjust', 'lighting']) $(`#${name}-tab`).hidden = name !== activeTab;
-  if (activeTab === 'lighting') lightingPanel.render();
+  if (activeTab !== 'scan') $(`#${activeTab}-inspector-slot`).append($('#placement-inspector'));
+  for (const name of ['preview', 'scan', 'adjust']) $(`#${name}-tab`).hidden = name !== activeTab;
+  if (activeTab === 'preview') lightingPanel.render();
   document.querySelectorAll<HTMLElement>('[data-tab]').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === activeTab);
     button.setAttribute('aria-current', button.dataset.tab === activeTab ? 'step' : 'false');
   });
-  const tabLabels: Record<string, string> = { preview: '广告位预览', scan: '场地视频', adjust: '导入结果与微调', lighting: '灯光' };
+  const tabLabels: Record<string, string> = { preview: '广告位预览', scan: '场地视频', adjust: '导入结果与微调' };
   $('#page-crumb').textContent = tabLabels[activeTab];
   if (activeTab !== 'scan') $<HTMLVideoElement>('#scan-preview').pause();
   if (activeTab !== 'preview') {

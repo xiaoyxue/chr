@@ -64,7 +64,7 @@ class Config:
     # Where pitch-studio keeps matches, placements, sessions and uploaded files
     # (STUDIO_DATA_DIR); inside asset_root so chr-server can read the uploads.
     studio_data_dir: str | None = None
-    # Folder of the OpenEXR panoramas pitch-studio's 灯光 tab offers (STUDIO_IBL_DIR);
+    # Folder of the OpenEXR panoramas pitch-studio's 场景灯光 offers (STUDIO_IBL_DIR);
     # with asset_root, chr-server may read them too. Default: the asset/ibl submodule.
     ibl_dir: str | None = None
     monitor_page_port: int = 5173

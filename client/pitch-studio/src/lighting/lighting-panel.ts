@@ -1,4 +1,4 @@
-// The 灯光 tab: one global library of lighting presets, the preset each match uses,
+// 广告位预览 › 场景灯光: one global library of lighting presets, the preset each match uses,
 // and an editor for the operator's own presets. Built-in presets are read-only; a
 // copy is edited instead. Every change is saved to the studio store at once.
 import { StoreConflict, type StoredDocument } from '../shared/studio-store.ts';
@@ -33,9 +33,12 @@ export class LightingPanel {
   /** Panoramas found in the IBL folder, as absolute server paths. */
   private panoramas: string[] = [];
   private status = '';
+  /** Lights whose position and angle fields are shown. */
+  private readonly expanded = new Set<string>();
 
   constructor(
     private readonly root: HTMLElement,
+    private readonly summary: HTMLElement,
     private readonly document: StoredDocument<LightingLibrary>,
     private readonly context: { matchId(): string | undefined; field(): FieldDimensions | undefined; iblDir(): string; onError(error: unknown): void },
   ) {
@@ -78,48 +81,60 @@ export class LightingPanel {
   render() {
     const preset = this.preset();
     if (!preset) { this.root.innerHTML = '<p class="on-help">打开一场比赛后设置灯光。</p>'; return; }
+    const focused = this.root.contains(document.activeElement) && document.activeElement instanceof HTMLElement
+      ? `[data-field="${document.activeElement.dataset.field}"]${document.activeElement.dataset.lightId ? `[data-light-id="${document.activeElement.dataset.lightId}"]` : ''}` : undefined;
     const locked = Boolean(preset.builtIn), disabled = locked ? 'disabled' : '';
-    const enabled = preset.lights.filter((light) => light.enabled).length;
+    const enabled = preset.lights.filter((light) => light.enabled);
     const number = (field: string, label: string, value: number, bounds = '', id = '') =>
       `<label>${label}<input type="number" step="any" data-field="${field}" ${id ? `data-light-id="${id}"` : ''} value="${round(value)}" ${bounds} ${disabled} /></label>`;
     const options = this.allPresets().map((item) =>
       `<option value="${escape(item.id)}" ${item.id === preset.id ? 'selected' : ''}>${item.builtIn ? '内置 · ' : ''}${escape(item.name)}</option>`).join('');
     const light = (item: StudioLight) => {
-      const id = item.id, common = `<div class="on-light-head"><strong>${KIND_LABEL[item.kind]}</strong>
-        <input type="text" data-field="name" data-light-id="${id}" value="${escape(item.name)}" aria-label="灯光名称" ${disabled} />
-        <label class="on-check"><input type="checkbox" data-field="enabled" data-light-id="${id}" ${item.enabled ? 'checked' : ''} ${disabled} /> 启用</label>
-        <label class="on-check"><input type="checkbox" data-field="shadows" data-light-id="${id}" ${item.shadows ? 'checked' : ''} ${disabled} /> 阴影</label>
-        <label class="on-check">颜色 <input type="color" data-field="color" data-light-id="${id}" value="${toHex(item.color)}" ${disabled} /></label>
-        ${locked ? '' : `<button class="on-text-button" type="button" data-lighting-action="remove-light" data-light-id="${id}">删除</button>`}</div>`;
-      const fields = item.kind === 'directional'
+      const id = item.id, open = this.expanded.has(id);
+      const main = item.kind === 'directional' ? number('irradiance', 'W/m²', item.irradiance, 'min="0"', id) : number('intensity', 'W/sr', item.intensity, 'min="0"', id);
+      const details = item.kind === 'directional'
         ? number('azimuth', '来向方位 / °', item.azimuth, '', id) + number('elevation', '高度角 / °', item.elevation, 'min="0" max="90"', id)
-          + number('irradiance', '辐照度 / W·m⁻²', item.irradiance, 'min="0"', id)
-        : number('x', '位置 X / m', item.position[0], '', id) + number('y', '位置 Y / m', item.position[1], '', id)
-          + number('height', '高度 / m', item.position[2], 'min="0"', id) + number('intensity', '强度 / W·sr⁻¹', item.intensity, 'min="0"', id)
+        : number('x', 'X / m', item.position[0], '', id) + number('y', 'Y / m', item.position[1], '', id)
+          + number('height', '高度 / m', item.position[2], 'min="0"', id)
           + (item.kind === 'spot' ? number('targetX', '对准 X / m', item.target[0], '', id) + number('targetY', '对准 Y / m', item.target[1], '', id)
             + number('inner', '内角 / °', item.inner, 'min="0" max="89"', id) + number('outer', '外角 / °', item.outer, 'min="0" max="89.9"', id) : '')
           + number('radius', '光源半径 / m', item.radius, 'min="0"', id);
-      return `<div class="on-light">${common}<div class="on-field-grid">${fields}</div></div>`;
+      return `<div class="on-light ${item.enabled ? '' : 'is-off'}">
+        <div class="on-light-row"><span class="on-badge ${item.kind === 'directional' ? 'amber' : ''}">${KIND_LABEL[item.kind]}</span>
+          <input type="text" data-field="name" data-light-id="${id}" value="${escape(item.name)}" aria-label="灯光名称" ${disabled} />
+          <label class="on-check"><input type="checkbox" data-field="enabled" data-light-id="${id}" ${item.enabled ? 'checked' : ''} ${disabled} /> 启用</label>
+          <label class="on-check"><input type="checkbox" data-field="shadows" data-light-id="${id}" ${item.shadows ? 'checked' : ''} ${disabled} /> 阴影</label>
+          <input type="color" data-field="color" data-light-id="${id}" value="${toHex(item.color)}" aria-label="颜色" ${disabled} />
+          <span class="on-light-main">${main}</span>
+          <button class="on-text-button" type="button" data-lighting-action="toggle" data-light-id="${id}" aria-expanded="${open}">${open ? '收起 ▴' : '位置 ▾'}</button>
+          ${locked ? '' : `<button class="on-text-button" type="button" data-lighting-action="remove-light" data-light-id="${id}" aria-label="删除 ${escape(item.name)}">删除</button>`}</div>
+        ${open ? `<div class="on-field-grid on-light-details">${details}</div>` : ''}</div>`;
     };
     const panoramas = [...new Set([...this.panoramas, ...(preset.environment.path ? [preset.environment.path] : [])])];
-    this.root.innerHTML = `
-      <section class="on-card"><div class="on-card-head"><div><h2>灯光预设</h2><p class="on-help">全局预设库，所有场次共用；本场使用下面选中的预设，发送到渲染器时带上它的灯光。内置预设只读，复制后再编辑。</p></div></div>
-        <div class="on-card-body"><div class="on-source-row"><select data-field="preset" aria-label="本场灯光预设">${options}</select>
-          <button class="on-button" type="button" data-lighting-action="copy">复制为新预设</button>
-          <button class="on-button" type="button" data-lighting-action="rename" ${disabled}>重命名</button>
-          <button class="on-button" type="button" data-lighting-action="delete" ${disabled}>删除</button></div>
-          <p class="on-help" role="status">${escape(this.status)}</p></div></section>
-      <section class="on-card"><div class="on-card-head"><div><h2>光源</h2><p class="on-help">已启用 ${enabled} / ${MAX_LIGHTS} 盏（chr-server 上限）。坐标为球场米制：X 沿长边，Y 沿宽边（俯视向下），高度向上；方位角从 +X 转向 +Y。</p></div>
+    const sky = preset.environment.path ? `IBL ${preset.environment.path.split('/').pop()} × ${round(preset.environment.gain)}` : '无 IBL';
+    this.summary.textContent = `本场使用“${preset.name}”：${enabled.length} 盏灯 · ${sky} · 常量光 ${round(preset.constant.intensity)}。预设库所有场次共用，发送到渲染器时一并发送。`;
+    this.root.innerHTML = `<div class="on-lighting-grid">
+      <section class="on-card on-lighting-lights"><div class="on-card-head"><div><h2>光源 <span class="on-badge ${enabled.length > MAX_LIGHTS ? 'amber' : ''}">${enabled.length} / ${MAX_LIGHTS}</span></h2>
+          <p class="on-help">球场米制坐标：X 沿长边，Y 沿宽边（俯视向下），高度向上；方位角从 +X 转向 +Y。最多启用 ${MAX_LIGHTS} 盏。</p></div>
         <div class="on-action-row">${locked ? '' : (['spot', 'point', 'directional'] as const).map((kind) =>
-          `<button class="on-button" type="button" data-lighting-action="add-${kind}">添加${KIND_LABEL[kind]}</button>`).join('')}</div></div>
-        <div class="on-card-body on-lights">${preset.lights.map(light).join('') || '<p class="on-help">没有光源。</p>'}</div></section>
-      <section class="on-card"><div class="on-card-head"><div><h2>环境光 IBL</h2><p class="on-help">OpenEXR 全景图照亮场景（无阴影）。全景图里若有太阳，平行光太阳会重复照明，可降低 gain。背景不显示。</p></div></div>
-        <div class="on-card-body"><div class="on-field-grid"><label>环境贴图<select data-field="environment" ${disabled}><option value="">无</option>${panoramas.map((path) =>
-          `<option value="${escape(path)}" ${path === preset.environment.path ? 'selected' : ''}>${escape(path.split('/').pop())}</option>`).join('')}</select></label>
-          ${number('gain', 'gain', preset.environment.gain, 'min="0" max="100"')}${number('rotation', '旋转 / °', preset.environment.rotation, 'min="-360" max="360"')}</div></div></section>
-      <section class="on-card"><div class="on-card-head"><div><h2>常量光</h2><p class="on-help">来自各个方向的均匀补光（无阴影），与环境光叠加，用来整体提亮暗部；单位 W·m⁻²·sr⁻¹。</p></div></div>
-        <div class="on-card-body"><div class="on-field-grid">${number('constant', '强度', preset.constant.intensity, 'min="0" max="100"')}
-          <label>颜色<input type="color" data-field="constantColor" value="${toHex(preset.constant.color)}" ${disabled} /></label></div></div></section>`;
+          `<button class="on-button" type="button" data-lighting-action="add-${kind}">＋ ${KIND_LABEL[kind]}</button>`).join('')}</div></div>
+        <div class="on-lights">${preset.lights.map(light).join('') || '<p class="on-help">没有光源。</p>'}</div></section>
+      <div class="on-lighting-side">
+        <section class="on-card"><div class="on-card-head"><h2>灯光预设</h2>${locked ? '<span class="on-badge">内置 · 只读</span>' : ''}</div>
+          <div class="on-card-body"><select data-field="preset" aria-label="本场灯光预设">${options}</select>
+            <div class="on-action-row"><button class="on-button" type="button" data-lighting-action="copy">复制为新预设</button>
+              <button class="on-button" type="button" data-lighting-action="rename" ${disabled}>重命名</button>
+              <button class="on-button" type="button" data-lighting-action="delete" ${disabled}>删除</button></div>
+            <p class="on-help" role="status">${escape(this.status) || (locked ? '内置预设只读：复制为新预设后再编辑。' : '修改即时保存到现场服务器。')}</p></div></section>
+        <section class="on-card"><div class="on-card-head"><div><h2>环境光 IBL</h2><p class="on-help">EXR 全景图照明，无阴影、不显示背景；图中有太阳时可降低 gain，避免与平行光重复。</p></div></div>
+          <div class="on-card-body"><label>环境贴图<select data-field="environment" ${disabled}><option value="">无</option>${panoramas.map((path) =>
+            `<option value="${escape(path)}" ${path === preset.environment.path ? 'selected' : ''}>${escape(path.split('/').pop())}</option>`).join('')}</select></label>
+            <div class="on-field-grid">${number('gain', 'gain', preset.environment.gain, 'min="0" max="100"')}${number('rotation', '旋转 / °', preset.environment.rotation, 'min="-360" max="360"')}</div></div></section>
+        <section class="on-card"><div class="on-card-head"><div><h2>常量光</h2><p class="on-help">各方向均匀补光，无阴影，与环境光叠加，整体提亮暗部。</p></div></div>
+          <div class="on-card-body"><div class="on-field-grid">${number('constant', '强度 / W·m⁻²·sr⁻¹', preset.constant.intensity, 'min="0" max="100"')}
+            <label>颜色<input type="color" data-field="constantColor" value="${toHex(preset.constant.color)}" ${disabled} /></label></div></div></section>
+      </div></div>`;
+    if (focused) this.root.querySelector<HTMLElement>(focused)?.focus();
   }
 
   /** Saves `change` applied to the library; on a conflict reloads it and says so. */
@@ -178,7 +193,10 @@ export class LightingPanel {
   private async act(action: string, lightId?: string) {
     const preset = this.preset(), matchId = this.context.matchId();
     if (!preset || !matchId) return;
-    if (action === 'copy') {
+    if (action === 'toggle' && lightId) {
+      if (!this.expanded.delete(lightId)) this.expanded.add(lightId);
+      this.render();
+    } else if (action === 'copy') {
       const name = window.prompt('新预设名称', `${preset.name}（副本）`)?.trim();
       if (!name) return;
       const copy: LightingPreset = { ...structuredClone(preset), id: `preset-${shortId()}`, name: name.slice(0, 80) };
@@ -199,6 +217,7 @@ export class LightingPanel {
         : kind === 'spot'
           ? { kind, id, name: '聚光灯', enabled: true, shadows: true, color, position: [0, 40, 30], target: [0, 0], intensity: 10000, inner: 20, outer: 45, radius: 0.5 }
           : { kind: 'point', id, name: '点光源', enabled: true, shadows: false, color, position: [0, 0, 20], intensity: 2000, radius: 0.3 };
+      this.expanded.add(id);
       await this.editPreset((item) => { item.lights.push(light); });
     }
   }

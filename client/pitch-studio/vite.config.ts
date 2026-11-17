@@ -8,7 +8,7 @@ import { studioStore } from './scripts/studio-store.ts';
 // Without STUDIO_DATA_DIR the studio keeps its data in the repository's ignored output/.
 const DEFAULT_STUDIO_DATA_DIR = fileURLToPath(new URL('../../output/pitch-studio', import.meta.url));
 
-// The OpenEXR panoramas the 灯光 tab offers: the asset/ibl submodule folder by default.
+// The OpenEXR panoramas 场景灯光 offers: the asset/ibl submodule folder by default.
 const DEFAULT_IBL_DIR = fileURLToPath(new URL('../../asset/ibl', import.meta.url));
 
 // Tells the page server-side settings it cannot discover itself.

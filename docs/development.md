@@ -378,7 +378,7 @@ downloads no material, and writes the studio's JSON exports
 there, written atomically, at most 64 MB, and an existing file replaced only
 after the page asks.
 
-The 灯光 (lighting) tab offers the OpenEXR panoramas of `STUDIO_IBL_DIR` (default
+场景灯光 (scene lighting, in the 广告位预览 tab) offers the OpenEXR panoramas of `STUDIO_IBL_DIR` (default
 `asset/ibl` of the checkout; the stack's `ibl_dir`), which the page server lists and
 hashes through `/local-files/`; `/studio-config` tells the page that folder.
 

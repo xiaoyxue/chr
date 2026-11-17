@@ -215,7 +215,8 @@ newer package keeps them:
   share pitch coordinates, also without loading that cloud again; editing it needs
   the cloud. Placements that cannot be sent are left out and the page says why.
 - **Disabled placements:** become `visible: false`.
-- **Lighting:** the match's preset from the **灯光** tab becomes `scene.lighting`, always
+- **Lighting:** the match's preset from **场景灯光** (in 广告位预览,
+  between the pitch editor and the send bar) becomes `scene.lighting`, always
   explicit: its enabled point, spot and directional lights (at most 8; colours times
   intensities), its panorama as an `environment` asset `IBL-` plus the first 16 hex of
   its SHA-256 (hashed by the page server, not downloaded; `visible: false`), and its
