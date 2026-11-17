@@ -660,7 +660,20 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     }
     let metal=clamp(object.factors.x*mr.b,0.0,1.0);
     // Finite raster specular lobe; roughness zero is not a sampled delta mirror.
-    let rough=clamp(object.factors.y*mr.g,0.045,1.0);
+    var alpha2=pow(clamp(object.factors.y*mr.g,0.045,1.0),4.0);
+    // Specular antialiasing (#177): normals varying within a pixel widen its lobe, so sub-pixel
+    // curvature and bumps cannot reflect one bright texel or light at full strength. The
+    // screen-space kernel (Tokuyoshi and Kaplanyan, Filament's variance 0.15 and threshold 0.2)
+    // sees variation across pixels; a minified normal map's shortened average (Toksvig), the
+    // variation inside its texels.
+    let dndx=dpdx(n); let dndy=dpdy(n);
+    alpha2+=min(0.3*(dot(dndx,dndx)+dot(dndy,dndy)),0.2);
+    if object.flags.x!=0u {
+        // 8-bit texels of unit normals fall short by up to sqrt(3)/255; that is not variance.
+        let mean=clamp(length(normal_texel)+0.007,1e-3,1.0);
+        alpha2+=(1.0-mean)/mean*min(object.factors.z*object.factors.z,1.0);
+    }
+    let rough=sqrt(sqrt(min(alpha2,1.0)));
     let ao=mix(1.0,occlusion,object.factors.w);
     var radiance=emissive+environment_lighting(n,v,base.rgb,metal,rough,ao);
     for (var i=0u;i<camera.options.y;i++) {

@@ -56,7 +56,14 @@ metallic-roughness, normal and emissive maps, authored, imported or
 derivative tangent frames (the screen-derivative fallback, for vertices without
 a UV gradient, uses the same orthogonal glTF-handed frame), vertex colours, alpha masks and double-sided/mirrored surfaces.
 Colour textures and their mipmaps are filtered in linear light; data maps stay
-linear. Trilinear samplers also filter anisotropically (16x), so ground ads seen at
+linear.
+Specular antialiasing (#177) widens each pixel's GGX lobe by the normal's
+variance within it: a screen-space kernel from the shading normal's derivatives
+(Tokuyoshi and Kaplanyan; Filament's variance 0.15 and threshold 0.2) for
+curvature and bumps across pixels, and Toksvig's term from a minified normal
+map's shortened mip average (beyond 8-bit quantisation) for bumps inside a
+texel. Sub-pixel detail therefore cannot reflect a single bright panorama texel
+or light at mirror strength; glossy surfaces seen up close are unchanged. Trilinear samplers also filter anisotropically (16x), so ground ads seen at
 a broadcast camera's grazing angle keep their detail across the view. Occlusion maps are retained for indirect lighting and do not darken
 punctual direct light. No implicit ambient fill or fixed light rig is added.
 

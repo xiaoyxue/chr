@@ -346,3 +346,101 @@ fn colour_mipmaps_filter_in_linear_light() {
     assert!(pixels[center + 1].abs_diff(encoded(0.5)) <= 2);
     assert_eq!(pixels[center + 2], 0);
 }
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn minified_normal_map_bumps_widen_the_specular_lobe() {
+    use chr_renderer::scene::{Filter, TextureSampler};
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let extent = ImageExtent::new(32, 32).unwrap();
+    let camera = Camera::look_at(
+        extent,
+        [0.0, 0.0, -5.0],
+        [0.0; 3],
+        [0.0, -1.0, 0.0],
+        1.0,
+        0.1,
+        100.0,
+    )
+    .unwrap();
+    let mut scene = Scene::new().unwrap();
+    let mesh = scene
+        .add_mesh(
+            MeshData::new(
+                vec![
+                    [-2.0, -2.0, 0.0],
+                    [2.0, -2.0, 0.0],
+                    [2.0, 2.0, 0.0],
+                    [-2.0, 2.0, 0.0],
+                ],
+                vec![0, 2, 1, 0, 3, 2],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap()
+            .with_attributes(MeshAttributes {
+                tex_coords: vec![[0.0, 0.0], [128.0, 0.0], [128.0, 128.0], [0.0, 128.0]],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let factors = PbrMaterial {
+        metallic: 1.0,
+        roughness: 0.3,
+        ..Default::default()
+    };
+    let material = scene
+        .add_material_with_maps(factors, MaterialMaps::default())
+        .unwrap();
+    scene
+        .add_instance(mesh, vec![material], ModelMatrix::IDENTITY)
+        .unwrap();
+    // The sun travels along the view axis, so the plane mirrors it into the centre pixel.
+    scene
+        .set_lighting(
+            Lighting::new(
+                vec![Light::Directional {
+                    direction: [0.0, 0.0, 1.0],
+                    irradiance: [1.0; 3],
+                    angular_radius: 0.0,
+                    shadow_mode: None,
+                }],
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let center = (16 * 32 + 16) * 4;
+    let mut highlight = |normal: Option<Vec<u8>>| {
+        let maps = MaterialMaps {
+            normal: normal.map(|pixels| {
+                Arc::new(
+                    TextureData::new(ImageExtent::new(2, 1).unwrap(), pixels)
+                        .unwrap()
+                        .with_sampler(TextureSampler {
+                            mip: Some(Filter::Linear),
+                            ..Default::default()
+                        }),
+                )
+            }),
+            ..Default::default()
+        };
+        scene.set_material_maps(material, maps).unwrap();
+        capture(&gpu, &mut renderer, &scene, &camera, 0.02)[center]
+    };
+    let bare = highlight(None);
+    let flat = highlight(Some(vec![128, 128, 255, 255, 128, 128, 255, 255]));
+    // Texels tilted +-37 degrees about Y average to (0, 0, 0.8): flat, but no mirror.
+    let bumpy = highlight(Some(vec![204, 128, 230, 255, 51, 128, 230, 255]));
+    assert!(bare > 100, "mirror highlight {bare}");
+    assert!(
+        flat.abs_diff(bare) <= 2,
+        "8-bit flat texels {flat} vs {bare}"
+    );
+    assert!(
+        u32::from(bumpy) * 4 < u32::from(bare),
+        "bumps {bumpy} vs {bare}"
+    );
+}
