@@ -227,7 +227,9 @@ newer package keeps them:
   constant fill. Presets are one global library in the store's `lighting.json`, with
   the preset each match uses. Two built-ins are offered: chr-server's default rig lit by
   `fly-studio-03_4K.exr` (gain 0.5; the panorama IBL picks first when switched on), and
-  `orlando_stadium_4k.exr` (gain 0.5) with that rig and a constant fill of 0.1. Every
+  `orlando_stadium_4k.exr` (gain 0.5, `max_radiance` 50, which caps off its sun) with
+  that rig and a constant fill of 0.1. The IBL card's 亮度上限 sets `max_radiance`
+  (starting from 50 when switched on; off sends none). Every
   value of the selected preset is editable at once; editing a built-in stores the
   operator's version under its ID, which 恢复内置默认 drops. Each light, the IBL and
   the constant fill have their own 启用 switch; switched off, they keep their values

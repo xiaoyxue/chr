@@ -270,6 +270,10 @@
 .on-light-main label { display:flex; align-items:center; gap:6px; color:var(--on-muted); font-size:11px; }
 .onsite .on-light-main input { width:96px; background:#12232e; color:var(--on-ink); border:1px solid #3a5261; padding:7px 9px; border-radius:6px; }
 .on-lighting .on-light-details { grid-template-columns:repeat(4,minmax(0,1fr)); margin:10px 0 2px; }
+.on-inline-field { display:flex; align-items:center; gap:8px; }
+.onsite .on-field-grid .on-inline-field input { margin-top:0; }
+.onsite .on-field-grid .on-inline-field input[type=checkbox] { width:auto; flex:none; accent-color:var(--on-lime); }
+.onsite .on-field-grid .on-inline-field input:disabled { opacity:.45; }
 .on-lighting input[type=color] { width:40px; height:30px; padding:0; border:1px solid #3a5261; border-radius:6px; background:none; cursor:pointer; }
 @media (max-width:1100px) { .on-lighting-grid { grid-template-columns:1fr; } .on-lighting .on-light-details { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .on-lighting .on-field-grid label { display:grid; gap:4px; color:var(--on-muted); font-size:11px; }
