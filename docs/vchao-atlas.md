@@ -39,6 +39,7 @@ Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
   **V**, the views' homographies $V_i : \Sigma \to \mathcal{I}_i$ (table `views`,
   column `v`), and **Q**, the landmarks (table `landmarks`, column `q`), plus the
   observations linking them and a manifest with the anchor and $T_{\mathrm{ref}}$.
+  The slash is not a quotient, although a map's content is one (section 8).
 - This page writes one landmark as $q_k$: one row of vchao's Q. It is a ray from
   the optical centre (Definition 4), not a 3D or pitch point.
 - $Q_a$ in Definition 5 is a chart rotation (vchao's `camera-geometry.md`
@@ -391,6 +392,102 @@ in general, so chart angles are not physical.
 **Relation.** ② and ③ are registrations (Definition 3) with unknown $A$; ① is
 the registration whose $A$ is a known physical rotation. Upgrading ② or ③ to ①
 needs exactly the conditions of Proposition 6.
+
+### 8. The V/Q map as a quotient
+
+The slash in "V/Q" only means "V and Q". Mathematically, though, the content of
+a map is a quotient, in two layers.
+
+**Layer 1: each element is a class.** $V_i \in \mathrm{PGL}(3) = \mathrm{GL}(3)/\mathbb{R}^\times$
+and $q_k \in \mathbb{P}^2 = (\mathbb{R}^3 \setminus \lbrace 0 \rbrace)/\mathbb{R}^\times$
+are defined only up to a nonzero factor. Storage picks representatives:
+$N(V_i)$ with $\det = 1$, and any nonzero float64 triple for $q_k$.
+
+**Definition 7 (representatives and the gauge action).** Let $I \subseteq F$
+be the map's views and $\mathcal{K}$ its landmarks. A representative of a map is
+
+$$
+\mathbf{m} = \left( (V_i)_{i \in I},\ (q_k)_{k \in \mathcal{K}},\ T_{\mathrm{ref}} \right)
+\in \mathcal{R} := \mathrm{PGL}(3)^{I} \times (\mathbb{P}^2)^{\mathcal{K}} \times \mathrm{PGL}(3).
+$$
+
+Descriptors $d_k$ and observations $x_{ik}$ are attached to the indices and are
+not acted on. The gauge group $G = \mathrm{PGL}(3)$ acts on the right by
+
+$$
+\mathbf{m} \cdot M = \left( (V_i M)_i,\ (M^{-1} q_k)_k,\ M^{-1} T_{\mathrm{ref}} \right).
+$$
+
+This is a right action: $(\mathbf{m} \cdot M) \cdot M' = \mathbf{m} \cdot (M M')$
+because $(MM')^{-1} = M'^{-1} M^{-1}$.
+
+**Layer 2: the map is an orbit.** The physical content of a map is its orbit
+$\mathbf{m} \cdot G$, a point of the quotient
+
+$$
+\mathcal{M} = \mathcal{R} / G .
+$$
+
+**Proposition 7 (invariants).** The following are constant on every orbit:
+
+$$
+T_i = V_i\, T_{\mathrm{ref}}, \qquad
+H_{j \leftarrow i} = V_j V_i^{-1}, \qquad
+[\,V_i\, q_k\,] \in \mathcal{I}_i .
+$$
+
+*Proof.* $V_i M \cdot M^{-1} T_{\mathrm{ref}} = V_i T_{\mathrm{ref}}$,
+$V_j M (V_i M)^{-1} = V_j V_i^{-1}$ and $V_i M \cdot M^{-1} q_k = V_i q_k$. $\square$
+
+**Proposition 8 (free action).** $G$ acts freely on $\mathcal{R}$: every orbit
+is a $G$-torsor, in bijection with $\mathrm{PGL}(3)$. Hence
+
+$$
+\dim \mathcal{M} = \dim \mathcal{R} - 8 = 8\,|I| + 2\,|\mathcal{K}| .
+$$
+
+*Proof.* $\mathbf{m} \cdot M = \mathbf{m}$ implies $V_i M = V_i$ in
+$\mathrm{PGL}(3)$, so $M = I$. $\square$
+
+**Proposition 9 (the invariants determine the orbit).** If $\mathbf{m}$ and
+$\mathbf{m}'$ have the same $H_{j \leftarrow i}$ for all $i, j \in I$, the same
+$T_r$ and the same $[V_r q_k]$ for all $k$, for one $r \in I$, then
+$\mathbf{m}' = \mathbf{m} \cdot M$ with $M = V_r^{-1} V'_r$.
+
+*Proof.* $V'_i = H_{i \leftarrow r} V'_r = V_i V_r^{-1} V'_r = V_i M$;
+$T'_{\mathrm{ref}} = V'^{-1}_r T_r = M^{-1} V_r^{-1} T_r = M^{-1} T_{\mathrm{ref}}$;
+$[V'_r q'_k] = [V_r q_k]$ gives $[q'_k] = [V'^{-1}_r V_r q_k] = [M^{-1} q_k]$. $\square$
+
+So a map's physical content is exactly its invariants: the frame-to-frame
+homographies, the pitch homographies and where each landmark appears.
+
+**Gauge fixing: the reference frame is a section.** For $r \in I$, the slice
+$\mathcal{S}_r = \lbrace \mathbf{m} : V_r = I \rbrace$ meets every orbit exactly
+once, at $\mathbf{m} \cdot V_r^{-1}$, because $V_r M = I$ forces $M = V_r^{-1}$.
+Hence $\mathcal{M} \cong \mathcal{S}_r$, and the representative in this slice is
+
+$$
+\mathbf{m} \cdot V_r^{-1} = \left( (H_{i \leftarrow r})_i,\ ([V_r q_k])_k,\ T_r \right):
+$$
+
+every view is its homography from frame $r$, every landmark is its position on
+frame $r$'s (unbounded) film, and $T_{\mathrm{ref}}$ is frame $r$'s own pitch
+homography. This is the precise sense of "everything is expressed relative to
+the reference frame". The canonical Atlas ① is a different section: it fixes
+$A = S Q_a$ instead of $V_r = I$, which needs the calibration of Proposition 6.
+
+**Consequences.**
+
+1. A stored V/Q map is one point of one slice; its numbers are coordinates in
+   that gauge, not physical quantities on their own.
+2. Components of different representatives must not be mixed: taking $V_i$
+   from $\mathbf{m}$ and $q'_k$ from $\mathbf{m} \cdot M$ predicts
+   $V_i M^{-1} q_k$ instead of $V_i q_k$, wrong unless $M = I$. This is vchao's
+   rule that Q must stay with its actual fitted V lineage.
+3. Live estimation is covariant: for the representative $\mathbf{m} \cdot M$,
+   the fit of Section 6 returns $\hat V_f M$, because it only sees
+   $x \sim V q$. The output $T_f = N(\hat V_f M \cdot M^{-1} T_{\mathrm{ref}})$ is
+   unchanged.
 
 ## Algorithms
 
