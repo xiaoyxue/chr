@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="560" viewBox="0 0 860 560">
+<style>
+text{font-family:Helvetica,Arial,sans-serif;font-size:15px;fill:#222}
+.s{font-size:12px} .t{font-size:17px;font-weight:bold} .m{font-style:italic}
+.ray{stroke:#999;stroke-width:1.2}
+.ground{stroke:#2e7d32;stroke-width:4}
+.sig{stroke:#1565c0;stroke-width:4} .sigx{stroke:#1565c0;stroke-width:2;stroke-dasharray:6 5}
+.fi{stroke:#e65100;stroke-width:4}
+.alt{stroke:#7b1fa2;stroke-width:3}
+.arr{stroke:#333;stroke-width:1.6;fill:none;marker-end:url(#a)}
+</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#333"/></marker></defs>
+<rect width="860" height="560" fill="#fff"/>
+<path d="M700,430 L700,345 L780,300 L780,430 z" fill="#eceff1" stroke="#90a4ae"/>
+<text x="705" y="420" class="s">stand / board</text>
+<line class="ray" x1="400" y1="70" x2="140.0" y2="430.0"/>
+<line class="ray" x1="400" y1="70" x2="330.0" y2="430.0"/>
+<line class="ray" x1="400" y1="70" x2="560.0" y2="430.0"/>
+<line class="ray" x1="400" y1="70" x2="735.0" y2="330.0"/>
+<line class="ground" x1="30" y1="430" x2="830" y2="430"/>
+<text x="34" y="458">pitch ground Π<tspan class="s" baseline-shift="sub">0</tspan>: Z = 0, coordinates (X, Y) in metres</text>
+<line class="sigx" x1="676.4" y1="220.5" x2="87.4" y2="106.0"/>
+<line class="sig" x1="475.1" y1="181.4" x2="288.6" y2="145.1"/>
+<line class="fi" x1="521.6" y1="155.4" x2="414.5" y2="217.9"/>
+<circle cx="140" cy="430" r="6" fill="#2e7d32"/>
+<text x="128" y="480" class="m">X<tspan class="s" baseline-shift="sub">1</tspan></text>
+<circle cx="338.7" cy="154.9" r="5" fill="#1565c0"/>
+<circle cx="330" cy="430" r="6" fill="#2e7d32"/>
+<text x="318" y="480" class="m">X<tspan class="s" baseline-shift="sub">2</tspan></text>
+<circle cx="381.9" cy="163.3" r="5" fill="#1565c0"/>
+<circle cx="560" cy="430" r="6" fill="#2e7d32"/>
+<text x="548" y="480" class="m">X<tspan class="s" baseline-shift="sub">3</tspan></text>
+<circle cx="447.1" cy="175.9" r="5" fill="#1565c0"/>
+<circle cx="735" cy="330" r="6" fill="#455a64"/>
+<text x="745" y="322" class="m">landmark</text>
+<circle cx="566.4" cy="199.1" r="5" fill="#455a64"/>
+<text x="572.4" y="189.1" class="m">q<tspan class="s" baseline-shift="sub">k</tspan></text>
+<circle cx="455.2" cy="194.1" r="5" fill="#e65100"/>
+<circle cx="515.0" cy="159.2" r="5" fill="#e65100"/>
+<circle cx="400" cy="70" r="7" fill="#000"/>
+<text x="250" y="52">optical centre <tspan class="m">C</tspan> (metres)</text>
+<text x="30" y="62" style="fill:#1565c0">reference film <tspan class="m">Σ</tspan> = film of frame <tspan class="m">r</tspan></text>
+<text x="30" y="80" class="s" style="fill:#1565c0">SNC; frozen at frame r and extended without bound (dashed)</text>
+<line x1="418" y1="214" x2="585" y2="128" stroke="#e65100" stroke-width="1"/>
+<text x="590" y="122" style="fill:#e65100">film of frame <tspan class="m">i</tspan>, ℐ<tspan class="s" baseline-shift="sub">i</tspan></text>
+<text x="590" y="140" class="s" style="fill:#e65100">SNC; finite (the sensor), has pixels</text>
+<text x="30" y="520" class="s">Every point seen from C lies on one ray. Each film cuts each ray once: ground point → Σ is T_ref, Σ → film i is V_i, ground → film i is T_i = V_i T_ref.</text>
+<text x="30" y="540" class="s">The landmark on the stand is not on the ground, so it has no pitch (X, Y); it still has a point q_k on Σ.</text>
+</svg>
