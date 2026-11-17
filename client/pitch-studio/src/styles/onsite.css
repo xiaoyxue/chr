@@ -255,3 +255,12 @@
 .on-dialog::backdrop { background:rgba(0,0,0,0.5); }
 .onsite .on-dialog h3 { margin:0 0 10px; font-size:14px; }
 .on-dialog p { white-space:pre-line; line-height:1.6; }
+
+.on-lighting { display:grid; gap:16px; margin-bottom:16px; }
+.on-lighting select { background:#12232e; color:var(--on-ink); border:1px solid #3a5261; padding:10px; border-radius:6px; font-size:13px; min-width:0; }
+.on-lighting .on-source-row select { flex:1; }
+.on-lights { display:grid; gap:14px; }
+.on-light { border:1px solid var(--on-line); border-radius:8px; padding:12px; display:grid; gap:10px; }
+.on-light-head { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+.onsite .on-light-head input[type=text] { flex:1; min-width:120px; background:#12232e; color:var(--on-ink); border:1px solid #3a5261; padding:8px; border-radius:6px; }
+.on-lighting input[type=color] { width:44px; height:28px; padding:0; border:1px solid #3a5261; background:none; }

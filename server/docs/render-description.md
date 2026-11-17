@@ -215,6 +215,15 @@ newer package keeps them:
   share pitch coordinates, also without loading that cloud again; editing it needs
   the cloud. Placements that cannot be sent are left out and the page says why.
 - **Disabled placements:** become `visible: false`.
+- **Lighting:** the match's preset from the **灯光** tab becomes `scene.lighting`, always
+  explicit: its enabled point, spot and directional lights (at most 8; colours times
+  intensities), its panorama as an `environment` asset `IBL-` plus the first 16 hex of
+  its SHA-256 (hashed by the page server, not downloaded; `visible: false`), and its
+  constant fill. Presets are one global library in the store's `lighting.json`, with
+  the preset each match uses; two built-ins are read-only: chr-server's default rig,
+  and `orlando_stadium_4k.exr` (gain 0.5) with that rig and a constant fill of 0.1.
+  A directional light is set by the azimuth (from +X towards +Y) and elevation of
+  the side it comes from, a spot by its position, height and aim point on the ground.
 - **Blended GLBs:** a GLB with BLEND materials gets `blend_as: "mask"`, and the
   page lists those materials after sending.
 - **Fusion asset sources:** assets are entries of the offline ZIP, read by the

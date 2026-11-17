@@ -14,7 +14,7 @@ import { localProblem, localRow, sendScope, type CloudState, type LocalRow } fro
 import { glbBounds } from '../placements/local-ad-scene.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import { exportTarget, fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
-import { describeScene, sendDescription } from '../render/render-description.ts';
+import { describeScene, environmentAssetId, sendDescription } from '../render/render-description.ts';
 import { fusionAssets, localMaterials, type MaterialAccess } from '../render/send-materials.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
@@ -24,6 +24,8 @@ import { UndoStack } from '../shared/undo-stack.ts';
 import { SOURCE_LABEL, SessionStore, cloudAligned, restorePlan, withAlignment, type SessionSource, type SourceKind } from './session.ts';
 import type { GroundPlacement, MatchRecord, Placement } from '../shared/types.ts';
 import type { PitchPreview } from '../scene/pitch-preview.ts';
+import { LightingPanel } from '../lighting/lighting-panel.ts';
+import { describeLighting, validateLightingLibrary } from '../lighting/lighting.ts';
 import type { LocalAnalysis } from '../analysis/ply-result.ts';
 
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
@@ -32,6 +34,13 @@ const gateway = new FusionGateway(new HttpFusionAdapter());
 const library = new StoredDocument('matches', validateMatchLibrary);
 /** Offline package id → the ZIP path chr-server reads its materials from. */
 const packagePathDocument = new StoredDocument('package-paths', validatePackagePaths);
+/** The global lighting presets and the one each match uses. */
+const lightingDocument = new StoredDocument('lighting', validateLightingLibrary);
+/** The onsite server folder of the OpenEXR panoramas (STUDIO_IBL_DIR). */
+let iblDir = '';
+const lightingPanel = new LightingPanel($('#lighting-panel'), lightingDocument, {
+  matchId: () => currentId, field: () => current()?.match.field, iblDir: () => iblDir, onError: (error) => showError(error),
+});
 const scanFiles = new Map<string, File>();
 const analysisResults = new Map<string, LocalAnalysis>();
 let analysisImport: { matchId: string; controller: AbortController };
@@ -800,17 +809,18 @@ async function ensureEngine() {
 }
 
 function setActiveTab(tab: string) {
-  const next = ['preview', 'scan', 'adjust'].includes(tab) ? tab : 'preview';
+  const next = ['preview', 'scan', 'adjust', 'lighting'].includes(tab) ? tab : 'preview';
   if (next !== activeTab) setUnlocked(undefined);
   activeTab = next;
   // One inspector serves both tabs that edit placements.
-  if (activeTab !== 'scan') $(`#${activeTab}-inspector-slot`).append($('#placement-inspector'));
-  for (const name of ['preview', 'scan', 'adjust']) $(`#${name}-tab`).hidden = name !== activeTab;
+  if (activeTab === 'preview' || activeTab === 'adjust') $(`#${activeTab}-inspector-slot`).append($('#placement-inspector'));
+  for (const name of ['preview', 'scan', 'adjust', 'lighting']) $(`#${name}-tab`).hidden = name !== activeTab;
+  if (activeTab === 'lighting') lightingPanel.render();
   document.querySelectorAll<HTMLElement>('[data-tab]').forEach((button) => {
     button.classList.toggle('active', button.dataset.tab === activeTab);
     button.setAttribute('aria-current', button.dataset.tab === activeTab ? 'step' : 'false');
   });
-  const tabLabels: Record<string, string> = { preview: '广告位预览', scan: '场地视频', adjust: '导入结果与微调' };
+  const tabLabels: Record<string, string> = { preview: '广告位预览', scan: '场地视频', adjust: '导入结果与微调', lighting: '灯光' };
   $('#page-crumb').textContent = tabLabels[activeTab];
   if (activeTab !== 'scan') $<HTMLVideoElement>('#scan-preview').pause();
   if (activeTab !== 'preview') {
@@ -1410,9 +1420,19 @@ async function renderScene() {
   // Older matches did not note their blended GLB materials; keep them now, so later sends read nothing.
   if (assetBlended) void saveLibrary(records.map((item) => item.match.id === record.match.id ? { ...item, assetBlended } : item)).catch(showError);
   const local = await renderLocals();
+  const lighting = await renderLighting();
   return { masked: [...masked, ...local.masked], skipped: (scope.note ? ` ${scope.note}` : '') + local.skipped, fusion: scope.fusion,
+    lightingName: lighting.name,
     scene: describeScene({ field: record.match.field, slots: scope.fusion ? record.draft : [], hidden: new Set(record.hiddenPlacementIds),
-      geometry: scope.fusion ? engine.renderGeometry() : new Map(), assets, packagePath, locals: local.locals }) };
+      geometry: scope.fusion ? engine.renderGeometry() : new Map(), assets, packagePath, locals: local.locals, lighting: lighting.described }) };
+}
+
+/** The match's lighting preset as the description carries it; its panorama is hashed by the page server, not downloaded. */
+async function renderLighting() {
+  const preset = lightingPanel.preset();
+  const path = preset.environment.path, sha256 = path ? await serverSha256(path) : undefined;
+  const environment = path ? { id: environmentAssetId(sha256), path, sha256 } : undefined;
+  return { name: preset.name, described: { lighting: describeLighting(preset, environment?.id), environment } };
 }
 
 /** Runs one renderer action at a time and resolves with its status; a second click while it runs is ignored. */
@@ -1438,7 +1458,7 @@ function rendererProgress(step: string) {
 
 const sendToRenderer = () => rendererAction('正在检查素材…', async () => {
   const record = current(), started = performance.now();
-  const { scene, masked, skipped, fusion } = await renderScene();
+  const { scene, masked, skipped, fusion, lightingName } = await renderScene();
   const checked = performance.now();
   rendererProgress('正在发送到 chr-server…');
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
@@ -1446,7 +1466,7 @@ const sendToRenderer = () => rendererAction('正在检查素材…', async () =>
   const seconds = (from: number, to: number) => ((to - from) / 1000).toFixed(1);
   const timing = `检查素材 ${seconds(started, checked)} 秒，发送 ${seconds(checked, performance.now())} 秒`;
   if (fusion) rememberPackagePath(record.match.offlinePackageId, serverPath(rendererPaths[0].value));
-  return `已发送 ${scene.instances.length} 个广告位（含本地和旗帜）到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}；${timing}）。`
+  return `已发送 ${scene.instances.length} 个广告位（含本地和旗帜）和灯光“${lightingName}”到 chr-server（输出 ${sdi.video_mode}）：新导入素材 ${loaded.assets_imported} 个，复用 ${loaded.assets_reused} 个（场景版本 ${loaded.scene_revision}；${timing}）。`
     + (masked.length ? ` 渲染器不支持 GLB 半透明混合，以下材质按镂空（alpha ≥ 0.5）显示：${masked.join('；')}。` : '') + skipped;
 }, '发送失败');
 
@@ -1493,6 +1513,9 @@ async function start() {
     const migrated = await migrateBrowserData(library, packagePathDocument);
     records = (await library.load())?.records ?? [];
     await packagePathDocument.load();
+    await lightingDocument.load();
+    ({ iblDir } = await (await fetch('/studio-config', { cache: 'no-store' })).json() as { iblDir: string });
+    void lightingPanel.loadPanoramas();
     if (migrated) {
       $('#match-delete-status').hidden = false;
       $('#match-delete-status').textContent = migrated;

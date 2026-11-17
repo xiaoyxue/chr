@@ -64,6 +64,9 @@ class Config:
     # Where pitch-studio keeps matches, placements, sessions and uploaded files
     # (STUDIO_DATA_DIR); inside asset_root so chr-server can read the uploads.
     studio_data_dir: str | None = None
+    # Folder of the OpenEXR panoramas pitch-studio's 灯光 tab offers (STUDIO_IBL_DIR);
+    # with asset_root, chr-server may read them too. Default: the asset/ibl submodule.
+    ibl_dir: str | None = None
     monitor_page_port: int = 5173
     # "worker": chr-server's tracking worker supplies cameras; "external": chr-sdi-in
     # sends the recorded ones (--send-cameras).
@@ -195,8 +198,11 @@ def components(config: Config) -> list[Component]:
     ]
     if config.description:
         render += ["--description", config.description]
+    ibl_dir = config.ibl_dir or str(ROOT / "asset" / "ibl")
     if config.asset_root:
         render += ["--asset-root", config.asset_root]
+        if Path(ibl_dir).is_dir():
+            render += ["--asset-root", ibl_dir]
     if config.tracking == "worker":
         render += ["--tracking-cli", config.tracking_cli] if config.tracking_cli else ["--tracking-worker"]
         for arg in config.tracking_worker_args:
@@ -226,7 +232,7 @@ def components(config: Config) -> list[Component]:
             ["nix", "develop", ".#media", "--command", "python3", "server/scripts/stack.py", "relay", caller,
              str(config.srt_relay_port)],
             {}, [("SRT relay", "127.0.0.1", config.srt_relay_port)]))
-    studio_env = {"CHR_RENDER_URL": f"ws://{config.server_ws}"}
+    studio_env = {"CHR_RENDER_URL": f"ws://{config.server_ws}", "STUDIO_IBL_DIR": ibl_dir}
     if config.studio_data_dir:
         studio_env["STUDIO_DATA_DIR"] = config.studio_data_dir
     for name, directory, port, env in (

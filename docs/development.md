@@ -378,12 +378,17 @@ downloads no material, and writes the studio's JSON exports
 there, written atomically, at most 64 MB, and an existing file replaced only
 after the page asks.
 
+The 灯光 (lighting) tab offers the OpenEXR panoramas of `STUDIO_IBL_DIR` (default
+`asset/ibl` of the checkout; the stack's `ibl_dir`), which the page server lists and
+hashes through `/local-files/`; `/studio-config` tells the page that folder.
+
 The studio keeps all of its data on the onsite server, not in the browser, in
 one directory: `STUDIO_DATA_DIR` (`output/pitch-studio` in the repository for
 `npm run dev` / `vite preview`, or under the working directory for the
 `pitch-studio` launcher; the stack's `studio_data_dir`). The same process serves
 it under `/studio-store/`, for loopback hosts only: `matches.json` (the match
 library and Fusion drafts), `package-paths.json` (offline ZIP paths),
+`lighting.json` (lighting presets and each match's choice),
 `matches/<matchId>/local-ads.json` and `session.json` (placements made onsite and
 the operator's session, kept apart from the Fusion package),
 `matches/<matchId>/exports/` (the default folder for exports), and
