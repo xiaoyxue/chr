@@ -238,8 +238,8 @@ renegotiates the socket's caps in the same session. The core then:
    (below).
 4. **Output.** With `follow` the program's caps change at the first frame of the
    new rate: `livesync` and the simulated output sink take the new rate (the
-   sink is an `appsink`; a DeckLink sink will need its mode switched, phase 3),
-   and the tap's slots carry it; `sdi.get_status` reports the new mode from
+   sink is an `appsink`; a DeckLink sink cannot follow, so a card output needs
+   `fixed`, phase 3), and the tap's slots carry it; `sdi.get_status` reports the new mode from
    that slot on, D after the capture's change. With `fixed` nothing changes
    downstream.
 5. **chr-monitor follows** the tap without a restart: each slot carries its
@@ -267,7 +267,8 @@ rendered: other_extent` in the core's log; CG returns with the camera's extent.
 - **`follow`** (default): the output runs at the input's rate and changes with
   it; every input frame is one output slot, and the capture-to-output delay is
   exactly D. A downstream that cannot change rate sees a change.
-- **`fixed:<rate>`**: the output stays at `<rate>` whatever the input does. The
+- **`fixed:<rate>`**: the output stays at `<rate>` whatever the input does
+  (`fixed:50i`, a field rate with an `i`, is 25 interlaced frames: phase 3). The
   program has its own grid of slots at `<rate>`, starting at the first frame's
   due time; each decided frame fills the grid slots from its due time until the
   next frame is due: the latest frame due is shown, as GStreamer's `videorate`
@@ -300,9 +301,11 @@ request to vchao; until then a format change is a short CG outage.
 The development host has no DeckLink card (`lspci` shows none). The code paths
 are built, construct the elements GStreamer 1.28.8's `decklink` plugin
 provides, map formats to the cards' modes and fail clearly without a card;
-tests cover argument parsing, the mode mapping and "no DeckLink device".
-Capture, playout, genlock, the card clock, the mode switch, RP 188 timecode,
-captions and embedded audio on a real card are **not verified**.
+tests cover argument parsing, the mode mapping, that the program's caps
+negotiate with the sink's pad template in every mapped mode, the priming of
+both sinks (with a simulated sink) and "no DeckLink device". Capture,
+playout, genlock, the card clock and its start, RP 188 timecode, captions and
+embedded audio on a real card are **not verified**.
 
 - **Input** (`chr-sdi-in --source decklink --device N [--mode auto|<mode>]
   [--connection sdi|hdmi|optical-sdi|auto]`, `gst_core::decklink`):
@@ -316,14 +319,29 @@ captions and embedded audio on a real card are **not verified**.
   renegotiates caps: the input starts a new stream, exactly as the test
   pattern's `--then` switch, so the core follows it (phase 2). The card is not
   paced by `clocksync` (it delivers in real time and timestamps on its own).
-- **Output** (`chr-server --pipeline gst --output decklink [--device N]`):
-  `decklinkvideosink` replaces the simulated `appsink` after `livesync`,
-  `decklinkaudiosink` the audio `appsink`. Its mode is the program format's
-  (table below); in `follow` a new program format switches the sink's `mode`
-  right before the new caps reach it (a pad probe). `cc-line=9` and
-  `timecode-format=rp188any` output the slot's captions and timecode. Without a
-  card `Core::start` fails with `no DeckLink device 0 (0 found): install
-  Blackmagic Desktop Video …`.
+- **Output** (`chr-server --pipeline gst --output decklink [--device N]
+  --output-rate fixed:<rate>`): `decklinkvideosink` replaces the simulated
+  `appsink` after `livesync`, `decklinkaudiosink` the audio `appsink`. Its mode
+  is the fixed output format's (table below), for the whole run:
+  `decklinkvideosink` keeps its mode once it plays (new caps of the same size
+  are "nothing relevant", others "reconfiguration not supported"), so a card
+  output **requires `--output-rate fixed:<rate>`** (`fixed:50i` for 1080i50,
+  `fixed:59.94` for 1080p59.94) and refuses `follow` at start; the input's
+  other rates are converted (phase 2's grid; an interlaced fixed output keeps
+  an interlaced input's fields, a progressive one deinterlaces it). Switching
+  the card's mode on the fly (the sink to READY, a new mode, primed again) is
+  left for a test with a card. `cc-line=9` and `timecode-format=rp188any`
+  output the slot's captions and timecode. Without a card `Core::start` fails
+  with `no DeckLink device 0 (0 found): install Blackmagic Desktop Video …`.
+- **Start.** A DeckLink clock stands still until the card plays, and the card
+  plays once its video sink, and with audio its audio sink, got caps; the
+  video sink gets them with the first frame `livesync` passes on, and the
+  selector's deadlines wait on that clock. So the core primes both right
+  after the pipeline plays (`select::prime`): a black program frame at running
+  time 0, due at once, and 10 ms of silence at 0 in the card's fixed audio
+  format (`--audio-channels 2|8|16`, the input's audio converted to it), so the
+  card starts whether or not the input has audio. `livesync` repeats the black
+  frame until the first program frame (it counts as a fill, then repeats).
 - **Clock and genlock.** With a DeckLink output, the sink's clock (the card's,
   locked to its reference input when one is connected) is the pipeline clock;
   in simulation the system clock stays. Every capture time, a frame's
@@ -342,10 +360,10 @@ captions and embedded audio on a real card are **not verified**.
 | 1920x1080 progressive | 23.98, 24, 25, 29.97, 30, 50, 59.94, 60 | `1920x1080p50` … | `1080p2398` … `1080p60` |
 | 1280x720 progressive | 50, 59.94, 60 | `1280x720p50` … | `720p50`, `720p5994`, `720p60` |
 | 3840x2160 progressive | 23.98 … 60 | `3840x2160p50` … | `2160p2398` … `2160p60` |
-| 720x486 interlaced, bottom first | 30000/1001 | `720x486i59.94` | `ntsc` |
-| 720x576 interlaced, top first | 25 | `720x576i50` | `pal` |
-
-Any other format is refused with the list of modes. Host setup and the
+Any other format is refused with the list of modes. SD (`ntsc`, `pal`) is not
+mapped: its caps have non-square pixels (10/11, 12/11) and BT.601, which the
+core's square-pixel BT.709 frames do not negotiate with; an SD signal on a card
+in `mode=auto` does not negotiate either. Host setup and the
 checklist: `docs/operations.md`.
 
 ### Interlaced formats
@@ -399,8 +417,10 @@ between them is a format change (a new stream, phase 2).
   slots keep the input's 50 fields. Rendering both fields (two renders per
   frame at the field rate, woven 1:1) is the upgrade if CG motion must be
   field-rate.
-- **`fixed:<rate>`** output stays progressive: an interlaced input's clean feed
-  is deinterlaced the same way before it is converted.
+- **`fixed:<rate>`** output is progressive: an interlaced input's clean feed
+  is deinterlaced the same way before it is converted. **`fixed:<field
+  rate>i`** (`fixed:50i`) is interlaced: an interlaced input's clean feed keeps
+  its fields, a progressive input's pictures go out as both fields of a frame.
 - The monitor shows interlaced program frames woven, as they are (the tap does
   not carry the scan).
 
@@ -544,8 +564,8 @@ target/linux/release/chr-server --pipeline gst --fps 25 --size 1920x1080 ... \
 Both default to `$XDG_RUNTIME_DIR/chr/capture.sock` (`--socket`,
 `--capture-socket`); the audio socket is `<socket>.audio` (`--no-audio` on
 either side turns audio off). With a card: `chr-sdi-in --source decklink
---device 0` and `chr-server … --output decklink --device 1` (not verified on
-hardware; `docs/operations.md`). chr-server logs the output every 10 s: slots, CG,
+--device 0` and `chr-server … --output decklink --device 1 --output-rate
+fixed:50i` (not verified on hardware; `docs/operations.md`). chr-server logs the output every 10 s: slots, CG,
 clean feed, repeats, duplicates (fixed rate), skipped frames, the interval at
 each rate and the capture-to-output delay (min/mean/max and standard
 deviation), the tap's slot − frame, the selector's decisions with format
@@ -795,8 +815,9 @@ decoders.
   output keeps `--size` (the clean feed is scaled), so the tap is never
   re-created. Only the test pattern switches formats in simulation; the file
   input plays one clip.
-- With `fixed`, the output's delay varies by up to an input period by design,
-  and the output is progressive (an interlaced input is deinterlaced).
+- With `fixed`, the output's delay varies by up to an input period by design.
+- A DeckLink output keeps one mode: it needs a fixed output rate. SD modes
+  are not mapped.
 
 Next (#154): verify phase 3 and 4 on a DeckLink card with house sync (#80);
 removing the timer loop, the capture ring and the old join (phase 5).

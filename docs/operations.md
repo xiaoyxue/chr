@@ -88,14 +88,17 @@ the input and the server with the card:
 
 ```sh
 chr-sdi-in --source decklink --device 0 --mode auto --connection sdi
-chr-server --pipeline gst --output decklink --device 1 --input-loss black ...
+chr-server --pipeline gst --output decklink --device 1 --output-rate fixed:50i \
+  --input-loss black ...
 ```
 
 The Nix shells' GStreamer has the `decklink` plugin (gst-plugins-bad); it
 loads `libDeckLinkAPI.so` from the host at run time. The output card's clock
 times the whole pipeline: lock its reference input to house sync before going
-on air, and verify capture, playout, the mode switch on a format change,
-RP 188 timecode, captions (line 9) and embedded audio on site.
+on air, and verify capture, playout, the card's start (the core primes it
+with a black frame and silence), RP 188 timecode, captions (line 9) and
+embedded audio on site. The output card keeps the mode of `--output-rate
+fixed:<rate>` (HD and UHD; no SD) for the whole run.
 
 To enable Resizable BAR on an NVIDIA host (needs a reboot; stop the stack first):
 

@@ -29,8 +29,8 @@
 //! pass through untouched (the same memfd). Its frames are allocated by the
 //! shared-memory allocator, as the workers' sockets require. The clean branch
 //! keeps the interlaced picture as it came (both fields, their order) for an
-//! output that follows the input; a fixed, progressive output rate gets it
-//! deinterlaced the same way.
+//! output that follows the input or is interlaced at a fixed rate; a fixed,
+//! progressive output gets it deinterlaced the same way.
 
 use std::{
     collections::VecDeque,
@@ -291,6 +291,10 @@ impl Capture {
         let convert = gst::ElementFactory::make("videoconvertscale")
             .property("n-threads", convert_threads(config))
             .build()?;
+        // A fixed progressive output deinterlaces; following the input, or a
+        // fixed interlaced output, keeps the frame's fields.
+        let progressive_output =
+            matches!(config.output_rate, OutputRate::Fixed(_, Scan::Progressive));
         // The output's extent; the rate and scan stay the frame's, unless the
         // output is progressive at a fixed rate.
         let clean_caps = gst::ElementFactory::make("capsfilter")
@@ -298,7 +302,7 @@ impl Capture {
                 let mut caps = super::uyvy_caps(config.output.into());
                 let structure = caps.make_mut().structure_mut(0).expect("one structure");
                 structure.remove_field("framerate");
-                if config.output_rate == OutputRate::Follow {
+                if !progressive_output {
                     structure.remove_fields(["interlace-mode", "field-order"]);
                 }
                 caps
@@ -320,9 +324,10 @@ impl Capture {
         gst::Element::link_many([&source, &captured, &tee])?;
         gst::Element::link_many([&tee, &cg_queue, &progressive, cg.upcast_ref()])?;
         let mut clean_branch = vec![&tee, &clean_queue];
-        let fixed_deinterlace = match config.output_rate {
-            OutputRate::Follow => None,
-            OutputRate::Fixed(_) => Some(first_field_deinterlacer()?),
+        let fixed_deinterlace = if progressive_output {
+            Some(first_field_deinterlacer()?)
+        } else {
+            None
         };
         if let Some(deinterlace) = &fixed_deinterlace {
             bin.add(deinterlace)?;

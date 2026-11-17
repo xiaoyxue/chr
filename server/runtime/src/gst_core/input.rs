@@ -122,14 +122,19 @@ pub fn audio_socket(capture: &Path) -> PathBuf {
 }
 
 /// The capture hop's audio: 32-bit samples (SDI audio is 24-bit), 48 kHz,
-/// interleaved.
+/// interleaved; more than two channels are unpositioned (SDI's embedded
+/// channels have no speaker positions).
 pub fn audio_caps(channels: u32) -> gst::Caps {
-    gst::Caps::builder("audio/x-raw")
+    let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "S32LE")
         .field("rate", AUDIO_RATE as i32)
         .field("channels", channels as i32)
-        .field("layout", "interleaved")
-        .build()
+        .field("layout", "interleaved");
+    if channels > 2 {
+        caps.field("channel-mask", gst::Bitmask::new(0)).build()
+    } else {
+        caps.build()
+    }
 }
 
 pub struct Input {

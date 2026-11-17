@@ -65,6 +65,8 @@ pub struct Chain {
     delay: gst::ClockTime,
     stats: Arc<Mutex<Stats>>,
     timeline: Arc<OnceLock<Timeline>>,
+    /// The sink's fixed caps, primed with silence when the chain starts.
+    prime: Option<gst::Caps>,
 }
 
 pub struct Audio {
@@ -84,8 +86,17 @@ struct Session {
 }
 
 impl Chain {
-    /// The program's audio chain in `pipeline`, which does not play yet.
-    pub fn add(pipeline: &gst::Pipeline, delay: Duration, sink: Sink) -> Result<Self, Error> {
+    /// The program's audio chain in `pipeline`, which does not play yet. With
+    /// `prime` channels (a card's sink) the sink gets one fixed format, the
+    /// input's audio converted to it, and is primed with silence when the
+    /// chain starts: a DeckLink card plays, and its clock runs, only once its
+    /// audio sink has caps too, whether or not the input has audio.
+    pub fn add(
+        pipeline: &gst::Pipeline,
+        delay: Duration,
+        sink: Sink,
+        prime: Option<u32>,
+    ) -> Result<Self, Error> {
         let delay = gst::ClockTime::from_nseconds(delay.as_nanos() as u64);
         let program = AppSrc::builder()
             .name("program-audio")
@@ -129,13 +140,18 @@ impl Chain {
                 sink.upcast()
             }
         };
-        pipeline.add_many([program.upcast_ref(), &convert, &sink])?;
-        gst::Element::link_many([program.upcast_ref(), &convert, &sink])?;
+        let prime = prime.map(super::input::audio_caps);
+        let fixed = gst::ElementFactory::make("capsfilter")
+            .property("caps", prime.clone().unwrap_or_else(gst::Caps::new_any))
+            .build()?;
+        pipeline.add_many([program.upcast_ref(), &convert, &fixed, &sink])?;
+        gst::Element::link_many([program.upcast_ref(), &convert, &fixed, &sink])?;
         Ok(Self {
             program,
             delay,
             stats,
             timeline,
+            prime,
         })
     }
 
@@ -148,6 +164,9 @@ impl Chain {
         recorder: SdiRecorder,
     ) -> Audio {
         let _ = self.timeline.set(timeline.clone());
+        if let Some(caps) = &self.prime {
+            prime(&self.program, caps);
+        }
         Audio {
             pipeline: pipeline.clone(),
             program: self.program,
@@ -284,6 +303,21 @@ impl Drop for Audio {
             let _ = bin.set_state(gst::State::Null);
             let _ = self.pipeline.remove(&bin);
         }
+    }
+}
+
+/// Pushes 10 ms of silence in `caps` at running time 0.
+fn prime(program: &AppSrc, caps: &gst::Caps) {
+    let structure = caps.structure(0).expect("one structure");
+    let channels = structure.get::<i32>("channels").unwrap_or(2) as usize;
+    let samples = super::input::AUDIO_RATE as usize / 100;
+    let mut silence = gst::Buffer::from_mut_slice(vec![0_u8; samples * channels * 4]);
+    let writable = silence.get_mut().expect("new buffer is not shared");
+    writable.set_pts(gst::ClockTime::ZERO);
+    writable.set_duration(gst::ClockTime::from_mseconds(10));
+    program.set_caps(Some(caps));
+    if let Err(error) = program.push_buffer(silence) {
+        log::warn!("the audio sink was not primed: {error:?}");
     }
 }
 

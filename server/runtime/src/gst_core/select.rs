@@ -478,8 +478,9 @@ struct Shared {
 /// under the output rate policy.
 pub struct Program {
     pub appsrc: AppSrc,
-    /// The output's extent and its rate at start (the fixed rate, if fixed).
-    pub output: VideoMode,
+    /// The output's extent, and its rate and scan at start (the fixed ones, if
+    /// fixed).
+    pub output: Format,
     pub policy: OutputRate,
     pub recorder: SdiRecorder,
     /// The black or slate frame for a lost input; `None` holds the last frame.
@@ -563,10 +564,10 @@ impl Selector {
 }
 
 fn run(shared: &Shared, program: &Program, timeline: &Timeline, timing: Timing) {
-    let mut program_format = Format::from(program.output);
+    let mut program_format = program.output;
     let mut grid = match program.policy {
         OutputRate::Follow => None,
-        OutputRate::Fixed(rate) => Some(Grid::new(rate)),
+        OutputRate::Fixed(rate, _) => Some(Grid::new(rate)),
     };
     let mut filler = Filler {
         still: program.loss_fill.clone(),
@@ -659,7 +660,7 @@ fn run(shared: &Shared, program: &Program, timeline: &Timeline, timing: Timing) 
         let format = Format {
             mode: VideoMode {
                 fps: key.rate,
-                ..program.output
+                ..program.output.mode
             },
             scan: key.scan,
         };
@@ -693,6 +694,38 @@ fn run(shared: &Shared, program: &Program, timeline: &Timeline, timing: Timing) 
         }
         slots = lock(&shared.slots);
     }
+}
+
+/// Starts the program with `black` at running time 0, due as soon as the
+/// pipeline plays: a DeckLink card's clock stands still until the card
+/// plays, and the card plays once its sink got caps, which `livesync` passes
+/// on with its first frame. The selector's deadlines wait on that clock, so
+/// without this frame nothing would ever be due. `livesync` repeats it until
+/// the first program frame; it counts as a fill in the output's statistics.
+pub fn prime(
+    appsrc: &AppSrc,
+    black: &gst::Buffer,
+    format: Format,
+    timeline: &Timeline,
+) -> Result<(), Error> {
+    let frame = program_frame(
+        black,
+        Stamp {
+            key: Frame {
+                sequence: 0,
+                capture: gst::ClockTime::ZERO,
+                rate: format.mode.fps,
+                scan: format.scan,
+            },
+            choice: Choice::Fill,
+            ancillary: None,
+        },
+        timeline,
+        0,
+        format.mode.fps.period_ns(),
+    );
+    appsrc.push_buffer(frame)?;
+    Ok(())
 }
 
 /// How long until `margin` before running time `due` ns.

@@ -143,6 +143,22 @@ impl Format {
     }
 }
 
+/// A rate as the command lines take it: frames per second (`50`, `59.94`,
+/// `30000/1001`), or with an `i` suffix interlaced, named by its field rate as
+/// broadcast does: `50i` is 25 interlaced frames per second, top field first.
+pub fn scanned_rate(text: &str) -> Result<(Rate, Scan), String> {
+    match text.strip_suffix('i') {
+        None => Ok((text.parse().map_err(|e| format!("{e}"))?, Scan::Progressive)),
+        Some(fields) => {
+            let fields: Rate = fields.parse().map_err(|e| format!("{e}"))?;
+            Ok((
+                Rate::new(fields.num(), fields.den() * 2).map_err(|e| format!("{e}"))?,
+                Scan::Interlaced(FieldOrder::TopFirst),
+            ))
+        }
+    }
+}
+
 impl From<VideoMode> for Format {
     fn from(mode: VideoMode) -> Self {
         Self {

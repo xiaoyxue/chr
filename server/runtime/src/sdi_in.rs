@@ -11,13 +11,12 @@
 
 use std::{error::Error, path::PathBuf, time::Duration};
 
-use chr_common::rate::Rate;
 use chr_runtime::{
     gst_core::{
         decklink::{self, Connection},
         input::{Input, Options, Source, audio_socket},
     },
-    sdi::{FieldOrder, Format, Scan, VideoMode},
+    sdi::{Format, VideoMode, scanned_rate},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -79,21 +78,6 @@ struct Args {
     /// Steps, each after the previous state lasted this long.
     then: Vec<(Duration, Step)>,
     cycle: bool,
-}
-
-/// A rate as `--test-pattern` and `--then` take it: `50`, `59.94`, or `50i`
-/// for interlaced frames at half that rate.
-fn scanned_rate(text: &str) -> Result<(Rate, Scan)> {
-    match text.strip_suffix('i') {
-        None => Ok((text.parse()?, Scan::Progressive)),
-        Some(fields) => {
-            let fields: Rate = fields.parse()?;
-            Ok((
-                Rate::new(fields.num(), fields.den() * 2)?,
-                Scan::Interlaced(FieldOrder::TopFirst),
-            ))
-        }
-    }
 }
 
 /// `<WxH> <rate>` of `flag`.
@@ -330,6 +314,8 @@ fn run(args: Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chr_common::rate::Rate;
+    use chr_runtime::sdi::{FieldOrder, Scan};
 
     fn parse(args: &[&str]) -> Result<Option<Args>> {
         parse_args(args.iter().map(|arg| (*arg).to_owned()))

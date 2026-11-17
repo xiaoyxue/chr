@@ -14,10 +14,14 @@
 //!   switch is. `drop-no-signal-frames` makes a lost signal an input loss
 //!   (no frames) rather than black frames. Timecode (RP 188, any) and captions
 //!   come as GStreamer metas.
-//! - **Output** (`chr-server --output decklink`): `decklinkvideosink` in the
-//!   mode of the program's format, switched when the program's format changes,
-//!   and its clock (the card's, genlocked to its reference input) becomes the
-//!   core's pipeline clock.
+//! - **Output** (`chr-server --output decklink`, with a fixed output rate):
+//!   `decklinkvideosink` in the mode of the program's format, which does not
+//!   change while it plays (the sink refuses a reconfiguration), and its clock
+//!   (the card's, genlocked to its reference input) becomes the core's
+//!   pipeline clock; the core primes it ([`super::select::prime`]).
+//!
+//! Only HD and UHD modes are mapped: SD's caps carry a non-square pixel aspect
+//! ratio and BT.601, which chr's 1:1, BT.709 frames do not negotiate with.
 
 use gstreamer::{self as gst, prelude::*};
 
@@ -33,15 +37,13 @@ pub struct Mode {
     pub format: Format,
 }
 
-/// The modes chr maps: SD, HD and UHD broadcast formats. Interlaced modes are
+/// The modes chr maps: HD and UHD broadcast formats. Interlaced modes are
 /// named by their field rate and run at half of it in frames (`1080i50` is 25
 /// frames per second), as GStreamer's caps carry them.
 const MODES: &[(&str, u32, u32, u32, u32, Scan)] = {
-    use FieldOrder::{BottomFirst, TopFirst};
+    use FieldOrder::TopFirst;
     use Scan::{Interlaced, Progressive};
     &[
-        ("ntsc", 720, 486, 30000, 1001, Interlaced(BottomFirst)),
-        ("pal", 720, 576, 25, 1, Interlaced(TopFirst)),
         ("1080p2398", 1920, 1080, 24000, 1001, Progressive),
         ("1080p24", 1920, 1080, 24, 1, Progressive),
         ("1080p25", 1920, 1080, 25, 1, Progressive),
@@ -275,10 +277,9 @@ mod tests {
             .nick,
             "1080p5994"
         );
-        assert_eq!(
-            "ntsc".parse::<Mode>().unwrap().format,
-            format(720, 486, ntsc, Scan::Interlaced(FieldOrder::BottomFirst))
-        );
+        // SD (non-square pixels, BT.601) is not mapped.
+        assert!("ntsc".parse::<Mode>().is_err() && "pal".parse::<Mode>().is_err());
+        assert!(Mode::of(format(720, 576, Rate::fps(25), tff)).is_err());
         for mode in modes() {
             assert_eq!(Mode::of(mode.format).unwrap(), mode, "{}", mode.nick);
             assert_eq!(mode.nick.parse::<Mode>().unwrap(), mode);
@@ -298,6 +299,35 @@ mod tests {
         assert!("1080i49".parse::<Mode>().is_err());
         assert_eq!("sdi".parse::<Connection>().unwrap(), Connection::Sdi);
         assert!("dvi".parse::<Connection>().is_err());
+    }
+
+    /// The program's caps in every mapped mode negotiate with
+    /// `decklinkvideosink`'s caps (its pad template, no card needed).
+    #[test]
+    fn program_caps_negotiate_with_the_sink_in_every_mode() {
+        gst::init().unwrap();
+        let Some(factory) = gst::ElementFactory::find("decklinkvideosink") else {
+            eprintln!("skipped: no decklink plugin");
+            return;
+        };
+        let template = factory
+            .static_pad_templates()
+            .into_iter()
+            .find(|template| template.direction() == gst::PadDirection::Sink)
+            .unwrap()
+            .caps();
+        for mode in modes() {
+            let caps = super::super::uyvy_caps(mode.format);
+            assert!(caps.can_intersect(&template), "{}: {caps}", mode.nick);
+        }
+        // SD would not: its pixels are not square.
+        let sd = super::super::uyvy_caps(format(
+            720,
+            576,
+            Rate::fps(25),
+            Scan::Interlaced(FieldOrder::TopFirst),
+        ));
+        assert!(!sd.can_intersect(&template), "{sd}");
     }
 
     /// The development host has no DeckLink card: the elements exist, and

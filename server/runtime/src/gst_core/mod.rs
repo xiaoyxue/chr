@@ -68,7 +68,7 @@ use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSrc};
 
 use crate::{
-    sdi::{Format, SdiRecorder, VideoMode},
+    sdi::{Format, Scan, SdiRecorder, VideoMode},
     worker::transport::{self, Host},
 };
 
@@ -159,22 +159,28 @@ impl Timeline {
 /// The program output's rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputRate {
-    /// The input's rate, changing with it.
+    /// The input's rate and scan, changing with it.
     Follow,
-    /// This rate whatever the input's: frames are repeated or dropped.
-    Fixed(Rate),
+    /// This rate and scan whatever the input's: frames are repeated or
+    /// dropped; a progressive output deinterlaces an interlaced input.
+    Fixed(Rate, Scan),
 }
 
 impl std::str::FromStr for OutputRate {
     type Err = String;
 
-    /// `follow` or `fixed:<rate>`.
+    /// `follow`, `fixed:<rate>` or `fixed:<field rate>i` (`fixed:50i`: 25
+    /// interlaced frames per second).
     fn from_str(text: &str) -> Result<Self, String> {
         match text.split_once(':') {
             None if text == "follow" => Ok(Self::Follow),
-            Some(("fixed", rate)) => Ok(Self::Fixed(rate.parse().map_err(|e| format!("{e}"))?)),
+            Some(("fixed", rate)) => {
+                let (rate, scan) = crate::sdi::scanned_rate(rate)?;
+                Ok(Self::Fixed(rate, scan))
+            }
             _ => Err(format!(
-                "the output rate is follow or fixed:<rate> (fixed:50, fixed:59.94), not {text:?}"
+                "the output rate is follow or fixed:<rate> (fixed:50, fixed:59.94, fixed:50i), \
+                 not {text:?}"
             )),
         }
     }
@@ -186,7 +192,9 @@ pub enum OutputSink {
     /// An `appsink` on the system clock that measures the cadence.
     #[default]
     Simulated,
-    /// A DeckLink card's output, whose clock becomes the pipeline's.
+    /// A DeckLink card's output, whose clock becomes the pipeline's. It
+    /// needs a fixed output rate: a card does not change its mode while it
+    /// plays.
     DeckLink { device: u32 },
 }
 
@@ -211,6 +219,9 @@ pub struct CoreConfig {
     pub input_loss: InputLoss,
     /// Pass the input's audio through.
     pub audio: bool,
+    /// Audio channels of a DeckLink output (2, 8 or 16), whatever the input
+    /// sends.
+    pub audio_channels: u32,
 }
 
 /// The running pipeline: program output, selector and capture.
@@ -246,7 +257,23 @@ impl Core {
     ) -> Result<(Self, tokio::sync::mpsc::Receiver<capture::Captured>), Error> {
         init()?;
         let pipeline = gst::Pipeline::with_name("chr-core");
-        let output_format = Format::from(config.output);
+        let output_format = Format {
+            mode: config.output,
+            scan: match config.output_rate {
+                OutputRate::Follow => Scan::Progressive,
+                OutputRate::Fixed(_, scan) => scan,
+            },
+        };
+        if matches!(config.sink, OutputSink::DeckLink { .. })
+            && config.output_rate == OutputRate::Follow
+        {
+            return Err(
+                "--output decklink needs --output-rate fixed:<rate> (fixed:50i, \
+                        fixed:59.94): decklinkvideosink does not change its mode while it \
+                        plays, so the card's format cannot follow the input"
+                    .into(),
+            );
+        }
         let program = AppSrc::builder()
             .name("program")
             .caps(&uyvy_caps(output_format))
@@ -285,7 +312,6 @@ impl Core {
             }
             OutputSink::DeckLink { device } => {
                 let sink = decklink::video_sink(device, output_format)?;
-                follow_mode(&sink)?;
                 // The card's clock, locked to its reference input, times the program.
                 let clock = sink
                     .provide_clock()
@@ -330,6 +356,7 @@ impl Core {
             None => None,
         };
         let loss_fill = fill::frame(&config.input_loss, config.output)?;
+        let card = matches!(config.sink, OutputSink::DeckLink { .. });
         let audio = if config.audio {
             Some(audio::Chain::add(
                 &pipeline,
@@ -340,6 +367,7 @@ impl Core {
                         audio::Sink::Element(decklink::audio_sink(device)?)
                     }
                 },
+                card.then_some(config.audio_channels),
             )?)
         } else {
             None
@@ -353,10 +381,21 @@ impl Core {
             config.recorder.clone(),
         ));
         output::attach(&output, &output_sink, &tap_sink)?;
+        if card {
+            // A card's clock stands still until it plays, and it plays once
+            // both sinks have their caps: give them a frame (and silence) at
+            // running time 0, due now, before anything waits on the clock.
+            select::prime(
+                &program,
+                &fill::black(config.output),
+                output_format,
+                &timeline,
+            )?;
+        }
         let selector = select::Selector::start(
             select::Program {
                 appsrc: program,
-                output: config.output,
+                output: output_format,
                 policy: config.output_rate,
                 recorder: config.recorder.clone(),
                 loss_fill,
@@ -386,7 +425,7 @@ impl Core {
             config.output.height,
             match config.output_rate {
                 OutputRate::Follow => "the input's rate and scan".to_owned(),
-                OutputRate::Fixed(rate) => format!("a fixed {} fps, progressive", rate.label()),
+                OutputRate::Fixed(..) => format!("a fixed {}", output_format.name()),
             },
             config.program_delay,
             DECISION_MARGIN,
@@ -603,42 +642,21 @@ pub fn uyvy_caps(format: Format) -> gst::Caps {
     caps
 }
 
-/// Switches a DeckLink output's mode to each new program format, right
-/// before its caps reach the sink.
-fn follow_mode(sink: &gst::Element) -> Result<(), Error> {
-    let element = sink.downgrade();
-    sink.static_pad("sink")
-        .ok_or("the output sink has no sink pad")?
-        .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
-            if let Some(gst::PadProbeData::Event(event)) = &info.data
-                && let gst::EventView::Caps(caps) = event.view()
-                && let Some(sink) = element.upgrade()
-            {
-                match capture::format_of(caps.caps()).and_then(decklink::Mode::of) {
-                    Ok(mode) => {
-                        log::info!("DeckLink output mode {}", mode.nick);
-                        sink.set_property_from_str("mode", mode.nick);
-                    }
-                    Err(error) => log::error!("the DeckLink output cannot follow: {error}"),
-                }
-            }
-            gst::PadProbeReturn::Ok
-        });
-    Ok(())
-}
-
 /// The still frames a lost input's slots show.
 mod fill {
     use super::*;
 
+    /// A black UYVY frame at the output's extent.
+    pub fn black(output: VideoMode) -> gst::Buffer {
+        let pixels = output.width as usize * output.height as usize;
+        gst::Buffer::from_mut_slice([0x80, 0x10, 0x80, 0x10].repeat(pixels / 2))
+    }
+
     /// Black or the slate at the output's extent; `None` to hold the last frame.
     pub fn frame(loss: &InputLoss, output: VideoMode) -> Result<Option<gst::Buffer>, Error> {
-        let (width, height) = (output.width as usize, output.height as usize);
         match loss {
             InputLoss::Hold => Ok(None),
-            InputLoss::Black => Ok(Some(gst::Buffer::from_mut_slice(
-                [0x80, 0x10, 0x80, 0x10].repeat(width * height / 2),
-            ))),
+            InputLoss::Black => Ok(Some(black(output))),
             InputLoss::Slate(None) => {
                 convert("videotestsrc num-buffers=1 pattern=smpte", None, output).map(Some)
             }
@@ -717,6 +735,7 @@ fn queue(buffers: u32, leaky: bool) -> Result<gst::Element, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdi::SdiStats;
 
     #[test]
     fn input_loss_policies_parse_and_fill_black_or_a_slate() {
@@ -840,6 +859,103 @@ mod tests {
         assert_eq!(woven, frames);
     }
 
+    /// A card's output is primed: a black program frame at running time 0,
+    /// with the program's caps, leaves `livesync` at once (a card's sink
+    /// starts playing, and its clock running, on those caps), and its audio
+    /// sink gets the card's fixed format with silence at 0, whether or not the
+    /// input has audio.
+    #[test]
+    fn a_card_output_is_primed_with_black_and_silence_at_running_time_zero() {
+        init().unwrap();
+        let i50 = Format {
+            mode: VideoMode {
+                width: 64,
+                height: 36,
+                fps: Rate::fps(25),
+            },
+            scan: crate::sdi::Scan::Interlaced(crate::sdi::FieldOrder::TopFirst),
+        };
+        let pipeline = gst::parse::launch(
+            "appsrc name=program format=time is-live=true ! livesync ! appsink name=output",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        pipeline.use_clock(Some(&gst::SystemClock::obtain()));
+        let program = pipeline
+            .by_name("program")
+            .unwrap()
+            .downcast::<AppSrc>()
+            .unwrap();
+        program.set_caps(Some(&uyvy_caps(i50)));
+        let sink = pipeline
+            .by_name("output")
+            .unwrap()
+            .downcast::<AppSink>()
+            .unwrap();
+        let chain = audio::Chain::add(
+            &pipeline,
+            Duration::from_millis(100),
+            audio::Sink::Simulated,
+            Some(8),
+        )
+        .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let timeline = Timeline::of(&pipeline).unwrap();
+        let audio_sink = pipeline
+            .by_name("audio-output")
+            .unwrap()
+            .downcast::<AppSink>()
+            .unwrap();
+        // The audio sink's frames, as the card would take them.
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&heard);
+        audio_sink.static_pad("sink").unwrap().add_probe(
+            gst::PadProbeType::BUFFER,
+            move |pad, info| {
+                let caps = pad.current_caps().unwrap();
+                let channels = caps.structure(0).unwrap().get::<i32>("channels").unwrap();
+                let buffer = info.buffer().unwrap();
+                record
+                    .lock()
+                    .unwrap()
+                    .push((buffer.pts(), channels, buffer.size()));
+                gst::PadProbeReturn::Ok
+            },
+        );
+        select::prime(&program, &fill::black(i50.mode), i50, &timeline).unwrap();
+        let audio = chain.start(&pipeline, timeline, "/nonexistent".into(), {
+            SdiStats::recorded(i50).1
+        });
+        let sample = sink
+            .try_pull_sample(gst::ClockTime::from_mseconds(500))
+            .expect("the primed frame");
+        let buffer = sample.buffer().unwrap();
+        assert_eq!(buffer.pts(), Some(gst::ClockTime::ZERO));
+        assert_eq!(
+            capture::format_of(sample.caps().unwrap()).unwrap(),
+            i50,
+            "the program's caps reach the sink with it"
+        );
+        let meta = gst::meta::CustomMeta::from_buffer(buffer, PROGRAM_META).unwrap();
+        assert!(meta.structure().get::<bool>("fill").unwrap());
+        assert_eq!(
+            &buffer.map_readable().unwrap()[..4],
+            [0x80, 0x10, 0x80, 0x10]
+        );
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while heard.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            heard.lock().unwrap().first().copied(),
+            Some((Some(gst::ClockTime::ZERO), 8, 480 * 8 * 4)),
+            "10 ms of 8-channel silence at 0"
+        );
+        drop(audio);
+        pipeline.set_state(gst::State::Null).unwrap();
+    }
+
     #[test]
     fn a_system_clock_capture_time_maps_onto_another_clock() {
         init().unwrap();
@@ -865,9 +981,22 @@ mod tests {
         assert_eq!("follow".parse(), Ok(OutputRate::Follow));
         assert_eq!(
             "fixed:59.94".parse(),
-            Ok(OutputRate::Fixed(Rate::new(60000, 1001).unwrap()))
+            Ok(OutputRate::Fixed(
+                Rate::new(60000, 1001).unwrap(),
+                Scan::Progressive
+            ))
         );
-        assert_eq!("fixed:50".parse(), Ok(OutputRate::Fixed(Rate::fps(50))));
+        assert_eq!(
+            "fixed:50".parse(),
+            Ok(OutputRate::Fixed(Rate::fps(50), Scan::Progressive))
+        );
+        assert_eq!(
+            "fixed:50i".parse(),
+            Ok(OutputRate::Fixed(
+                Rate::fps(25),
+                Scan::Interlaced(crate::sdi::FieldOrder::TopFirst)
+            ))
+        );
         for bad in ["fixed", "fixed:", "fixed:0", "follow:50", "50", ""] {
             assert!(bad.parse::<OutputRate>().is_err(), "{bad}");
         }
