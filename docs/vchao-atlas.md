@@ -5,7 +5,7 @@ own documents are authoritative; this page follows the pinned submodule
 `external/vchao` (`f209fc9`).
 
 **Scope:** what "atlas" means in vchao, the three products the word is used for,
-and a formal statement of the geometry that connects $K$, $R$, $C$, $H$, $V$,
+an intuitive picture with diagrams and units, and a formal statement of the geometry that connects $K$, $R$, $C$, $H$, $V$,
 $q$, $T_{\mathrm{ref}}$ and $T_i$ (vchao's `Ti`), and the offline (map
 building) and online (per-frame) algorithms. It does not define a chr protocol. The paired translation is [vchao-atlas.zh-CN.md](vchao-atlas.zh-CN.md).
 
@@ -43,6 +43,96 @@ Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
   the optical centre (Definition 4), not a 3D or pitch point.
 - $Q_a$ in Definition 5 is a chart rotation (vchao's `camera-geometry.md`
   notation), unrelated to the landmarks Q. The gauge matrix is $M$.
+
+## Intuition: one optical centre, many films
+
+### Three planes
+
+![Side view: the optical centre, the pitch ground, the reference film and the film of frame i](images/vchao-atlas-side.svg)
+
+The station's optical centre $C$ never moves. Everything the camera sees lies
+on a ray from $C$. Three planes cut those rays:
+
+| Plane | What it is | Coordinates | Extent |
+|---|---|---|---|
+| Pitch ground $\Pi_0$ | The real grass, $Z = 0$ | $(X, Y)$ in metres, the standard top view | The pitch |
+| Film of frame $i$, $\mathcal{I}_i$ | Frame $i$'s image plane (the sensor, drawn upright in front of $C$) | SNC of frame $i$ | Finite; it has pixels |
+| Reference film $\Sigma$ | The film of one chosen frame $r$, frozen at that moment | SNC of frame $r$ | Extended without bound |
+
+The reference film is **a film like any other**: geometrically, $\Sigma$ and
+$\mathcal{I}_i$ are the same kind of object, and $V_i$ is the same kind of map
+as a frame-to-frame homography. Only the role differs: $\Sigma$ is the one film
+every frame is recorded against.
+
+Each map follows one ray from one plane to another:
+
+- $T_{\mathrm{ref}}$: a ground point $X$, along the ray $CX$, to where that ray
+  crosses $\Sigma$. Because $V_r = I$, $T_{\mathrm{ref}} = T_r$: it is simply
+  **the pitch as seen by the reference frame**.
+- $V_i$: a point of $\Sigma$, along the same ray, to frame $i$'s film. With
+  $V_r = I$, $V_i = H_{i \leftarrow r}$.
+- $T_i = V_i T_{\mathrm{ref}}$: the ground to frame $i$'s film, through $\Sigma$.
+- $q_k$: where a landmark's ray crosses $\Sigma$. The landmark in the figure is
+  on a stand, not on the ground, so it has no pitch coordinates; it still has a
+  point on $\Sigma$. This is why registration uses $\Sigma$ and not the ground.
+
+### Maps and indices
+
+![Maps between the pitch ground, the reference film and the films of frames i and j](images/vchao-atlas-maps.svg)
+
+One index means one film: $V_i$ ($\Sigma \to \mathcal{I}_i$) and $T_i$
+($\Pi_0 \to \mathcal{I}_i$). Two indices mean film to film:
+$H_{j \leftarrow i} = V_j V_i^{-1} = T_j T_i^{-1}$ (the second form only for
+ground points). $T_{\mathrm{ref}}$ has no frame index; it is a constant of the
+station.
+
+| | Reference film $\Sigma$ | Film of frame $i$ |
+|---|---|---|
+| Number | One per map | One per frame, changing over time |
+| Extent | Unbounded | The sensor |
+| Pixels | Not needed; it can be a film never exposed (the $K = I$ charts of ①) | Yes, the captured picture |
+| Holds | Landmarks $q_k$ and $T_{\mathrm{ref}}$ | Observations $x_{ik}$ |
+
+One shared film is used because:
+
+1. $N$ frames need $N$ maps $V_i$ instead of $N^2$ pairs, and pairs derived as
+   $V_j V_i^{-1}$ are consistent around every loop.
+2. A landmark seen in 100 frames is stored once, as one $q_k$.
+3. A live frame only needs its own $\hat V_f$, not a match to every past frame.
+4. The pitch is attached once, by the constant $T_{\mathrm{ref}}$.
+
+This is the same choice as taking the first camera's frame as the world frame
+in SLAM.
+
+### There are infinitely many reference films
+
+![Several reference films at the same optical centre](images/vchao-atlas-gauge.svg)
+
+Any plane not through $C$ can be the reference film: choose its orientation
+$R'$ (3 degrees of freedom) and intrinsics $K'$ (5), that is, any
+$M = K'R' \in \mathrm{PGL}(3)$ (8). Changing the reference by $M$ changes
+$V_i \mapsto V_i M$, $q_k \mapsto M^{-1} q_k$ and
+$T_{\mathrm{ref}} \mapsto M^{-1} T_{\mathrm{ref}}$, and leaves every physical
+quantity ($T_i$, $H_{j \leftarrow i}$, the observations) unchanged. vchao
+chooses the middle frame of a shot; the canonical Atlas ① chooses 36 films with
+$K = I$ and known orientations. $q$, $V$ and $T_{\mathrm{ref}}$ of one map must
+come from the same choice.
+
+## Units
+
+| Quantity | Maps or lives in | Unit |
+|---|---|---|
+| $X, Y, Z$; $C$ | World | Metres, pitch-centred; up is $-Z$ |
+| $(u, v)$ | Native image | Pixels, integer pixel centres |
+| SNC point $(x, y)$ | Film of a frame | Dimensionless: $x = (2u - W)/s$, $y = (2v - H)/s$, $s = \sqrt{WH}$. For 1920 x 1080, $s = 1440$, so $x \in [-1.33, 1.33]$ and $y \in [-0.75, 0.75]$ |
+| Point of $\Sigma$; $q_k$ | Reference film | The reference frame's SNC; homogeneous, so only the ratio $q_1 : q_2 : q_3$ matters. On a canonical chart ($K = I$), $x$ and $y$ are tangents of the angle from the chart's axis |
+| $K_i$ | Intrinsics in SNC | Dimensionless: $f_{\mathrm{SNC}} = f_{\mathrm{px}} / (s/2)$; the half field of view across $x$ is $\arctan\big((W/s) / f_{\mathrm{SNC}}\big)$ |
+| $V_i$, $H_{j \leftarrow i}$ | Film to film | Dimensionless 3 x 3, stored with $\det = 1$ |
+| $T_i$, $T_{\mathrm{ref}}$ | Ground to film | Input $(X, Y, 1)$ in metres, output homogeneous SNC. Changing the length unit by $X' = cX$ replaces $T$ with $T\,\mathrm{diag}(1/c, 1/c, 1)$ |
+| $D_i$ | Film to direction | Dimensionless |
+| $G_0(C)$ | | First two columns dimensionless, third column $-C$ in metres |
+| $\Lambda_f$ | Native pixels to SNC | Scale $2/s$ per pixel |
+| $\rho_3$ threshold, RANSAC inliers | Native image | Pixels |
 
 ## Formal statement
 
