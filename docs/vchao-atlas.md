@@ -465,9 +465,12 @@ Texture fixes $V$ and $q$, pitch markings fix $T_{\mathrm{ref}}$, and only
 elevated points fix $C$ (Proposition 2). vchao does not solve $E$ jointly; there
 is no bundle adjustment over all of $\Theta$.
 
-**What vchao solves: stages in one direction.** Each stage freezes the result of
-the previous one and never returns to it. This is one pass of block-coordinate
-descent, not an alternation between $V$, $T$ and $C$. The stage 2 CLIs are on
+**What vchao solves: stages in one direction.** $V$ and $q$ are fixed after
+stage 1 and nothing later feeds back into them; there is no alternation between
+$V$, $T$ and $C$. The later stages are not a strict chain either: stage 2b
+releases stage 2a's factorisation $T_i = V_i T_{\mathrm{ref}}$ (and the robust
+fit initialises from NBJW seeds, not from stage 2a), and stage 3's
+`--refine-transforms` locally corrects the stage 2 $T_i$. The stage 2 CLIs are on
 vchao main `c1a3c50` (#183), after the pinned `f209fc9`.
 
 *Stage 1, registration (texture only).*
@@ -489,11 +492,11 @@ $$
 $$
 
 *Stage 2b, free per-frame maps* (`pitch-refine-ti`,
-`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`; $8N$ unknowns). The
-registration enters only as a regulariser: the symmetric RMS disagreement
-between $T_j T_i^{-1}$ and $\hat V_j \hat V_i^{-1}$ (or a measured
-$\hat H_{j \leftarrow i}$) on native probes, for frame pairs at roster offsets
-1, 4 and 16:
+`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`; $8N$ unknowns). In the
+robust joint fit the registration seeds the initialisation and otherwise enters
+only as a regulariser: the symmetric RMS disagreement between $T_j T_i^{-1}$ and
+$\hat V_j \hat V_i^{-1}$ (or a measured $\hat H_{j \leftarrow i}$) on native
+probes, for frame pairs at roster offsets 1, 4 and 16:
 
 $$
 \lbrace \hat T_i \rbrace = \operatorname*{arg\,min}_{\lbrace T_i \rbrace}\
@@ -503,10 +506,14 @@ $$
 $$
 
 with $r_{in} = \lVert \pi_i(T_i P_n) - y_{in} \rVert$ and
-$d_p = \min_\ell d_{\mathrm{px}}(p, T_i \ell)$. This is the objective of
-`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`; `pitch-refine-ti` uses
-measured $\hat H_{j \leftarrow i}$ for the last term and Huber at 2 px for both
-terms.
+$d_p = \min_\ell d_{\mathrm{px}}(p, T_i \ell)$. `pitch-refine-ti` has no NBJW term and
+does not use $V$: from an initial $T_i$ it minimises, with measured homographies
+only and unnormalised weights,
+
+$$
+\sum_{(i,j)} w_{ij}\, \mathrm{Huber}_2\left( \mathrm{RMS}_{\mathrm{sym}}\left( T_j T_i^{-1},\ \hat H_{j \leftarrow i} \right) \right)
++ w_{\mathrm{paint}} \sum_i \sum_{p} m_p\, \mathrm{Huber}_2(d_p) .
+$$
 
 *Stage 3, optical centre* (`pitch-centre-fit`; 3 unknowns $(a, b, \eta)$ with
 height $h = e^\eta$ and $C = (-ha, -hb, -h)$; $\hat T_i$ frozen). Goal points use a
@@ -541,7 +548,10 @@ w_m = \frac{\rho'(r_m)}{r_m}, \qquad
 T \leftarrow \exp\left( \textstyle\sum_{a=1}^{8} \delta_a G_a \right) T .
 $$
 
-  Stage 2 updates by the exponential map as written, with Armijo backtracking
+  Stage 2b updates on the left, as written. Stage 2a updates $T_{\mathrm{ref}}$ on
+  the right, on the pitch side,
+  $T_{\mathrm{ref}} \leftarrow N\left( T_{\mathrm{ref}} D^{-1} \exp\left( \sum_a \delta_a G_a \right) D \right)$
+  with $D = \mathrm{diag}(2/L, 2/W, 1)$. Both use Armijo backtracking
   ($\mu = 0$, undamped). The online solver instead takes the largest matrix
   entry as pivot and updates the other eight entries, damped ($\mu$ divided by
   3 on acceptance, multiplied by 10 on rejection, at most eight iterations).

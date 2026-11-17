@@ -407,8 +407,9 @@ $$
 纹理确定 $V$ 和 $q$，场线确定 $T_{\mathrm{ref}}$，只有离地点能确定 $C$（命题 2）。vchao 并不联合求解 $E$，
 也没有对整个 $\Theta$ 做光束平差。
 
-**vchao 实际求解的：单向的分阶段。** 每个阶段冻结上一阶段的结果，之后不再回头修改。这是一遍块坐标下降，
-不是 $V$、$T$、$C$ 之间的交替迭代。阶段 2 的 CLI 在 vchao main `c1a3c50`（#183）上，晚于固定的 `f209fc9`。
+**vchao 实际求解的：单向的分阶段。** 阶段 1 之后 $V$ 和 $q$ 固定不变，后续结果不会反馈回它们；$V$、$T$、$C$ 之间
+没有交替迭代。后面几个阶段也不是严格的链：阶段 2b 放开了阶段 2a 的分解 $T_i = V_i T_{\mathrm{ref}}$（鲁棒联合拟合从
+NBJW 初值出发，而不是从阶段 2a 的结果出发），阶段 3 的 `--refine-transforms` 还会局部修正阶段 2 的 $T_i$。阶段 2 的 CLI 在 vchao main `c1a3c50`（#183）上，晚于固定的 `f209fc9`。
 
 *阶段 1，配准（只用纹理）。*
 
@@ -428,8 +429,8 @@ $$
 $$
 
 *阶段 2b，每帧自由*（`pitch-refine-ti`、`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`；$8N$ 个未知数）。
-配准只作为正则项出现：在原生像素探针上，$T_j T_i^{-1}$ 与 $\hat V_j \hat V_i^{-1}$（或实测的 $\hat H_{j \leftarrow i}$）
-之间的对称 RMS 差异，帧对取名单中间隔 1、4、16 的帧：
+在鲁棒联合拟合中，配准用于给出初值，此外只作为正则项出现：在原生像素探针上，$T_j T_i^{-1}$ 与
+$\hat V_j \hat V_i^{-1}$（或实测的 $\hat H_{j \leftarrow i}$）之间的对称 RMS 差异，帧对取名单中间隔 1、4、16 的帧：
 
 $$
 \lbrace \hat T_i \rbrace = \operatorname*{arg\,min}_{\lbrace T_i \rbrace}\
@@ -438,9 +439,12 @@ $$
 + \frac{w_{\mathrm{geo}}}{2^2} \sum_{(i,j)} m_{ij}\, \mathrm{Huber}_2\left( \mathrm{RMS}_{\mathrm{sym}}\left( T_j T_i^{-1},\ \hat V_j \hat V_i^{-1} \right) \right),
 $$
 
-其中 $r_{in} = \lVert \pi_i(T_i P_n) - y_{in} \rVert$，$d_p = \min_\ell d_{\mathrm{px}}(p, T_i \ell)$。这是
-`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh` 的目标函数；`pitch-refine-ti` 的最后一项使用实测的
-$\hat H_{j \leftarrow i}$，两项都用 2 px 的 Huber。
+其中 $r_{in} = \lVert \pi_i(T_i P_n) - y_{in} \rVert$，$d_p = \min_\ell d_{\mathrm{px}}(p, T_i \ell)$。`pitch-refine-ti` 没有 NBJW 项，也不使用 $V$：它从初始 $T_i$ 出发，只用实测单应和未归一化的权重，最小化
+
+$$
+\sum_{(i,j)} w_{ij}\, \mathrm{Huber}_2\left( \mathrm{RMS}_{\mathrm{sym}}\left( T_j T_i^{-1},\ \hat H_{j \leftarrow i} \right) \right)
++ w_{\mathrm{paint}} \sum_i \sum_{p} m_p\, \mathrm{Huber}_2(d_p) .
+$$
 
 *阶段 3，光心*（`pitch-centre-fit`；3 个未知数 $(a, b, \eta)$，高度 $h = e^\eta$，$C = (-ha, -hb, -h)$；冻结 $\hat T_i$）。
 球门点使用 Student-t（$\nu = 4$）损失，$\sigma_p = 3$ px；每条观测到的球门线 $\ell$ 取两个固定探针 $\pm$
@@ -472,7 +476,9 @@ w_m = \frac{\rho'(r_m)}{r_m}, \qquad
 T \leftarrow \exp\left( \textstyle\sum_{a=1}^{8} \delta_a G_a \right) T .
 $$
 
-  阶段 2 按上式用指数映射更新，配合 Armijo 回溯（$\mu = 0$，无阻尼）。在线求解器则以绝对值最大的矩阵元素为基准，
+  阶段 2b 按上式从左侧更新。阶段 2a 从右侧（球场一侧）更新 $T_{\mathrm{ref}}$：
+  $T_{\mathrm{ref}} \leftarrow N\left( T_{\mathrm{ref}} D^{-1} \exp\left( \sum_a \delta_a G_a \right) D \right)$，
+  其中 $D = \mathrm{diag}(2/L, 2/W, 1)$。两者都配合 Armijo 回溯（$\mu = 0$，无阻尼）。在线求解器则以绝对值最大的矩阵元素为基准，
   更新其余 8 个元素，并带阻尼（接受时 $\mu$ 除以 3，拒绝时乘以 10，最多 8 次迭代）。阶段 3 在 $(a, b, \eta)$
   上做阻尼加回溯。
 - *最近场线关联（类似 ICP）。* $E_{\mathrm{gh}}$ 中的 $\min_\ell$ 每次迭代都按当前 $T$ 重新计算：先关联，再更新。
