@@ -25,8 +25,8 @@ chr 初期有两大交付组件：
 | --- | --- | --- |
 | 控制 WebUI（含 Local Server） | 广告位信息管理、业务操作、现场工作流、状态呈现和交互预览。 | chr；WebUI 与 Local Server 的内部拆分后续细化。 |
 | 实时渲染服务（现场视频运行时） | 组织 SDI 采集、实时追踪接入、逐帧渲染合成、视频输出及录制任务，执行运行时控制。 | chr，以本地 CLI/服务形式运行。 |
-| 离线场景建模 | 读取扫描视频，产出已注册到球场的 atlas 图像/Ti 对及同参考系下的光心 C。 | 可能在仓库外；chr 负责准备输入和接入结果。 |
-| 实时追踪服务 | 使用标定参考模型分析实时视频，提供逐帧 Ti；特征、索引和匹配策略属于内部细节。 | 作为 `chr-server` 监管的跟踪 worker 进程运行（`server/runtime/src/worker/tracking/`；契约、镜头选择与帧/相机配对等 chr 侧逻辑在纯逻辑 crate `server/tracker/`（`chr-tracker`）），协议是 vchao 的 VchaoFrame v1 原始帧契约，与语言无关（经 GStreamer unixfd socket 传输）；当前由回放已记录 Ti 的 `chr-tracking-sim-cli` 代替，真实模块 vchao 的 `pitch-analysis` 按同一契约原样替换它（#148）。见 [Tracking worker](../server/docs/tracking-worker.md)。 |
+| 离线场景建模 | 读取机位的扫场视频，产出该机位的 V/Q map（特征点、各视图的 V 和锚定球场的 T_ref）及同参考系下的光心 C；见 [vchao 的 atlas、V、Ti 与 T_ref](vchao-atlas.zh-CN.md)。 | 在仓库外（vchao）；chr 负责准备输入和接入结果：map 交给跟踪 worker，C 经 `--tracking-centre` 交给 `chr-server`。 |
+| 实时追踪服务 | 使用标定参考模型分析实时视频，提供逐帧 Ti；特征、索引和匹配策略属于内部细节。 | 作为 `chr-server` 监管的跟踪 worker 进程运行（`server/runtime/src/worker/tracking/`；契约、镜头选择与帧/相机配对等 chr 侧逻辑在纯逻辑 crate `server/tracker/`（`chr-tracker`）），协议是 vchao 的 VchaoFrame v1 原始帧契约，与语言无关（经 GStreamer unixfd socket 传输）；vchao 的 `pitch-analysis` 按同一契约原样接入（#148），启动时加载离线建好的 V/Q map；回放已记录 Ti 的 `chr-tracking-sim-cli` 保留为替身。见 [Tracking worker](../server/docs/tracking-worker.md)。 |
 
 Local Server 属于控制侧，不另计为第五个大模块。离线与实时分析也不因名称中有
 “服务”就要求远端部署；可否本地运行、使用什么传输方式均未冻结。
@@ -40,8 +40,8 @@ WebUI ↔ Local Server     ← 控制侧
              ↕
       实时渲染 CLI/服务   ← 实时侧
 
-chr → 扫描视频 → 离线场景建模 → 校准/场地参考结果 → chr
-chr → 实时视频 → 实时追踪服务 → 逐帧 Ti → chr
+chr → 扫场视频 → 离线场景建模（vchao）→ V/Q map + T_ref、光心 C → chr
+chr → 实时视频 → 跟踪 worker（vchao pitch-analysis，使用该 map）→ 逐帧 Ti → chr
 ```
 
 实时视频链路由现场视频运行时组织：采集的视频交给追踪服务，返回结果用于对应帧的渲染合成，

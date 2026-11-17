@@ -26,12 +26,19 @@ runs these processes and connections:
 
 ```mermaid
 flowchart LR
+  subgraph offline["Before the match: offline, outside chr"]
+    scan["scan video of the station"]
+    build["vchao map building<br/>and centre fit"]
+    map[("V/Q map + T_ref<br/>manifest.json")]
+    centre[("optical centre C")]
+    assets[("asset root: Fusion ZIPs,<br/>logos, flags, GLB models")]
+  end
   subgraph camera["Camera: simulated SDI input"]
     sim["chr-sdi-in<br/>+ ffmpeg decoders"]
   end
   subgraph render["render component: run-tracked.sh restarts each process"]
     server["chr-server: GStreamer core<br/>no GPU: per-slot CG or clean feed,<br/>program delay D, output, program tap"]
-    tracker["tracking worker<br/>chr-tracking-sim-cli or pitch-analysis<br/>(replay stand-in or vchao)"]
+    tracker["tracking worker<br/>pitch-analysis (vchao, GPU)<br/>or chr-tracking-sim-cli (replay)"]
     renderer["render worker<br/>chr-renderer-cli (GPU)"]
     monitor["chr-monitor<br/>H.264 encoder"]
   end
@@ -40,6 +47,12 @@ flowchart LR
   relay["SRT relay (srt_relay_port)"]
   player["VLC / ffplay"]
 
+  scan --> build
+  build --> map
+  build --> centre
+  map -- "loaded at start (asset-manifest)" --> tracker
+  centre -- "tracking_centre" --> server
+  assets -- "files the description names" --> server
   sim -- "frames + audio (unixfd, memfd)" --> server
   server -- "frame N + VchaoFrame (unixfd, memfd)" --> tracker
   tracker -- "same frame N + selected Ti or unavailable (unixfd)" --> server
@@ -67,20 +80,25 @@ The same in text, with every channel:
   │ chr-server (no GPU): one GStreamer pipeline               │◄── description.load, status ── pitch-studio :4173
   │ every frame leaves D after capture: its CG, else its own  │    (through its /chr-render proxy)
   │ clean feed; supervises both workers; output (UYVY) on the │◄── status ───────────────────── monitor page :5173
-  │ pipeline clock (simulated sink, or a DeckLink card)       │
+  │ pipeline clock (simulated sink, or a DeckLink card)       │◄── optical centre C (--tracking-centre); files under the asset root
   └───┬─────▲───────────────────┬─────▲─────────────────┬─────┘
       │     │ ①                 │     │ ②               │ ③ program tap (shm)
       ▼     │                   ▼     │                 ▼
   ┌─────────┴────────────┐  ┌─────────┴────────┐  ┌───────────────────────────────────────┐
   │ tracking worker      │  │ render worker    │  │ chr-monitor (≤1080p H.264: NVENC/x264)│── SRT udp :9001 ──► VLC / ffplay
-  │ chr-tracking-sim-cli │  │ chr-renderer-cli │  └───────────────────┬───────────────────┘   └► stack.py relay tcp ──► players over SSH
-  │ (replay stand-in)    │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
-  └──────────────────────┘  └──────────────────┘                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+  │ pitch-analysis       │  │ chr-renderer-cli │  └───────────────────┬───────────────────┘   └► stack.py relay tcp ──► players over SSH
+  │ (vchao, GPU), or     │  │ (GPU)            │                      ├─ ws :8789 status, WebRTC signalling ──► monitor page
+  │ chr-tracking-sim-cli │  │                  │                      └─ WebRTC ICE-TCP :8790-8793, per viewer ─► monitor page
+  │ (replay stand-in)    │  │                  │
+  └──────────▲───────────┘  └──────────────────┘
+             │ ④
+  scan video ─► vchao map building (offline, before the match) ─► V/Q map + T_ref (manifest.json), optical centre C
 
   ① frame N as memfd memory with vchao's VchaoFrame meta ▼; the same frame N with its selected Ti or `unavailable` ▲
   ② `render` carrying the same frame N memory and its camera ▼; `done` carrying the composed SDI frame ▲
   ①② two GStreamer unixfd sockets per worker; each message is JSON in a buffer's GstCustomMeta
   ③ every slot the output sends
+  ④ pitch-analysis loads the station's V/Q map at start (--asset-manifest); the replay stand-in reads the clip's manifest instead
 ```
 
 Each box is one process; the only shared-memory ring left is the program tap
@@ -97,6 +115,10 @@ Clients such as pitch-studio still talk JSON-RPC to chr-server over WebSocket or
 the NativeSocket, unchanged. `chr-tracking-sim-cli` replays the clip's recorded
 `Ti` and estimates nothing. vchao's `pitch-analysis` replaces it unchanged
 (`chr-server --tracking-cli`, #148); see [tracking worker](server/docs/tracking-worker.md).
+`pitch-analysis` loads a V/Q map built offline for the station
+(`--asset-manifest`), and chr-server gets that station's optical centre C
+(`--tracking-centre`, `tracking_centre` in `stack.toml`); see
+[vchao atlas, V, Ti and T_ref](docs/vchao-atlas.md).
 With `tracking = "external"` in `stack.toml`, no tracking worker runs and
 `chr-sdi-in --send-cameras` sends each frame's recorded camera as `tracking.frame`
 on `<dir>/render.sock`. `run-tracked.sh` restarts chr-sdi-in, chr-server and
