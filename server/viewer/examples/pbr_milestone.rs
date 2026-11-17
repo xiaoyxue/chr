@@ -544,6 +544,7 @@ fn main() -> Result<()> {
                 gain: 1.0,
                 rotation,
                 visible,
+                max_radiance: None,
             }),
         )?)?;
         capture(

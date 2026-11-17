@@ -217,6 +217,7 @@ fn orthographic_specular_and_sky_use_parallel_world_directions() {
         gain: 1.0,
         rotation: 0.0,
         visible: true,
+        max_radiance: None,
     };
     scene
         .set_lighting(Lighting::new(Vec::new(), Some(sky.clone())).unwrap())

@@ -274,6 +274,8 @@ type RenderLighting = {
     gain: number;
     rotation: number;
     visible: boolean;
+    /** Largest panorama radiance before gain; brighter texels are clamped. Omitted when absent. */
+    max_radiance?: number;
   } | null;
   /** Uniform, unoccluded fill radiance, linear RGB W/(m^2 sr); omitted when absent. */
   constant?: [number, number, number];

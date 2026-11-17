@@ -313,6 +313,10 @@ pub struct SkyLight {
     /// World yaw about the upward (-Z) axis, in radians.
     pub rotation: f64,
     pub visible: bool,
+    /// Largest radiance taken from the panorama, before `gain`; brighter texels are
+    /// clamped. Removes a sun that a directional light already carries, which would
+    /// otherwise light shadows (IBL is unoccluded) and sparkle on glossy surfaces.
+    pub max_radiance: Option<f32>,
 }
 
 /// No implicit ambient fill or fixed key/fill/rim rig; a constant fill is explicit.
@@ -328,10 +332,14 @@ impl Lighting {
         for light in &lights {
             light.validate()?;
         }
-        if sky
-            .as_ref()
-            .is_some_and(|sky| !sky.gain.is_finite() || sky.gain < 0.0 || !sky.rotation.is_finite())
-        {
+        if sky.as_ref().is_some_and(|sky| {
+            !sky.gain.is_finite()
+                || sky.gain < 0.0
+                || !sky.rotation.is_finite()
+                || sky
+                    .max_radiance
+                    .is_some_and(|cap| !cap.is_finite() || cap <= 0.0)
+        }) {
             return Err(SceneError::InvalidLighting);
         }
         Ok(Self {

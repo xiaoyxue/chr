@@ -173,7 +173,8 @@ async fn described_lighting_uses_an_exr_environment_and_a_constant_fill() {
     described["scene"]["lighting"] = json!({
         "lights": [{"light_id": "sun", "kind": "directional", "direction": [0.5, 0.6, 1.0],
             "irradiance": [2.5, 2.35, 2.1], "angular_radius": 0.00465, "shadow_mode": null}],
-        "environment": {"asset_ref": "sky", "gain": 0.5, "rotation": 0.0, "visible": false},
+        "environment": {"asset_ref": "sky", "gain": 0.5, "rotation": 0.0, "visible": false,
+            "max_radiance": 50.0},
         "constant": [0.1, 0.1, 0.1]});
     let load = |value: &Value| {
         std::fs::write(&path, value.to_string()).unwrap();
@@ -196,6 +197,10 @@ async fn described_lighting_uses_an_exr_environment_and_a_constant_fill() {
     assert_eq!(
         scene["state"]["lighting"]["environment"]["asset_ref"],
         "sky"
+    );
+    assert_eq!(
+        scene["state"]["lighting"]["environment"]["max_radiance"],
+        50.0
     );
     drop(control);
     owner.await.unwrap();

@@ -294,6 +294,7 @@ fn overlays_and_view_switches_preserve_lighting_resources_environment_and_shadow
                     rotation: 0.0,
                     gain: 1.0,
                     visible: true,
+                    max_radiance: None,
                 }),
             )
             .unwrap(),
@@ -458,6 +459,7 @@ fn orthographic_msaa_diagnostics_keep_optical_depth_ibl_and_shadows_compatible()
                     rotation: 0.0,
                     gain: 1.0,
                     visible: true,
+                    max_radiance: None,
                 }),
             )
             .unwrap(),
