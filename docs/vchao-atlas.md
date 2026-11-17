@@ -99,7 +99,9 @@ Ti_i  = V_i T_ref
 
 Check: `V_i T_ref = K_i R_i R_rᵀ K_r⁻¹ · K_r R_r [e1 e2 −C] = K_i R_i [e1 e2 −C] = Ti_i`.
 In general (`V_i ~ D_i⁻¹ A`), `T_ref ~ A⁻¹ [e1 e2 −C]`, and the same check holds
-because A cancels. The anchor only fixes T_ref; it does not reveal A.
+because A cancels. The anchor fixes T_ref. A then follows as
+`A ~ [e1 e2 −C] T_ref⁻¹` once C is known (`C_z ≠ 0`); without C, the anchor
+alone does not determine A.
 
 ### 6. Live estimation (`atlas-vq-estimate`)
 

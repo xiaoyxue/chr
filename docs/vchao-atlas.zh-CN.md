@@ -88,7 +88,7 @@ Ti_i  = V_i T_ref
 
 验证：`V_i T_ref = K_i R_i R_rᵀ K_r⁻¹ · K_r R_r [e1 e2 −C] = K_i R_i [e1 e2 −C] = Ti_i`。
 一般情况下（`V_i ~ D_i⁻¹ A`），`T_ref ~ A⁻¹ [e1 e2 −C]`，A 在相乘时消掉，验证同样成立。
-锚点只确定 T_ref，并不能求出 A。
+锚点确定 T_ref；只要已知 C（`C_z ≠ 0`），就有 `A ~ [e1 e2 −C] T_ref⁻¹`；不知道 C 时，仅凭锚点无法确定 A。
 
 ### 6. 实时估计（`atlas-vq-estimate`）
 
