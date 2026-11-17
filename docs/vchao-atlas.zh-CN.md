@@ -37,13 +37,21 @@ $H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的几何关�
   $x \sim y$ 表示存在 $\lambda \neq 0$ 使 $x = \lambda y$；$[x]$ 表示 $x$ 所在的等价类。
 - $\mathrm{PGL}(3) = \mathrm{GL}(3)/\mathbb{R}^\times$ 以 $[x] \mapsto [Mx]$
   作用于 $\mathbb{P}^2$（列向量）。由于 $3$ 是奇数，$\mathrm{SL}(3) \to \mathrm{PGL}(3)$
-  是双射；$\operatorname{canon}(M) = M / \sqrt[3]{\det M}$（实立方根）就是 vchao
-  存储的行列式为 1 的代表元。
+  是双射；$N(M) = M / \sqrt[3]{\det M}$（实立方根）就是 vchao 存储的行列式为 1 的
+  代表元（vchao 的 `N(H)`；`atlas-vq-estimate` 称之为 `canon`，它不是
+  `camera-geometry.md` 中使 $K_{33} = 1$ 的相机规范化 `canon`）。
 - 世界为 $W = \mathbb{R}^3$，单位为球场米；地面为 $\Pi_0 = \lbrace Z = 0 \rbrace$，
   标准基为 $e_1, e_2, e_3$（向上为 $-e_3$，见[坐标契约](../server/docs/coordinates.md)）。
 - 每帧 $i$ 的像平面 $\mathcal{I}_i \cong \mathbb{P}^2$ 使用已去畸变的 SNC 坐标。
   镜头畸变 $\psi_i$ 作用在投影之后，下文省略。
 - $\varphi(x) = (x_1/x_3,\ x_2/x_3)$ 为去齐次化。
+- 对 $W_f \times H_f$ 原生像素的帧，记 $s_f = \sqrt{W_f H_f}$，$\Lambda_f$ 把原生像素坐标
+  $(u, v, 1)^\top$ 映为 SNC：
+
+$$
+\Lambda_f = \frac{1}{s_f} \begin{bmatrix} 2 & 0 & -W_f \\ 0 & 2 & -H_f \\ 0 & 0 & s_f \end{bmatrix}.
+$$
+
 - 对 $h \in \mathbb{R}$ 和 $C \in \mathbb{R}^3$，记
 
 $$
@@ -200,20 +208,20 @@ $$
 给定 V/Q map $\lbrace (q_k, d_k) \rbrace$、$T_{\mathrm{ref}}$ 和新的一帧 $f$：
 
 **第 1 步（匹配）。** 将 $f$ 的 ALIKED 特征与描述子 $d_k$ 匹配（互最近邻加比值检验），
-得到对应关系 $\lbrace (x_m, q_{k(m)}) \rbrace$。
+得到对应关系 $\lbrace (x_m, q_{k(m)}) \rbrace$，其中 $x_m$ 为原生像素坐标。
 
 **第 2 步（后方交会）。** RANSAC 给出初值，再用阻尼 Gauss-Newton 求解单应后方交会
 $\Sigma \to \mathcal{I}_f$（8 个自由度，至少 4 个对应点）。残差以原生像素计，
 $\rho_3$ 为阈值 3 像素的 Huber 损失：
 
 $$
-\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi(V q_{k(m)}) - x_m \right\rVert \right).
+\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi\left(\Lambda_f^{-1} V q_{k(m)}\right) - x_m \right\rVert \right).
 $$
 
 **第 3 步（输出）。**
 
 $$
-T_f = \operatorname{canon}\left( \hat V_f\, T_{\mathrm{ref}} \right).
+T_f = N\left( \hat V_f\, T_{\mathrm{ref}} \right).
 $$
 
 map 中的 $V_i$、$q_k$ 和 $T_{\mathrm{ref}}$ 保持不变；不估计 $C$、$K$、$R$。

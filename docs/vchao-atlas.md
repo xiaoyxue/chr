@@ -43,8 +43,10 @@ Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
 - $\mathrm{PGL}(3) = \mathrm{GL}(3)/\mathbb{R}^\times$ acts on $\mathbb{P}^2$ by
   $[x] \mapsto [Mx]$ (column vectors). Because $3$ is odd,
   $\mathrm{SL}(3) \to \mathrm{PGL}(3)$ is a bijection, and
-  $\operatorname{canon}(M) = M / \sqrt[3]{\det M}$ (real cube root) is the
-  determinant-one representative vchao stores.
+  $N(M) = M / \sqrt[3]{\det M}$ (real cube root) is the determinant-one
+  representative vchao stores (vchao's `N(H)`; `atlas-vq-estimate` calls it
+  `canon`, which is not the $K_{33} = 1$ camera gauge `canon` of
+  `camera-geometry.md`).
 - The world is $W = \mathbb{R}^3$ in pitch metres, with ground plane
   $\Pi_0 = \lbrace Z = 0 \rbrace$ and standard basis $e_1, e_2, e_3$
   (up is $-e_3$, see the [coordinate contract](../server/docs/coordinates.md)).
@@ -52,6 +54,13 @@ Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
   undistorted SNC coordinates. Lens distortion $\psi_i$ acts after projection
   and is omitted below.
 - $\varphi(x) = (x_1/x_3,\ x_2/x_3)$ is dehomogenisation.
+- A frame of $W_f \times H_f$ native pixels has $s_f = \sqrt{W_f H_f}$, and
+  $\Lambda_f$ maps native pixel coordinates $(u, v, 1)^\top$ to SNC:
+
+$$
+\Lambda_f = \frac{1}{s_f} \begin{bmatrix} 2 & 0 & -W_f \\ 0 & 2 & -H_f \\ 0 & 0 & s_f \end{bmatrix}.
+$$
+
 - For $h \in \mathbb{R}$ and $C \in \mathbb{R}^3$,
 
 $$
@@ -222,7 +231,7 @@ Given a V/Q map $\lbrace (q_k, d_k) \rbrace$, $T_{\mathrm{ref}}$ and a new frame
 
 **Step 1 (matching).** ALIKED features of $f$ are matched to the descriptors
 $d_k$ (mutual nearest neighbours with ratio tests), giving correspondences
-$\lbrace (x_m, q_{k(m)}) \rbrace$.
+$\lbrace (x_m, q_{k(m)}) \rbrace$, with $x_m$ in native pixels.
 
 **Step 2 (resection).** RANSAC initialises, then damped Gauss-Newton solves the
 homography resection $\Sigma \to \mathcal{I}_f$ (8 degrees of freedom, at least
@@ -230,13 +239,13 @@ homography resection $\Sigma \to \mathcal{I}_f$ (8 degrees of freedom, at least
 the Huber loss with a 3-pixel threshold:
 
 $$
-\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi(V q_{k(m)}) - x_m \right\rVert \right).
+\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi\left(\Lambda_f^{-1} V q_{k(m)}\right) - x_m \right\rVert \right).
 $$
 
 **Step 3 (output).**
 
 $$
-T_f = \operatorname{canon}\left( \hat V_f\, T_{\mathrm{ref}} \right).
+T_f = N\left( \hat V_f\, T_{\mathrm{ref}} \right).
 $$
 
 The map's $V_i$, $q_k$ and $T_{\mathrm{ref}}$ stay fixed. $C$, $K$ and $R$ are
