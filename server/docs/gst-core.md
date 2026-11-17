@@ -1,28 +1,40 @@
-# GStreamer core pipeline (#154, phases 1 and 2, experimental)
+# GStreamer core pipeline (#154, phases 1 to 4, experimental)
 
 **Status:** `experimental` simulation prototype behind `chr-server --pipeline gst`
 on Linux. The timer-paced loop (`--pipeline timer`, the input ring and the
-simulated SDI port) stays the default. Phases 1 (the pipeline, fixed delay,
-per-slot clean feed, relinking) and 2 (fractional rates, rates and formats from
-the caps, runtime format changes, the `follow`/`fixed` output policy) of #154 are
-done; DeckLink input/output with genlock (phase 3), audio, ancillary data and
-timecode (phase 4) and the switch-over (phase 5) are not started.
+simulated SDI port) stays the default. Done:
+
+- phase 1: the pipeline, fixed delay, per-slot clean feed, relinking;
+- phase 2: fractional rates, rates and formats from the caps, runtime format
+  changes, the `follow`/`fixed` output policy;
+- phase 3 (what needs no card): interlaced formats, input loss
+  (hold/black/slate), and the DeckLink input/output code paths with the card's
+  clock as the pipeline clock, **built and tested without a card but not
+  verified on hardware** (the development host has none);
+- phase 4 (simulated): audio with the same delay D, timecode and captions
+  carried across the capture hop and output with their frame.
+
+The switch-over (phase 5) is not started.
 
 `chr-server` owns one GStreamer pipeline from the input to the output. Its time
-is the pipeline clock (the system clock in simulation; the output card's in
-phase 3), not a software timer:
+is the pipeline clock (the system clock in simulation; with `--output decklink`
+the output card's), not a software timer:
 
 ```text
 chr-sdi-in (INPUT)                         chr-server (CORE, one pipeline "chr-core")
 file: ffmpeg | fdsrc ! rawvideoparse ─┐
-  ! videoconvert                      │    capture-<n>: unixfdsrc ! RGBA,<any extent and rate> ! [number] ! tee
-pattern: videotestsrc ────────────────┤      ├─ queue leaky ! appsink ──► driver: tracking hop ─► camera
-  ! RGBA + VchaoFrame wire caps       │      │                             (Ti + C + #150 lens) ─► render hop ─┐
-  ! clocksync ! [stamp] ──────────────┤      └─ queue leaky ! videoconvertscale ! UYVY,<output extent> ! appsink ┤
-  ! queue leaky ! unixfdsink ─unixfd──┘                                       selector (per slot, deadline) ◄──┘
-                                           program: appsrc ! livesync ! tee ─┬─ queue ! appsink sync (OUTPUT)
-                                           (caps: the input's or a fixed rate) └─ queue leaky ! appsink (program tap)
-                                           hop-<n>: appsrc ! unixfdsink / unixfdsrc ! appsink, per worker session
+  ! videoconvert                      │    capture-<n>: unixfdsrc ! RGBA,<any extent, rate, scan> ! [number] ! tee
+pattern: videotestsrc ────────────────┤      ├─ queue leaky ! deinterlace (first field) ! appsink ──► driver:
+DeckLink: decklinkvideosrc            │      │     tracking hop ─► camera (Ti + C + #150 lens) ─► render hop ─┐
+  mode=auto ! videoconvert ───────────┤      └─ queue leaky ! videoconvertscale ! UYVY,<output extent> ! appsink ┤
+  ! RGBA ! clocksync ! [stamp:        │                                       selector (per slot, deadline) ◄──┘
+  VchaoFrame, timecode, captions]     │                                       + input-loss fill, timecode, captions
+  ! queue leaky ! unixfdsink ─unixfd──┘    program: appsrc ! livesync ! tee ─┬─ queue ! appsink sync | decklinkvideosink
+audio: ffmpeg | rawaudioparse,        │    (caps: the input's rate and scan, └─ queue leaky ! appsink (program tap)
+  audiotestsrc or decklinkaudiosrc    │     or a fixed rate)
+  ! S32LE 48 kHz ! clocksync ! [stamp]│    audio-<n>: unixfdsrc ! appsink ─► [capture + D] ─► appsrc ! audioconvert
+  ! queue leaky ! unixfdsink ─unixfd──┘                                       ! appsink sync | decklinkaudiosink
+  (<socket>.audio)                         hop-<n>: appsrc ! unixfdsink / unixfdsrc ! appsink, per worker session
 ```
 
 ## Elements and the Nix shells
@@ -30,7 +42,10 @@ pattern: videotestsrc ────────────────┤      �
 | Element | Package | In the shells | Use |
 | --- | --- | --- | --- |
 | `unixfdsrc`, `unixfdsink`, `rawvideoparse` | gst-plugins-bad 1.28.8 | yes | capture and worker hops; file input |
-| `decklinkvideosrc`, `decklinkvideosink`, `decklinkaudiosrc/sink` | gst-plugins-bad 1.28.8 | yes (no card on the dev host) | phase 3 |
+| `decklinkvideosrc`, `decklinkvideosink`, `decklinkaudiosrc/sink` | gst-plugins-bad 1.28.8 | yes (no card on the dev host) | DeckLink input and output, phases 3 and 4 |
+| `deinterlace` | gst-plugins-good 1.28.8 | **added** | the CG branch's progressive frames of an interlaced input |
+| `interlace` | gst-plugins-bad 1.28.8 | yes | evaluated, not needed (below) |
+| `audiotestsrc`, `audioconvert`, `rawaudioparse` | gst-plugins-base, -bad | yes | audio of the test pattern and files |
 | `clocksync`, `queue`, `tee` | GStreamer core | yes | |
 | `videoconvert(scale)`, `videotestsrc`, `appsrc`, `appsink` | gst-plugins-base | yes | |
 | `livesync`, `fallbackswitch` | gst-plugins-rs 0.15.3 | **added** | `livesync`: rate lock; `fallbackswitch`: evaluated, not used |
@@ -40,7 +55,9 @@ just `libgstlivesync.so` and `libgstfallbackswitch.so` into a small derivation
 (`chr-gst-livesync`) on `GST_PLUGIN_SYSTEM_PATH_1_0` of both shells, the
 checks and the wrapped `chr-server` package programs: the whole package
 (about 55 plugins, a 1 GB closure with GTK 4 and more) would load on every
-registry scan. `flake.lock` is unchanged.
+registry scan. Phase 3 adds gst-plugins-good's `libgstdeinterlace.so` to the
+same derivation the same way (it needs only GStreamer and ORC); `yadif` is not
+built in nixpkgs' gst-plugins-bad (it is GPL). `flake.lock` is unchanged.
 
 ### Why not `fallbackswitch`
 
@@ -93,7 +110,8 @@ only when no frame came at all (input loss).
   no latency), `livesync` emits each one when due, and the output sink takes it
   on the clock (`processing-deadline` 0, so the pipeline adds no latency). The
   output therefore follows the input frame for frame at a constant D; in
-  simulation there is no separate output clock. Genlock is phase 3.
+  simulation there is no separate output clock. With a DeckLink output the
+  card's clock is the pipeline clock (phase 3, below).
 
 ## Frames and memory
 
@@ -130,8 +148,9 @@ other pipeline error stops chr-server.
 
 The capture is a bin too (`capture-<n>`): when `chr-sdi-in` goes away its stream
 ends, the core removes the bin and connects again every 500 ms; the output keeps
-its cadence (`livesync` repeats the last frame), and a new capture session
-numbers its frames after the old ones.
+its cadence (filled as `--input-loss` says, phase 3), and a new capture session
+numbers its frames after the old ones. The audio session (`audio-<n>`) is
+connected, lost and reconnected the same way, on its own.
 
 ## Rates and format changes (phase 2)
 
@@ -191,7 +210,7 @@ frame's format from the caps that come with it, never from `--fps`:
   worker gets the frame's extent in its image description and its time base in
   each request.
 
-`--fps` is the nominal rate only: the rate of the program at start, the
+`--fps` is the nominal rate only (a frame rate: `25` for a 1080i50 program): the rate of the program at start, the
 default program delay (3 periods), the program's animation rate, and the
 description's or manifest's `fps`, which must equal it.
 
@@ -260,7 +279,8 @@ rendered: other_extent` in the core's log; CG returns with the camera's extent.
   multiples, and a dropped frame's CG is never seen. `videorate` itself is not
   used: it outputs a frame only when the next one arrives, which costs an input
   period of latency (every slot late, or that period taken from the render
-  budget). Interlaced conversion (deinterlace/interlace) is phase 3.
+  budget). The fixed output is progressive: an interlaced input's clean feed
+  is deinterlaced like its CG frames (phase 3).
 
 ### vchao: a new stream costs a model load
 
@@ -272,6 +292,215 @@ on its output (01:55:12 → 01:55:22, 1212x654p30: map and model load,
 some 330 slots at 30 fps or 550 at 50 fps, of clean feed per format change. A
 new stream without a model reload (keep the model, reset the stream) is the
 request to vchao; until then a format change is a short CG outage.
+
+## Phase 3: DeckLink, interlaced, input loss
+
+### DeckLink input and output (not verified on hardware)
+
+The development host has no DeckLink card (`lspci` shows none). The code paths
+are built, construct the elements GStreamer 1.28.8's `decklink` plugin
+provides, map formats to the cards' modes and fail clearly without a card;
+tests cover argument parsing, the mode mapping and "no DeckLink device".
+Capture, playout, genlock, the card clock, the mode switch, RP 188 timecode,
+captions and embedded audio on a real card are **not verified**.
+
+- **Input** (`chr-sdi-in --source decklink --device N [--mode auto|<mode>]
+  [--connection sdi|hdmi|optical-sdi|auto]`, `gst_core::decklink`):
+  `decklinkvideosrc` with `mode=auto` and `video-format=auto` takes the format
+  (extent, rate, scan) from the signal; a fixed mode uses `8bit-yuv`.
+  `drop-no-signal-frames=true` makes a lost signal an input loss (no frames,
+  below) instead of black frames, `timecode-format=rp188any` and
+  `output-cc=true` attach `GstVideoTimeCodeMeta` and `GstVideoCaptionMeta`,
+  which the input carries to the core (phase 4). `decklinkaudiosrc` of the same
+  device gives 2, 8 or 16 channels (`--audio-channels`). A changed signal
+  renegotiates caps: the input starts a new stream, exactly as the test
+  pattern's `--then` switch, so the core follows it (phase 2). The card is not
+  paced by `clocksync` (it delivers in real time and timestamps on its own).
+- **Output** (`chr-server --pipeline gst --output decklink [--device N]`):
+  `decklinkvideosink` replaces the simulated `appsink` after `livesync`,
+  `decklinkaudiosink` the audio `appsink`. Its mode is the program format's
+  (table below); in `follow` a new program format switches the sink's `mode`
+  right before the new caps reach it (a pad probe). `cc-line=9` and
+  `timecode-format=rp188any` output the slot's captions and timecode. Without a
+  card `Core::start` fails with `no DeckLink device 0 (0 found): install
+  Blackmagic Desktop Video …`.
+- **Clock and genlock.** With a DeckLink output, the sink's clock (the card's,
+  locked to its reference input when one is connected) is the pipeline clock;
+  in simulation the system clock stays. Every capture time, a frame's
+  `source_ns` or an audio buffer's, is on the same-host system clock; the core
+  maps it to its pipeline clock through the two clocks' current offset
+  (`Timeline::of_system`; identical on the system clock). The two clocks drift
+  apart by parts per million: the offset is read at every frame, so D holds in
+  the card's time. The output's statistics count a card's slots as they are
+  handed to the sink, ahead of air.
+
+| Format | `Rate` (frames/s) | Name | DeckLink mode |
+| --- | --- | --- | --- |
+| 1920x1080 interlaced, top first | 25 | `1920x1080i50` | `1080i50` |
+| 1920x1080 interlaced, top first | 30000/1001 | `1920x1080i59.94` | `1080i5994` |
+| 1920x1080 interlaced, top first | 30 | `1920x1080i60` | `1080i60` |
+| 1920x1080 progressive | 23.98, 24, 25, 29.97, 30, 50, 59.94, 60 | `1920x1080p50` … | `1080p2398` … `1080p60` |
+| 1280x720 progressive | 50, 59.94, 60 | `1280x720p50` … | `720p50`, `720p5994`, `720p60` |
+| 3840x2160 progressive | 23.98 … 60 | `3840x2160p50` … | `2160p2398` … `2160p60` |
+| 720x486 interlaced, bottom first | 30000/1001 | `720x486i59.94` | `ntsc` |
+| 720x576 interlaced, top first | 25 | `720x576i50` | `pal` |
+
+Any other format is refused with the list of modes. Host setup and the
+checklist: `docs/operations.md`.
+
+### Interlaced formats
+
+**Rates are frame rates.** An interlaced frame carries both fields, woven line
+by line; `Rate` counts frames, as GStreamer's caps do: 1080i50 has
+`framerate=25/1`, `interlace-mode=interleaved`, `field-order=top-field-first`
+(25 frames, 50 fields per second). Every rule of phase 2 holds unchanged: a
+captured frame owns one slot, due its capture time plus D; deadlines, D and the
+selector count frames. Only names use the field rate, as broadcast does:
+`1920x1080i50`, `1920x1080i59.94` (`sdi.get_status`'s `video_mode`), and
+`chr-sdi-in`'s rates take an `i` suffix with the field rate (`50i` is 25
+interlaced frames per second). The scan is part of the format (`sdi::Format`):
+1080p25 and 1080i50 are different formats with the same rate, and a change
+between them is a format change (a new stream, phase 2).
+
+- **Input.** A file's `field_order` (FFprobe; `tt`/`bt` top first, `bb`/`tb`
+  bottom first, by display order) makes it interlaced; FFmpeg converts each
+  field's 4:2:0 chroma on its own (`scale=interl=1`) and `rawvideoparse
+  interlaced=true top-field-first=…` sets the caps. The test pattern takes
+  interlaced caps (`videotestsrc` draws both fields of one instant); a card
+  sets them from the signal.
+- **Tracking and rendering get progressive frames.** The CG branch's
+  `deinterlace mode=auto method=linear fields=<first field>` turns each
+  interlaced frame into one progressive frame of its first field
+  (top or bottom, from the caps), line-interpolated, at the frame's own time and
+  rate: one CG frame per slot, rendered for the instant the frame starts.
+  `linear` uses no other field, so it **adds no latency** and holds no
+  history across a format change or a loss; progressive frames pass through
+  untouched (the same memfd). The motion-adaptive methods (`greedyh`,
+  `tomsmocomp`) would keep more vertical detail for tracking at the cost of up
+  to two fields of history in the CG branch (40 ms at 1080i50, out of D); not
+  needed for the stand-in and solid workers measured here, and a change of
+  `method` only. The deinterlaced frame is new memory: the CG `appsink`
+  proposes the shared-memory allocator, so `deinterlace` writes it into a
+  memfd that the tracking and render sockets send without a copy. It does not
+  keep buffer offsets, so a probe carries each frame's sequence over by its
+  timestamp. The tracking hop's caps stay progressive (VchaoFrame unchanged).
+- **The clean branch keeps the interlaced picture**: `videoconvertscale` to
+  UYVY at the output's extent keeps both fields in their order (and its caps),
+  so a slot without CG shows the input as it came.
+- **The output is interlaced.** The program caps follow the input's scan (with
+  `follow`): `livesync`, the output sink and the tap take `interlace-mode` and
+  `field-order` from them, and a DeckLink sink its `1080i50` mode. A CG frame
+  of an interlaced program is the composite of the first field's picture, sent
+  as both fields of the frame: exactly what `interlace field-pattern=2:2`
+  makes of a progressive frame (a test checks the bytes are identical), so no
+  element is inserted, and none has to be removed when the input switches
+  between progressive and interlaced. The CG slots of an interlaced program
+  therefore move at the frame rate (25 pictures per second, PsF-like); clean
+  slots keep the input's 50 fields. Rendering both fields (two renders per
+  frame at the field rate, woven 1:1) is the upgrade if CG motion must be
+  field-rate.
+- **`fixed:<rate>`** output stays progressive: an interlaced input's clean feed
+  is deinterlaced the same way before it is converted.
+- The monitor shows interlaced program frames woven, as they are (the tap does
+  not carry the scan).
+
+### Input loss
+
+`--input-loss hold|black|slate[:<png>]` (default `hold`) says what fills the
+slots while the input delivers no frames:
+
+- `hold`: the last program frame again; `black`; `slate`: SMPTE colour bars, or
+  `slate:<png>` a PNG scaled to the output (letterboxed). The still frame is
+  made once at start, at the output's extent.
+- **Detection.** The selector keeps the cadence itself: when no frame was
+  captured for one and a half periods and no frame is pending for the
+  program's next slot, that slot is filled, a period after the previous
+  program frame, and every slot after it until a captured frame is due again.
+  A single missing frame (the next one pending) is not a loss: `livesync`
+  repeats as before. A capture process that stops (`SIGSTOP`), dies, or loses
+  its signal (`--then <s> loss`, a card's no-signal) all look the same.
+- **Recovery does not move D.** The first frame after the loss leaves at its
+  own capture time plus D, as every frame does; the slots until it are
+  filled, and the last fill lasts until it is due, so the program stays
+  contiguous: a restarted input in another phase shows as one interval of up
+  to one and a half periods (a genlocked input keeps its phase). A
+  stopped input's backlog is no input: `chr-sdi-in` drops frames released more
+  than a period late (`stale frames dropped`), as a card never delivers a stale
+  frame, and the core drops a slot decided after it was due.
+- **Counted**: `sdi.get_status`'s `input_loss_slots` and `input_losses` (TS
+  mirror), the output's `input-loss fills` and the selector's `input loss N
+  slots in M losses` in the log. Fill slots carry no capture time; the tap
+  keeps writing them.
+
+## Phase 4: audio, timecode, captions
+
+### Audio with the same delay
+
+- **Path.** The input sends its audio over a second unixfd socket beside the
+  frames' (`<capture socket>.audio`): 48 kHz, 32-bit samples (SDI audio is 24
+  bits), 2/8/16 channels, buffers of about 10 ms. Its own socket keeps audio
+  independent of the video's socket and queue (which drop frames when the core
+  is behind) and reuses the transport the frames use: `unixfdsink` copies the
+  small buffers into shared memory and the core maps them read-only. Each
+  buffer carries its capture time (the system-clock time `clocksync` released
+  it at, a card's capture time) in chr's capture meta.
+- **Same delay, same clock.** The core maps each buffer's capture time to its
+  running time exactly as a frame's (`Timeline::of_system`), adds D and hands it
+  to the program's audio: `appsrc ! audioconvert ! <sink>`, the sink rendering
+  each buffer on the pipeline clock when due (`appsink sync=true` in
+  simulation, `decklinkaudiosink` on a card). A frame and the audio captured
+  with it therefore leave together; lip sync is the input's.
+  The parser's DTS is cleared: a sink syncs on the DTS when there is one.
+- **Never dropped or blocked by tracking or render.** Audio does not pass the
+  selector, the workers or `livesync`; worker crashes, stalls, format changes
+  and slow renders cannot touch it. The program `appsrc` holds D plus a
+  second, leaky. A lost input is silence; its audio session reconnects on its
+  own.
+- **Sources.** A file's first audio stream (a second FFmpeg process decoding
+  only the audio, paced by its own reader, so neither stream can stall the
+  other; looped files keep A/V aligned if their streams last equally long,
+  FFmpeg filling gaps with silence), the test pattern's `audiotestsrc
+  wave=ticks` (a tick each second), a card's `decklinkaudiosrc`.
+- **Telemetry.** `sdi.get_status.audio`: sample rate, channels, samples out,
+  the mean capture-to-output delay and `offset_us` (audio delay minus video
+  delay over the last report; TS mirror `AudioStatus`), and the log line's
+  `audio: … audio - video … ms`.
+- **Not done:** audio in chr-monitor's SRT transport stream (AAC). The tap
+  carries video only; carrying audio needs a second ring beside the tap and an
+  AAC branch in the monitor: future.
+
+### Timecode
+
+GStreamer 1.28's unixfd carries only metas that can serialize themselves;
+`GstVideoTimeCodeMeta` cannot: a frame stamped by `timecodestamper` arrived
+over `unixfdsrc` with no meta (probe in this phase). The capture hop is chr's
+own, so `chr-sdi-in` carries the timecode in chr's capture meta
+(`chr-capture-ancillary`, a `GstCustomMeta` with a JSON string like the
+VchaoFrame meta; `gst_core::ancillary`), and the selector puts it back on the
+program frame as `GstVideoTimeCodeMeta`, which `decklinkvideosink` outputs as
+RP 188. The tracking hop rebuilds each frame from its memory with only the
+VchaoFrame meta: vchao never sees chr's fields.
+
+- **Source:** a card's RP 188 (any); else a file's `timecode` tag, counted on
+  frame by frame (continuous across loops of the file); else the time of day
+  (UTC) at the stream's start, counted on. Drop-frame at the 1000/1001 rates;
+  interlaced timecodes count frames (field 1).
+- **Frame identity:** each program frame's meta carries its timecode beside its
+  sequence; `sdi.get_status.last_timecode` is the latest slot's
+  (`hh:mm:ss:ff`, `;ff` drop-frame); the output counts `timecode breaks`
+  (consecutive frames whose timecodes are not one frame apart; a new stream
+  after a format change or a restarted input starts its own).
+
+### Captions
+
+`GstVideoCaptionMeta` (CEA-608/708) does not serialize over unixfd either, so
+captions travel with the timecode in chr's capture meta (type and bytes) and
+are put back on the program frame as `GstVideoCaptionMeta`;
+`decklinkvideosink` inserts them on line 9 (`cc-line`). Sources: a card's
+(`output-cc`), and for tests the test pattern's synthetic CEA-608 field-1
+pairs (`--captions`, two digits counting frames, odd parity). FFmpeg's raw
+pipe does not carry a file's A/53 captions: files have none. Counted:
+`sdi.get_status.caption_frames`, the output's `captioned`.
 
 ## Run
 
@@ -290,23 +519,46 @@ target/linux/release/chr-server --pipeline gst --description <description.json> 
 ```
 
 A signal whose format changes: the test pattern switches after each `--then`
-interval, and `--cycle` starts the list over:
+interval, and `--cycle` starts the list over; `loss` and `resume` take the
+signal away and bring it back (any source):
 
 ```sh
 target/linux/release/chr-sdi-in --test-pattern 1920x1080 25 \
-  --then 30 1920x1080 50 --then 30 1920x1080 29.97
+  --then 30 1920x1080 50 --then 30 1920x1080 59.94i --then 20 loss --then 5 resume
+```
+
+An interlaced clip with a parity patch, a flash and a beep (the measurements'):
+
+```sh
+ffmpeg -filter_complex "testsrc2=s=1920x1080:r=50:d=30[b];color=c=gray:s=192x1080:r=50:d=30,\
+format=yuv420p,geq=lum='40+4*mod(N\,40)':cb=128:cr=128[p];[b][p]overlay,drawbox=x=192:w=192:\
+h=1080:color=white:t=fill:enable='lt(mod(n\,50)\,2)',tinterlace=interleave_top,setfield=tff" \
+  -f lavfi -i "aevalsrc='if(lt(mod(t,1),0.02),0.5*sin(2*PI*1000*t),0)':s=48000:c=stereo:d=30" \
+  -c:v libx264 -crf 16 -pix_fmt yuv420p -flags +ilme+ildct -x264-params tff=1 \
+  -timecode 10:00:00:00 -c:a pcm_s16le output/gst-core/i50.mov
+target/linux/release/chr-sdi-in --video output/gst-core/i50.mov &
+target/linux/release/chr-server --pipeline gst --fps 25 --size 1920x1080 ... \
+  --input-loss slate:/srv/chr/slate.png
 ```
 
 Both default to `$XDG_RUNTIME_DIR/chr/capture.sock` (`--socket`,
-`--capture-socket`). chr-server logs the output every 10 s: slots, CG,
+`--capture-socket`); the audio socket is `<socket>.audio` (`--no-audio` on
+either side turns audio off). With a card: `chr-sdi-in --source decklink
+--device 0` and `chr-server … --output decklink --device 1` (not verified on
+hardware; `docs/operations.md`). chr-server logs the output every 10 s: slots, CG,
 clean feed, repeats, duplicates (fixed rate), skipped frames, the interval at
 each rate and the capture-to-output delay (min/mean/max and standard
 deviation), the tap's slot − frame, the selector's decisions with format
-changes and their clean slots, the frames joined with a camera and given up
-without one, and the render budget: the time left until each rendered frame's
-slot is decided when it was submitted. `chr-monitor` reads the program tap and
+changes and their clean slots, input-loss fills, timecode breaks and captioned
+slots, the audio (buffers, capture-to-output delay, audio minus video), the
+frames joined with a camera and given up without one, and the render budget:
+the time left until each rendered frame's slot is decided when it was
+submitted. `chr-monitor` reads the program tap and
 follows its mode; `cargo run --release -p chr-shm --example tap_stats -- <tap>
-<s>` reports the same cadence for either pipeline from the tap, per rate.
+<s> [<x0> <x1>]` reports the same cadence for either pipeline from the tap,
+per rate, and with columns the field parity of CG and other slots (odd minus
+even rows: positive when an interlaced clip's later bottom field is brighter
+and the fields kept their order).
 `CHR_WORKER_TEST_SOLID=<luma>` makes `chr-renderer-cli worker` answer with solid
 frames without a GPU, for timing and fault tests.
 
@@ -445,14 +697,94 @@ their slots were due, and the output repeated (2211 slots) until the input
 caught up; D was unchanged before and after. A real input card cannot fall
 behind that way; the test pattern input costs 6 % instead of about 120 %.
 
+### Phases 3 and 4: interlaced, input loss, audio, timecode
+
+Same host and setup (live stack beside it, `--program-delay-ms 100`,
+`chr-tracking-sim-cli`, solid render worker unless noted, release build).
+Clips: 1920x1080 `testsrc2` with a parity patch (columns 0–191: luma 40 + 4 ×
+picture number mod 40, so an interlaced frame's later bottom field is 4
+brighter), a white flash (columns 192–383, one frame per second) and a 20 ms
+1 kHz beep at each flash, H.264 woven top field first (`tinterlace`,
+`+ilme+ildct`), PCM audio, timecode 10:00:00:00. "Parity" is `tap_stats`'s
+odd minus even rows over the patch; "audio − video" the core's mean audio
+delay minus video delay per 10 s report.
+
+| Run | Output slots (CG / clean / fills / repeats) | Interval mean, sd, min–max (output) | Delay min / mean / max | Tap | Audio − video |
+| --- | --- | --- | --- | --- | --- |
+| 1080i50, 60 s | 1495 (1495 / 0 / 0 / 0) | 40.0000, 0.149, 39.45–40.63 ms | 100.05 / 100.21 / 100.87 ms | 1250 slots, slot − frame constant | −0.10 … −0.14 ms |
+| 1080i59.94, 60 s | 1791 (1791 / 0 / 0 / 0) | 33.3666, 0.159, 32.80–33.78 ms | 100.04 / 100.22 / 100.69 ms | 1498, constant | −0.11 … −0.14 ms |
+| 1080i50, every slot clean (render after D), 30 s | 757 (0 / 757 / 0 / 0) | 40.0000, 0.072, 39.71–40.36 ms | 100.06 / 100.12 / 100.45 ms | parity of 500 slots 2.99 / 4.00 / 5.00 | −0.03 ms |
+| 1080i59.94, every slot clean, 30 s | 907 (0 / 907 / 0 / 0) | 33.3666, 0.060, 33.04–33.61 ms | 100.05 / 100.13 / 100.41 ms | parity of 599 slots 2.99 / 4.00 / 4.99 | −0.03 … −0.04 ms |
+| 1080i50, GPU render worker, 40 s | 855 (848 / 7 / 0 / 0) | 40.0011, 0.144, 39.60–40.96 ms | 100.08 / 100.19 / 101.05 ms | CG parity 0.00 (both fields one picture) | −0.10 ms |
+| 1080i50, worker faults, 95 s | 2369 (2282 / 87 / 0 / 0) | 40.0001, 0.150, 39.43–40.73 ms | 100.03 / 100.21 / 101.03 ms | without CG per fault (render kill / stop, tracking kill / stop): 7 / 57 / 7 / 16 | −0.08 … −0.14 ms; 937–938 audio buffers in every 10 s, faults included |
+| Test pattern 1080p50 → p59.94 → i50 → i59.94, 20 s each | 3594 (3591 / 3 / 0 / 0) | 19.9998 / 16.6833 / 40.0000 / 33.3666 ms | 100.04 / 100.23 / 100.68 ms | one clean slot per change | −0.10 … −0.17 ms |
+
+- **Interlaced:** the cadence is the frame rate's to within a microsecond and
+  D is the same as at progressive rates. The output caps and
+  `sdi.get_status` say `1920x1080i50` / `1920x1080i59.94`. A clean slot keeps
+  both fields in their order (parity +4.00, every slot between 3 and 5); a CG
+  slot is one picture (parity 0). The deinterlaced first field reached both
+  workers through memfds (every slot CG with the solid and the GPU worker).
+- **Audio:** lip sync at the timestamps is a tenth of a millisecond (the audio
+  sink renders on its due time, the video sink a few hundred µs after), through
+  worker kills and stops, format changes in both directions between progressive
+  and interlaced, and input loss. On content, the integration test's beep and
+  flash clips (192x128, every slot clean so the flash shows) put the beep
+  0.041 ms (two samples, the detector's threshold) after the flash at 50p,
+  1080i50's 25i, 59.94p and 29.97i.
+- **Timecode:** the file's 10:00:00:00 counted on, no break in any run
+  (`timecode breaks` 0) but at the three format changes (each a new stream).
+
+**Input loss.** The 1080i50 clip with `SIGSTOP` of chr-sdi-in at 20 s and
+`SIGCONT` at 25 s, `kill -9` at 35 s and a new chr-sdi-in at 38 s, 60 s each;
+the test pattern with a scripted loss:
+
+| Run | Output slots (CG / fills / repeats) | Losses | Interval mean, sd, max | Irregular | Delay min / mean / max |
+| --- | --- | --- | --- | --- | --- |
+| `hold` | 1494 (1251 / 243 / 0) | 2 | 40.0058, 0.265, 48.66 ms | 0 | 100.05 / 100.23 / 100.64 ms |
+| `black` | 1494 (1251 / 243 / 0) | 2 | 40.0071, 0.302, 50.40 ms | 1 | 100.03 / 100.21 / 100.61 ms |
+| `slate:<png>` | 1494 (1256 / 238 / 0) | 2 | 40.0080, 0.340, 52.08 ms | 1 | 100.06 / 100.21 / 100.55 ms |
+| Test pattern 1080p50, `black` | 2994 (2547 / 447 / 0) | 2 | 20.0027, 0.240, 28.50 ms | 1 | 100.04 / 100.26 / 102.22 ms |
+| Test pattern 1080i50, `--then 20 loss --then 5 resume --then 10 loss --then 1 resume`, `slate` | 1498 (1348 / 150 / 0) | 2 | 40.0002, 0.137, 40.44 ms | 0 | 100.04 / 100.22 / 100.58 ms |
+
+- The stopped input costs its 5 s plus about 1.2 s in which the resumed
+  decoder's backlog is dropped as stale (155 fills); the killed one 3 s plus
+  its start and connection (88 fills). Every frame before and after left D
+  after its capture; nothing was repeated by `livesync`.
+- A new input process runs in its own phase: the last fill lasts until its
+  first frame is due, one interval of up to one and a half periods (48–52 ms at
+  25 fps, 28.5 ms at 50 fps). A scripted loss keeps the phase: no irregular
+  interval at all. Before the last fill was cut to the new phase, `livesync`
+  sent that first frame 26–34 ms late and repeated once.
+- `frames skipped` (9 at 25 fps, 26 at 50 fps) at a restarted input are the
+  frames the new process sent before the core connected (it numbers a new
+  stream on by `frame_id`), not lost slots.
+- Audio stopped and came back with the input (its own session reconnected),
+  at −0.1 ms throughout.
+
+**Soak:** 10 min 20 s at 1080i50 from the clip with audio, no faults: 15 495
+slots, all CG, no repeat, fill or skipped frame, interval mean 40.0000 ms (sd
+0.145 ms, 37.36–42.80 ms, none a quarter period off), capture → output delay
+100.04 / 100.21 / 102.90 ms, no timecode break; the tap read 15 250 slots at
+39.999983 ms with one slot − frame value; audio − video −0.08 … −0.17 ms in all
+61 reports, 937–938 audio buffers each. chr-server used 48 % of a core and 84
+MiB (78 MiB at the end, 45 descriptors), chr-sdi-in 29 % plus FFmpeg's two
+decoders.
+
 ## Limitations
 
 - Frames of this mode are not render submissions: `render.get` does not see
   them, and `render.get_worker_status` counts restarts but not clean feed.
   The core's log line and `sdi.get_status` (slots, repeats, last frame) report
   the output.
-- Input loss holds the last frame (`livesync`); black or slate, and when the
-  output returns, are not implemented.
+- DeckLink input and output, the card clock and genlock, RP 188 timecode,
+  captions on line 9 and embedded audio on a card are built and tested
+  without a card only: not verified on hardware.
+- An interlaced program's CG slots show one picture per frame (the first
+  field's, both fields from it); its clean slots keep both fields.
+- Audio is not in chr-monitor's SRT/WebRTC streams (the tap is video only).
+- Timecode restarts with each new stream (a format change, a restarted input);
+  files' A/53 captions do not pass FFmpeg's raw pipe.
 - The decision margin is a fixed 4 ms; the clean conversion costs CPU
   (videoconvertscale, 2 threads per started 1080p).
 - `stack.py` does not start this mode.
@@ -463,10 +795,8 @@ behind that way; the test pattern input costs 6 % instead of about 120 %.
   output keeps `--size` (the clean feed is scaled), so the tap is never
   re-created. Only the test pattern switches formats in simulation; the file
   input plays one clip.
-- With `fixed`, the output's delay varies by up to an input period by design;
-  interlaced conversion is phase 3.
+- With `fixed`, the output's delay varies by up to an input period by design,
+  and the output is progressive (an interlaced input is deinterlaced).
 
-Next (#154): `decklinkvideosrc mode=auto` and `decklinkvideosink` on the card's
-genlocked clock, its mode switched on a format change, interlaced formats
-(phase 3, with #80); audio, ANC and timecode with the same D (phase 4);
+Next (#154): verify phase 3 and 4 on a DeckLink card with house sync (#80);
 removing the timer loop, the capture ring and the old join (phase 5).

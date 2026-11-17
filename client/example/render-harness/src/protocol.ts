@@ -131,6 +131,27 @@ export interface SdiStatus {
   format_changes: number;
   /** Clean-feed slots while a format change was in progress. */
   transition_clean_slots: number;
+  /** Slots filled (hold, black or slate) while the input delivered no frames. */
+  input_loss_slots: number;
+  /** Times the input stopped delivering frames. */
+  input_losses: number;
+  /** Timecode of the latest output slot's frame, `hh:mm:ss:ff` (`;ff` drop-frame). */
+  last_timecode: string | null;
+  /** Output slots whose frame carried captions (CEA-608/708). */
+  caption_frames: number;
+  /** The input's audio, passed through with its video's delay (`--pipeline gst`). */
+  audio: AudioStatus | null;
+}
+
+/** Audio output of the GStreamer core. */
+export interface AudioStatus {
+  sample_rate: number;
+  channels: number;
+  samples_output: number;
+  /** Mean capture-to-output delay over the last report, µs. */
+  delay_us: number;
+  /** Lip sync: audio delay minus video delay, µs; positive when the audio is late. */
+  offset_us: number;
 }
 
 /** The render worker process supervised by chr-server. */

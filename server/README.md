@@ -37,7 +37,7 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | `worker/` | The unixfd transport shared by both workers (`transport.rs`), the render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
 | `worker/tracking/` | The tracking worker's supervisor in `chr-server` (`supervisor.rs`) and the VchaoFrame contract on GStreamer buffers: caps, meta and frames (`wire.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker's process over `chr_tracker::replay`. Pairing frames with cameras is `chr_tracker::join` |
 | `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
-| `gst_core/` | `--pipeline gst` (#154, experimental): one GStreamer pipeline from `chr-sdi-in` (`input.rs`) through the capture bin (`capture.rs`), the CG driver over both workers (`driver.rs`) and the per-slot selector (`select.rs`) to the simulated output and the program tap (`output.rs`) |
+| `gst_core/` | `--pipeline gst` (#154, experimental): one GStreamer pipeline from `chr-sdi-in` (`input.rs`) through the capture bin (`capture.rs`, interlaced input deinterlaced for the workers), the CG driver over both workers (`driver.rs`) and the per-slot selector (`select.rs`, input-loss fill) to the simulated or DeckLink output (`decklink.rs`) and the program tap (`output.rs`); audio with the same delay (`audio.rs`); timecode and captions across the capture hop (`ancillary.rs`) |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 
 `chr-server` creates no GPU device. As decided in #94, its `chr-render` thread

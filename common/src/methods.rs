@@ -300,6 +300,40 @@ pub mod sdi {
         /// the first frame in the new format to its first CG frame.
         #[serde(default)]
         pub transition_clean_slots: u64,
+        /// Slots filled (hold, black or slate) because the input delivered no
+        /// frames (`--pipeline gst`, `--input-loss`).
+        #[serde(default)]
+        pub input_loss_slots: u64,
+        /// Times the input stopped delivering frames.
+        #[serde(default)]
+        pub input_losses: u64,
+        /// Timecode of the most recent output slot's frame, `hh:mm:ss:ff`
+        /// (`hh:mm:ss;ff` drop-frame), the input's timecode output with the
+        /// same delay as its frame (`--pipeline gst`).
+        #[serde(default)]
+        pub last_timecode: Option<String>,
+        /// Output slots whose frame carried captions (CEA-608/708).
+        #[serde(default)]
+        pub caption_frames: u64,
+        /// The embedded audio passed through with the video (`--pipeline gst`).
+        #[serde(default)]
+        pub audio: Option<AudioStatus>,
+    }
+
+    /// Audio output of the GStreamer core: the input's audio delayed by the
+    /// same program delay as its video.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct AudioStatus {
+        /// Samples per second.
+        pub sample_rate: u32,
+        pub channels: u32,
+        /// Sample frames output so far.
+        pub samples_output: u64,
+        /// Mean capture-to-output delay of the audio over the last report, µs.
+        pub delay_us: i64,
+        /// Lip sync: the audio's mean delay minus the video's over the last
+        /// report, µs; positive when the audio is late.
+        pub offset_us: i64,
     }
 }
 

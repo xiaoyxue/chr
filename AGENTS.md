@@ -23,9 +23,9 @@
   Node.js/npm, TypeScript (`tsc`), the renderer Rust toolchain, Git, pkg-config,
   nixfmt, rendering libraries, and GStreamer core/base/bad (the `unixfd` elements of
   chr-server's worker transport, a hard dependency of `chr-runtime`) plus the
-  `livesync` and `fallbackswitch` plugins of gst-plugins-rs (chr-server's GStreamer
-  core, #154). Do not install global npm tools or use an unrelated flake template to
-  replace the existing environment.
+  `livesync` and `fallbackswitch` plugins of gst-plugins-rs and the `deinterlace`
+  plugin of gst-plugins-good (chr-server's GStreamer core, #154). Do not install global
+  npm tools or use an unrelated flake template to replace the existing environment.
 - `nix develop .#media` extends the root shell with FFmpeg, the GStreamer ugly
   plugins and Python GObject bindings for the software video-input helper in
   `server/scripts/` and the opt-in `gstreamer-media` feature of `chr-runtime` and

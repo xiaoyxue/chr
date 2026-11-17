@@ -139,7 +139,7 @@ The root development shell provides:
 | Build and maintenance | Git, pkg-config, and nixfmt |
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
 | Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`, 1.28 or later), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
-| GStreamer core (#154) | `livesync` and `fallbackswitch` copied out of the pinned gst-plugins-rs (the `chr-gst-livesync` derivation, on the same plugin path) |
+| GStreamer core (#154) | `livesync` and `fallbackswitch` copied out of the pinned gst-plugins-rs and `deinterlace` out of gst-plugins-good (the `chr-gst-livesync` derivation, on the same plugin path); the `decklink` elements come with the bad plugins and need Blackmagic Desktop Video on the host to open a card ([operations](operations.md#host-checklist)) |
 
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
 the GStreamer ugly plugins, and Python GObject bindings. It runs the video-only

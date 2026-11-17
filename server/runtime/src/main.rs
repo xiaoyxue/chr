@@ -60,8 +60,9 @@ Options:
   --size <WxH>            Render size; both even, up to 4096x2160 and with the camera's
                           aspect for a camera program [default: 1280x720]
   --fps <rate>            Frames per second, 1-120: an integer, N/D (30000/1001) or one of
-                          23.976, 29.97, 47.95, 59.94, 119.88 [default: 50]. With
-                          --pipeline gst the nominal rate: the input's caps set the rate
+                          23.976, 29.97, 47.95, 59.94, 119.88 [default: 50]; frames, not
+                          fields (25 for 1080i50). With --pipeline gst the nominal rate:
+                          the input's caps set the rate
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
@@ -116,6 +117,15 @@ Options:
   --program-delay-ms <n>  Capture to output, every frame (--pipeline gst); a frame
                           without CG by then is its clean feed, at most 1500
                           [default: 3 frame periods]
+  --input-loss <hold|black|slate[:<png>]> What the output shows while the input delivers
+                          no frames (--pipeline gst): the last frame, black, colour bars
+                          or a PNG scaled to the output [default: hold]
+  --output <sim|decklink> The program output (--pipeline gst): a simulated sink on the
+                          system clock, or a DeckLink card in the program's mode, whose
+                          clock (genlocked to its reference input) times the pipeline;
+                          not verified on hardware [default: sim]
+  --device <n>            The DeckLink output device (--output decklink) [default: 0]
+  --no-audio              Do not pass the input's audio through (--pipeline gst)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
@@ -164,6 +174,11 @@ struct Args {
     capture_socket: Option<PathBuf>,
     program_delay_ms: Option<u64>,
     output_rate: Option<chr_runtime::gst_core::OutputRate>,
+    input_loss: Option<chr_runtime::gst_core::InputLoss>,
+    /// `--output decklink --device <n>`.
+    decklink: Option<u32>,
+    output_decklink: bool,
+    no_audio: bool,
 }
 
 /// Reads `N` finite numbers that follow `flag`.
@@ -213,6 +228,10 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         capture_socket: None,
         program_delay_ms: None,
         output_rate: None,
+        input_loss: None,
+        decklink: None,
+        output_decklink: false,
+        no_audio: false,
     };
     let mut lens_given = false;
     let (mut lens_k, mut lens_centre, mut lens_scale, mut lens_support) = (None, None, None, None);
@@ -278,6 +297,20 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--capture-socket" => args.capture_socket = Some(value()?.into()),
             "--program-delay-ms" => args.program_delay_ms = Some(value()?.parse()?),
             "--output-rate" => args.output_rate = Some(value()?.parse()?),
+            "--input-loss" => args.input_loss = Some(value()?.parse()?),
+            "--output" => {
+                args.output_decklink = match value()?.as_str() {
+                    "sim" => false,
+                    "decklink" => true,
+                    other => {
+                        return Err(
+                            format!("--output must be sim or decklink, not {other:?}").into()
+                        );
+                    }
+                }
+            }
+            "--device" => args.decklink = Some(value()?.parse()?),
+            "--no-audio" => args.no_audio = true,
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--renderer-cli" => args.renderer_cli = Some(value()?.into()),
@@ -394,12 +427,23 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                     .ok_or("XDG_RUNTIME_DIR is not set; pass --capture-socket <path>")?,
             );
         }
+        match (args.output_decklink, args.decklink) {
+            (true, None) => args.decklink = Some(0),
+            (false, Some(_)) => return Err("--device requires --output decklink".into()),
+            _ => {}
+        }
     } else if args.capture_socket.is_some()
         || args.program_delay_ms.is_some()
         || args.output_rate.is_some()
+        || args.input_loss.is_some()
+        || args.output_decklink
+        || args.decklink.is_some()
+        || args.no_audio
     {
         return Err(
-            "--capture-socket, --program-delay-ms and --output-rate require --pipeline gst".into(),
+            "--capture-socket, --program-delay-ms, --output-rate, --input-loss, --output, \
+             --device and --no-audio require --pipeline gst"
+                .into(),
         );
     }
     if tracked && args.input_ring.is_none() && !args.gst {
@@ -930,6 +974,12 @@ fn run_gst(args: Args) -> Result<()> {
         program_delay: delay,
         tap: args.monitor_tap.clone(),
         recorder,
+        sink: match args.decklink {
+            Some(device) => chr_runtime::gst_core::OutputSink::DeckLink { device },
+            None => chr_runtime::gst_core::OutputSink::Simulated,
+        },
+        input_loss: args.input_loss.clone().unwrap_or_default(),
+        audio: !args.no_audio,
     })?;
     if let Some(path) = &args.monitor_tap {
         log::info!("program tap for chr-monitor at {}", path.display());
@@ -1555,8 +1605,48 @@ mod tests {
             &["--capture-socket", "/run/c.sock"],
             &["--output-rate", "follow"],
             &["--fps", "29.9"],
+            &[&gst[..], &["--input-loss", "freeze"]].concat(),
+            &[&gst[..], &["--output", "sdi"]].concat(),
+            &[&gst[..], &["--device", "1"]].concat(),
+            &["--input-loss", "black"],
+            &["--output", "decklink"],
+            &["--no-audio"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+        let card = parse(
+            &[
+                &gst[..],
+                &[
+                    "--output",
+                    "decklink",
+                    "--input-loss",
+                    "slate:/s.png",
+                    "--no-audio",
+                ],
+            ]
+            .concat(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (card.decklink, card.input_loss, card.no_audio),
+            (
+                Some(0),
+                Some(chr_runtime::gst_core::InputLoss::Slate(Some(
+                    "/s.png".into()
+                ))),
+                true
+            )
+        );
+        let sim = parse(&gst).unwrap().unwrap();
+        assert_eq!(
+            (sim.decklink, sim.input_loss, sim.no_audio),
+            (None, None, false)
+        );
+        let second = parse(&[&gst[..], &["--output", "decklink", "--device", "1"]].concat())
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.decklink, Some(1));
     }
 }

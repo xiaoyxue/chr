@@ -74,6 +74,28 @@ Check every render host before it goes onsite:
 | GPU clocks under light load | `nvidia-smi -q -d CLOCK` while the stack runs | Not stuck at idle clocks; otherwise lock the minimum core clock, e.g. `sudo nvidia-smi -pm 1 && sudo nvidia-smi -i 0 -lgc 1500,2100` (`server/README.md`) |
 | Room for the rings | `df -h $XDG_RUNTIME_DIR` | More free space than the [Video size](#video-size) table needs |
 | SRT port reachable from viewers | `sudo ufw status` | The `srt` UDP port is allowed from the viewers' addresses |
+| DeckLink card and driver (`--pipeline gst` with a card, #154) | `lspci \| grep -i blackmagic`, `ls /dev/blackmagic/`, `lsmod \| grep blackmagic` | The card on the bus, its device nodes, and the `blackmagic`/`blackmagic_io` modules of Desktop Video loaded |
+| DeckLink API and firmware | `ls /usr/lib/libDeckLinkAPI.so` (or the distribution's path) and `BlackmagicFirmwareUpdater status` | Desktop Video's `libDeckLinkAPI.so` installed in the version the firmware needs |
+| GStreamer sees the card | `nix develop .#media -c gst-device-monitor-1.0 Video` | A `DeckLink` source and sink per device; without them chr fails with "no DeckLink device" |
+| Genlock reference | The card's reference input (Desktop Video Setup: "Reference": locked) | Black burst or tri-level from house sync, locked |
+
+**DeckLink (not verified on hardware).** The development host has no card, so
+the DeckLink code of the GStreamer core is built and tested only up to "no
+DeckLink device" ([GStreamer core](../server/docs/gst-core.md#phase-3-decklink-interlaced-input-loss)):
+install Blackmagic Desktop Video (its kernel modules and `libDeckLinkAPI.so`;
+on NixOS the `decklink` module and package), check the rows above, then run
+the input and the server with the card:
+
+```sh
+chr-sdi-in --source decklink --device 0 --mode auto --connection sdi
+chr-server --pipeline gst --output decklink --device 1 --input-loss black ...
+```
+
+The Nix shells' GStreamer has the `decklink` plugin (gst-plugins-bad); it
+loads `libDeckLinkAPI.so` from the host at run time. The output card's clock
+times the whole pipeline: lock its reference input to house sync before going
+on air, and verify capture, playout, the mode switch on a format change,
+RP 188 timecode, captions (line 9) and embedded audio on site.
 
 To enable Resizable BAR on an NVIDIA host (needs a reboot; stop the stack first):
 

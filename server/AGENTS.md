@@ -48,7 +48,9 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   (`--pipeline gst`, #154, `docs/gst-core.md`): one pipeline from
   `chr-sdi-in`'s frames to the output and the program tap, with the per-slot
   selector, the CG driver over both workers, and the workers' sockets as bins
-  of that pipeline; the timer-paced loop stays the default. The root `monitor/`
+  of that pipeline, the program's audio with the same delay, timecode and
+  captions, and the DeckLink input/output code paths (not verified on
+  hardware); the timer-paced loop stays the default. The root `monitor/`
   crate (`chr-monitor`, a separate process) encodes the tap and fans it out to
   WebRTC/SRT. The runtime's GStreamer media helpers serve only the software
   input and remain private to it; the worker transport and the GStreamer core
