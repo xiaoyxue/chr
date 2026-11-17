@@ -196,7 +196,11 @@ M9 implements OpenEXR-backed environment illumination and background through
 the retained `SkyLight`. Diffuse uses three-band SH with exact per-pixel
 lat-long basis integrals and Lambert convolution. Specular uses six spatial
 roughness layers, deterministic GGX importance sampling and a split-sum BRDF
-LUT with correlated Smith visibility. Float32 textures are manually bilinear
+LUT with correlated Smith visibility. The prefilter reads a box-filtered mip
+chain of the source (filtered importance sampling, #177): each sample takes the
+level whose texels match its share of the lobe's solid angle, and never a finer
+level than the output texel covers, so a sun of a few texels is integrated
+instead of being hit or missed by the 64 samples. Float32 textures are manually bilinear
 sampled; no optional float32-filtering feature is required. Source normalization
 plus a separate scale preserves HDR values before the existing output bound.
 

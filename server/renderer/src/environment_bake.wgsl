@@ -12,6 +12,26 @@ fn ggx_half(index:u32,count:u32,roughness:f32)->vec3<f32> {
     return vec3(r*cos(phi),r*sin(phi),z);
 }
 
+// Bilinear at `level`, trilinear between levels: reads the source panorama's box-filtered mips.
+fn sample_mip(uv:vec2<f32>,level:i32)->vec3<f32> {
+    let size=vec2<i32>(textureDimensions(input,level));
+    let pixel=uv*vec2<f32>(size)-vec2(0.5);
+    let base=vec2<i32>(floor(pixel));
+    let f=fract(pixel);
+    let a=textureLoad(input,image_pixel(base,size,true),level).rgb;
+    let b=textureLoad(input,image_pixel(base+vec2(1,0),size,true),level).rgb;
+    let c=textureLoad(input,image_pixel(base+vec2(0,1),size,true),level).rgb;
+    let d=textureLoad(input,image_pixel(base+vec2(1,1),size,true),level).rgb;
+    return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+
+fn sample_level(uv:vec2<f32>,level:f32)->vec3<f32> {
+    let top=f32(textureNumLevels(input)-1u);
+    let l=clamp(level,0.0,top);
+    let a=floor(l);
+    return mix(sample_mip(uv,i32(a)),sample_mip(uv,i32(min(a+1.0,top))),l-a);
+}
+
 @compute @workgroup_size(8,8)
 fn main(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(output);
@@ -39,10 +59,18 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
         return;
     }
     let n=panorama_direction(uv);
+    // Filtered importance sampling (Krivanek and Colbert, #177): each sample reads the mip whose
+    // texels match its share of the lobe's solid angle, never finer than the output texel's own,
+    // so a sun of a few source texels is integrated rather than hit or missed.
+    let source=vec2<f32>(textureDimensions(input));
+    let footprint=log2(source.x/f32(size.x));
     if params.roughness==0.0 {
-        textureStore(output,vec2<i32>(id.xy),vec4(sample_float_image(input,uv,true),1.0));
+        textureStore(output,vec2<i32>(id.xy),vec4(sample_level(uv,footprint),1.0));
         return;
     }
+    let equator_texel=2.0*ENV_PI*ENV_PI/(source.x*source.y);
+    let alpha=params.roughness*params.roughness;
+    let a2=alpha*alpha;
     let up=select(vec3(0.0,0.0,1.0),vec3(1.0,0.0,0.0),abs(n.z)>0.99);
     let t=normalize(cross(up,n));
     let b=cross(n,t);
@@ -54,7 +82,13 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
         let l=normalize(2.0*dot(n,h)*h-n);
         let nl=max(dot(n,l),0.0);
         if nl>0.0 {
-            radiance+=sample_float_image(input,panorama_uv(l),true)*nl;
+            // With n = v the reflected direction's density is D(h) / 4.
+            let q=local.z*local.z*(a2-1.0)+1.0;
+            let pdf=a2/(4.0*ENV_PI*q*q);
+            let sample_angle=1.0/(f32(params.samples)*pdf);
+            let texel_angle=equator_texel*max(sqrt(max(1.0-l.z*l.z,0.0)),1e-4);
+            let level=max(0.5*log2(sample_angle/texel_angle)+1.0,footprint);
+            radiance+=sample_level(panorama_uv(l),level)*nl;
             weight+=nl;
         }
     }

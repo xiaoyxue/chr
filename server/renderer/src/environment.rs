@@ -119,7 +119,7 @@ pub(crate) fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
 
 impl EnvironmentGpu {
     pub fn new(device: &wgpu::Device) -> Self {
-        let placeholder = texture(device, 1, 1, 1, "empty environment");
+        let placeholder = texture(device, 1, 1, 1, 1, "empty environment");
         let bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("environment prefilter"),
             entries: &[
@@ -232,7 +232,9 @@ impl EnvironmentGpu {
             {
                 return Err("environment exceeds texture limits".into());
             }
-            let bytes = (u64::from(extent.width()) * u64::from(extent.height())
+            let bytes = (mip_sizes(extent.width(), extent.height())
+                .map(|(w, h)| u64::from(w) * u64::from(h))
+                .sum::<u64>()
                 + u64::from(settings.resolution)
                     * u64::from(settings.resolution / 2)
                     * u64::from(ROUGHNESS_LAYERS)
@@ -284,7 +286,7 @@ impl EnvironmentGpu {
                 return Err("sky rays exceed GPU range".into());
             }
         } else if self.cache.take().is_some() {
-            let empty = texture(&gpu.device, 1, 1, 1, "empty environment");
+            let empty = texture(&gpu.device, 1, 1, 1, 1, "empty environment");
             self.source = empty.create_view(&Default::default());
             self.specular = empty.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -320,29 +322,41 @@ impl EnvironmentGpu {
             })
             .collect();
         let extent = source.extent();
+        let levels = mip_chain(extent.width(), extent.height(), pixels);
         let input = texture(
             &gpu.device,
             extent.width(),
             extent.height(),
             1,
+            levels.len() as u32,
             "scene-linear environment",
         );
-        gpu.queue.write_texture(
-            input.as_image_copy(),
-            bytemuck::cast_slice(&pixels),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(extent.width() * 16),
-                rows_per_image: Some(extent.height()),
-            },
-            input.size(),
-        );
+        for (level, (width, height, pixels)) in levels.iter().enumerate() {
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    mip_level: level as u32,
+                    ..input.as_image_copy()
+                },
+                bytemuck::cast_slice(pixels),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 16),
+                    rows_per_image: Some(*height),
+                },
+                wgpu::Extent3d {
+                    width: *width,
+                    height: *height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         self.source = input.create_view(&Default::default());
         let filtered = texture(
             &gpu.device,
             settings.resolution,
             settings.resolution / 2,
             ROUGHNESS_LAYERS,
+            1,
             "GGX roughness layers",
         );
         self.specular = filtered.create_view(&wgpu::TextureViewDescriptor {
@@ -388,7 +402,7 @@ impl EnvironmentGpu {
         if self.lut_ready {
             return false;
         }
-        let lut = texture(&gpu.device, LUT_SIZE, LUT_SIZE, 1, "GGX split-sum BRDF");
+        let lut = texture(&gpu.device, LUT_SIZE, LUT_SIZE, 1, 1, "GGX split-sum BRDF");
         self.lut = lut.create_view(&Default::default());
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         self.bake(
@@ -453,6 +467,7 @@ fn texture(
     width: u32,
     height: u32,
     layers: u32,
+    mips: u32,
     label: &str,
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
@@ -462,7 +477,7 @@ fn texture(
             height,
             depth_or_array_layers: layers,
         },
-        mip_level_count: 1,
+        mip_level_count: mips,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba32Float,
@@ -471,6 +486,41 @@ fn texture(
             | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
+}
+
+/// Sizes of a mip chain halving each side (rounding down, at least 1) until both are 1.
+fn mip_sizes(width: u32, height: u32) -> impl Iterator<Item = (u32, u32)> {
+    std::iter::successors(Some((width, height)), |&(w, h)| {
+        (w > 1 || h > 1).then(|| ((w / 2).max(1), (h / 2).max(1)))
+    })
+}
+
+/// The panorama and its box-filtered mips, so the prefilter can read a sample's
+/// whole solid angle instead of point-sampling a few bright texels (#177).
+fn mip_chain(width: u32, height: u32, pixels: Vec<[f32; 4]>) -> Vec<(u32, u32, Vec<[f32; 4]>)> {
+    let mut levels = vec![(width, height, pixels)];
+    for (w, h) in mip_sizes(width, height).skip(1) {
+        let (sw, sh, source) = levels.last().expect("level zero");
+        let (sw, sh) = (*sw as usize, *sh as usize);
+        let (w, h) = (w as usize, h as usize);
+        let mut level = Vec::with_capacity(w * h);
+        for y in 0..h {
+            let rows = y * sh / h..((y + 1) * sh).div_ceil(h);
+            for x in 0..w {
+                let columns = x * sw / w..((x + 1) * sw).div_ceil(w);
+                let mut sum = [0.0_f32; 4];
+                for row in rows.clone() {
+                    for p in &source[row * sw + columns.start..row * sw + columns.end] {
+                        sum = std::array::from_fn(|i| sum[i] + p[i]);
+                    }
+                }
+                let count = (rows.len() * columns.len()) as f32;
+                level.push(sum.map(|v| v / count));
+            }
+        }
+        levels.push((w as u32, h as u32, level));
+    }
+    levels
 }
 
 // Integrate each lat-long pixel's SH basis exactly; even a 1x1 constant map stays isotropic.
@@ -544,6 +594,18 @@ use bytemuck::Zeroable;
 mod tests {
     use super::*;
     use crate::coordinates::ImageExtent;
+
+    #[test]
+    fn mip_chain_preserves_mean_radiance_down_to_one_texel() {
+        let pixels: Vec<[f32; 4]> = (0..24).map(|i| [i as f32, 1.0, 0.0, 1.0]).collect();
+        let levels = mip_chain(6, 4, pixels);
+        let sizes: Vec<_> = levels.iter().map(|(w, h, _)| (*w, *h)).collect();
+        assert_eq!(sizes, [(6, 4), (3, 2), (1, 1)]);
+        assert_eq!(levels[1].2[0], [3.5, 1.0, 0.0, 1.0]);
+        assert_eq!(levels[2].2[0], [11.5, 1.0, 0.0, 1.0]);
+        let sizes: Vec<_> = mip_sizes(8, 2).collect();
+        assert_eq!(sizes, [(8, 2), (4, 1), (2, 1), (1, 1)]);
+    }
 
     #[test]
     fn exact_pixel_sh_integrals_preserve_constant_hdr_at_any_resolution() {

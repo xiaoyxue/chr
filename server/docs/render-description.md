@@ -108,8 +108,9 @@ All lights inherit the scene's `shadow_mode` unless they set their own.
   that a directional light already carries, which would otherwise light shadows a
   second time and sparkle on glossy, finely bumped surfaces (#177). A server
   prefilters each panorama once per cap on
-  the GPU (256 x 128 x 6 roughness layers, 64 samples); a source plus its layers may
-  take up to 256 MiB of GPU memory, enough for 4096 x 2048.
+  the GPU (256 x 128 x 6 roughness layers, 64 filtered samples from the source's mip
+  chain); a source with its mips plus its layers may take up to 256 MiB of GPU
+  memory, enough for 4096 x 2048.
 - **Constant fill:** `constant` is a uniform radiance from every direction, added
   to the environment's and shaded the same way (diffuse and specular, also
   unoccluded). It lifts shadows evenly; it does not appear as a background.
