@@ -168,7 +168,7 @@ Next, in order:
 | Issue | Work | State |
 | --- | --- | --- |
 | #146 | Enable Resizable BAR on render hosts: a second Vulkan process on the same GPU is about 1000x slower while it is off | `necessary`, host configuration; do before #148 phase 2 testing, then add to the [host checklist](docs/operations.md#host-checklist) |
-| #148 | vchao's `pitch-analysis` (`atlas-vq-estimate`) replaces the `chr-tracking-sim-cli` replay as the tracking worker over vchao's VchaoFrame unixfd contract (supersedes #140's transport) | In progress: chr speaks VchaoFrame, frames without camera are clean feed, `pitch-analysis` (pin `f209fc9`) tracks the SC1464 fixture through chr-server ([measured](server/docs/tracking-worker.md#measured)); CG from vchao's `Ti` verified on an exclusive GPU; integration with an onsite map is next |
+| #148 | vchao's `pitch-analysis` (`atlas-vq-estimate`) replaces the `chr-tracking-sim-cli` replay as the tracking worker over vchao's VchaoFrame unixfd contract (supersedes #140's transport) | Done (closed): chr speaks VchaoFrame, frames without camera are clean feed, `pitch-analysis` (pin `f209fc9`) tracks the SC1464 fixture through chr-server ([measured](server/docs/tracking-worker.md#measured)); CG from vchao's `Ti` verified on an exclusive GPU; integration with an onsite station's map is the open follow-up |
 | #154 | chr-server owns one GStreamer pipeline: card-clocked I/O, memfd frames, per-slot clean feed, rate lock, input-driven rate | Done in simulation (phases 1 to 5); DeckLink input/output, genlock, RP 188 and embedded audio on a card are not verified on hardware (with #80) |
 | #80 | Physical SDI capture and output | Not started; the DeckLink code paths of #154 wait for a card |
 

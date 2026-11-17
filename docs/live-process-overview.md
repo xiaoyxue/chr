@@ -62,7 +62,8 @@ Key points:
   plus the program delay D (`--program-delay-ms`) later, with its own CG if that
   arrived in time, else with its own clean feed (the input without CG). A frame
   never borrows another frame's camera.
-- **Fault isolation:** the GPU is used only in the workers. If a worker crashes,
+- **Fault isolation:** chr-server uses no GPU; rendering and tracking use it only
+  in the workers (chr-monitor may use NVENC). If a worker crashes,
   hangs or loses its device, program output continues as clean feed; the worker
   is restarted and relinked into the running pipeline, and CG returns.
 - **Monitoring is decoupled:** `chr-monitor` only reads the program tap and never
@@ -71,8 +72,8 @@ Key points:
 - **Transport:** `chr-sdi-in` and both workers talk to `chr-server` over
   GStreamer `unixfdsink`/`unixfdsrc` sockets. Each message is JSON in a buffer's
   custom meta; frames are memfd memory passed as file descriptors, so a captured
-  frame is written once and shared by `chr-server`, both workers and the delay
-  queue.
+  frame is written once into a memfd that both workers share; the clean feed held
+  for D is one UYVY conversion of it.
 - **Shared memory (`chr-shm`):** only the program tap, a single-writer,
   many-reader ring; torn reads are discarded.
 - **Tracking:** vchao's `pitch-analysis` estimates each frame's `Ti` against a
@@ -93,7 +94,7 @@ Key points:
 
 Not done yet: physical SDI capture and output, with the DeckLink code paths,
 genlock and embedded audio verified on a card (#80, #161); vchao tracking with
-a map of an onsite station (#148); a hot-standby worker.
+a map of an onsite station (the follow-up of #148); a hot-standby worker.
 
 ## 中文
 
@@ -148,13 +149,13 @@ flowchart TB
 
 - **固定延迟，逐 slot 的 clean feed：** 每一帧在采集时间加节目延迟 D（`--program-delay-ms`）时发出：
   它的 CG 及时到达就带 CG，否则发它自己的 clean feed（不带 CG 的原始画面）。一帧绝不借用别的帧的相机。
-- **故障隔离：** 只有 worker 使用 GPU。worker 崩溃、卡住或丢失设备时，节目输出以 clean feed 继续；
+- **故障隔离：** chr-server 不使用 GPU；渲染和跟踪只在 worker 中使用 GPU（chr-monitor 可能使用 NVENC）。worker 崩溃、卡住或丢失设备时，节目输出以 clean feed 继续；
   worker 重启并重新接入正在运行的流水线后，CG 自动恢复。
 - **监看解耦：** `chr-monitor` 只读 program tap，从不回写。编码和推流不会拖慢节目输出，
   monitor 也可以单独重启。
 - **传输：** `chr-sdi-in` 和两个 worker 都通过 GStreamer `unixfdsink`/`unixfdsrc` socket 与
   `chr-server` 通信。每条消息是 buffer 自定义 meta 里的 JSON；帧是以文件描述符传递的 memfd 内存，
-  所以一帧采集画面只写一次，由 `chr-server`、两个 worker 和延迟队列共用。
+  所以一帧采集画面只写一次，写入两个 worker 共用的 memfd；在 D 期间保留的 clean feed 是它的一份 UYVY 转换。
 - **共享内存（`chr-shm`）：** 只剩 program tap，一个单写多读的环形缓冲，读到被覆盖了一半的帧直接丢弃。
 - **跟踪：** vchao 的 `pitch-analysis` 依据为该机位离线建好的 V/Q map 估计每一帧的 `Ti`；
   `chr-server` 通过 `--tracking-centre` 得到该机位的光心 C。`chr-tracking-sim-cli` 回放片段已记录的
@@ -168,4 +169,4 @@ flowchart TB
 - **离线渲染：** `chr-renderer-cli render` 单独渲染一帧，结果与 worker 渲染的一致。
 
 尚未完成：物理 SDI 采集和输出，包括在真实板卡上验证 DeckLink 代码路径、genlock 和嵌入音频（#80、#161）；
-使用现场机位 map 的 vchao 跟踪（#148）；热备 worker。
+使用现场机位 map 的 vchao 跟踪（#148 的后续工作）；热备 worker。
