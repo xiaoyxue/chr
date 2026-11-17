@@ -134,6 +134,10 @@ pub enum AssetKind {
     /// the flag-local origin and it reads upright from the flag's -Z side. Texels
     /// with alpha below 0.5 are cut out.
     Flag,
+    /// A linear-light OpenEXR latitude-longitude panorama (2:1) for image-based
+    /// lighting, in the renderer's convention: +X at the image centre, up (-Z) along
+    /// the top row. Only `lighting.environment.asset_ref` may use it, never an instance.
+    Environment,
 }
 
 /// Where the server reads an asset: a file, or an entry of a ZIP package such as

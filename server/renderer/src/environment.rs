@@ -37,6 +37,8 @@ struct EnvironmentUniform {
     info: [f32; 4],
     flags: [f32; 4],
     rays: [[f32; 4]; 3],
+    /// Uniform radiance added to the sky's, linear RGB; w unused.
+    constant: [f32; 4],
 }
 
 #[repr(C)]
@@ -207,13 +209,15 @@ impl EnvironmentGpu {
         &mut self,
         gpu: &Gpu,
         sky: Option<&SkyLight>,
+        constant: [f32; 3],
         camera: &dyn CameraView,
         settings: EnvironmentSettings,
     ) -> Result<bool, BoxError> {
         self.preprocessed = false;
         self.visible = sky.is_some_and(|sky| sky.visible);
         let mut data = EnvironmentUniform::zeroed();
-        let mut changed = false;
+        data.constant = [constant[0], constant[1], constant[2], 0.0];
+        let mut changed = (sky.is_some() || constant != [0.0; 3]) && self.ensure_lut(gpu);
         if let Some(sky) = sky {
             let extent = sky.environment.extent();
             if !(64..=1024).contains(&settings.resolution)
@@ -350,24 +354,6 @@ impl EnvironmentGpu {
                 },
             );
         }
-        if !self.lut_ready {
-            let lut = texture(&gpu.device, LUT_SIZE, LUT_SIZE, 1, "GGX split-sum BRDF");
-            self.lut = lut.create_view(&Default::default());
-            self.bake(
-                &gpu.device,
-                &mut encoder,
-                &self.lut,
-                LUT_SIZE,
-                LUT_SIZE,
-                BakeUniform {
-                    roughness: 0.0,
-                    samples: 256,
-                    kind: 1,
-                    padding: 0,
-                },
-            );
-            self.lut_ready = true;
-        }
         gpu.queue.submit([encoder.finish()]);
         self.cache = Some(CachedEnvironment {
             sh: diffuse_sh(&source, scale),
@@ -376,6 +362,33 @@ impl EnvironmentGpu {
             samples: settings.samples,
             scale,
         });
+    }
+
+    /// Builds the split-sum BRDF table once; a sky and a constant fill both need it.
+    /// Returns whether its view changed.
+    fn ensure_lut(&mut self, gpu: &Gpu) -> bool {
+        if self.lut_ready {
+            return false;
+        }
+        let lut = texture(&gpu.device, LUT_SIZE, LUT_SIZE, 1, "GGX split-sum BRDF");
+        self.lut = lut.create_view(&Default::default());
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        self.bake(
+            &gpu.device,
+            &mut encoder,
+            &self.lut,
+            LUT_SIZE,
+            LUT_SIZE,
+            BakeUniform {
+                roughness: 0.0,
+                samples: 256,
+                kind: 1,
+                padding: 0,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        self.lut_ready = true;
+        true
     }
 
     fn bake(

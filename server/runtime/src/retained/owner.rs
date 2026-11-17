@@ -276,6 +276,15 @@ impl SceneAdapter {
         self.registrations.register_model(id, asset)
     }
 
+    /// Registers an environment map after startup, like [`Self::register_model`].
+    pub fn register_environment(
+        &mut self,
+        id: w::Id,
+        environment: chr_renderer::scene::EnvironmentMap,
+    ) -> Result<(), ErrorObject> {
+        self.registrations.register_environment(id, environment)
+    }
+
     /// Rebinds a scene snapshot with this adapter's registrations, as a render
     /// worker does for each request. The snapshot must belong to this runtime.
     pub fn bind(&self, snapshot: w::SceneSnapshot) -> Result<BoundScene, ErrorObject> {

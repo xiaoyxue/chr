@@ -19,7 +19,7 @@ use super::{
     transport::{self, Incoming, Receiver, Sender, SharedPixels},
 };
 use crate::{
-    program::{Frame, ProgramRenderer},
+    program::{Frame, ProgramRenderer, assets::Imported},
     retained::{BoundScene, SceneAdapter},
     sdi::VideoMode,
 };
@@ -209,10 +209,11 @@ fn start(requests: &Receiver) -> Result<Worker, Error> {
         Some(spec) => {
             let mut installed = spec.install(VideoMode { width, height, fps }, runtime_id)?;
             for (id, asset) in crate::program::description::import_for_worker(&assets)? {
-                installed
-                    .adapter
-                    .register_model(id, asset)
-                    .map_err(|e| e.to_string())?;
+                match asset {
+                    Imported::Model(glb) => installed.adapter.register_model(id, glb),
+                    Imported::Environment(map) => installed.adapter.register_environment(id, map),
+                }
+                .map_err(|e| e.to_string())?;
             }
             let mut renderer = ProgramRenderer::new(&gpu, &installed.program.configuration)?;
             renderer.set_video_lens(installed.program.video_lens.clone());

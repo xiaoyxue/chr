@@ -205,6 +205,10 @@ object!(Lighting {
     lights: Vec<Light>,
     #[serde(deserialize_with = "required_nullable")]
     environment: Option<Environment>,
+    /// Uniform, unoccluded radiance from every direction, linear RGB W/(m^2 sr),
+    /// added to the environment's; absent means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    constant: Option<Vec3>,
 });
 object!(Intrinsics {
     fx: Finite,

@@ -31,7 +31,8 @@ struct Light {
 @group(3) @binding(1) var shadow_maps: texture_depth_2d_array;
 @group(3) @binding(2) var shadow_sampler: sampler_comparison;
 struct Environment {
-    sh:array<vec4<f32>,9>, info:vec4<f32>, flags:vec4<f32>, rays:array<vec4<f32>,3>
+    sh:array<vec4<f32>,9>, info:vec4<f32>, flags:vec4<f32>, rays:array<vec4<f32>,3>,
+    constant:vec4<f32>
 };
 @group(3) @binding(3) var environment_source:texture_2d<f32>;
 @group(3) @binding(4) var environment_filtered:texture_2d_array<f32>;
@@ -58,20 +59,29 @@ fn environment_diffuse(n:vec3<f32>)->vec3<f32> {
 }
 
 fn environment_lighting(n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32,ao:f32)->vec3<f32> {
-    if environment.flags.x==0.0 || environment.info.x==0.0 {return vec3(0.0);}
+    let sky=environment.flags.x!=0.0 && environment.info.x!=0.0;
+    let constant=environment.constant.rgb;
+    if !sky && all(constant==vec3(0.0)) {return vec3(0.0);}
     let nv=max(dot(n,v),0.0001);
     let f0=mix(vec3(0.04),base,metal);
     let fresnel=f0+(max(vec3(1.0-rough),f0)-f0)*pow5(1.0-nv);
-    let diffuse=(vec3(1.0)-fresnel)*(1.0-metal)*base*environment_diffuse(environment_direction(n));
-    let uv=panorama_uv(environment_direction(reflect(-v,n)));
-    let level=rough*environment.info.w;
-    let lower=i32(floor(level));
-    let upper=min(lower+1,i32(environment.info.w));
-    let filtered=mix(sample_float_layer(environment_filtered,uv,lower),
-        sample_float_layer(environment_filtered,uv,upper),fract(level));
+    // A uniform radiance L is its own diffuse (SH) and prefiltered specular radiance.
+    var irradiance=constant;
+    var prefiltered=constant;
+    if sky {
+        let gain=environment.flags.y*environment.info.x;
+        irradiance+=environment_diffuse(environment_direction(n))*gain;
+        let uv=panorama_uv(environment_direction(reflect(-v,n)));
+        let level=rough*environment.info.w;
+        let lower=i32(floor(level));
+        let upper=min(lower+1,i32(environment.info.w));
+        prefiltered+=mix(sample_float_layer(environment_filtered,uv,lower),
+            sample_float_layer(environment_filtered,uv,upper),fract(level))*gain;
+    }
     let dfg=sample_float_image(environment_brdf,vec2(nv,rough),false).rg;
-    let specular=filtered*(f0*dfg.x+vec3(dfg.y));
-    return ((diffuse+specular)*ao*environment.flags.y)*environment.info.x;
+    let diffuse=(vec3(1.0)-fresnel)*(1.0-metal)*base*irradiance;
+    let specular=prefiltered*(f0*dfg.x+vec3(dfg.y));
+    return (diffuse+specular)*ao;
 }
 
 @vertex

@@ -131,10 +131,12 @@ const light = union(
     intensity: vec3, source_radius: finite, inner_angle: finite, outer_angle: finite,
   }),
 );
-const lighting = object({
+const lightingFields = {
   lights: refine(array(light), values => unique(values, value => value.light_id)),
   environment: nullable(object({ asset_ref: id, gain: finite, rotation: finite, visible: bool })),
-});
+};
+// `constant` (uniform fill radiance, linear RGB W/(m^2 sr)) is omitted when absent.
+const lighting = union(object(lightingFields), object({ ...lightingFields, constant: vec3 }));
 const clipFields = { near_m: finite, far_m: finite };
 const clipping = (value: { near_m: number; far_m: number }) => value.near_m > 0 && value.near_m < value.far_m;
 const pinholeFields = { extent, ...clipFields };
