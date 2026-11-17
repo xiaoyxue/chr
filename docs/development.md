@@ -118,14 +118,18 @@ LFS does not prevent that, and `export-ignore` does not either, while submodules
 left out.
 
 ```sh
-nix develop                                  # provides git-lfs
-git lfs install --skip-repo                  # once per user: the LFS filter, no hooks in chr
+nix develop                                  # git-lfs and its filter
 git submodule update --init asset            # about 450 MB
 ```
 
-Run Git commands that touch `asset/` inside `nix develop`. Do not run `git lfs install`
-without `--skip-repo` in chr: it would put LFS hooks into chr's shared `.git/hooks`, and
-pushes outside the shell would then fail.
+The dev shell sets the LFS filter through `GIT_CONFIG_*` variables, so nothing in
+your Git configuration depends on `git-lfs`. Run Git commands that read or change
+`asset/` inside `nix develop`; outside it they would check out LFS pointers. The
+submodule is `ignore = dirty`, so `git status` in chr works anywhere. Do not run
+`git lfs install` in chr: it would put LFS hooks into chr's shared `.git/hooks` and
+a filter into your global configuration, and Git would then fail outside the shell
+wherever `git-lfs` is not installed. To change the assets themselves, run
+`git lfs install --local` inside `asset/`.
 
 Builds and checks never need `asset/`. chr-server reads its files at runtime when
 `asset/` is one of its asset roots.
