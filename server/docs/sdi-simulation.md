@@ -183,9 +183,15 @@ cameras (`run-tracked.sh` passes it without `--tracking-worker`) to
 `--server-socket` (default `$XDG_RUNTIME_DIR/chr/render.sock`); with it,
 `--tracking-delay-ms <n>` sends every camera that long after its frame, and
 `--drop-tracking-every <n>` withholds every n-th camera to exercise frames
-without one. A camera is the manifest's `Ti`/`C` and lens with its warp of
-`frame_id % warps`, like the calibrated replay; the clip should have as many
-frames as the manifest has `frame_warps`.
+without one. A camera is the manifest's `Ti`/`C` and lens with the warp of the
+clip frame the frame shows, `source_index % warps` like the calibrated replay,
+sent with `sequence` = the frame's `frame_id`. `source_index` counts the clip's
+decoded frames through its loops (the parser's timestamp in frames), so frames
+the input drops (a lost signal, stale frames after a stall) leave no gap in the
+`frame_id`s but keep every later camera on its own picture. `--send-cameras`
+needs `--video` and refuses to start unless the clip decodes (FFprobe
+`-count_frames`) to exactly one frame per `frame_warps` entry at the manifest's
+`width` x `height`.
 
 `chr-renderer-cli render --tracked-scene <json> --frame <n>` renders frame `n`
 with the manifest's `Ti`/`C`, lens and warp `n` through the same tracked path.

@@ -414,9 +414,9 @@ async fn external_cameras_join_their_frames_by_frame_id_and_feed_the_telemetry()
         // tracking.frame's camera of every frame but each tenth, keyed by frame_id.
         let send = async {
             loop {
-                for frame_id in run.input.borrow().take_frames() {
-                    if frame_id % 10 != 0 {
-                        run.feed.push(replay.frame(frame_id)).unwrap();
+                for stamped in run.input.borrow().take_frames() {
+                    if stamped.frame_id % 10 != 0 {
+                        run.feed.push(replay.frame(stamped.frame_id)).unwrap();
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -449,6 +449,52 @@ async fn external_cameras_join_their_frames_by_frame_id_and_feed_the_telemetry()
     .await;
 }
 
+#[test]
+fn frames_lost_by_the_input_still_count_in_the_source() {
+    // chr-sdi-in --send-cameras picks each camera by the frame's source index:
+    // frames dropped while the input is lost get no frame_id but still count.
+    let dir = std::env::temp_dir().join(format!("chr-gst-core-source-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = Input::start(
+        &Source::TestPattern(MODE.into()),
+        &dir.join("capture.sock"),
+        &Options {
+            audio: false,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    input.watch_frames();
+    std::thread::sleep(Duration::from_millis(300));
+    input.set_lost(true);
+    std::thread::sleep(Duration::from_millis(300));
+    input.set_lost(false);
+    std::thread::sleep(Duration::from_millis(300));
+    let stamped = input.take_frames();
+    drop(input);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(stamped.len() > 20, "{stamped:?}");
+    let steps: Vec<(u64, u64)> = stamped
+        .windows(2)
+        .map(|pair| {
+            (
+                pair[1].frame_id - pair[0].frame_id,
+                pair[1].source_index - pair[0].source_index,
+            )
+        })
+        .collect();
+    assert!(
+        steps.iter().all(|(frame_id, _)| *frame_id == 1),
+        "frame_ids leave no gap: {steps:?}"
+    );
+    let skipped: u64 = steps.iter().map(|(_, source)| source - 1).sum();
+    // 300 ms at 50 fps: about 15 frames lost.
+    assert!(
+        (10..=20).contains(&skipped),
+        "the source index skips the lost frames: {steps:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cameras_answered_in_batches_wait_for_render_credits() {
     // vchao answers in batches (--batch-frames 8): more cameras at once than
@@ -467,8 +513,8 @@ async fn cameras_answered_in_batches_wait_for_render_credits() {
             loop {
                 batch.extend(run.input.borrow().take_frames());
                 if batch.len() >= 8 {
-                    for frame_id in batch.drain(..) {
-                        run.feed.push(replay.frame(frame_id)).unwrap();
+                    for stamped in batch.drain(..) {
+                        run.feed.push(replay.frame(stamped.frame_id)).unwrap();
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;

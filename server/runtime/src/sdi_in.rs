@@ -9,8 +9,9 @@
 //!
 //! With `--send-cameras <manifest>` it is also the external tracking source of
 //! a chr-server without a tracking worker: each frame's recorded camera (the
-//! calibrated clip's `Ti`, `C`, lens and that frame's warp) goes to chr-server
-//! as `tracking.frame`, keyed by the frame's `frame_id`. Nothing estimates it.
+//! calibrated clip's `Ti`, `C`, lens and the warp of the clip frame it shows)
+//! goes to chr-server as `tracking.frame`, keyed by the frame's `frame_id`.
+//! Nothing estimates it.
 
 use std::{
     collections::VecDeque,
@@ -24,7 +25,7 @@ use chr_runtime::{
     calibration::lens::CHECKS,
     gst_core::{
         decklink::{self, Connection},
-        input::{Input, Options, Source, audio_socket},
+        input::{Input, Options, Source, Stamped, audio_socket, decoded_frames},
     },
     sdi::{Format, VideoMode, scanned_rate},
 };
@@ -291,7 +292,11 @@ fn run(args: Args) -> Result<()> {
     if let Some(parent) = args.socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut cameras = args.cameras.as_ref().map(CameraSender::new).transpose()?;
+    let mut cameras = match (&args.cameras, &args.source) {
+        (Some(cameras), Source::File(video)) => Some(CameraSender::new(cameras, video)?),
+        (Some(_), _) => return Err("--send-cameras replays a calibrated clip: give --video".into()),
+        (None, _) => None,
+    };
     let mut input = Input::start(&args.source, &args.socket, &args.options)?;
     if cameras.is_some() {
         input.watch_frames();
@@ -384,6 +389,15 @@ fn run(args: Args) -> Result<()> {
     })
 }
 
+/// The recorded camera of the clip frame `stamped` shows (its warp of
+/// `source_index % warps`), keyed by its `frame_id`: frames the input dropped
+/// (lost, stale) are not stamped but still count in the clip.
+fn camera(replay: &TrackingReplay, stamped: Stamped) -> tracking::TrackingFrame {
+    let mut camera = replay.frame(stamped.source_index);
+    camera.sequence = stamped.frame_id.into();
+    camera
+}
+
 /// `--send-cameras`: sends each stamped frame's recorded camera to chr-server
 /// as `tracking.frame`, `delay` after its frame, keyed by its `frame_id`.
 struct CameraSender {
@@ -403,10 +417,30 @@ struct CameraSender {
 const DUE_CAMERAS: usize = 64;
 
 impl CameraSender {
-    fn new(cameras: &Cameras) -> Result<Self> {
+    /// The cameras of the calibrated clip `video`, which must decode to one
+    /// frame per warp of the manifest, at its extent.
+    fn new(cameras: &Cameras, video: &std::path::Path) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct Extent {
+            width: u32,
+            height: u32,
+        }
         let replay = chr_tracker::replay::load(&cameras.manifest, &CHECKS)?;
-        if replay.warp_count() == 0 {
-            return Err("the --send-cameras manifest has no frame_warps to replay".into());
+        let extent: Extent = serde_json::from_slice(&std::fs::read(&cameras.manifest)?)?;
+        let (width, height, frames) = decoded_frames(video)?;
+        if replay.warp_count() == 0
+            || frames != replay.warp_count() as u64
+            || (width, height) != (extent.width, extent.height)
+        {
+            return Err(format!(
+                "--send-cameras needs the manifest's clip: {} decodes to {frames} frames of \
+                 {width}x{height}, the manifest has {} frame_warps at {}x{}",
+                video.display(),
+                replay.warp_count(),
+                extent.width,
+                extent.height
+            )
+            .into());
         }
         log::info!(
             "sending the recorded cameras of {} to {} (+{} ms)",
@@ -429,12 +463,15 @@ impl CameraSender {
     }
 
     async fn send(&mut self, input: &Input) -> Result<()> {
-        for frame_id in input.take_frames() {
-            if self.drop_every.is_some_and(|n| (frame_id + 1) % n == 0) {
+        for stamped in input.take_frames() {
+            if self
+                .drop_every
+                .is_some_and(|n| (stamped.frame_id + 1) % n == 0)
+            {
                 self.withheld += 1;
             } else {
                 self.due
-                    .push_back((Instant::now() + self.delay, self.replay.frame(frame_id)));
+                    .push_back((Instant::now() + self.delay, camera(&self.replay, stamped)));
             }
         }
         while self.due.len() > DUE_CAMERAS {
@@ -511,6 +548,42 @@ mod tests {
             mode: VideoMode { width, height, fps },
             scan,
         }
+    }
+
+    #[test]
+    fn cameras_follow_the_clip_frame_after_dropped_frames_and_loops() {
+        let warp = |x: f64| [[0.001, 0., x], [0., 0.001, -0.5], [0., 0., 1.]];
+        let replay = TrackingReplay::new(
+            [[0.02, 0., 0.], [0., 0.02, 0.], [0., 0., 1.]],
+            [0., 0., -10.],
+            chr_tracker::lens::wire([2., 1.], 2., [-0.05, 0., 0.], None, &CHECKS).unwrap(),
+            &[warp(-1.), warp(-0.9), warp(-0.8), warp(-0.7)],
+            &CHECKS,
+        )
+        .unwrap();
+        // Clip frames 2 and 3 were dropped (input lost), 6 is frame 2 of the next loop.
+        let shown = [0, 1, 4, 5, 6, 7];
+        for (frame_id, source_index) in (0..).zip(shown) {
+            let camera = camera(
+                &replay,
+                Stamped {
+                    frame_id,
+                    source_index,
+                },
+            );
+            assert_eq!(camera.sequence.get(), frame_id, "keyed by frame_id");
+            assert_eq!(
+                camera.frame_warp,
+                replay.warp(source_index % 4),
+                "frame {frame_id} shows clip frame {}",
+                source_index % 4
+            );
+        }
+        assert_ne!(
+            replay.warp(2),
+            replay.warp(0),
+            "frame_id 2 shows clip frame 0, not 2"
+        );
     }
 
     #[test]

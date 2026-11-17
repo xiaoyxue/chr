@@ -298,7 +298,7 @@ def main() -> None:
     parser.add_argument("--dir", default=f"{os.environ.get('XDG_RUNTIME_DIR', '/tmp')}/chr-resolution-bench")
     parser.add_argument("--encoder", default="gstreamer", help="run: chr-monitor --encoder")
     parser.add_argument("--server-arg", action="append", default=[],
-                        help="run: extra chr-server argument (repeatable), e.g. --server-arg=--render-deadline-ms")
+                        help="run: extra chr-server argument (repeatable), e.g. --server-arg=--program-delay-ms --server-arg=200")
     parser.add_argument("--scene")
     parser.add_argument("--video")
     parser.add_argument("--description")

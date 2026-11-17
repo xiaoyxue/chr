@@ -152,13 +152,31 @@ struct Shared {
     audio_sent: AtomicU64,
     stale: AtomicU64,
     stream: Mutex<Option<Stamping>>,
-    /// The `frame_id`s stamped since [`Input::take_frames`], once
+    /// The frames stamped since [`Input::take_frames`], once
     /// [`Input::watch_frames`] asked for them.
-    frames: Mutex<Option<VecDeque<u64>>>,
+    frames: Mutex<Option<VecDeque<Stamped>>>,
 }
 
-/// Stamped `frame_id`s kept for [`Input::take_frames`].
+/// Stamped frames kept for [`Input::take_frames`].
 const WATCHED_FRAMES: usize = 256;
+
+/// A frame as it left the input: its `frame_id`, and its index in the
+/// source's own frame count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamped {
+    pub frame_id: u64,
+    /// The decoded frame it shows, counted from the file's first frame on
+    /// through its loops (`rawvideoparse` times every frame it parses,
+    /// dropped ones too), or the test pattern's: unlike `frame_id`, frames
+    /// dropped while the input was lost or stale still count.
+    pub source_index: u64,
+}
+
+/// The source frame a buffer timed `pts_ns` shows, at `fps`: `rawvideoparse`
+/// and `videotestsrc` time frame `n` at [`Rate::frame_ns`]`(n)`.
+pub fn source_index(pts_ns: u64, fps: Rate) -> u64 {
+    fps.frame_at(pts_ns.saturating_add(fps.period_ns() / 2))
+}
 
 /// Where a stream's timecode comes from, unless the source's frames carry one.
 #[derive(Clone, Debug)]
@@ -357,15 +375,15 @@ impl Input {
         self.shared.lost.store(lost, Ordering::Release);
     }
 
-    /// Keeps the `frame_id` of every frame stamped from now on, for
-    /// [`Self::take_frames`] (`--send-cameras`).
+    /// Keeps every frame stamped from now on, for [`Self::take_frames`]
+    /// (`--send-cameras`).
     pub fn watch_frames(&self) {
         lock(&self.shared.frames).get_or_insert_with(VecDeque::new);
     }
 
-    /// The `frame_id`s stamped since the last call, oldest first, at most
-    /// the newest [`WATCHED_FRAMES`].
-    pub fn take_frames(&self) -> Vec<u64> {
+    /// The frames stamped since the last call, oldest first, at most the
+    /// newest [`WATCHED_FRAMES`].
+    pub fn take_frames(&self) -> Vec<Stamped> {
         lock(&self.shared.frames)
             .as_mut()
             .map_or_else(Vec::new, |frames| frames.drain(..).collect())
@@ -746,7 +764,10 @@ fn stamp(pace: &gst::Element, shared: Arc<Shared>, stamper: Stamper) -> Result<(
                     if frames.len() == WATCHED_FRAMES {
                         frames.pop_front();
                     }
-                    frames.push_back(frame_id);
+                    frames.push_back(Stamped {
+                        frame_id,
+                        source_index: source_index(pts.nseconds(), stamping.format.mode.fps),
+                    });
                 }
                 let mut ancillary = Ancillary::of_gst_metas(buffer);
                 if ancillary.timecode.is_none() {
@@ -888,6 +909,42 @@ fn probe(path: &Path) -> Result<Probed, Error> {
     })
 }
 
+/// The extent of `path`'s first video stream and the frames it decodes to
+/// (FFprobe decodes the whole file).
+pub fn decoded_frames(path: &Path) -> Result<(u32, u32, u64), Error> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=width,height,nb_read_frames",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("cannot run ffprobe (the media shell has it): {error}"))?;
+    if !output.status.success() {
+        return Err(format!("ffprobe cannot read {}", path.display()).into());
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let stream = &metadata["streams"][0];
+    let number = |key: &str| {
+        stream[key]
+            .as_u64()
+            .or_else(|| stream[key].as_str().and_then(|text| text.parse().ok()))
+            .ok_or_else(|| format!("{}: no video {key}", path.display()))
+    };
+    Ok((
+        u32::try_from(number("width")?)?,
+        u32::try_from(number("height")?)?,
+        number("nb_read_frames")?,
+    ))
+}
+
 /// FFprobe's `field_order`: the order fields are displayed in (`tb` is top
 /// coded first, bottom displayed first).
 fn scan_of(field_order: Option<&str>) -> Scan {
@@ -923,6 +980,24 @@ mod tests {
             audio_socket(Path::new("/run/chr/capture.sock")),
             Path::new("/run/chr/capture.sock.audio")
         );
+    }
+
+    #[test]
+    fn a_frames_source_index_is_its_parser_timestamp_in_frames() {
+        for fps in [
+            Rate::fps(30),
+            Rate::fps(50),
+            Rate::new(30000, 1001).unwrap(),
+        ] {
+            // An hour of frames, the clip's loops included.
+            for n in [0, 1, 2, 341, 342, 1000, 107_891, 107_892] {
+                let pts = fps.frame_ns(n);
+                assert_eq!(source_index(pts, fps), n, "{fps:?} frame {n}");
+                let jitter = fps.period_ns() / 4;
+                assert_eq!(source_index(pts + jitter, fps), n);
+                assert_eq!(source_index(pts.saturating_sub(jitter), fps), n);
+            }
+        }
     }
 
     #[test]

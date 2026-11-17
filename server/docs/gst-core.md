@@ -576,7 +576,8 @@ sequence of the newest stream's first frame (`TrackingFeed::rebase`), so a
 camera finds its frame across input restarts and format changes. A frame waits
 for its camera until its slot is decided, exactly as for a worker's answer.
 `chr-sdi-in --send-cameras <manifest>` replays a calibrated clip's cameras
-(`Ti`, `C`, lens, and the warp of `frame_id % warps`), optionally late
+(`Ti`, `C`, lens, and the warp of the clip frame each frame shows, counted
+through drops and loops; [SDI simulation](sdi-simulation.md#run)), optionally late
 (`--tracking-delay-ms`) or with gaps (`--drop-tracking-every`).
 
 ### Telemetry
