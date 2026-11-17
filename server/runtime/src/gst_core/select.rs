@@ -21,8 +21,8 @@
 //! ones repeat.
 //!
 //! A change of the input's format starts a transition: from the oldest slot
-//! still undecided to the first CG slot after it, every slot without CG is
-//! counted as transition clean feed.
+//! still undecided to the first CG slot of the new format, every slot sent as
+//! clean feed is counted as transition clean feed.
 
 use std::{
     collections::BTreeMap,
@@ -100,7 +100,7 @@ pub struct Counters {
     pub refused: u64,
     /// Changes of the input's format.
     pub transitions: u64,
-    /// Slots without CG during a format change.
+    /// Slots sent as clean feed during a format change.
     pub transition_clean: u64,
     /// Fixed output rate: program frames repeating a decided frame on the
     /// grid, and decided frames that covered no grid slot.
@@ -241,11 +241,14 @@ impl<B> Slots<B> {
         if let Some((start, first)) = self.transition
             && sequence >= start
         {
-            if choice != Choice::Cg {
-                self.counters.transition_clean += 1;
-                transition = true;
-            } else if sequence >= first {
-                self.transition = None;
+            match choice {
+                Choice::Clean => {
+                    self.counters.transition_clean += 1;
+                    transition = true;
+                }
+                Choice::Cg if sequence >= first => self.transition = None,
+                // Nothing goes out for an empty slot (the output repeats).
+                Choice::Cg | Choice::Empty => {}
             }
         }
         let key = Frame {
@@ -450,6 +453,10 @@ fn run(shared: &Shared, program: &Program, timeline: &Timeline, timing: Timing) 
                 ..program.output
             });
             program.appsrc.set_caps(Some(&caps));
+            program.recorder.set_mode(VideoMode {
+                fps: program_rate,
+                ..program.output
+            });
             log::info!("program output now at {} fps", program_rate.label());
         }
         for (pts, duration) in times {

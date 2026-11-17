@@ -115,8 +115,9 @@ only when no frame came at all (input loss).
 ## Workers and relinking
 
 Both workers keep their protocols and supervisors: VchaoFrame for tracking
-(#148), render protocol v3 with the bound scene snapshot of every frame
-(`scene.get` on the program scene, as the timer loop's submissions carry). The
+(#148), render protocol v4 with the bound scene snapshot of every frame
+(`scene.get` on the program scene, as the timer loop's submissions carry) and
+its `time_base` (the core's requests count nanoseconds of capture time). The
 transport's `Host::Bin` puts each worker session's two sockets into the core's
 pipeline as bins `hop-<n>`, added when the supervisor starts the worker and
 removed when it kills or replaces it; so a crashed, hung or stopped worker is
@@ -206,9 +207,10 @@ renegotiates the socket's caps in the same session. The core then:
    A new stream in another format is a format change: it is logged, counted
    (`sdi.get_status`'s `format_changes`) and starts a transition.
 2. **Clean feed during the transition.** From the oldest undecided slot to the
-   first CG slot of the new format, every slot without CG is counted as
-   transition clean feed (`transition_clean_slots`); each still goes out at
-   its due time, as its own frame.
+   first CG slot of the new format, every slot sent as clean feed is counted
+   as transition clean feed (`transition_clean_slots`); each still goes out at
+   its due time, as its own frame. A slot with no frame at all (the output
+   repeats) is not counted.
 3. **New tracking session.** The driver sees the first frame of the new format,
    kills the tracking worker (its frames in flight get no camera, so their
    slots are clean) and starts a new one with the new caps and a new stream id
@@ -218,7 +220,9 @@ renegotiates the socket's caps in the same session. The core then:
 4. **Output.** With `follow` the program's caps change at the first frame of the
    new rate: `livesync` and the simulated output sink take the new rate (the
    sink is an `appsink`; a DeckLink sink will need its mode switched, phase 3),
-   and the tap's slots carry it. With `fixed` nothing changes downstream.
+   and the tap's slots carry it; `sdi.get_status` reports the new mode from
+   that slot on, D after the capture's change. With `fixed` nothing changes
+   downstream.
 5. **chr-monitor follows** the tap without a restart: each slot carries its
    mode; on a new one the monitor restarts its encoder in that mode (the next
    frame is a keyframe; the preview size may change), and the media time of

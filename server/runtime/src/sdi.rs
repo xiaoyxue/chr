@@ -195,15 +195,14 @@ impl SdiRecorder {
         counters.has_source_frame.store(true, Ordering::Release);
     }
 
-    /// The output's mode, without a format change: the capture's first format.
+    /// The output's mode from its next slot on.
     pub fn set_mode(&self, output: VideoMode) {
         *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = output;
     }
 
-    /// The output's mode now; a change of the input's format counts once,
-    /// whether or not the output's mode follows it.
-    pub fn format_changed(&self, output: VideoMode) {
-        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = output;
+    /// One change of the input's format, whether or not the output's mode
+    /// follows it.
+    pub fn format_changed(&self) {
         self.counters.format_changes.fetch_add(1, Ordering::Relaxed);
     }
 

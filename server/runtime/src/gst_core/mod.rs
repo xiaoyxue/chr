@@ -23,7 +23,7 @@
 //! - **Frames** stay in the capture process's memfds end to end: the same
 //!   memory goes to the tracking and render workers.
 //! - **Workers** keep their protocols (VchaoFrame for tracking, render protocol
-//!   v3 with the scene snapshot) and their supervisors; their sockets are bins
+//!   v4 with the scene snapshot and each frame's time base) and their supervisors; their sockets are bins
 //!   of this pipeline ([`Host::Bin`]), added for each worker session and
 //!   removed with it, so a restarted worker is relinked into the running
 //!   pipeline. A dead or stalled worker only costs CG: its frames' slots get
@@ -277,8 +277,6 @@ impl Core {
         let streams = Arc::new(capture::Streams::new(on_format(
             selector.clone(),
             config.recorder.clone(),
-            config.output,
-            config.output_rate,
         )));
         let (frames, captured) = tokio::sync::mpsc::channel(CAPTURED_QUEUE);
         log::info!(
@@ -453,32 +451,16 @@ impl Drop for Core {
 }
 
 /// What the core does when the capture's format changes: a transition in the
-/// selector, and the output's mode in the status.
-fn on_format(
-    selector: select::Selector,
-    recorder: crate::sdi::SdiRecorder,
-    output: VideoMode,
-    policy: OutputRate,
-) -> capture::OnFormat {
+/// selector, counted in the status. The status's mode changes where the
+/// output's does, in the selector.
+fn on_format(selector: select::Selector, recorder: crate::sdi::SdiRecorder) -> capture::OnFormat {
     Box::new(move |first, format, changed| {
-        let program = match policy {
-            OutputRate::Follow => VideoMode {
-                fps: format.fps,
-                ..output
-            },
-            OutputRate::Fixed(_) => output,
-        };
         if changed {
-            log::info!(
-                "capture format now {} from frame {first}: program {}",
-                format.name(),
-                program.name()
-            );
+            log::info!("capture format now {} from frame {first}", format.name());
             selector.begin_transition(first);
-            recorder.format_changed(program);
+            recorder.format_changed();
         } else {
             log::info!("capture format {} from frame {first}", format.name());
-            recorder.set_mode(program);
         }
     })
 }
