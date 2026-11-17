@@ -67,6 +67,38 @@ fn transforms_preserve_parts_normals_and_negative_z_grounding() {
 }
 
 #[test]
+fn a_view_with_moved_instances_leaves_the_original_and_shares_meshes() {
+    let mut scene = Scene::new().unwrap();
+    let mesh_id = scene.add_mesh(mesh()).unwrap();
+    let material = scene.add_material(PbrMaterial::default()).unwrap();
+    let moving = scene
+        .add_instance(mesh_id, vec![material; 2], ModelMatrix::IDENTITY)
+        .unwrap();
+    let still = scene
+        .add_instance(mesh_id, vec![material; 2], ModelMatrix::IDENTITY)
+        .unwrap();
+    let view = scene.snapshot();
+    let mut rows = ModelMatrix::IDENTITY.rows();
+    rows[0][3] = 10.0;
+    let moved = view
+        .with_models([(moving, ModelMatrix::new(rows).unwrap())])
+        .unwrap();
+    assert_eq!(
+        moved.instance(moving).unwrap().bounds().max(),
+        [11.0, 1.0, 1.0]
+    );
+    assert_eq!(view.instance(moving).unwrap().bounds().max(), [1.0; 3]);
+    assert_eq!(
+        moved.instance(still).unwrap().model(),
+        ModelMatrix::IDENTITY
+    );
+    assert!(std::ptr::eq(
+        view.mesh(mesh_id).unwrap(),
+        moved.mesh(mesh_id).unwrap()
+    ));
+}
+
+#[test]
 fn resource_reuse_and_updates_do_not_rewrite_old_views() {
     let mut scene = Scene::new().unwrap();
     let mesh_id = scene.add_mesh(mesh()).unwrap();

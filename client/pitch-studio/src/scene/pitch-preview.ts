@@ -257,14 +257,16 @@ export class PitchPreview {
     this.renderMain();
   }
 
-  /** Renders the active camera; while a flag is visible it keeps doing so every frame, without the thumbnails. */
+  /** Renders the active camera; while a flag waves or a model moves it keeps doing so every frame, without the thumbnails. */
   private renderMain() {
     if (!this.available || !this.dimensions || !this.viewport.clientWidth || !this.viewport.clientHeight) return;
     this.configureCamera(this.camera, this.cameraId);
     this.axes.visible = this.showAxes && this.cameraId === 'top';
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(Math.max(this.viewport.clientWidth, 1), Math.max(this.viewport.clientHeight, 1), false);
-    const waving = this.localAds.animate(performance.now() / 1000);
+    const now = performance.now() / 1000;
+    // Both run every frame: flags wave and Fusion models move (#157).
+    const waving = [this.localAds.animate(now), this.creatives?.animate(now) ?? false].some(Boolean);
     this.renderer.render(this.scene, this.camera);
     // A hidden tab has no size and returns above, which stops the loop until the next refresh.
     if (waving && !this.waveRequest) this.waveRequest = requestAnimationFrame(() => { this.waveRequest = 0; this.renderMain(); });

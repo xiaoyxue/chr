@@ -110,6 +110,8 @@ def placements(match, assets):
                 pose = {key: number(source["modelPose"][key]) for key in ("x", "y", "scale", "yaw")}
                 require(abs(pose["x"]) <= 1 and abs(pose["y"]) <= 1 and 0.01 <= pose["scale"] <= 1
                         and 0 <= pose["yaw"] < 360, "Invalid Fusion model pose.")
+                animation = ("swingAxis", "swingAmplitude", "swingPeriod", "rotationMode", "motion")
+                pose.update({key: source["modelPose"][key] for key in animation if key in source["modelPose"]})
                 slot.update(region={"width": width, "height": height}, modelPose=pose, scaleX=1)
             result.append(slot)
     return result
@@ -244,6 +246,31 @@ def glb_model(slot, bounds):
     ]
 
 
+def wire_motion(pose, pivot):
+    """wireMotion: the pose's rotation and timed motion about `pivot` (#157), or None."""
+    mode = pose.get("rotationMode", "swing")
+    amplitude = pose.get("swingAmplitude", 0) * math.pi / 180
+    axis = pose.get("swingAxis")
+    rotates = axis is not None and (mode == "continuous" or amplitude > 0)
+    motion = pose.get("motion")
+    moves = bool(motion and motion["enabled"])
+    if not (rotates or moves):
+        return None
+    result = {"pivot": pivot}
+    if rotates:
+        require(axis in ("x", "y", "z") and mode in ("swing", "continuous")
+                and 0.1 <= pose.get("swingPeriod", 0) <= 60, "Invalid Fusion model rotation.")
+        result["rotation"] = {"axis": {"x": [1, 0, 0], "y": [0, 1, 0], "z": [0, 0, 1]}[axis], "mode": mode,
+                              "amplitude": amplitude, "period": pose["swingPeriod"]}
+    if moves:
+        playback = {"once": "once", "loop": "loop", "ping-pong": "ping_pong"}.get(motion["playback"])
+        require(playback and motion["duration"] > 0, "Invalid Fusion model motion.")
+        key = lambda k: {"offset": [k["x"], k["y"], k["z"]], "scale": k["scale"]}
+        result["path"] = {"start": key(motion["start"]), "end": key(motion["end"]),
+                          "duration": motion["duration"], "playback": playback}
+    return result
+
+
 def quad_model(slot, width, height):
     """quadModel: the unit image quad contain-fitted in the placement, image top towards -Y."""
     rotated = slot["assetRotation"] in (90, 270)
@@ -283,18 +310,22 @@ def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), 
                                                      "entry": asset["entry"]}, "sha256": asset["sha256"]}
         if slot["type"] == "3D":
             gltf = glb_json(asset["data"])
-            model = glb_model(slot, glb_bounds(gltf))
+            bounds = glb_bounds(gltf)
+            model = glb_model(slot, bounds)
+            fit = fit_fusion_model(bounds["max"][0] - bounds["min"][0], bounds["max"][2] - bounds["min"][2], slot)
+            motion = wire_motion(slot["modelPose"], [fit["x"], fit["y"], slot["z"] - 0.015])
             described["kind"] = "glb"
             if blended_materials(gltf):
                 described["blend_as"] = "mask"
         else:
+            motion = None
             model = quad_model(slot, *image_size(asset["data"], asset["contentType"]))
             described["kind"] = "image_quad"
         if not any(listed["id"] == described["id"] for listed in scene["assets"]):
             scene["assets"].append({key: described[key] for key in ("id", "kind", "source", "sha256", "blend_as")
                                     if key in described})
         scene["instances"].append({"id": slot["id"], "asset": slot["asset"], "model": model,
-                                   "visible": slot["id"] not in hidden})
+                                   "visible": slot["id"] not in hidden, **({"motion": motion} if motion else {})})
     require(len(scene["instances"]) <= MAX_INSTANCES,
             f"chr-server places at most {MAX_INSTANCES} instances; this match has {len(scene['instances'])}.")
     return scene

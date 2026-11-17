@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::rate::Rate;
-use crate::scene_frame::{Flag, Id, Lighting, Matrix4, ShadowMode, U64};
+use crate::scene_frame::{Flag, Id, Lighting, Matrix4, Motion, ShadowMode, U64};
 
 pub const PROFILE: &str = "chr-render-description-v1";
 
@@ -179,6 +179,9 @@ pub struct Instance {
     /// rejected for other assets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<Flag>,
+    /// Rigid animation of the whole instance about its `model` (#157).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<Motion>,
 }
 
 fn visible() -> bool {

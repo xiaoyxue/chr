@@ -1,5 +1,6 @@
 import { validateDimensions } from '../scene/pitch/dimensions.ts';
 import { isPlacementInside } from '../scene/pitch/pitch-layout.ts';
+import { validateModelPose } from '../placements/model-motion.ts';
 import type { FusionAdapter, Match, MatchRecord, Placement, FieldDimensions, FusionAsset } from '../shared/types.ts';
 
 export const MATCH_STORAGE_KEY = 'liveshow.onsite.matches.v1';
@@ -49,14 +50,12 @@ export function validatePlacement(slot: unknown, field: FieldDimensions): Placem
   if (slot.region !== undefined || slot.modelPose !== undefined) {
     const region = slot.region, modelPose = slot.modelPose;
     if (!isRecord(region) || !hasNumbers(region, ['width', 'height']) || region.width <= 0 || region.height <= 0
-      || !isRecord(modelPose) || !hasNumbers(modelPose, ['x', 'y', 'scale', 'yaw'])
-      || Math.abs(modelPose.x) > 1 || Math.abs(modelPose.y) > 1 || modelPose.scale < 0.01 || modelPose.scale > 1
-      || modelPose.yaw < 0 || modelPose.yaw >= 360 || slot.scaleX !== slot.scaleY || slot.scaleX !== slot.scaleZ
+      || slot.scaleX !== slot.scaleY || slot.scaleX !== slot.scaleZ
       || slot.z !== 0 || slot.rx !== 0 || slot.ry !== 0
       || !isPlacementInside({ x: slot.x, y: slot.y, sizeX: region.width, sizeY: region.height }, field))
       throw new Error('Invalid bounded Fusion model pose or region.');
     return { ...pose, ...scales, id, name, type, region: { width: region.width, height: region.height },
-      modelPose: { x: modelPose.x, y: modelPose.y, scale: modelPose.scale, yaw: modelPose.yaw } };
+      modelPose: validateModelPose(modelPose) };
   }
   if (assetRole !== 'car' && assetRole !== 'bank-left' && assetRole !== 'bank-right') throw new Error('Invalid model role.');
   return { ...pose, ...scales, id, name, type, assetRole };

@@ -496,3 +496,59 @@ async fn gpu_described_image_quads_are_drawn_unlit_through_the_tracked_camera() 
         .count();
     assert!(changed > 100, "the red quad changes {changed} bytes");
 }
+
+#[tokio::test]
+async fn described_motion_is_kept_and_invalid_motion_is_refused() {
+    let fixture = Fixture::new("motion");
+    let path = fixture.description(json!([]));
+    let (program, adapter) = description::load(&path, MODE, runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let loader = Loader::new(
+        &program,
+        control.clone(),
+        vec![fixture.root()],
+        WorkerAssets::default(),
+        fixture.dir.join("store"),
+    )
+    .unwrap();
+    let ad = json!({"id": "ad", "kind": "image_quad", "source": {"path": fixture.dir.join("ad.png")},
+        "sha256": sha(&png([255, 0, 0, 255]))});
+    let motion = json!({"pivot": [2.0, 0.0, -0.05],
+        "rotation": {"axis": [0.0, 0.0, 1.0], "mode": "swing", "amplitude": 0.5, "period": 2.0},
+        "path": {"start": {"offset": [-8.0, 2.0, 0.0], "scale": 0.5},
+                 "end": {"offset": [16.0, -6.0, -4.0], "scale": 1.5},
+                 "duration": 4.0, "playback": "ping_pong"}});
+    let moving = |motion: Value| {
+        let mut instance = Fixture::instance("moving", "ad", 2., 1.);
+        instance["motion"] = motion;
+        instance
+    };
+    loader
+        .load(scene(
+            &fixture,
+            json!([ad]),
+            json!([moving(motion.clone())]),
+        ))
+        .await
+        .unwrap();
+    let state = control
+        .call(
+            w::SCENE_GET,
+            Some(json!({"runtime_id": program.configuration.runtime_id, "scene_id": program.scene_id})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state["state"]["instances"][1]["motion"], motion);
+
+    let mut flat = motion.clone();
+    flat["rotation"]["amplitude"] = json!(0.0);
+    let error = loader
+        .load(scene(&fixture, json!([]), json!([moving(flat)])))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, w::RejectionKind::IncompatibleInput.code());
+    assert!(error.message.contains("amplitude"), "{}", error.message);
+    drop((control, loader));
+    owner.await.unwrap();
+}

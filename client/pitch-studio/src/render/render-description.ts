@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { fitFusionModel } from '../placements/fusion-creatives.ts';
 import { flagModel } from '../placements/flag.ts';
+import { wireMotion, type WireMotion } from '../placements/model-motion.ts';
 import { adRoot, modelFit } from '../placements/local-ad-transform.ts';
 import type { LocalAd } from '../placements/local-ad.ts';
 import type { FieldDimensions, GroundPlacement, ModelPlacement, Placement } from '../shared/types.ts';
@@ -43,7 +44,7 @@ export interface FlagParameters {
 export interface DescriptionScene {
   ground: { pitch_m: [number, number] };
   assets: { id: string; kind: DescribedAsset['kind'] | 'flag' | 'environment'; source: { package: string; entry: string } | { path: string }; sha256: string; blend_as?: 'mask' }[];
-  instances: { id: string; asset: string; model: Rows; visible: boolean; flag?: FlagParameters }[];
+  instances: { id: string; asset: string; model: Rows; visible: boolean; flag?: FlagParameters; motion?: WireMotion }[];
   /** Absent: chr-server's default rig. */
   lighting?: WireLighting;
 }
@@ -111,6 +112,16 @@ export function glbModel(slot: ModelPlacement, bounds: GlbBounds): Rows {
   ];
 }
 
+/**
+ * A Fusion model's animation (#157) about its neutral bottom centre, where glbModel
+ * stands it; undefined when its pose does not move.
+ */
+export function glbMotion(slot: ModelPlacement, bounds: GlbBounds): WireMotion | undefined {
+  if (!slot.modelPose) return undefined;
+  const fit = fitFusionModel(bounds.max[0] - bounds.min[0], bounds.max[2] - bounds.min[2], slot);
+  return wireMotion(slot.modelPose, [fit.x, fit.y, slot.z - 0.015]);
+}
+
 /** The unit image quad scaled to fit the placement like the preview, image top towards -Y. */
 export function quadModel(slot: GroundPlacement, image: { width: number; height: number }): Rows {
   const rotated = slot.assetRotation === 90 || slot.assetRotation === 270;
@@ -141,14 +152,16 @@ export function describeScene(options: {
     const geometry = options.geometry.get(slot.id);
     const asset = slot.asset && options.assets.get(slot.asset.id);
     if (!slot.asset || !geometry || !asset) continue;
-    let model: Rows;
-    if (slot.type === '3D' && geometry.kind === 'glb' && asset.kind === 'glb') model = glbModel(slot, geometry.bounds);
-    else if (slot.type === '2D' && geometry.kind === 'image' && asset.kind === 'image_quad') model = quadModel(slot, geometry);
+    let model: Rows, motion: WireMotion | undefined;
+    if (slot.type === '3D' && geometry.kind === 'glb' && asset.kind === 'glb') {
+      model = glbModel(slot, geometry.bounds);
+      motion = glbMotion(slot, geometry.bounds);
+    } else if (slot.type === '2D' && geometry.kind === 'image' && asset.kind === 'image_quad') model = quadModel(slot, geometry);
     else throw new Error(`Placement ${slot.id} does not match its material.`);
     if (!scene.assets.some((listed) => listed.id === slot.asset!.id))
       scene.assets.push({ id: slot.asset.id, kind: asset.kind, source: { package: options.packagePath, entry: asset.entry },
         sha256: asset.sha256, ...(asset.blendAs ? { blend_as: asset.blendAs } : {}) });
-    scene.instances.push({ id: slot.id, asset: slot.asset.id, model, visible: !options.hidden.has(slot.id) });
+    scene.instances.push({ id: slot.id, asset: slot.asset.id, model, visible: !options.hidden.has(slot.id), ...(motion ? { motion } : {}) });
   }
   for (const { ad, sha256, bounds, blendAs } of options.locals ?? []) {
     const asset = localAssetId(ad, sha256);

@@ -62,6 +62,8 @@ pub struct Frame<'a> {
     pub frame_warp: Option<[[f64; 3]; 3]>,
     /// Media time of the frame on its timeline; animates flags reproducibly.
     pub seconds: f64,
+    /// Seconds since the scene started playing: drives instance motion (#157).
+    pub motion_seconds: f64,
 }
 
 impl<'a> Frame<'a> {
@@ -75,6 +77,11 @@ impl<'a> Frame<'a> {
             lens: frame_lens(&execution.provenance.input.geometry)?,
             frame_warp: frame_warp(&execution.provenance.input.geometry),
             seconds: media_seconds(
+                execution.input.metadata().timeline.time_base,
+                execution.input.metadata().position.ticks.get(),
+            ),
+            // An in-process program plays its scene from the start of its timeline.
+            motion_seconds: media_seconds(
                 execution.input.metadata().timeline.time_base,
                 execution.input.metadata().position.ticks.get(),
             ),
@@ -345,9 +352,10 @@ impl ProgramRenderer {
             (None, None) => &CameraModel::Pinhole,
         };
         compositor.set_animation_time(frame.seconds);
+        let scene = frame.scene.scene_at(frame.motion_seconds)?;
         compositor.prepare_model(
             gpu,
-            frame.scene.scene(),
+            &scene,
             frame.camera,
             camera_model,
             &[ImageLayer::new(&view, settings.input_stage)],

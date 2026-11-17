@@ -52,6 +52,44 @@ with which lens, independent of any client's own scene model. The schema lives i
   along the length, Y along the width, ground Z = 0, up is negative Z. `model`
   is forward row-major and maps asset coordinates to the world.
 
+## Motion
+
+Any instance may carry `motion`, a rigid animation of the whole instance about its
+`model` (#157). Rotation and scale act about `pivot` (for a Fusion model, its
+neutral bottom centre); the path moves the pivot in fixed world axes, unaffected by
+the model's heading or rotation:
+
+```json
+"motion": {
+  "pivot": [5, 6, -0.015],
+  "rotation": {"axis": [0, 0, 1], "mode": "continuous", "amplitude": 0, "period": 20},
+  "path": {"start": {"offset": [-8, 2, 0], "scale": 0.5},
+           "end": {"offset": [16, -6, -4], "scale": 1.5},
+           "duration": 4, "playback": "ping_pong"}
+}
+```
+
+At `t` seconds the model is `T(pivot + offset(t)) * scale(t) * R(axis, angle(t)) *
+T(-pivot) * model`:
+
+| Field | Meaning |
+| --- | --- |
+| `rotation.axis` | World axis, any length; positive angles turn right-handed about it, so about +Z from +X towards +Y like a heading |
+| `rotation.mode` | `"swing"`: `amplitude * sin(2 pi t / period)`, `amplitude` in (0, pi] radians on each side; `"continuous"`: a full turn every `period` |
+| `rotation.period` | Seconds, 0.1 to 60 |
+| `path.start`, `path.end` | `offset`: world metres of the pivot (negative Z raises it); `scale`: positive multiplier of the neutral scale |
+| `path.duration` | Seconds from start to end, positive; offsets and scale interpolate linearly |
+| `path.playback` | `"once"` holds the end, `"loop"` restarts at the start, `"ping_pong"` returns over another `duration` |
+
+Rotation and path run together: a finished `once` path keeps rotating. Nothing is
+clamped or refitted, so a model may leave its region or go below the ground. Time
+zero is the first frame a render worker draws with the loaded scene, so each
+`description.load` plays from the start; a restarted worker starts again. A still
+render (`--frame <n>`) uses `t = n / fps`. The render worker evaluates the motion on
+the CPU for each frame; the main pass, shadows and bounds use the moved model, and
+the shaders are unchanged. Invalid settings reject the load with the instance and
+field named.
+
 ## Assets
 
 An asset is imported once and may back many instances; its mesh and textures
@@ -185,6 +223,13 @@ newer package keeps them:
   its region. In chr's basis, the preview's centring becomes the translation
   `(-cx, -cz, min_y)`, followed by the placement's translation (Z −0.015), yaw and
   uniform scale.
+- **Fusion model animation:** `modelPose`'s rotation (`swingAxis`, `swingAmplitude`
+  degrees, `swingPeriod`, `rotationMode`, swing when omitted) and `motion` (field
+  metres, z down, `once` / `loop` / `ping-pong`) become the instance's
+  [`motion`](#motion) about its neutral bottom centre: Fusion's field axes are chr's
+  world axes. Disabled or absent settings send no motion but are kept through import
+  and the store; invalid ones fail the import naming the field. The preview plays
+  the same motion from when the models load.
 - **Fusion 2D placements:** the preview's contain fit of the image in its area,
   rotated by `rz + assetRotation`, at Z −0.02. The studio scales the area (relative
   to Fusion's size) and rotates it about its centre; the rotated area must stay on
@@ -333,6 +378,7 @@ the client.
 
 ```sh
 cargo test --locked -p chr-runtime --test description
+cargo test --locked -p chr-runtime --lib motion
 cargo test --locked -p chr-runtime --test description -- --ignored   # hardware GPU
 cargo test --locked -p chr-renderer --test glb
 cargo test --locked -p chr-renderer --test flag_gpu -- --ignored   # hardware GPU
@@ -352,7 +398,9 @@ The tests cover:
 - environment assets: OpenEXR import, used only by lighting, and a constant fill
   next to them; a constant fill shades like a uniform environment of the same
   radiance;
-- the client's quad, GLB and asset conversion, including local placements and flags.
+- the client's quad, GLB and asset conversion, including local placements and flags;
+- motion: kept through a load, invalid settings refused, sampled like Fusion's
+  example (ping-pong at 0/2/4/6/8 s) and translated in world axes.
 
 Recorded on the Linux RTX 3090 host: the Fusion package from the client
 conversion loaded at runtime with 3 assets (two PNG ads and a 27 MB GLB whose
