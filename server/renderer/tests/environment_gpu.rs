@@ -661,3 +661,56 @@ fn max_radiance_clamps_the_panorama_before_prefiltering() {
         "the same cap is cached"
     );
 }
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn prefiltering_integrates_a_one_texel_sun_wherever_it_lies() {
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let extent = ImageExtent::new(64, 64).unwrap();
+    // Seen from (0, -3, -3) the plane mirrors the sky 45 degrees above +Y: u 0.75, v 0.25.
+    let camera = Camera::look_at(
+        extent,
+        [0.0, -3.0, -3.0],
+        [0.0; 3],
+        [0.0, 0.0, -1.0],
+        0.8,
+        0.1,
+        20.0,
+    )
+    .unwrap();
+    let (mut scene, _) = plane(PbrMaterial {
+        metallic: 1.0,
+        roughness: 0.3,
+        ..Default::default()
+    });
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let (width, height) = (1024_u32, 512_u32);
+    let mut reflect = |texels: &[(u32, u32)]| {
+        let mut pixels = vec![[0.01_f32; 3]; (width * height) as usize];
+        let energy = 2e4 / texels.len() as f32;
+        for &(x, y) in texels {
+            pixels[(y * width + x) as usize] = [energy; 3];
+        }
+        let map = Arc::new(
+            EnvironmentMap::new(ImageExtent::new(width, height).unwrap(), pixels).unwrap(),
+        );
+        sky(&mut scene, &map, 0.0, 1.0, false);
+        let image = render(&gpu, &mut renderer, &scene, &camera, 0.05);
+        (0..64 * 64)
+            .map(|i| radiance(image[i * 4 + 1]))
+            .collect::<Vec<_>>()
+    };
+    let block: Vec<_> = (764..772)
+        .flat_map(|x| (124..132).map(move |y| (x, y)))
+        .collect();
+    let spread: f64 = reflect(&block).iter().sum();
+    // Point-sampled, 64 GGX samples hit or miss one texel: its reflection would come and go.
+    for sun in [(768, 128), (769, 128), (770, 129), (767, 131), (766, 126)] {
+        let energy: f64 = reflect(&[sun]).iter().sum();
+        assert!(
+            (energy / spread - 1.0).abs() < 0.1,
+            "sun at {sun:?} reflects {energy} vs spread {spread}"
+        );
+    }
+}
