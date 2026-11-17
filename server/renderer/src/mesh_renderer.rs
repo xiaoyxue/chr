@@ -969,6 +969,11 @@ impl MeshRenderer {
             } else {
                 None
             },
+            if settings.is_some() {
+                scene.lighting().constant()
+            } else {
+                [0.0; 3]
+            },
             camera,
             settings.map_or(EnvironmentSettings::default(), |s| s.environment),
         )?;

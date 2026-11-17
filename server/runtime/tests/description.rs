@@ -160,6 +160,55 @@ async fn a_startup_description_shares_one_asset_between_instances() {
 }
 
 #[tokio::test]
+async fn described_lighting_uses_an_exr_environment_and_a_constant_fill() {
+    let fixture = Fixture::new("lighting");
+    let path = fixture.description(json!([Fixture::instance("left", "ad", -4., 2.)]));
+    let sky = fixture.dir.join("sky.exr");
+    exr::prelude::write_rgb_file(&sky, 8, 4, |_, y| (1.0, 1.0, 0.5 + y as f32)).unwrap();
+    let mut described: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    described["scene"]["assets"].as_array_mut().unwrap().push(
+        json!({"id": "sky", "kind": "environment", "source": {"path": "sky.exr"},
+            "sha256": sha(&std::fs::read(&sky).unwrap())}),
+    );
+    described["scene"]["lighting"] = json!({
+        "lights": [{"light_id": "sun", "kind": "directional", "direction": [0.5, 0.6, 1.0],
+            "irradiance": [2.5, 2.35, 2.1], "angular_radius": 0.00465, "shadow_mode": null}],
+        "environment": {"asset_ref": "sky", "gain": 0.5, "rotation": 0.0, "visible": false},
+        "constant": [0.1, 0.1, 0.1]});
+    let load = |value: &Value| {
+        std::fs::write(&path, value.to_string()).unwrap();
+        description::load(&path, MODE, runtime_id().unwrap())
+    };
+    let (program, adapter) = load(&described).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let scene = control
+        .call(
+            w::SCENE_GET,
+            Some(json!({"runtime_id": program.configuration.runtime_id, "scene_id": program.scene_id})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scene["state"]["lighting"]["constant"],
+        json!([0.1, 0.1, 0.1])
+    );
+    assert_eq!(
+        scene["state"]["lighting"]["environment"]["asset_ref"],
+        "sky"
+    );
+    drop(control);
+    owner.await.unwrap();
+
+    let mut drawn = described.clone();
+    drawn["scene"]["instances"][0]["asset"] = json!("sky");
+    assert!(load(&drawn).is_err(), "an environment is not drawable");
+    let mut misused = described;
+    misused["scene"]["lighting"]["environment"]["asset_ref"] = json!("ad");
+    assert!(load(&misused).is_err(), "an image is not an environment");
+}
+
+#[tokio::test]
 async fn description_load_replaces_the_scene_with_reused_and_packaged_assets() {
     let fixture = Fixture::new("load");
     let path = fixture.description(json!([Fixture::instance("left", "ad", -4., 2.)]));

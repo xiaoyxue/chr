@@ -315,11 +315,12 @@ pub struct SkyLight {
     pub visible: bool,
 }
 
-/// No implicit ambient fill or fixed key/fill/rim rig.
+/// No implicit ambient fill or fixed key/fill/rim rig; a constant fill is explicit.
 #[derive(Clone, Debug, Default)]
 pub struct Lighting {
     lights: Arc<[Light]>,
     sky: Option<SkyLight>,
+    constant: [f32; 3],
 }
 
 impl Lighting {
@@ -336,7 +337,22 @@ impl Lighting {
         Ok(Self {
             lights: lights.into(),
             sky,
+            constant: [0.0; 3],
         })
+    }
+
+    /// Adds uniform, unoccluded radiance from every direction (linear RGB
+    /// W/(m^2 sr)) to the sky's: a constant fill shaded like a uniform environment.
+    pub fn with_constant(mut self, radiance: [f32; 3]) -> Result<Self, SceneError> {
+        if !nonnegative(radiance) {
+            return Err(SceneError::InvalidLighting);
+        }
+        self.constant = radiance;
+        Ok(self)
+    }
+
+    pub fn constant(&self) -> [f32; 3] {
+        self.constant
     }
 
     pub fn lights(&self) -> &[Light] {

@@ -103,8 +103,52 @@ fn mixed_precision_and_lossless_scanline_or_tiled_encodings() {
 }
 
 #[test]
-fn rejects_negative_and_nonfinite_radiance_using_scene_validation() {
-    for value in [-1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+fn clamps_negative_radiance_to_zero() {
+    for half in [false, true] {
+        let mut image = fixture(false, half);
+        let values = [-0.019, -1.0, 0.0, 2.0, -0.5, 1.0, 3.0, -0.0];
+        image.layer_data.channel_data.list[2].sample_data = if half {
+            FlatSamples::F16(values.into_iter().map(f16::from_f32).collect())
+        } else {
+            FlatSamples::F32(values.to_vec())
+        };
+        let decoded = import_exr(&encode(&image)).unwrap();
+        let red: Vec<f32> = decoded.pixels().iter().map(|p| p[0]).collect();
+        assert_eq!(red, [0.0, 0.0, 0.0, 2.0, 0.0, 1.0, 3.0, 0.0]);
+    }
+}
+
+#[test]
+fn accepts_rounded_srgb_tags_and_harmless_editor_attributes() {
+    let mut image = fixture(false, false);
+    // As float32 tags of real files store sRGB/D65.
+    image.attributes.chromaticities = Some(Chromaticities {
+        red: Vec2(0.640_009_2, 0.330_006_9),
+        green: Vec2(0.300_007_6, 0.600_015_3),
+        blue: Vec2(0.150_011_4, 0.059_998_5),
+        white: Vec2(0.312_703_1, 0.328_999_8),
+    });
+    let other = &mut image.layer_data.attributes.other;
+    other.insert(
+        Text::from("PhotoshopLayerInfo"),
+        AttributeValue::TextVector(vec![Text::from("{\"opacity\": \"255\"}")]),
+    );
+    other.insert(Text::from("Orientation"), AttributeValue::I32(1));
+    assert!(import_exr(&encode(&image)).is_ok());
+    image
+        .layer_data
+        .attributes
+        .other
+        .insert(Text::from("Orientation"), AttributeValue::I32(3));
+    assert!(
+        import_exr(&encode(&image)).is_err(),
+        "a rotated image would turn the lighting"
+    );
+}
+
+#[test]
+fn rejects_nonfinite_radiance_using_scene_validation() {
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         for half in [false, true] {
             let mut image = fixture(false, half);
             image.layer_data.channel_data.list[0].sample_data = if half {

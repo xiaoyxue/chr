@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::{
     Error,
-    assets::{self, Paths},
+    assets::{self, Imported, Paths},
     synthetic::{Synthetic, id},
 };
 use crate::{
@@ -43,6 +43,9 @@ pub const MAX_INSTANCES: usize = 63;
 pub const MAX_ASSETS: usize = 64;
 /// Most bytes of runtime asset copies a server keeps for its render workers.
 pub const MAX_STORED_BYTES: u64 = 1024 * 1024 * 1024;
+/// GPU bytes of one environment: its source as RGBA32F plus the prefiltered
+/// panoramas; a 4096x2048 map needs about 137 MB.
+const ENVIRONMENT_BYTES: u64 = 256 * 1024 * 1024;
 
 pub fn load(
     path: &Path,
@@ -71,7 +74,7 @@ pub fn load(
 /// Installs a description whose assets are already imported, in its order.
 pub fn prepare(
     description: &d::RenderDescription,
-    imported: Vec<(w::Id, GlbAsset)>,
+    imported: Vec<(w::Id, Imported)>,
     mode: VideoMode,
     runtime: w::Id,
 ) -> Result<(Synthetic, SceneAdapter), Error> {
@@ -110,6 +113,9 @@ pub fn prepare(
     config.limits.instances_per_scene = (MAX_INSTANCES + 1) as u32;
     config.shadows.resolution = 2048;
     config.shadows.max_bytes = (128_u64 * 1024 * 1024).into();
+    config.environment.resolution = 256;
+    config.environment.samples = 64;
+    config.environment.max_bytes = ENVIRONMENT_BYTES.into();
     config.max_intermediate_bytes = super::composition_budget(extent, config.output_extent).into();
 
     let world: w::Version =
@@ -123,16 +129,28 @@ pub fn prepare(
         .map_err(|e| e.to_string())?;
     let mut digests = HashMap::new();
     for ((asset_id, asset), described) in imported.into_iter().zip(&description.scene.assets) {
-        log::info!(
-            "description asset {}: vertices={} triangles={} parts={}",
-            asset_id.as_str(),
-            asset.mesh.positions().len(),
-            asset.mesh.indices().len() / 3,
-            asset.mesh.parts().len()
-        );
-        registrations
-            .register_model(asset_id.clone(), asset)
-            .map_err(|e| e.to_string())?;
+        match asset {
+            Imported::Model(model) => {
+                log::info!(
+                    "description asset {}: vertices={} triangles={} parts={}",
+                    asset_id.as_str(),
+                    model.mesh.positions().len(),
+                    model.mesh.indices().len() / 3,
+                    model.mesh.parts().len()
+                );
+                registrations.register_model(asset_id.clone(), model)
+            }
+            Imported::Environment(map) => {
+                log::info!(
+                    "description environment {}: {}x{}",
+                    asset_id.as_str(),
+                    map.extent().width(),
+                    map.extent().height()
+                );
+                registrations.register_environment(asset_id.clone(), map)
+            }
+        }
+        .map_err(|e| e.to_string())?;
         digests.insert(asset_id, assets::identity(described));
     }
     let state = scene_state(&config.configuration_id, &world, &description.scene)?;
@@ -206,6 +224,27 @@ fn scene_state(
         .any(|id| id.as_str() == GROUND)
     {
         return Err(format!("{GROUND} is reserved for the ground").into());
+    }
+    let kind = |id: &w::Id| scene.assets.iter().find(|a| a.id == *id).map(|a| a.kind);
+    if let Some(instance) = scene
+        .instances
+        .iter()
+        .find(|i| kind(&i.asset) == Some(d::AssetKind::Environment))
+    {
+        return Err(format!(
+            "instance {} cannot draw an environment asset",
+            instance.id.as_str()
+        )
+        .into());
+    }
+    if let Some(sky) = scene.lighting.as_ref().and_then(|l| l.environment.as_ref())
+        && kind(&sky.asset_ref) != Some(d::AssetKind::Environment)
+    {
+        return Err(format!(
+            "lighting.environment {} must be an environment asset of the description",
+            sky.asset_ref.as_str()
+        )
+        .into());
     }
     let lighting = match &scene.lighting {
         Some(lighting) => serde_json::to_value(lighting)?,
@@ -368,8 +407,8 @@ impl Loader {
                 .into_iter()
                 .map(|asset| {
                     let bytes = assets::read_verified(&asset, &Paths::Roots(&roots))?;
-                    let glb = assets::import(&asset, &bytes)?;
-                    Ok((keep(asset, &bytes, &store)?, glb, bytes.len() as u64))
+                    let imported = assets::import(&asset, &bytes)?;
+                    Ok((keep(asset, &bytes, &store)?, imported, bytes.len() as u64))
                 })
                 .collect::<Result<Vec<_>, Error>>()
         })
@@ -387,8 +426,15 @@ impl Loader {
         }
         *stored += size;
         let imported_count = imported.len() as u32;
-        for (asset, glb, _) in imported {
-            self.control.register_model(asset.id.clone(), glb).await?;
+        for (asset, imported, _) in imported {
+            match imported {
+                Imported::Model(glb) => self.control.register_model(asset.id.clone(), glb).await?,
+                Imported::Environment(map) => {
+                    self.control
+                        .register_environment(asset.id.clone(), map)
+                        .await?
+                }
+            }
             registered.insert(asset.id.clone(), assets::identity(&asset));
             self.worker.push(asset);
         }
@@ -455,7 +501,7 @@ fn keep(mut asset: d::Asset, bytes: &[u8], store: &Path) -> Result<d::Asset, Err
 
 /// Imports the runtime assets a render worker must register after installing its
 /// program; their paths point to the server's private, verified copies.
-pub fn import_for_worker(assets: &[d::Asset]) -> Result<Vec<(w::Id, GlbAsset)>, Error> {
+pub fn import_for_worker(assets: &[d::Asset]) -> Result<Vec<(w::Id, Imported)>, Error> {
     assets
         .iter()
         .map(|asset| {

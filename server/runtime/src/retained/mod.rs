@@ -35,6 +35,11 @@ enum Command {
         asset: Box<chr_renderer::glb::GlbAsset>,
         reply: oneshot::Sender<Result<(), ErrorObject>>,
     },
+    RegisterEnvironment {
+        id: wire::Id,
+        environment: Box<chr_renderer::scene::EnvironmentMap>,
+        reply: oneshot::Sender<Result<(), ErrorObject>>,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -78,6 +83,13 @@ impl SceneControl {
                     }
                     Command::Register { id, asset, reply } => {
                         let _ = reply.send(adapter.register_model(id, *asset));
+                    }
+                    Command::RegisterEnvironment {
+                        id,
+                        environment,
+                        reply,
+                    } => {
+                        let _ = reply.send(adapter.register_environment(id, *environment));
                     }
                     Command::Shutdown(reply) => {
                         receiver.close();
@@ -135,6 +147,23 @@ impl SceneControl {
         self.send(Command::Register {
             id,
             asset: Box::new(asset),
+            reply,
+        })?;
+        response
+            .await
+            .map_err(|_| reject(wire::RejectionKind::InvalidState, "scene control stopped"))?
+    }
+
+    /// Registers one more environment map after startup, like [`Self::register_model`].
+    pub async fn register_environment(
+        &self,
+        id: wire::Id,
+        environment: chr_renderer::scene::EnvironmentMap,
+    ) -> Result<(), ErrorObject> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::RegisterEnvironment {
+            id,
+            environment: Box::new(environment),
             reply,
         })?;
         response

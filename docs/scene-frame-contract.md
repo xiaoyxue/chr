@@ -275,6 +275,8 @@ type RenderLighting = {
     rotation: number;
     visible: boolean;
   } | null;
+  /** Uniform, unoccluded fill radiance, linear RGB W/(m^2 sr); omitted when absent. */
+  constant?: [number, number, number];
 };
 type RenderPinhole = {
   extent: RenderExtent;

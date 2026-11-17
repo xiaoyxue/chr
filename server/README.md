@@ -535,6 +535,14 @@ Source/quality changes rebuild cached data; rotation, gain, background visibilit
 and output exposure do not. `environment_preprocessed_last_prepare()` reports
 actual source-dependent preprocessing. Scene switches without a sky clear it.
 
+`Lighting::with_constant` adds a uniform fill radiance from every direction. It
+is shaded exactly like a uniform environment of that radiance (SH diffuse and the
+split-sum specular share the same BRDF LUT), adds to the sky's and is just as
+unoccluded; it never draws a background. `import_exr` accepts sRGB/D65
+chromaticity tags within 1e-4 (float-rounded tags of real files), an image editor's
+`PhotoshopLayerInfo` and `Orientation` 1 among custom attributes, and turns finite
+negative texels (processing noise of captured panoramas) into zero.
+
 This is explicitly **unoccluded IBL**: material AO affects indirect illumination
 only and does not implement scene sky visibility. Three-band SH, split-sum's
 normal-view prefilter and single-scattering GGX are approximations; diffuse IBL

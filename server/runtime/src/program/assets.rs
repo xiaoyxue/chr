@@ -1,5 +1,6 @@
-//! Reads and imports the assets of a render description: a GLB, an image quad or
-//! flag artwork, from a file or a ZIP package entry, verified by SHA-256.
+//! Reads and imports the assets of a render description: a GLB, an image quad, flag
+//! artwork or an environment map, from a file or a ZIP package entry, verified by
+//! SHA-256.
 
 use std::{
     fs::File,
@@ -11,10 +12,11 @@ use std::{
 use chr_common::description::{Asset, AssetKind, AssetSource, BlendAs};
 use chr_renderer::{
     coordinates::ImageExtent,
+    exr::import_exr,
     glb::{GlbAsset, ImportOptions, ImportedMaterial, import_glb_with},
     scene::{
-        Filter, MaterialMaps, MeshAttributes, MeshData, PbrMaterial, TextureData, TextureSampler,
-        Wrap,
+        EnvironmentMap, Filter, MaterialMaps, MeshAttributes, MeshData, PbrMaterial, TextureData,
+        TextureSampler, Wrap,
     },
 };
 use sha2::{Digest, Sha256};
@@ -32,8 +34,14 @@ pub enum Paths<'a> {
     Roots(&'a [PathBuf]),
 }
 
+/// An imported asset: drawable geometry, or an environment that lighting refers to.
+pub enum Imported {
+    Model(GlbAsset),
+    Environment(EnvironmentMap),
+}
+
 /// Reads, verifies and imports `asset`.
-pub fn load(asset: &Asset, paths: &Paths) -> Result<GlbAsset, Error> {
+pub fn load(asset: &Asset, paths: &Paths) -> Result<Imported, Error> {
     import(asset, &read_verified(asset, paths)?)
 }
 
@@ -53,8 +61,15 @@ pub fn read_verified(asset: &Asset, paths: &Paths) -> Result<Vec<u8>, Error> {
 }
 
 /// Imports verified source bytes as `asset.kind` describes them.
-pub fn import(asset: &Asset, bytes: &[u8]) -> Result<GlbAsset, Error> {
-    match asset.kind {
+pub fn import(asset: &Asset, bytes: &[u8]) -> Result<Imported, Error> {
+    if asset.blend_as.is_some() && asset.kind != AssetKind::Glb {
+        return Err(format!(
+            "asset {}: blend_as applies to glb assets only",
+            asset.id.as_str()
+        )
+        .into());
+    }
+    Ok(match asset.kind {
         AssetKind::Glb => {
             let glb = import_glb_with(
                 bytes,
@@ -65,16 +80,28 @@ pub fn import(asset: &Asset, bytes: &[u8]) -> Result<GlbAsset, Error> {
             for warning in &glb.warnings {
                 log::warn!("asset {}: {warning}", asset.id.as_str());
             }
-            Ok(glb)
+            Imported::Model(glb)
         }
-        AssetKind::ImageQuad | AssetKind::Flag if asset.blend_as.is_some() => Err(format!(
-            "asset {}: blend_as applies to glb assets only",
-            asset.id.as_str()
+        AssetKind::ImageQuad => Imported::Model(image_quad(bytes)?),
+        AssetKind::Flag => Imported::Model(flag(bytes)?),
+        AssetKind::Environment => Imported::Environment(environment(asset, bytes)?),
+    })
+}
+
+/// A latitude-longitude OpenEXR panorama; other aspects would be stretched over the sphere.
+fn environment(asset: &Asset, bytes: &[u8]) -> Result<EnvironmentMap, Error> {
+    let map = import_exr(bytes)?;
+    let extent = map.extent();
+    if extent.width() != 2 * extent.height() {
+        return Err(format!(
+            "asset {}: an environment must be a 2:1 panorama, not {}x{}",
+            asset.id.as_str(),
+            extent.width(),
+            extent.height()
         )
-        .into()),
-        AssetKind::ImageQuad => image_quad(bytes),
-        AssetKind::Flag => flag(bytes),
+        .into());
     }
+    Ok(map)
 }
 
 /// What makes two registrations of one asset ID the same: its bytes and its
@@ -261,7 +288,9 @@ mod tests {
             }),
             &png,
         );
-        let quad = load(&file, &Paths::Startup { base: &dir }).unwrap();
+        let Imported::Model(quad) = load(&file, &Paths::Startup { base: &dir }).unwrap() else {
+            panic!("an image quad is a model");
+        };
         assert_eq!(quad.mesh.parts().len(), quad.materials.len());
         let maps = &quad.materials[0].maps;
         assert_eq!(
@@ -289,7 +318,8 @@ mod tests {
         let mut tampered = packaged.clone();
         tampered.sha256 = "0".repeat(64);
         let error = load(&tampered, &Paths::Roots(&roots))
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string();
         assert!(error.contains("SHA-256"), "{error}");
         assert!(
@@ -298,6 +328,29 @@ mod tests {
         );
         let outside = [std::env::temp_dir().join("chr-no-such-root")];
         assert!(load(&packaged, &Paths::Roots(&outside)).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn environments_import_exr_panoramas_of_two_to_one_only() {
+        let dir = std::env::temp_dir().join(format!("chr-environment-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let environment = |name: &str, width: usize, height: usize| {
+            let path = dir.join(name);
+            exr::prelude::write_rgb_file(&path, width, height, |x, _| (x as f32, 0.5, 2.0))
+                .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let mut described = asset(AssetSource::File(FilePath { path }), &bytes);
+            described.kind = AssetKind::Environment;
+            load(&described, &Paths::Startup { base: &dir })
+        };
+        let Imported::Environment(map) = environment("sky.exr", 4, 2).unwrap() else {
+            panic!("an EXR is an environment");
+        };
+        assert_eq!((map.extent().width(), map.extent().height()), (4, 2));
+        assert_eq!(map.pixels()[3], [3.0, 0.5, 2.0]);
+        let error = environment("square.exr", 2, 2).err().unwrap().to_string();
+        assert!(error.contains("2:1"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

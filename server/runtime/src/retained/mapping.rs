@@ -233,9 +233,16 @@ impl Registrations {
                 })
             })
             .transpose()?;
-        scene
-            .set_lighting(scene::Lighting::new(lights, sky).map_err(incompatible)?)
-            .map_err(incompatible)?;
+        let mut lighting = scene::Lighting::new(lights, sky).map_err(incompatible)?;
+        if let Some(constant) = state.lighting.constant {
+            for v in constant {
+                nonnegative(v)?;
+            }
+            lighting = lighting
+                .with_constant(v3(constant)?)
+                .map_err(incompatible)?;
+        }
+        scene.set_lighting(lighting).map_err(incompatible)?;
         shadow_budget(config, state)?;
         Ok((scene.snapshot(), camera))
     }

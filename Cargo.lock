@@ -610,6 +610,7 @@ dependencies = [
  "chr-shm",
  "chr-tracker",
  "env_logger",
+ "exr",
  "futures-util",
  "gstreamer",
  "gstreamer-allocators",

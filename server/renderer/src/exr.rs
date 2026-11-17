@@ -5,7 +5,10 @@ use std::io::Cursor;
 use ::exr::{
     meta::{
         BlockDescription,
-        attribute::{Chromaticities, EnvironmentMap as Projection, LevelMode, SampleType},
+        attribute::{
+            AttributeValue, Chromaticities, EnvironmentMap as Projection, LevelMode, SampleType,
+            Text,
+        },
         header::Header,
     },
     prelude::{Compression, ReadChannels, ReadLayers, RgbaChannels, Vec2, read},
@@ -36,8 +39,13 @@ pub enum ExrError {
 /// exposure, tone mapping, resampling or colour conversion.
 ///
 /// The working space is scene-linear sRGB/Rec.709 with D65 white. Missing
-/// chromaticities explicitly means this space; tagged input must match it.
-/// Other colour transforms, luminance scaling and custom attributes are rejected.
+/// chromaticities explicitly means this space; tagged input must match it within
+/// 1e-4, which float-rounded tags of real files need and other gamuts never meet.
+/// Other colour transforms, luminance scaling and custom attributes are rejected,
+/// except two that do not change radiance: an image editor's `PhotoshopLayerInfo`
+/// and `Orientation` 1 (stored as shown).
+/// Finite negative radiance, processing noise in captured panoramas, becomes zero;
+/// non-finite radiance is rejected.
 /// Missing `envmap` explicitly means latitude-longitude; cube maps, cropped or
 /// shifted windows, non-square pixels and multiview data are not supported.
 /// Alpha, when present, must be exactly one: associated transparent RGB cannot
@@ -73,9 +81,14 @@ pub fn import_exr(bytes: &[u8]) -> Result<EnvironmentMap, ExrError> {
         .all_attributes()
         .pedantic()
         .from_chunks(chunks)?;
-    let (pixels, opaque) = image.layer_data.channel_data.pixels;
+    let (mut pixels, opaque) = image.layer_data.channel_data.pixels;
     if !opaque {
         return Err(ExrError::Unsupported("non-opaque alpha"));
+    }
+    for value in pixels.iter_mut().flatten() {
+        if value.is_finite() {
+            *value = value.max(0.0);
+        }
     }
     Ok(EnvironmentMap::new(extent, pixels)?)
 }
@@ -139,13 +152,22 @@ fn validate_header(header: &Header) -> Result<(), ExrError> {
         || own.rendering_transform_name.is_some()
         || own.look_modification_transform_name.is_some()
         || !shared.other.is_empty()
-        || !own.other.is_empty()
+        || !own.other.iter().all(|(name, value)| harmless(name, value))
     {
         return Err(ExrError::Unsupported(
             "colour metadata (requires linear sRGB/D65 without transforms or custom attributes)",
         ));
     }
     Ok(())
+}
+
+/// Custom attributes known not to affect the radiance or its directions.
+fn harmless(name: &Text, value: &AttributeValue) -> bool {
+    match name.to_string().as_str() {
+        "PhotoshopLayerInfo" => true,
+        "Orientation" => matches!(value, AttributeValue::I32(1)),
+        _ => false,
+    }
 }
 
 fn is_linear_srgb(value: Chromaticities) -> bool {
@@ -157,6 +179,6 @@ fn is_linear_srgb(value: Chromaticities) -> bool {
     ]
     .into_iter()
     .all(|(actual, expected)| {
-        (actual.x() - expected.x()).abs() <= 1e-5 && (actual.y() - expected.y()).abs() <= 1e-5
+        (actual.x() - expected.x()).abs() <= 1e-4 && (actual.y() - expected.y()).abs() <= 1e-4
     })
 }

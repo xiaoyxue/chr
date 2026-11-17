@@ -46,9 +46,8 @@ with which lens, independent of any client's own scene model. The schema lives i
   (`chr-renderer-cli render --description <json> --frame <n>`); the live server
   ignores it.
 - `scene` replaces the whole scene. `ground.pitch_m` sizes an invisible shadow
-  catcher 1.5 times larger than the pitch. `lighting: null` selects four 35 m
-  corner spots aimed at the centre plus a sun; otherwise it is a `scene_frame`
-  `Lighting` (at most 8 lights). `shadow_mode: null` selects PCSS.
+  catcher 1.5 times larger than the pitch. `lighting` is described under
+  [Lighting](#lighting). `shadow_mode: null` selects PCSS.
 - Coordinates follow [coordinates](coordinates.md): pitch-centred metres, X
   along the length, Y along the width, ground Z = 0, up is negative Z. `model`
   is forward row-major and maps asset coordinates to the world.
@@ -62,7 +61,54 @@ are shared.
 | --- | --- | --- |
 | `glb` | The importer's basis: glTF +Y-up turned to -Z-up, `(x, y, z) -> (x, z, -y)`, node transforms baked | As authored. `alphaMode: BLEND` is rejected unless `blend_as: "mask"`, which imports it as an alpha mask (cutoff 0.5) and logs a warning. The renderer has no translucent pass. |
 | `flag` (PNG, JPEG) | Flag-local metres: X along the width from the left edge, Y down from the top edge, Z = X × Y. The image's top-left texel is at the origin and reads upright from the -Z side, mirrored from the other. Size comes from the instance's `flag` | Double-sided artwork; texels with alpha below 0.5 are cut out. `material: "simple"` lights it like SimpleWave under a fixed key light above the viewer; `"pbr"` uses the scene's lights, environment and shadows. It casts shadows that follow the wave |
+| `environment` (OpenEXR) | A latitude-longitude panorama, 2:1: +X at the image centre, +Y a quarter further right, up (-Z) along the top row | Not drawn: only `lighting.environment.asset_ref` may name it, never an instance. Linear sRGB/D65 RGB(A), HALF or FLOAT, NONE/RLE/ZIP/ZIPS/PIZ; finite negative texels become zero (see `chr_renderer::exr::import_exr`) |
 | `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended over the opaque CG by the image's alpha times a fixed opacity of 0.5 (`alpha = 0.5 * image alpha`, `alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
+
+## Lighting
+
+`lighting: null` selects the default rig below. Otherwise `lighting` is a
+`scene_frame` `Lighting` and replaces it completely: at most 8 lights of the kinds
+`directional`, `point` and `spot`, an optional environment and an optional
+constant fill. Units are linear RGB: a directional light's `irradiance` in W/m²
+perpendicular to it, a point or spot light's `intensity` in W/sr (a spot's before
+its cone falloff), radiance in W/(m² sr). Directions are where the light travels,
+in world coordinates (+Z down); angles are radians.
+
+| Default light | Configuration |
+| --- | --- |
+| `tower-light-0` … `-3` (`spot`) | At the four pitch corners 35 m up, `(±length/2, ±width/2, -35)`, aimed at the centre spot; `intensity` `[16000, 16800, 20000]`, `inner_angle` 0.4, `outer_angle` 0.9, `source_radius` 0.5 m |
+| `sun` (`directional`) | `direction` `[0.5, 0.6, 1.0]` (from the -X -Y side, about 52° high), `irradiance` `[2.5, 2.35, 2.1]`, `angular_radius` 0.00465 (the sun's) |
+| Environment, constant | None |
+
+All lights inherit the scene's `shadow_mode` unless they set their own.
+
+```json
+"lighting": {
+  "lights": [
+    {"light_id": "sun", "kind": "directional", "direction": [0.5, 0.6, 1.0],
+     "irradiance": [2.5, 2.35, 2.1], "angular_radius": 0.00465, "shadow_mode": null},
+    {"light_id": "tower-0", "kind": "spot", "position": [-52.5, -34, -35],
+     "direction": [52.5, 34, 35], "intensity": [16000, 16800, 20000],
+     "source_radius": 0.5, "inner_angle": 0.4, "outer_angle": 0.9, "shadow_mode": null},
+    {"light_id": "lamp", "kind": "point", "position": [0, 30, -12],
+     "intensity": [800, 800, 800], "source_radius": 0.3, "shadow_mode": "off"}
+  ],
+  "environment": {"asset_ref": "IBL-orlando", "gain": 0.5, "rotation": 0.0, "visible": false},
+  "constant": [0.1, 0.1, 0.1]
+}
+```
+
+- **Environment (IBL):** `asset_ref` names an `environment` asset of the same
+  description. `gain` scales its radiance, `rotation` turns it about the up axis.
+  Keep `visible: false`: the program composites CG over the camera's picture, so a
+  drawn sky would cover it. Image-based light is unoccluded (no shadows); keep the
+  sun a `directional` light, which casts them, and prefer panoramas without it, or
+  lower `gain`, to avoid lighting twice. A server prefilters each panorama once on
+  the GPU (256 x 128 x 6 roughness layers, 64 samples); a source plus its layers may
+  take up to 256 MiB of GPU memory, enough for 4096 x 2048.
+- **Constant fill:** `constant` is a uniform radiance from every direction, added
+  to the environment's and shaded the same way (diffuse and specular, also
+  unoccluded). It lifts shadows evenly; it does not appear as a background.
 
 ### Flags
 
@@ -268,6 +314,8 @@ cargo test --locked -p chr-runtime --test description
 cargo test --locked -p chr-runtime --test description -- --ignored   # hardware GPU
 cargo test --locked -p chr-renderer --test glb
 cargo test --locked -p chr-renderer --test flag_gpu -- --ignored   # hardware GPU
+cargo test --locked -p chr-renderer --test exr_import
+cargo test --locked -p chr-renderer --test environment_gpu -- --ignored   # hardware GPU
 npm --prefix client/pitch-studio run test:offline
 ```
 
@@ -279,6 +327,9 @@ The tests cover:
 - the `blend_as` opt-in;
 - an unlit quad drawn through the tracked camera on the GPU;
 - flag parameters required for flag assets and rejected for others;
+- environment assets: OpenEXR import, used only by lighting, and a constant fill
+  next to them; a constant fill shades like a uniform environment of the same
+  radiance;
 - the client's quad, GLB and asset conversion, including local placements and flags.
 
 Recorded on the Linux RTX 3090 host: the Fusion package from the client

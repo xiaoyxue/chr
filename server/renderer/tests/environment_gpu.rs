@@ -486,3 +486,90 @@ fn punctual_shadows_do_not_multiply_unoccluded_ibl() {
         "unoccluded blue IBL is independent of the punctual shadow map"
     );
 }
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn constant_fill_shades_like_a_uniform_environment_and_adds_to_one() {
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let extent = ImageExtent::new(64, 64).unwrap();
+    let camera = Camera::look_at(
+        extent,
+        [0.0, 0.0, -3.0],
+        [0.0; 3],
+        [0.0, -1.0, 0.0],
+        1.0,
+        0.1,
+        20.0,
+    )
+    .unwrap();
+    let uniform = Arc::new(
+        EnvironmentMap::new(ImageExtent::new(1, 1).unwrap(), vec![[4.0, 2.0, 1.0]]).unwrap(),
+    );
+    for material in [
+        PbrMaterial {
+            roughness: 1.0,
+            ..Default::default()
+        },
+        PbrMaterial {
+            metallic: 1.0,
+            roughness: 0.4,
+            ..Default::default()
+        },
+    ] {
+        let (mut scene, _) = plane(material);
+        let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+        sky(&mut scene, &uniform, 0.0, 0.5, false);
+        let environment = rgb(
+            &render(&gpu, &mut renderer, &scene, &camera, 1.0),
+            extent,
+            32,
+            32,
+        );
+        let constant = |scene: &mut Scene, sky: Option<SkyLight>, radiance| {
+            scene
+                .set_lighting(
+                    Lighting::new(Vec::new(), sky)
+                        .unwrap()
+                        .with_constant(radiance)
+                        .unwrap(),
+                )
+                .unwrap();
+        };
+        // A fresh renderer has no environment cache: the constant alone must build
+        // what it shares with the sky (the split-sum table).
+        let mut fresh = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+        constant(&mut scene, None, [2.0, 1.0, 0.5]);
+        let alone = rgb(
+            &render(&gpu, &mut fresh, &scene, &camera, 1.0),
+            extent,
+            32,
+            32,
+        );
+        let half = SkyLight {
+            environment: Arc::clone(&uniform),
+            rotation: 0.0,
+            gain: 0.25,
+            visible: false,
+        };
+        constant(&mut scene, Some(half), [1.0, 0.5, 0.25]);
+        let added = rgb(
+            &render(&gpu, &mut fresh, &scene, &camera, 1.0),
+            extent,
+            32,
+            32,
+        );
+        for (actual, name) in [(alone, "constant"), (added, "constant + environment")] {
+            for (a, e) in actual.into_iter().zip(environment) {
+                assert!(
+                    a.abs_diff(e) <= 1,
+                    "{name} {actual:?} vs uniform environment {environment:?}"
+                );
+            }
+        }
+        assert!(
+            environment.iter().any(|&v| v > 40),
+            "{environment:?} is lit"
+        );
+    }
+}
