@@ -368,6 +368,120 @@ $$
 **已实现**（有 CLI）、**规划**（`docs/cli-contracts.md` 中的候选，还没有 CLI）、
 **研究**（目前由 vchao CLI 之外的研究代码完成）。
 
+### 目标函数与求解方式
+
+**变量。** 以 $V_r = I$ 固定规范，球场尺寸 $L$、$W$ 取配置值：
+
+$$
+\Theta = \left( \lbrace V_i \rbrace,\ \lbrace q_k \rbrace,\ T_{\mathrm{ref}},\ C \right),
+\qquad T_i = V_i\, T_{\mathrm{ref}} .
+$$
+
+记 $\pi_i(y) = \varphi(\Lambda_i^{-1} y)$，把齐次 SNC 点 $y$ 换成第 $i$ 帧的原生像素。
+
+**观测。**
+
+| 观测 | 记号 | 来源 |
+|---|---|---|
+| 纹理特征点 $k$ 在第 $i$ 帧的位置 | $x_{ik}$ | ALIKED、LightGlue、EfficientLoFTR |
+| 模型的语义地面点 $n$，$P_n = (X_n, Y_n, 1)^\top$ | $y_{in}$ | NBJW（只用地面编号） |
+| 无语义的线点 | $p \in \mathcal{O}_i$ | Gaussian-Hessian（GH）亮线脊 |
+| 离地的球门点 $X_g$（立柱、横梁） | $y_{ig}$ | 球门检测 |
+
+**联合目标（并不整体求解）。** $\rho_s$ 为尺度 $s$ 原生像素的鲁棒损失，$d_{\mathrm{px}}(p, T\ell)$
+为 $p$ 到模型场线 $\ell$（线段、中圈或禁区弧）成像的像素距离：
+
+$$
+\min_{\Theta}\ E(\Theta) = E_{\mathrm{tex}} + \lambda_{\mathrm{nn}} E_{\mathrm{nn}} + \lambda_{\mathrm{gh}} E_{\mathrm{gh}} + \lambda_{\mathrm{goal}} E_{\mathrm{goal}},
+$$
+
+$$
+\begin{aligned}
+E_{\mathrm{tex}} &= \sum_{i,k} \rho\left( \left\lVert \pi_i(V_i q_k) - x_{ik} \right\rVert \right), \\
+E_{\mathrm{nn}} &= \sum_{i,n} m_{in}\, \rho_8\left( \left\lVert \pi_i(V_i T_{\mathrm{ref}} P_n) - y_{in} \right\rVert \right), \\
+E_{\mathrm{gh}} &= \sum_i \sum_{p \in \mathcal{O}_i} m_p\, \rho_2\left( \min_{\ell \in \mathcal{M}(L, W)} d_{\mathrm{px}}\left( p,\ V_i T_{\mathrm{ref}}\, \ell \right) \right), \\
+E_{\mathrm{goal}} &= \sum_{i,g} \rho\left( \left\lVert \pi_i\left( V_i T_{\mathrm{ref}}\, G_0(C)^{-1} (X_g - C) \right) - y_{ig} \right\rVert \right).
+\end{aligned}
+$$
+
+纹理确定 $V$ 和 $q$，场线确定 $T_{\mathrm{ref}}$，只有离地点能确定 $C$（命题 2）。vchao 并不联合求解 $E$，
+也没有对整个 $\Theta$ 做光束平差。
+
+**vchao 实际求解的：单向的分阶段。** 每个阶段冻结上一阶段的结果，之后不再回头修改。这是一遍块坐标下降，
+不是 $V$、$T$、$C$ 之间的交替迭代。阶段 2 的 CLI 在 vchao main `c1a3c50`（#183）上，晚于固定的 `f209fc9`。
+
+*阶段 1，配准（只用纹理）。*
+
+$$
+(\hat V, \hat q) = \operatorname*{arg\,min}_{\lbrace V_i \rbrace,\ \lbrace q_k \rbrace} E_{\mathrm{tex}}
+\quad \text{s.t. } V_r = I,
+$$
+
+或者由拟合出的帧对单应 $\hat H_{j \leftarrow i}$ 求 H 图形式 $\min \sum_{(i,j)} d(\hat H_{j \leftarrow i}, V_j V_i^{-1})$。研究。
+
+*阶段 2a，一个共享锚点*（`pitch-register-from-v`；8 个未知数；冻结 $\hat V$）。GH 点的权重为
+$m_p = 1 / (N\, |\mathcal{O}_i|)$，Huber 阈值 2 px：
+
+$$
+\hat T_{\mathrm{ref}} = \operatorname*{arg\,min}_{T_{\mathrm{ref}}}\ \sum_i \sum_{p \in \mathcal{O}_i} m_p\, \rho_2\left( \min_{\ell} d_{\mathrm{px}}\left( p,\ \hat V_i T_{\mathrm{ref}}\, \ell \right) \right),
+\qquad T_i = N(\hat V_i\, \hat T_{\mathrm{ref}}) .
+$$
+
+*阶段 2b，每帧自由*（`pitch-refine-ti`、`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`；$8N$ 个未知数）。
+配准只作为正则项出现：在原生像素探针上，$T_j T_i^{-1}$ 与 $\hat V_j \hat V_i^{-1}$（或实测的 $\hat H_{j \leftarrow i}$）
+之间的对称 RMS 差异，帧对取名单中间隔 1、4、16 的帧：
+
+$$
+\lbrace \hat T_i \rbrace = \operatorname*{arg\,min}_{\lbrace T_i \rbrace}\
+\frac{1}{4^2} \sum_{i,n} m_{in}\, \rho_8(r_{in})
++ \frac{w_{\mathrm{gh}}}{1.5^2} \sum_i \sum_{p \in \mathcal{O}_i} m_p\, \rho_2(d_p)
++ \frac{w_{\mathrm{geo}}}{2^2} \sum_{(i,j)} m_{ij}\, \mathrm{Huber}_2\left( \mathrm{RMS}_{\mathrm{sym}}\left( T_j T_i^{-1},\ \hat V_j \hat V_i^{-1} \right) \right),
+$$
+
+其中 $r_{in} = \lVert \pi_i(T_i P_n) - y_{in} \rVert$，$d_p = \min_\ell d_{\mathrm{px}}(p, T_i \ell)$。这是
+`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh` 的目标函数；`pitch-refine-ti` 的最后一项使用实测的
+$\hat H_{j \leftarrow i}$，两项都用 2 px 的 Huber。
+
+*阶段 3，光心*（`pitch-centre-fit`；3 个未知数 $(a, b, \eta)$，高度 $h = e^\eta$，$C = (-ha, -hb, -h)$；冻结 $\hat T_i$）。
+球门点使用 Student-t（$\nu = 4$）损失，$\sigma_p = 3$ px；每条观测到的球门线 $\ell$ 取两个固定探针 $\pm$
+的平均，$\sigma_l = 2$ px：
+
+$$
+\hat C = \operatorname*{arg\,min}_{C}\ \sum_{i,g} 3 \log\left( 1 + \frac{\lVert r_{ig}(C) / \sigma_p \rVert^2}{4} \right)
++ \sum_{i,\ell} \frac{1}{2} \sum_{\pm} 2.5 \log\left( 1 + \frac{\left( d_{i\ell\pm}(C) / \sigma_l \right)^2}{4} \right),
+$$
+
+其中 $r_{ig}(C) = \pi_i\left( \hat T_i\, G_0(C)^{-1} (X_g - C) \right) - y_{ig}$。`--refine-transforms`
+可在此之后修正有球门观测的帧的 $T_i$，这只是本阶段内的局部联合。
+
+*在线*（`atlas-vq-estimate`；8 个未知数；冻结整个 map）：
+
+$$
+\hat V_f = \operatorname*{arg\,min}_{V}\ \sum_m \rho_3\left( \left\lVert \pi_f(V q_{k(m)}) - x_m \right\rVert \right),
+\qquad T_f = N(\hat V_f\, T_{\mathrm{ref}}) .
+$$
+
+**求解器内部的交替。** 交替只发生在局部：
+
+- *IRLS 加 Gauss-Newton。* 每次迭代先按当前残差重新加权，再用 8 个迹为零的生成元 $G_a$ 在
+  $\mathrm{SL}(3)$ 上走一步：
+
+$$
+w_m = \frac{\rho'(r_m)}{r_m}, \qquad
+\delta = -\left( J^\top W J + \mu D \right)^{-1} J^\top W r, \qquad
+T \leftarrow \exp\left( \textstyle\sum_{a=1}^{8} \delta_a G_a \right) T .
+$$
+
+  阶段 2 按上式用指数映射更新，配合 Armijo 回溯（$\mu = 0$，无阻尼）。在线求解器则以绝对值最大的矩阵元素为基准，
+  更新其余 8 个元素，并带阻尼（接受时 $\mu$ 除以 3，拒绝时乘以 10，最多 8 次迭代）。阶段 3 在 $(a, b, \eta)$
+  上做阻尼加回溯。
+- *最近场线关联（类似 ICP）。* $E_{\mathrm{gh}}$ 中的 $\min_\ell$ 每次迭代都按当前 $T$ 重新计算：先关联，再更新。
+- *RANSAC* 在假设与一致性之间交替，只用于给出初值。
+
+**为什么分阶段。** 不同证据各自确定不同的自由度，耦合很少；分阶段条件更好、更容易诊断，而且仅
+$E_{\mathrm{tex}}$ 就有上万个特征点。代价是阶段 1 的误差会传进 $T$；阶段 2b 让每个 $T_i$ 在正则项约束下自由调整，
+以减轻这一点。
+
 ### 离线算法：建图
 
 **输入。** 同一机位的一段扫场视频：光心固定，通过摇、俯仰、变焦覆盖全场；标准球场模型
@@ -410,10 +524,10 @@ $$
 研究；`f209fc9` 中没有导出用的 CLI。
 
 **步骤 O7（球场观测）。** 亮线点和线段（`ridge-lines`、`pitch-line-gaussian-hessian-points`，已实现）；
-带已知模型编号的语义点、线、圆锥曲线（`pitch-detect-*`，规划）。
+带已知模型编号的语义点、线、圆锥曲线（`pitch-detect-*`，规划；vchao main `c1a3c50` 上已有 `nbjw-pitch-init`，晚于固定版本）。
 
 **步骤 O8（锚定球场）。** 用一帧 $a$ 对模型拟合（`fit-anchor-camera`，规划），令
-$T_{\mathrm{ref}} = V_a^{-1} T_a$（命题 5）。再固定 $V_i$，用所有帧精化（`calibrate-shot-from-g`，规划）。
+$T_{\mathrm{ref}} = V_a^{-1} T_a$（命题 5）。再固定 $V_i$，用所有帧精化（`calibrate-shot-from-g`，规划；vchao main `c1a3c50` 上的 `pitch-register-from-v`、`pitch-refine-ti` 和 `pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh` 已实现这一步，晚于固定版本，见上文目标函数）。
 模型直线 $\ell$ 映为图像直线 $T_i^{-\top} \ell$，因此对第 $i$ 帧中观测到的线点
 $p = (x, y, 1)^\top \in \mathcal{O}_{i,\ell}$：
 

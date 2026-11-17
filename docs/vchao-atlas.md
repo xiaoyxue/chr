@@ -421,6 +421,141 @@ vchao tool at `f209fc9` and its state: **implemented** (a CLI exists),
 **planned** (a candidate in `docs/cli-contracts.md`, no CLI yet) or
 **research** (done today by research code outside the vchao CLIs).
 
+### Objectives and how they are solved
+
+**Variables.** With the gauge fixed by $V_r = I$ and the pitch size $L, W$
+configured:
+
+$$
+\Theta = \left( \lbrace V_i \rbrace,\ \lbrace q_k \rbrace,\ T_{\mathrm{ref}},\ C \right),
+\qquad T_i = V_i\, T_{\mathrm{ref}} .
+$$
+
+Write $\pi_i(y) = \varphi(\Lambda_i^{-1} y)$ for a homogeneous SNC point $y$ in
+frame $i$'s native pixels.
+
+**Observations.**
+
+| Observation | Symbol | Source |
+|---|---|---|
+| Texture landmark $k$ in frame $i$ | $x_{ik}$ | ALIKED, LightGlue, EfficientLoFTR |
+| Semantic ground point $n$ of the model, $P_n = (X_n, Y_n, 1)^\top$ | $y_{in}$ | NBJW (ground IDs only) |
+| Unlabelled line point | $p \in \mathcal{O}_i$ | Gaussian-Hessian (GH) ridges |
+| Elevated goal point $X_g$ (posts, crossbars) | $y_{ig}$ | Goal detections |
+
+**The joint objective (not solved as a whole).** With $\rho_s$ a robust loss of
+scale $s$ native pixels and $d_{\mathrm{px}}(p, T\ell)$ the pixel distance from
+$p$ to the image of the model marking $\ell$ (segment, centre circle or penalty
+arc):
+
+$$
+\min_{\Theta}\ E(\Theta) = E_{\mathrm{tex}} + \lambda_{\mathrm{nn}} E_{\mathrm{nn}} + \lambda_{\mathrm{gh}} E_{\mathrm{gh}} + \lambda_{\mathrm{goal}} E_{\mathrm{goal}},
+$$
+
+$$
+\begin{aligned}
+E_{\mathrm{tex}} &= \sum_{i,k} \rho\left( \left\lVert \pi_i(V_i q_k) - x_{ik} \right\rVert \right), \\
+E_{\mathrm{nn}} &= \sum_{i,n} m_{in}\, \rho_8\left( \left\lVert \pi_i(V_i T_{\mathrm{ref}} P_n) - y_{in} \right\rVert \right), \\
+E_{\mathrm{gh}} &= \sum_i \sum_{p \in \mathcal{O}_i} m_p\, \rho_2\left( \min_{\ell \in \mathcal{M}(L, W)} d_{\mathrm{px}}\left( p,\ V_i T_{\mathrm{ref}}\, \ell \right) \right), \\
+E_{\mathrm{goal}} &= \sum_{i,g} \rho\left( \left\lVert \pi_i\left( V_i T_{\mathrm{ref}}\, G_0(C)^{-1} (X_g - C) \right) - y_{ig} \right\rVert \right).
+\end{aligned}
+$$
+
+Texture fixes $V$ and $q$, pitch markings fix $T_{\mathrm{ref}}$, and only
+elevated points fix $C$ (Proposition 2). vchao does not solve $E$ jointly; there
+is no bundle adjustment over all of $\Theta$.
+
+**What vchao solves: stages in one direction.** Each stage freezes the result of
+the previous one and never returns to it. This is one pass of block-coordinate
+descent, not an alternation between $V$, $T$ and $C$. The stage 2 CLIs are on
+vchao main `c1a3c50` (#183), after the pinned `f209fc9`.
+
+*Stage 1, registration (texture only).*
+
+$$
+(\hat V, \hat q) = \operatorname*{arg\,min}_{\lbrace V_i \rbrace,\ \lbrace q_k \rbrace} E_{\mathrm{tex}}
+\quad \text{s.t. } V_r = I,
+$$
+
+or, from fitted pair homographies $\hat H_{j \leftarrow i}$, the H-graph form
+$\min \sum_{(i,j)} d(\hat H_{j \leftarrow i}, V_j V_i^{-1})$. Research.
+
+*Stage 2a, one shared anchor* (`pitch-register-from-v`; 8 unknowns; $\hat V$
+frozen). GH points take mass $m_p = 1 / (N\, |\mathcal{O}_i|)$, Huber at 2 px:
+
+$$
+\hat T_{\mathrm{ref}} = \operatorname*{arg\,min}_{T_{\mathrm{ref}}}\ \sum_i \sum_{p \in \mathcal{O}_i} m_p\, \rho_2\left( \min_{\ell} d_{\mathrm{px}}\left( p,\ \hat V_i T_{\mathrm{ref}}\, \ell \right) \right),
+\qquad T_i = N(\hat V_i\, \hat T_{\mathrm{ref}}) .
+$$
+
+*Stage 2b, free per-frame maps* (`pitch-refine-ti`,
+`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`; $8N$ unknowns). The
+registration enters only as a regulariser: the symmetric RMS disagreement
+between $T_j T_i^{-1}$ and $\hat V_j \hat V_i^{-1}$ (or a measured
+$\hat H_{j \leftarrow i}$) on native probes, for frame pairs at roster offsets
+1, 4 and 16:
+
+$$
+\lbrace \hat T_i \rbrace = \operatorname*{arg\,min}_{\lbrace T_i \rbrace}\
+\frac{1}{4^2} \sum_{i,n} m_{in}\, \rho_8(r_{in})
++ \frac{w_{\mathrm{gh}}}{1.5^2} \sum_i \sum_{p \in \mathcal{O}_i} m_p\, \rho_2(d_p)
++ \frac{w_{\mathrm{geo}}}{2^2} \sum_{(i,j)} m_{ij}\, \mathrm{Huber}_2\left( \mathrm{RMS}_{\mathrm{sym}}\left( T_j T_i^{-1},\ \hat V_j \hat V_i^{-1} \right) \right),
+$$
+
+with $r_{in} = \lVert \pi_i(T_i P_n) - y_{in} \rVert$ and
+$d_p = \min_\ell d_{\mathrm{px}}(p, T_i \ell)$. This is the objective of
+`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh`; `pitch-refine-ti` uses
+measured $\hat H_{j \leftarrow i}$ for the last term and Huber at 2 px for both
+terms.
+
+*Stage 3, optical centre* (`pitch-centre-fit`; 3 unknowns $(a, b, \eta)$ with
+height $h = e^\eta$ and $C = (-ha, -hb, -h)$; $\hat T_i$ frozen). Goal points use a
+Student-t ($\nu = 4$) loss with $\sigma_p = 3$ px, and each observed goal line
+$\ell$ the mean over two fixed probes $\pm$ with $\sigma_l = 2$ px:
+
+$$
+\hat C = \operatorname*{arg\,min}_{C}\ \sum_{i,g} 3 \log\left( 1 + \frac{\lVert r_{ig}(C) / \sigma_p \rVert^2}{4} \right)
++ \sum_{i,\ell} \frac{1}{2} \sum_{\pm} 2.5 \log\left( 1 + \frac{\left( d_{i\ell\pm}(C) / \sigma_l \right)^2}{4} \right),
+$$
+
+with $r_{ig}(C) = \pi_i\left( \hat T_i\, G_0(C)^{-1} (X_g - C) \right) - y_{ig}$.
+`--refine-transforms` then optionally corrects the $T_i$ of frames with goal
+evidence, a local joint step of this stage only.
+
+*Online* (`atlas-vq-estimate`; 8 unknowns; the whole map frozen):
+
+$$
+\hat V_f = \operatorname*{arg\,min}_{V}\ \sum_m \rho_3\left( \left\lVert \pi_f(V q_{k(m)}) - x_m \right\rVert \right),
+\qquad T_f = N(\hat V_f\, T_{\mathrm{ref}}) .
+$$
+
+**Alternation inside the solvers.** The only alternations are local:
+
+- *IRLS with Gauss-Newton.* Each iteration reweights by the current residuals,
+  then takes one step on $\mathrm{SL}(3)$ with the eight trace-zero generators
+  $G_a$:
+
+$$
+w_m = \frac{\rho'(r_m)}{r_m}, \qquad
+\delta = -\left( J^\top W J + \mu D \right)^{-1} J^\top W r, \qquad
+T \leftarrow \exp\left( \textstyle\sum_{a=1}^{8} \delta_a G_a \right) T .
+$$
+
+  Stage 2 updates by the exponential map as written, with Armijo backtracking
+  ($\mu = 0$, undamped). The online solver instead takes the largest matrix
+  entry as pivot and updates the other eight entries, damped ($\mu$ divided by
+  3 on acceptance, multiplied by 10 on rejection, at most eight iterations).
+  Stage 3 damps and backtracks in $(a, b, \eta)$.
+- *Nearest-marking association (ICP-like).* The $\min_\ell$ in $E_{\mathrm{gh}}$
+  is re-evaluated at the current $T$ every iteration: association, then update.
+- *RANSAC* alternates hypotheses and consensus, only to initialise.
+
+**Why stages.** Each kind of evidence fixes different degrees of freedom with
+little coupling, so stages are better conditioned and easier to diagnose, and
+$E_{\mathrm{tex}}$ alone has tens of thousands of landmarks. The cost is that
+stage 1 errors pass into $T$; stage 2b reduces this by freeing each $T_i$ under
+the regulariser.
+
 ### Offline algorithm: building the map
 
 **Input.** A sweep video of one station that pans, tilts and zooms over the
@@ -476,12 +611,16 @@ is no exporting CLI at `f209fc9`.
 
 **Step O7 (pitch observations).** Bright line points and segments
 (`ridge-lines`, `pitch-line-gaussian-hessian-points`, implemented); semantic
-points, lines and conics with known model IDs (`pitch-detect-*`, planned).
+points, lines and conics with known model IDs (`pitch-detect-*`, planned;
+`nbjw-pitch-init` on vchao main `c1a3c50`, after the pin).
 
 **Step O8 (anchor to the pitch).** Fit one frame $a$ to the model
 (`fit-anchor-camera`, planned) and set $T_{\mathrm{ref}} = V_a^{-1} T_a$
 (Proposition 5). Then refine with every frame, $V_i$ fixed
-(`calibrate-shot-from-g`, planned). A model line $\ell$ maps to the image line
+(`calibrate-shot-from-g`, planned; on vchao main `c1a3c50`, after the pin,
+`pitch-register-from-v`, `pitch-refine-ti` and
+`pitch-ti-robust-joint-fit-per-shot-from-vi-nbjw-gh` do this, see the
+objectives above). A model line $\ell$ maps to the image line
 $T_i^{-\top} \ell$, so with observed line points $p = (x, y, 1)^\top \in \mathcal{O}_{i,\ell}$
 in frame $i$:
 
