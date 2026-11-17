@@ -236,6 +236,13 @@
             GST_PLUGIN_SYSTEM_PATH_1_0 = workerPlugins;
             shellHook = ''
               export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"
+              # The Git LFS filter of the asset/ submodule, only inside this shell: a global
+              # filter would make git fail in asset/ wherever git-lfs is not installed.
+              export GIT_CONFIG_COUNT=4
+              export GIT_CONFIG_KEY_0=filter.lfs.clean GIT_CONFIG_VALUE_0="git-lfs clean -- %f"
+              export GIT_CONFIG_KEY_1=filter.lfs.smudge GIT_CONFIG_VALUE_1="git-lfs smudge -- %f"
+              export GIT_CONFIG_KEY_2=filter.lfs.process GIT_CONFIG_VALUE_2="git-lfs filter-process"
+              export GIT_CONFIG_KEY_3=filter.lfs.required GIT_CONFIG_VALUE_3=true
             '';
           };
         in

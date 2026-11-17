@@ -6,3 +6,4 @@
 	path = asset
 	url = ../chr-assets.git
 	branch = main
+	ignore = dirty
