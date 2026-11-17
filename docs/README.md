@@ -17,7 +17,7 @@
 | Execution | [Execution model](execution-model.md) | Effect、生效位置、逻辑时间、批处理和模拟重放。 |
 | Business methods | [Cam1 input recording](recording-control.md) | 录制 params、result、state、errors、产物及业务验证场景。 |
 | Business methods | [Calibration records](calibration-control.md) | atlas/Ti/C 记录及 create/get/load 的核心职责。 |
-| Tracking geometry | [vchao atlas, V, Ti and T_ref](vchao-atlas.md) / [中文](vchao-atlas.zh-CN.md) | vchao 中 atlas 的三种含义（canonical Atlas、射影全景图、V/Q map）及 K/R/C/H/V/q/T_ref/Ti 的公式关系。 |
+| Tracking geometry | [vchao atlas, V, Ti and T_ref](vchao-atlas.md) / [中文](vchao-atlas.zh-CN.md) | vchao 中 atlas 的三种含义（canonical Atlas、射影全景图、V/Q map）、K/R/C/H/V/q/T_ref/Ti 的形式化关系，以及离线建图与在线逐帧算法。 |
 | Frame pipeline | [Frame ingestion and rendering](render-frame-input.md) | 首期 pinhole 范围、scene 上下文、帧发布/渲染提交与资源生命周期。 |
 | Live processes | [Live process overview](live-process-overview.md) | 三个进程及其通道的总览图（英文 / 中文）。 |
 | Live processes | [Live process architecture](live-process-architecture.md) / [implementation plan](live-process-implementation.md) | chr-server、渲染 worker 与监看进程的职责、通道、状态归属与故障处理（#94 决定），以及分步实现计划。 |

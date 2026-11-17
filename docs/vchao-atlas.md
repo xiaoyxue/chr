@@ -6,8 +6,8 @@ own documents are authoritative; this page follows the pinned submodule
 
 **Scope:** what "atlas" means in vchao, the three products the word is used for,
 and a formal statement of the geometry that connects $K$, $R$, $C$, $H$, $V$,
-$q$, $T_{\mathrm{ref}}$ and $T_i$ (vchao's `Ti`). It does not define a chr
-protocol. The paired translation is [vchao-atlas.zh-CN.md](vchao-atlas.zh-CN.md).
+$q$, $T_{\mathrm{ref}}$ and $T_i$ (vchao's `Ti`), and the offline (map
+building) and online (per-frame) algorithms. It does not define a chr protocol. The paired translation is [vchao-atlas.zh-CN.md](vchao-atlas.zh-CN.md).
 
 Sources in `external/vchao`: `README.md` (`Atlas`), `docs/camera-geometry.md`
 (the preamble before the contents, and sections 3, 6, 8 and 9),
@@ -290,6 +290,168 @@ in general, so chart angles are not physical.
 **Relation.** ② and ③ are registrations (Definition 3) with unknown $A$; ① is
 the registration whose $A$ is a known physical rotation. Upgrading ② or ③ to ①
 needs exactly the conditions of Proposition 6.
+
+## Algorithms
+
+Both algorithms use the notation of the formal statement. Each step names the
+vchao tool at `f209fc9` and its state: **implemented** (a CLI exists),
+**planned** (a candidate in `docs/cli-contracts.md`, no CLI yet) or
+**research** (done today by research code outside the vchao CLIs).
+
+### Offline algorithm: building the map
+
+**Input.** A sweep video of one station that pans, tilts and zooms over the
+whole pitch with a fixed optical centre; the standard pitch model
+$\mathcal{M}(L, W)$ (top view in pitch metres: lines, circles and goals with
+fixed standard dimensions, default $L = 105$, $W = 68$); a declared lens model
+$\psi$.
+
+**Output.** The V/Q map ③ $\big(\lbrace (q_k, d_k) \rbrace, \lbrace V_i \rbrace, T_{\mathrm{ref}}\big)$,
+the optical centre $C$ and the lens $\psi$; optionally $L$, $W$, $K_i$, $R_i$.
+
+**Step O1 (frames of one station).** Split the video into shots and keep the
+frames $F$ of one station (Definition 2); mask screen overlays.
+`tracklet-shot`, `ui-mask` — implemented. The common-centre assumption is
+declared by the caller, not verified.
+
+**Step O2 (undistorted coordinates).** Map native pixels $\tilde u$ to
+undistorted SNC, $p = \psi^{-1}\left(\varphi(\Lambda_i \tilde u)\right)$, so that
+Proposition 3 applies.
+
+**Step O3 (texture correspondences).** Match static texture (stands, boards,
+turf, lines); players, the ball and overlays are outliers. Adjacent frames:
+ALIKED N16ROT with LightGlue and SEA-RAFT flow (`frame-track`, implemented).
+Distant frames, for loop closure: EfficientLoFTR (`eloftr-match`,
+implemented).
+
+**Step O4 (pairwise homographies).** For each matched pair, a robust fit
+(RANSAC, then a robust loss $\rho$):
+
+$$
+\hat H_{j \leftarrow i} = \operatorname*{arg\,min}_{H \in \mathrm{PGL}(3)} \sum_m \rho\left( \left\lVert \varphi(H x_{i,m}) - x_{j,m} \right\rVert \right).
+$$
+
+`sparse-fit-h-*` — planned.
+
+**Step O5 (registration).** Solve the nodes, either from the H-graph
+
+$$
+\lbrace \hat V_i \rbrace = \operatorname*{arg\,min}_{\lbrace V_i \rbrace} \sum_{(i,j)} d\left( \hat H_{j \leftarrow i},\ V_j V_i^{-1} \right)
+$$
+
+(`solve-g-*`, planned), or jointly with the landmarks by the objective of
+Section 4 (research). Fix the gauge by $V_r = I$ with $r$ the middle frame
+(`projective-rebase`, implemented).
+
+**Step O6 (landmark bank for the live frontend).** Re-extract features with
+the **live** frontend (`aliked-n16`, not N16ROT), assign them to landmarks
+$q_k$, and set $d_k$ to the normalised sum of the member descriptors. Only
+landmarks with support $\geq 2$ enter the live matching bank. Research; there
+is no exporting CLI at `f209fc9`.
+
+**Step O7 (pitch observations).** Bright line points and segments
+(`ridge-lines`, `pitch-line-gaussian-hessian-points`, implemented); semantic
+points, lines and conics with known model IDs (`pitch-detect-*`, planned).
+
+**Step O8 (anchor to the pitch).** Fit one frame $a$ to the model
+(`fit-anchor-camera`, planned) and set $T_{\mathrm{ref}} = V_a^{-1} T_a$
+(Proposition 5). Then refine with every frame, $V_i$ fixed
+(`calibrate-shot-from-g`, planned). A model line $\ell$ maps to the image line
+$T_i^{-\top} \ell$, so with observed line points $p \in \mathcal{O}_{i,\ell}$
+(homogeneous, undistorted SNC) in frame $i$:
+
+$$
+\left( \hat T_{\mathrm{ref}}, \hat L, \hat W \right) = \operatorname*{arg\,min}_{T_{\mathrm{ref}},\, L,\, W}\ \sum_i \sum_{\ell \in \mathcal{M}(L, W)} \sum_{p \in \mathcal{O}_{i,\ell}} \rho\left( \frac{\left| \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)^\top p \right|}{\left\lVert \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)_{1:2} \right\rVert} \right).
+$$
+
+**Step O9 (optical centre).** Ground features cannot reveal $C$
+(Proposition 2); elevated ones can. With goal points $X_g$ (posts and
+crossbars, height $2.44$ m) observed at $y_{i,g}$ and $T_i = V_i T_{\mathrm{ref}}$
+fixed:
+
+$$
+\hat C = \operatorname*{arg\,min}_{C}\ \sum_{i,g} \rho\left( \left\lVert \varphi\left( T_i\, G_0(C)^{-1} (X_g - C) \right) - y_{i,g} \right\rVert \right).
+$$
+
+`pitch-centre-fit` — implemented (goal points and lines, three free
+parameters).
+
+**Step O10 (optional calibration).** $A \sim G_0(\hat C)\, T_{\mathrm{ref}}^{-1}$,
+then $K_i$ and $R_i$ by RQ (Proposition 6), and the canonical Atlas ①
+(`make-canonical-atlas`, planned).
+
+**Step O11 (quality checks).** Render the panorama ② (`projective-atlas`),
+score RGB reprojection (`h-graph-eval-rgb-reproject`) and track consistency
+(`eval-track-consistency`) — implemented.
+
+**Step O12 (export).** Write the V/Q map (`landmarks`, `observations`, `views`
+and a manifest holding the anchor and $T_{\mathrm{ref}}$; see
+`atlas-vq-estimate/README.md`), together with $\hat C$ and $\psi$.
+
+### Online algorithm: one frame at a time
+
+**Input.** The V/Q map, $C$, $\psi$, and live frames $f$ with source times
+$t_f$. **Output.** For every frame, in order: $T_f$ and a status
+`fresh`, `interpolated`, `reused` or `unavailable`.
+
+**Step I1 (scheduling).** `pitch-analysis` estimates scheduled targets on an
+$N = 8$, $S = 4$ grid (two fresh estimates per eight frames), with one
+execution slot and the newest target first. A frame held longer than
+$500$ ms is emitted with the current selection. Implemented.
+
+**Step I2 (features).** `aliked-n16` on the frame resized to a long side of
+1024 (threshold $0.2$, NMS radius $2$, at most $20000$ points); keypoints map
+back to native pixels $x$ with descriptors $\delta$. Implemented
+(`atlas-vq-estimate`, as are I3 to I7).
+
+**Step I3 (matching).** Match $\delta$ against the bank $\lbrace d_k \rbrace$:
+mutual nearest neighbours with squared distance ratio $< 0.64$ in both
+directions and squared distance $\leq 0.49$. This gives
+$\lbrace (x_m, q_{k(m)}) \rbrace$.
+
+**Step I4 (RANSAC).** At most $2048$ four-point hypotheses (seed $0$), inliers
+within $3$ native pixels, early stop at $90\%$ consensus.
+
+**Step I5 (refinement).** At most eight damped Gauss-Newton iterations on the
+inliers, only $V$ free:
+
+$$
+\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi\left(\Lambda_f^{-1} V q_{k(m)}\right) - x_m \right\rVert \right).
+$$
+
+**Step I6 (acceptance).** Accept only with at least $12$ inliers within
+$3$ px, native spans of at least $10\%$ in both axes and a minimum normalised
+covariance eigenvalue above $10^{-4}$; otherwise the status is
+`no_features`, `no_matches` or `low_support` and no pose is made.
+
+**Step I7 (fresh output).**
+
+$$
+T_f = N\left( \hat V_f\, T_{\mathrm{ref}} \right).
+$$
+
+**Step I8 (frames between estimates).** Between the nearest valid endpoints
+$A$ and $B$, interpolate in the matrix logarithm (LogH):
+
+$$
+\Delta = N\left( T_B T_A^{-1} \right), \qquad
+\alpha = \frac{t_f - t_A}{t_B - t_A}, \qquad
+T_f = N\left( \exp\left( \alpha \log \Delta \right) T_A \right),
+$$
+
+with $\log$ the principal real logarithm. Without a bracket, reuse the latest
+valid $T$ (`reused`), or report none (`unavailable`; never the identity).
+Implemented (`pitch-analysis`, from `pitch-live`).
+
+**Step I9 (rendering in chr).** chr receives $T_f$ in the VchaoFrame metadata
+and renders a world point $X$ at
+
+$$
+p = \psi\left( \varphi\left( T_f\, G_0(C)^{-1} (X - C) \right) \right)
+$$
+
+(Proposition 2), composited before the program deadline
+(`server/docs/tracking-worker.md`, `server/docs/gst-core.md`).
 
 ## Summary
 

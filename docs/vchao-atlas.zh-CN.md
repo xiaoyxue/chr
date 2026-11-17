@@ -4,7 +4,7 @@
 本页依据当前固定的子模块 `external/vchao`（`f209fc9`）。
 
 **范围：** vchao 中「atlas」指什么、这个词被用于哪三种产物，以及联系 $K$、$R$、$C$、
-$H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的几何关系的形式化表述。
+$H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的几何关系的形式化表述，以及离线（建图）和在线（逐帧）算法。
 本页不定义 chr 协议。英文版：[vchao-atlas.md](vchao-atlas.md)。
 
 `external/vchao` 中的出处：`README.md`（`Atlas`）、`docs/camera-geometry.md`
@@ -260,6 +260,135 @@ $$
 
 **关系。** ② 和 ③ 都是 $A$ 未知的配准（定义 3）；① 是 $A$ 取已知物理旋转的配准。
 把 ② 或 ③ 升级为 ①，所需条件正是命题 6 的条件。
+
+## 算法
+
+两个算法都沿用形式化表述中的记号。每一步注明 vchao（`f209fc9`）中对应的工具及其状态：
+**已实现**（有 CLI）、**规划**（`docs/cli-contracts.md` 中的候选，还没有 CLI）、
+**研究**（目前由 vchao CLI 之外的研究代码完成）。
+
+### 离线算法：建图
+
+**输入。** 同一机位的一段扫场视频：光心固定，通过摇、俯仰、变焦覆盖全场；标准球场模型
+$\mathcal{M}(L, W)$（以球场米为单位的俯视图：场线、圆和球门，局部尺寸固定，默认
+$L = 105$，$W = 68$）；声明的镜头模型 $\psi$。
+
+**输出。** V/Q map ③ $\big(\lbrace (q_k, d_k) \rbrace, \lbrace V_i \rbrace, T_{\mathrm{ref}}\big)$、
+光心 $C$ 和镜头 $\psi$；可选输出 $L$、$W$、$K_i$、$R_i$。
+
+**步骤 O1（同一机位的帧）。** 把视频切成镜头，保留同一机位的帧 $F$（定义 2），并遮掉屏幕叠加图文。
+`tracklet-shot`、`ui-mask` — 已实现。光心相同是调用方声明的假设，不做验证。
+
+**步骤 O2（去畸变坐标）。** 把原生像素 $\tilde u$ 映为去畸变的 SNC，
+$p = \psi^{-1}\left(\varphi(\Lambda_i \tilde u)\right)$，使命题 3 成立。
+
+**步骤 O3（纹理对应）。** 匹配静止的纹理（看台、广告牌、草皮、场线）；球员、球和叠加图文是外点。
+相邻帧：ALIKED N16ROT 加 LightGlue 和 SEA-RAFT 光流（`frame-track`，已实现）。
+相隔较远的帧（用于闭环）：EfficientLoFTR（`eloftr-match`，已实现）。
+
+**步骤 O4（帧对单应）。** 对每个匹配上的帧对做鲁棒拟合（先 RANSAC，再用鲁棒损失 $\rho$）：
+
+$$
+\hat H_{j \leftarrow i} = \operatorname*{arg\,min}_{H \in \mathrm{PGL}(3)} \sum_m \rho\left( \left\lVert \varphi(H x_{i,m}) - x_{j,m} \right\rVert \right).
+$$
+
+`sparse-fit-h-*` — 规划。
+
+**步骤 O5（配准）。** 求节点，可以由 H 图求解
+
+$$
+\lbrace \hat V_i \rbrace = \operatorname*{arg\,min}_{\lbrace V_i \rbrace} \sum_{(i,j)} d\left( \hat H_{j \leftarrow i},\ V_j V_i^{-1} \right)
+$$
+
+（`solve-g-*`，规划），也可以按第 4 节的目标函数与特征点联合求解（研究）。
+取中间帧 $r$ 令 $V_r = I$ 固定规范（`projective-rebase`，已实现）。
+
+**步骤 O6（供在线前端使用的特征库）。** 用**在线**前端（`aliked-n16`，不是 N16ROT）重新提取特征，
+归到各特征点 $q_k$，$d_k$ 取成员描述子之和再归一化。只有支持数 $\geq 2$ 的特征点进入在线匹配库。
+研究；`f209fc9` 中没有导出用的 CLI。
+
+**步骤 O7（球场观测）。** 亮线点和线段（`ridge-lines`、`pitch-line-gaussian-hessian-points`，已实现）；
+带已知模型编号的语义点、线、圆锥曲线（`pitch-detect-*`，规划）。
+
+**步骤 O8（锚定球场）。** 用一帧 $a$ 对模型拟合（`fit-anchor-camera`，规划），令
+$T_{\mathrm{ref}} = V_a^{-1} T_a$（命题 5）。再固定 $V_i$，用所有帧精化（`calibrate-shot-from-g`，规划）。
+模型直线 $\ell$ 映为图像直线 $T_i^{-\top} \ell$，因此对第 $i$ 帧中观测到的线点
+$p \in \mathcal{O}_{i,\ell}$（齐次、去畸变的 SNC）：
+
+$$
+\left( \hat T_{\mathrm{ref}}, \hat L, \hat W \right) = \operatorname*{arg\,min}_{T_{\mathrm{ref}},\, L,\, W}\ \sum_i \sum_{\ell \in \mathcal{M}(L, W)} \sum_{p \in \mathcal{O}_{i,\ell}} \rho\left( \frac{\left| \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)^\top p \right|}{\left\lVert \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)_{1:2} \right\rVert} \right).
+$$
+
+**步骤 O9（光心）。** 地面特征无法确定 $C$（命题 2），离地特征可以。设球门点 $X_g$
+（立柱和横梁，高 $2.44$ m）在第 $i$ 帧中观测到的位置为 $y_{i,g}$，并固定 $T_i = V_i T_{\mathrm{ref}}$：
+
+$$
+\hat C = \operatorname*{arg\,min}_{C}\ \sum_{i,g} \rho\left( \left\lVert \varphi\left( T_i\, G_0(C)^{-1} (X_g - C) \right) - y_{i,g} \right\rVert \right).
+$$
+
+`pitch-centre-fit` — 已实现（球门点和线，3 个自由参数）。
+
+**步骤 O10（可选：标定）。** $A \sim G_0(\hat C)\, T_{\mathrm{ref}}^{-1}$，再由 RQ 分解得到
+$K_i$ 和 $R_i$（命题 6），进而生成正式 Atlas ①（`make-canonical-atlas`，规划）。
+
+**步骤 O11（质量检查）。** 渲染全景图 ②（`projective-atlas`）、计算 RGB 重投影误差
+（`h-graph-eval-rgb-reproject`）和轨迹一致性（`eval-track-consistency`）— 已实现。
+
+**步骤 O12（导出）。** 写出 V/Q map（`landmarks`、`observations`、`views` 三张表，以及记录锚点和
+$T_{\mathrm{ref}}$ 的 manifest，见 `atlas-vq-estimate/README.md`），连同 $\hat C$ 和 $\psi$。
+
+### 在线算法：逐帧
+
+**输入。** V/Q map、$C$、$\psi$，以及带源时间 $t_f$ 的实时帧 $f$。
+**输出。** 按顺序为每一帧给出 $T_f$ 和状态 `fresh`、`interpolated`、`reused` 或 `unavailable`。
+
+**步骤 I1（调度）。** `pitch-analysis` 在 $N = 8$、$S = 4$ 的网格上对计划的目标帧做估计
+（每 8 帧 2 次新鲜估计），只有一个执行槽，优先最新的目标。被保留超过 $500$ ms 的帧立即按当前选择输出。
+已实现。
+
+**步骤 I2（特征）。** 把帧缩放到长边 1024，运行 `aliked-n16`（阈值 $0.2$，NMS 半径 $2$，最多
+$20000$ 个点）；关键点换算回原生像素 $x$，附带描述子 $\delta$。已实现（`atlas-vq-estimate`，I3 到 I7 同）。
+
+**步骤 I3（匹配）。** 把 $\delta$ 与特征库 $\lbrace d_k \rbrace$ 匹配：互为最近邻，双向平方距离比
+$< 0.64$，平方距离 $\leq 0.49$。得到 $\lbrace (x_m, q_{k(m)}) \rbrace$。
+
+**步骤 I4（RANSAC）。** 最多 $2048$ 个四点假设（种子 $0$），内点阈值 $3$ 个原生像素，
+一致率达到 $90\%$ 时提前停止。
+
+**步骤 I5（精化）。** 在内点上做最多 8 次阻尼 Gauss-Newton 迭代，只有 $V$ 是自由的：
+
+$$
+\hat V_f = \operatorname*{arg\,min}_{V \in \mathrm{PGL}(3)}\ \sum_m \rho_3\left( \left\lVert \varphi\left(\Lambda_f^{-1} V q_{k(m)}\right) - x_m \right\rVert \right).
+$$
+
+**步骤 I6（接受条件）。** 只有满足以下条件才接受：$3$ px 内至少 $12$ 个内点，两个方向的原生跨度都至少
+$10\%$，归一化协方差的最小特征值大于 $10^{-4}$；否则状态为 `no_features`、`no_matches` 或
+`low_support`，不产生位姿。
+
+**步骤 I7（新鲜输出）。**
+
+$$
+T_f = N\left( \hat V_f\, T_{\mathrm{ref}} \right).
+$$
+
+**步骤 I8（估计之间的帧）。** 在最近的两个有效端点 $A$、$B$ 之间，在矩阵对数空间插值（LogH）：
+
+$$
+\Delta = N\left( T_B T_A^{-1} \right), \qquad
+\alpha = \frac{t_f - t_A}{t_B - t_A}, \qquad
+T_f = N\left( \exp\left( \alpha \log \Delta \right) T_A \right),
+$$
+
+其中 $\log$ 为主实对数。没有前后端点时，沿用最近一次有效的 $T$（`reused`），或报告无（`unavailable`；
+绝不用单位矩阵代替）。已实现（`pitch-analysis`，来自 `pitch-live`）。
+
+**步骤 I9（chr 渲染）。** chr 从 VchaoFrame 元数据收到 $T_f$，把世界点 $X$ 渲染在
+
+$$
+p = \psi\left( \varphi\left( T_f\, G_0(C)^{-1} (X - C) \right) \right)
+$$
+
+处（命题 2），并在节目截止时间前合成（`server/docs/tracking-worker.md`、`server/docs/gst-core.md`）。
 
 ## 总结
 
