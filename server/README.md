@@ -11,8 +11,8 @@ The Cargo workspace is at the repository root; its server crates live here:
 | Directory | Crate | Role |
 | --- | --- | --- |
 | `renderer/` | `chr-renderer` | Coordinate math, GPU initialization, and rendering; no networking or device dependencies |
-| `tracker/` | `chr-tracker` | chr's tracking logic, without processes, GStreamer, an async runtime or the GPU renderer: vchao's VchaoFrame v1 mirror with chr's lens extensions and its validation (`protocol`), a returned pose as its frame's camera (`pose`), camera-model selection (`lens`), the frame/camera join with its fixed delay and clean-feed decision (`join`) and the replay stand-in's poses and lens (`replay`). Geometry is validated by the renderer's own checks, which `chr-runtime` passes in (`chr_tracker::Checks`) |
-| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, render pipeline, render and tracking worker supervision over GStreamer unixfd sockets, simulated SDI output, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-sdi-sim` simulates the camera; `chr-sdi-in` is the input of the experimental GStreamer core ([GStreamer core](docs/gst-core.md)) |
+| `tracker/` | `chr-tracker` | chr's tracking logic, without processes, GStreamer, an async runtime or the GPU renderer: vchao's VchaoFrame v1 mirror with chr's lens extensions and its validation (`protocol`), a returned pose as its frame's camera (`pose`), camera-model selection (`lens`), the frame/camera join until each frame's deadline (`join`) and the replay stand-in's poses and lens (`replay`). Geometry is validated by the renderer's own checks, which `chr-runtime` passes in (`chr_tracker::Checks`) |
+| `runtime/` | `chr-runtime` | Headless render server (`chr-server`): JSON-RPC control, the GStreamer core of every tracked program ([GStreamer core](docs/gst-core.md)), render and tracking worker supervision over GStreamer unixfd sockets, the internal-clock render loop and simulated SDI port of generated programs, shared-memory program tap; `chr-renderer-cli` renders program stills and runs as the render worker; `chr-tracking-sim-cli` is the tracking worker's stand-in that replays recorded cameras until the real tracking module replaces it ([tracking worker](docs/tracking-worker.md)); `chr-sdi-in` is the capture input (a file or test pattern simulating the camera, or a DeckLink card) |
 | `viewer/` | `chr-app` | Thin winit shell for windows, resize, and presentation, plus headless PNG export |
 | `docs/` | | Server contracts, such as `docs/coordinates.md` |
 | `scripts/` | | Windows development helpers, a Linux software video-input probe, the `run-live.sh` / `run-tracked.sh` launchers, the `stack.py` one-command development stack, the `resolution_bench.py` per-resolution measurement and the `gst_fallbackswitch_probe.py` probe behind the GStreamer core's own slot selector |
@@ -28,20 +28,18 @@ it and streams it over WebRTC/SRT; it never controls the program. See
 | Path under `runtime/src/` | Responsibility |
 | --- | --- |
 | `input/software.rs` | FFmpeg/GStreamer MP4 acquisition and native input sequence assignment |
-| `input/ring.rs` | Frames from a capture process through the shared-memory input ring (`--tracked-scene`) |
 | `calibration/replay.rs` | Demo-local lens preparation and native-frame association across validated clip loops |
 | `calibration/lens.rs` | The renderer's lens of a wire lens, and the renderer's geometry checks (`CHECKS`) that `chr-tracker` validates tracked cameras with |
 | `program/description.rs`, `program/assets.rs` | Render descriptions: startup program, `description.load`, asset reading, verification and import |
 | `program/` | Synthetic/pitch/video scene assembly, admission, and the GPU rendering bridge |
-| `pipeline.rs` | Render loop: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
+| `pipeline.rs` | A generated program's render loop on its internal clock: output pacing, triangle commands, program scheduling and clean feed; holds no GPU |
 | `worker/` | The unixfd transport shared by both workers (`transport.rs`), the render worker protocol (`protocol.rs`), the worker side run by `chr-renderer-cli worker` (`serve.rs`) and its supervisor in `chr-server` (`supervisor.rs`) |
 | `worker/tracking/` | The tracking worker's supervisor in `chr-server` (`supervisor.rs`) and the VchaoFrame contract on GStreamer buffers: caps, meta and frames (`wire.rs`); `chr-tracking-sim-cli` (`tracking_sim_cli.rs`) is the replay stand-in worker's process over `chr_tracker::replay`. Pairing frames with cameras is `chr_tracker::join` |
-| `sdi.rs` | Simulated SDI output clock, bounded output queue, and the shared-memory program tap of transmitted slots |
-| `gst_core/` | `--pipeline gst` (#154, experimental): one GStreamer pipeline from `chr-sdi-in` (`input.rs`) through the capture bin (`capture.rs`, interlaced input deinterlaced for the workers), the CG driver over both workers (`driver.rs`) and the per-slot selector (`select.rs`, input-loss fill) to the simulated or DeckLink output (`decklink.rs`) and the program tap (`output.rs`); audio with the same delay (`audio.rs`); timecode and captions across the capture hop (`ancillary.rs`) |
+| `sdi.rs` | A generated program's simulated SDI output clock, bounded output queue and program tap of transmitted slots; the output status (`sdi.get_status`) of both paths |
+| `gst_core/` | The live path of every tracked program (#154): one GStreamer pipeline from `chr-sdi-in` (`input.rs`) through the capture bin (`capture.rs`, interlaced input deinterlaced for the workers), the CG driver over both workers (`driver.rs`) and the per-slot selector (`select.rs`, input-loss fill) to the simulated or DeckLink output (`decklink.rs`) and the program tap (`output.rs`); audio with the same delay (`audio.rs`); timecode and captions across the capture hop (`ancillary.rs`); its telemetry in `sdi.get_status.core` (`driver.rs`) |
 | `gstreamer_support.rs` | Private mode validation and pipeline-error handling for the software input |
 
-`chr-server` creates no GPU device. As decided in #94, its `chr-render` thread
-sends every frame to a supervised `chr-renderer-cli worker` process (#97), which
+`chr-server` creates no GPU device. As decided in #94, every frame goes to a supervised `chr-renderer-cli worker` process (#97), which
 calls the `chr-renderer` library; see [Render worker](#render-worker). #95 moved
 video monitoring out of `chr-server` into `chr-monitor`.
 
@@ -52,9 +50,10 @@ vchao's `pitch-analysis` runs as the tracking worker unchanged;
 estimates nothing: the existing replay loads local lens data at startup and
 associates it by native stream/frame identity.
 `program/video.rs` retains the demo-specific GLB and scene setup. The opt-in
-[tracked camera simulation](docs/sdi-simulation.md) receives `Ti`, `C` and a
-frame warp per frame from `chr-sdi-sim`; it is a simulation, not a production
-tracking service. Physical SDI adapters and a general public distortion protocol
+[tracked camera simulation](docs/sdi-simulation.md) plays a calibrated clip
+through `chr-sdi-in` and takes each frame's `Ti` from the tracking worker or,
+with `chr-sdi-in --send-cameras`, `Ti`, `C` and a frame warp per frame over
+`tracking.frame`; it is a simulation, not a production tracking service. Physical SDI adapters and a general public distortion protocol
 remain separate work; the initial frame contract is still pinhole-only.
 
 The default draws an RGB triangle using the same pipeline in a native window,
@@ -265,15 +264,18 @@ no scene occlusion, audio, physical SDI, hardware encoding or real-time estimato
 ### SDI capture and tracked camera simulation
 
 `server/scripts/run-tracked.sh --scene scene.json --video clip.mp4 --srt <ip:port>`
-replays the same manifest and clip as a tracked camera: `chr-sdi-sim` writes
-each frame into a shared-memory input ring and sends its `Ti`/`C`/frame warp as
-`tracking.frame`; `chr-server --tracked-scene` pairs them by capture sequence and
-renders through the worker to the SDI port, which `chr-monitor` streams. The
-simulator also sends the manifest's lens with each camera. See
-[SDI capture and tracked camera simulation](docs/sdi-simulation.md). With `--tracking-worker`
-the simulator is the camera only and chr-server's tracking worker supplies the
-cameras ([tracking worker](docs/tracking-worker.md)); `stack.py` uses that mode
-by default. The tracking worker's options are:
+replays the same manifest and clip as a tracked camera: `chr-sdi-in` plays the
+clip at its own rate into chr-server's GStreamer core as memfd frames over unixfd,
+and sends each frame's `Ti`/`C`/frame warp and the manifest's lens as
+`tracking.frame` (`--send-cameras`); `chr-server --tracked-scene` pairs them by
+`frame_id`, renders through the worker and sends every frame the program delay
+after its capture, with its CG or its clean feed, to the output, whose program
+tap `chr-monitor` streams. See
+[SDI capture and tracked camera simulation](docs/sdi-simulation.md) and
+[GStreamer core](docs/gst-core.md). With `--tracking-worker` chr-sdi-in is the
+camera only and chr-server's tracking worker supplies the cameras
+([tracking worker](docs/tracking-worker.md)); `stack.py` uses that mode by
+default. The tracking worker's options are:
 - `--tracking-cli <path>` and `--tracking-worker-arg <arg>`: the worker and its
   arguments. The default is the stand-in, which takes `--manifest <json>`.
 - `--tracking-centre <x> <y> <z>`: the station centre of every camera. The
@@ -286,8 +288,11 @@ by default. The tracking worker's options are:
   description's or manifest's lens is never applied; vchao's `Ti` maps to the
   distorted image and comes without a lens
   ([lens](docs/tracking-worker.md#lens)).
-- `--tracking-wait-ms <n>` (at most 1500): with a worker, also the constant
-  program delay.
+- `--program-delay-ms <n>` (above 4, at most 1500; default three frame
+  periods): the program delay D of every frame, with or without a worker.
+  It replaced `--tracking-wait-ms`, which now fails with a pointer to it.
+- `--input-loss`, `--output-rate`, `--output decklink`, `--no-audio`: the
+  core's output ([GStreamer core](docs/gst-core.md)).
 
 ### Render description
 
@@ -703,21 +708,25 @@ GStreamer `unixfdsink`/`unixfdsrc` sockets in a private 0700 directory,
 shutdown. Each message is one buffer whose `chr-worker-message` `GstCustomMeta`
 holds the JSON; the input image and the rendered UYVY frame are the buffers'
 memfd-backed memory, passed as file descriptors. A tracked program's input is
-the very memory the tracking worker received: chr-server copies each captured
-frame once. The worker's stderr (and stdout) is `chr-server`'s log. The worker
+the very memory `chr-sdi-in` captured into and the tracking worker received:
+nothing copies a captured frame. The worker's stderr (and stdout) is `chr-server`'s log. The worker
 installs the same program with the server's runtime ID, logs its adapter and
 rejects software adapters. The protocol is in
 [Live process implementation plan](../docs/live-process-implementation.md#step-4-worker-supervision-and-clean-feed-97)
 and the transport in [tracking worker](docs/tracking-worker.md#transport-and-startup).
 
-At most 4 requests are outstanding (credits); without a credit the frame is
-clean feed. The queue towards the worker never blocks the render loop, and a
+At most 4 requests are outstanding (credits). In a generated program a frame
+without a credit is clean feed; in the GStreamer core a joined frame waits for a
+credit until its slot is decided (a tracking worker answers in batches). The
+queue towards the worker never blocks the render loop or the core, and a
 stopped worker holds at most 4 input images and 4 UYVY frames. A killed worker's
 buffers are released when its sockets close, and its credits return.
 
-- `--render-deadline-ms <n>` (default: 3/4 of the frame period, leaving time
-  for the clean-feed conversion): a frame the worker has not finished by then,
-  or by the render loop's next frame boundary, is sent as **clean feed**; a late
+- `--render-deadline-ms <n>` (a generated program; default: 3/4 of the frame
+  period, leaving time for the clean-feed conversion): a frame the worker has
+  not finished by then, or by the render loop's next frame boundary, is sent as
+  **clean feed**; a tracked program's deadline is its slot's (the program
+  delay, [GStreamer core](docs/gst-core.md)); a late
   completion only returns its credit. A worker whose GPU device is lost exits
   and is replaced like a crash.
 - `--worker-hang-ms <n>` (default 2000): a worker whose oldest outstanding
@@ -858,6 +867,10 @@ actually holds, each with its purpose. A process whose executable was rebuilt
 since it started is marked `OLD BUILD`. The report then asks chr-server itself,
 over `<dir>/render.sock`, twice one second apart, for its health:
 - SDI output and repeat rates;
+- the GStreamer core: the program delay D, CG / clean / empty slots, late CG,
+  the CG ratio since start and over the last 10 s, the per-slot slack of CG
+  slots, the render budget at submit and the capture-to-output delay, input
+  loss and format-change slots (`sdi.get_status.core`, #131);
 - the render worker and the tracking worker states;
 - frames paired with a camera per second.
 
@@ -874,8 +887,8 @@ needs. With every component enabled the stack runs nine working processes:
 | render | `chr-server` | control WebSocket (`server_ws`), NativeSocket `<dir>/render.sock` |
 | render | `chr-renderer-cli worker` | none listed: two unixfd sockets with chr-server (frames, replies) in `$XDG_RUNTIME_DIR/chr/worker-<pid>/`, holds the GPU |
 | render | `chr-tracking-sim-cli` (or `tracking_cli`) | none listed: two unixfd sockets with chr-server in `$XDG_RUNTIME_DIR/chr/tracking-<pid>/`; VchaoFrame frames in and back with their `Ti` (`tracking = "worker"`) |
-| render | `chr-sdi-sim` | none: input ring (shared memory); with `tracking = "external"` also chr-server's socket |
-| render | `ffmpeg` | none: decodes the clip for the simulator |
+| render | `chr-sdi-in` | capture sockets `<dir>/capture.sock` and `<dir>/capture.sock.audio` (unixfd: memfd frames and audio to chr-server); with `tracking = "external"` also a client of chr-server's NativeSocket |
+| render | `ffmpeg` (two) | none: decode the clip's video and audio for chr-sdi-in |
 | render | `chr-monitor` | WebSocket (`monitor_ws`), SRT listener (`srt`, UDP), ICE-TCP from `webrtc_tcp` (only while a viewer is connected) |
 | srt-relay | `stack.py relay` | TCP `srt_relay_port`, plus one `ffmpeg` per connected player |
 | pitch-studio | Vite | `pitch_studio_port` |

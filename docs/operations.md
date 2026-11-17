@@ -23,7 +23,7 @@ For the processes and their channels see the diagrams in the root
 | `<checkout>/reference/` | Private reference material | Never stage, upload or embed it. |
 | `<asset-root>` (`asset_root`, chr-server `--asset-root`) | Everything chr-server reads at runtime: Fusion offline ZIPs, logo and flag images, GLB models and the studio data directory | Outside the repository. Every file a description names must be an absolute path inside it, otherwise `description.load` rejects it. |
 | `<asset-root>/studio` (`studio_data_dir`) | The studio store (layout below) | Inside the asset root, so uploaded files can be sent to the renderer. Back it up; do not edit it by hand while the studio runs. |
-| `dir` in `stack.toml` (default `$XDG_RUNTIME_DIR/chr-stack`) | chr-server's control socket `render.sock`, the camera input ring and the program tap | Kept between runs; a RAM-backed runtime directory is fine. |
+| `dir` in `stack.toml` (default `$XDG_RUNTIME_DIR/chr-stack`) | chr-server's control socket `render.sock`, chr-sdi-in's capture sockets `capture.sock` and `capture.sock.audio` (frames and audio as memfds) and the program tap | Kept between runs; a RAM-backed runtime directory is fine. |
 | `$XDG_RUNTIME_DIR/chr/` | chr-server's worker sockets (`worker-<pid>/` and `tracking-<pid>/`, two GStreamer unixfd sockets each) and its verified copies of loaded assets | Managed by chr-server and removed on shutdown; a later chr-server removes those of a killed one. |
 
 ### Studio store
@@ -72,9 +72,9 @@ Check every render host before it goes onsite:
 | Render GPU and driver | `nvidia-smi` | The intended GPU (the RTX 3090 on the development host) with a working driver |
 | Resizable BAR enabled (#146) | `sudo lspci -vv -s <gpu-bus-id> \| grep "BAR 1:"` and `grep EnableResizableBar /proc/driver/nvidia/params` | BAR 1 larger than 256MB, `EnableResizableBar: 1` |
 | GPU clocks under light load | `nvidia-smi -q -d CLOCK` while the stack runs | Not stuck at idle clocks; otherwise lock the minimum core clock, e.g. `sudo nvidia-smi -pm 1 && sudo nvidia-smi -i 0 -lgc 1500,2100` (`server/README.md`) |
-| Room for the rings | `df -h $XDG_RUNTIME_DIR` | More free space than the [Video size](#video-size) table needs |
+| Room for the frames | `df -h $XDG_RUNTIME_DIR` and `free -h` | More free space than the [Video size](#video-size) table needs |
 | SRT port reachable from viewers | `sudo ufw status` | The `srt` UDP port is allowed from the viewers' addresses |
-| DeckLink card and driver (`--pipeline gst` with a card, #154) | `lspci \| grep -i blackmagic`, `ls /dev/blackmagic/`, `lsmod \| grep blackmagic` | The card on the bus, its device nodes, and the `blackmagic`/`blackmagic_io` modules of Desktop Video loaded |
+| DeckLink card and driver (`chr-sdi-in --source decklink`, `chr-server --output decklink`, #154) | `lspci \| grep -i blackmagic`, `ls /dev/blackmagic/`, `lsmod \| grep blackmagic` | The card on the bus, its device nodes, and the `blackmagic`/`blackmagic_io` modules of Desktop Video loaded |
 | DeckLink API and firmware | `ls /usr/lib/libDeckLinkAPI.so` (or the distribution's path) and `BlackmagicFirmwareUpdater status` | Desktop Video's `libDeckLinkAPI.so` installed in the version the firmware needs |
 | GStreamer sees the card | `nix develop .#media -c gst-device-monitor-1.0 Video` | A `DeckLink` source and sink per device; without them chr fails with "no DeckLink device" |
 | Genlock reference | The card's reference input (Desktop Video Setup: "Reference": locked) | Black burst or tri-level from house sync, locked |
@@ -88,7 +88,7 @@ the input and the server with the card:
 
 ```sh
 chr-sdi-in --source decklink --device 0 --mode auto --connection sdi
-chr-server --pipeline gst --output decklink --device 1 --output-rate fixed:50i \
+chr-server --description <json> --output decklink --device 1 --output-rate fixed:50i \
   --input-loss black ...
 ```
 
@@ -130,11 +130,14 @@ Edit `output/stack/stack.toml`; the example documents every key.
 | `srt` | An interface address, to let players on the LAN receive SRT directly |
 | `server_ws`, `monitor_ws`, `webrtc_tcp`, ports | Free local ports; set a page or relay port to 0 to leave it out |
 | `size` | The camera's own size, such as `1920x1080`; see [Video size](#video-size) |
-| `tracking`, `tracking_cli`, `tracking_worker_args`, `tracking_centre`, `tracking_wait_ms` | The tracking worker; see [Tracking worker](#tracking-worker) |
+| `tracking`, `tracking_cli`, `tracking_worker_args`, `tracking_centre` | The tracking worker; see [Tracking worker](#tracking-worker) |
+| `program_delay_ms` | The program delay D: every frame leaves this long after its capture; see [Program delay and output](#program-delay-and-output) |
+| `input_loss`, `output_rate`, `audio` | What fills the output while the input is lost, the output's rate, and the clip's audio; see [Program delay and output](#program-delay-and-output) |
 
 An unknown key stops the script ("unknown keys"). This happens when a configuration
 from a newer checkout is used with an older `stack.py`: remove the key or update
-the checkout.
+the checkout. A renamed key is still read with a warning: `tracking_wait_ms` is
+now `program_delay_ms` (#154); rename it, since both together are refused.
 
 ### Video size
 
@@ -155,14 +158,15 @@ encoded with NVENC when the GPU offers it (`stack.py` runs it through nixGL), el
 with x264. The `render` log names the choice: `monitor preview 1920x1080 of
 1920x1080p30 with nvh264enc`.
 
-| Size | Camera input ring + program tap in `dir` | Each captured frame (RGBA) |
-| --- | --- | --- |
-| 1280x720 | about 44 MB | 3.7 MB |
-| 1920x1080 | about 100 MB | 8.3 MB |
-| 3840x2160 | about 400 MB | 33 MB |
+| Size | Program tap in `dir` | Each captured frame (RGBA memfd) | Frames in flight at D = 800 ms, 30 fps (RGBA + clean feed) |
+| --- | --- | --- | --- |
+| 1280x720 | about 15 MB | 3.7 MB | about 0.15 GB |
+| 1920x1080 | about 33 MB | 8.3 MB | about 0.3 GB |
+| 3840x2160 | about 133 MB | 33 MB | about 1.3 GB |
 
 `dir` usually lives in `$XDG_RUNTIME_DIR`, a RAM-backed file system of limited
-size (`df -h $XDG_RUNTIME_DIR`). 4K is accepted but not yet sustained at 30 fps
+size (`df -h $XDG_RUNTIME_DIR`); the captured frames are memfds, in RAM but not
+in `dir`. 4K is accepted but not yet sustained at 30 fps
 with the software camera simulation on the development host (see the
 measurements in
 [live process implementation](live-process-implementation.md#resolutions-and-performance)).
@@ -191,12 +195,10 @@ to its tracking worker and renders each frame with the `Ti` it returns
   and `tracking_lens_scale` (all three, plus an optional `tracking_lens_support`),
   else none (pinhole). The description's or manifest's lens is never applied.
   `tracking_lens = "pinhole"` ignores every lens, for debugging.
-- `tracking_wait_ms` is the **program delay**: every frame leaves exactly this
-  long after capture, and a frame whose camera is later is not rendered.
-  - The default, three frame periods, suits the stand-in.
-  - `pitch-analysis` may hold a frame up to its 500 ms overload threshold: set
-    about 800 ms. The maximum is 1500 ms.
-  - Every waiting frame holds 8 MiB of memory at 1080p (33 MB at 4K).
+- `program_delay_ms` sets how long the worker may take; see
+  [Program delay and output](#program-delay-and-output).
+- `tracking = "external"` runs no worker: `chr-sdi-in --send-cameras` sends the
+  manifest's recorded cameras as `tracking.frame` (testing only).
 
 `stack.py status` names the worker and its current stream, counts the
 returned poses (fresh, interpolated, reused, unavailable and overdue) and shows
@@ -206,6 +208,34 @@ worker)` for the stand-in, which sends its manifest's lens but not its
 per-frame warps. Frames
 without a camera, such as while the worker loads its model or restarts, go out
 as clean feed: the camera picture without CG, at the same delay.
+
+### Program delay and output
+
+chr-server runs every tracked program on its GStreamer core
+([GStreamer core](../server/docs/gst-core.md)): `chr-sdi-in` plays the clip
+(`video`) at its own rate, or captures a DeckLink card, and every frame leaves
+the program delay after its capture, with its CG if that was ready in time, else
+as its clean feed (the camera picture without CG). The output follows the
+input's rate.
+
+- `program_delay_ms` (D): the default, three frame periods, suits the stand-in.
+  `pitch-analysis` may hold a frame up to its 500 ms overload threshold: set
+  about 800 ms. Above 4 and at most 1500 ms. Every frame in flight holds its
+  picture in memory ([Video size](#video-size)).
+- `input_loss`: what the output shows while the input delivers nothing:
+  `"hold"` (the last frame, default), `"black"`, `"slate"` (colour bars) or
+  `"slate:/path/to.png"`. The first frame after a loss leaves at its own D.
+- `output_rate`: `"follow"` (default) or `"fixed:<rate>"` such as `"fixed:50"`;
+  a fixed rate repeats or drops input frames.
+- `audio`: `false` drops the clip's audio; by default it leaves with its frame's
+  delay.
+
+`stack.py status` shows the core: D, CG / clean-feed / empty slots, the CG ratio
+since start and over the last 10 s, the per-slot slack of the CG slots (how long
+before its deadline each frame's CG arrived; near 0 means D is too short), the
+render budget at submit and the capture-to-output delay, input-loss and
+format-change slots. It reports a `PROBLEM` when fewer than half the slots of
+the last 10 s had CG.
 
 ### Run with vchao tracking
 
@@ -235,7 +265,7 @@ vchao's `pitch-analysis` estimates every frame's `Ti` from a map of the venue
        "--overload-ms", "500", "--ledger", "<asset-root>/runs/{stream_id}.arrow",
    ]
    tracking_centre = [14.52857216404143, 60.620266710663365, -9.91514362632655]
-   tracking_wait_ms = 800
+   program_delay_ms = 800
    nixgl = true
    ```
 
@@ -264,8 +294,9 @@ uv run server/scripts/stack.py restart
 uv run server/scripts/stack.py restart pitch-studio monitor-page   # only these components
 ```
 
-The components are `render` (chr-server, both workers, the SDI capture simulator and
-chr-monitor), `srt-relay`, `pitch-studio` and `monitor-page`.
+The components are `render` (`chr-sdi-in`, the capture input playing the clip;
+chr-server with its GStreamer core and both workers; chr-monitor), `srt-relay`,
+`pitch-studio` and `monitor-page`.
 - **First start:** builds the release binaries and both pages. This takes minutes; later starts reuse the builds.
 - **Readiness:** `start` prints `ready: …` as each part comes up, and `PROBLEM: …` for whatever is still wrong.
 - **Logs:** in `output/stack/<component>.log`.
@@ -337,5 +368,9 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 | Many clean-feed frames or deadline misses after raising `size` | The render worker is slower than a frame at that size, or another process uses the GPU. Check `stack.py status`, stop other GPU processes, or use a smaller `size`. |
 | A benchmark or test stack is hundreds of times slower than expected | Another Vulkan process uses the same GPU while Resizable BAR is off (#146). Stop the other process or enable Resizable BAR ([host checklist](#host-checklist)). |
 | `render.log`: `with-cuda-driver.sh: no libcuda.so.1` or the estimator finds no CUDA device | `pitch-analysis` runs outside nixGL; keep `nixgl = true`, or on NixOS name `pitch-analysis` directly as `tracking_cli`. |
-| Many frames without camera, or the tracking worker restarts with "holds N frames" | The worker returns frames later than `tracking_wait_ms`. Raise `tracking_wait_ms` (at most 1500), or check the worker's log in `output/stack/render.log`. |
+| Many frames without camera, or the tracking worker restarts with "holds N frames" | The worker returns frames later than the program delay. Raise `program_delay_ms` (at most 1500), or check the worker's log in `output/stack/render.log`. |
+| Low CG ratio in `status`, slack near 0 | Frames come back from tracking or rendering just before their deadline: raise `program_delay_ms`, or look for a slow render worker (render budget) or another GPU process. |
+| `status`: input loss slots growing, `capture from … lost; reconnecting` in `render.log` | `chr-sdi-in` stopped or lost its signal; it is restarted by `run-tracked.sh`. Check its lines in `render.log` (a missing clip, FFmpeg errors). The output keeps its cadence meanwhile (`input_loss`). |
+| `stack.py` warns `tracking_wait_ms is now program_delay_ms` | Rename the key in `stack.toml`. |
+| `chr-server`: `--tracking-wait-ms was removed`, `--input-ring was removed` or `--pipeline was removed` | A launcher of an older version: use `--program-delay-ms`, and `chr-sdi-in` with `--capture-socket` (#154). |
 | `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |

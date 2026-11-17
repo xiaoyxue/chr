@@ -6,10 +6,12 @@ defaults below are the intended first version; each step's pull request updates
 this document if they change. Steps 1 (#99), 2 (#95), 3 (#96) and 4 (#97) are
 `implemented`; step 4 is verified on Linux only. #141 replaced step 4's worker
 rings and stdin/stdout lines with GStreamer unixfd sockets (worker protocol
-version 2).
+version 2). #154 moved every tracked program onto chr-server's GStreamer core
+and removed the capture input ring (phase 5): the program tap is the one
+`chr-shm` ring left.
 
 **Scope:** delivery order (tracked in #100), package changes, the worker protocol, the `chr-shm`
-ring layout (program tap and capture input ring), supervision and clean feed, the monitor process, and acceptance
+ring layout (the program tap; the capture input ring until #154), supervision and clean feed, the monitor process, and acceptance
 tests. Physical SDI (#80) and tracking results (#60) are excluded.
 
 **Depends on:** [Live process architecture](live-process-architecture.md),
@@ -209,8 +211,9 @@ stdout joins it, stdin is unused.
   starts the worker; the worker runs `appsrc ! unixfdsink` on `output.sock` and
   `unixfdsrc ! appsink` on `input.sock`; `chr-server` connects its
   `unixfdsrc ! appsink` to `output.sock` once it exists. Sinks wait for their
-  client (`wait-for-connection`), so `hello` and `ready` are not lost. In the
-  GStreamer core (`--pipeline gst`, #154) both directions are bins of the
+  client (`wait-for-connection`), so `hello` and `ready` are not lost (a
+  generated program's render worker). In the GStreamer core (every tracked
+  program, #154) both directions are bins of the
   core's pipeline, chr-server's sink does not wait and `hello` goes out once
   the worker has connected; frames are submitted without waiting and their
   completions offered to the per-slot selector
@@ -252,17 +255,18 @@ stdout joins it, stdin is unused.
   (explicit frame parts instead of an `Execution`), which keeps the compositor
   per shadow mode as the in-process bridge does. It reads the input image in
   place from the mapped payload and checks its size against `image`.
-- **Credits:** at most 4 requests are outstanding. Without a credit the frame is
-  clean feed (`NoCredit`); a credit returns with the request's `done` or
+- **Credits:** at most 4 requests are outstanding. In a generated program a
+  frame without a credit is clean feed (`NoCredit`); in the GStreamer core a
+  joined frame waits for a credit until its slot is decided. A credit returns with the request's `done` or
   `failed`, or when the worker is replaced. `chr-server`'s `appsrc` never
   blocks and its queue is bounded, so a stopped worker cannot grow
   `chr-server`'s memory: it holds at most 4 input images and 4 UYVY frames.
-- **One copy per captured frame:** a tracked program's frames are copied once,
-  from the capture input ring into shared memory; the tracking worker and the
-  render worker receive that same memory. The tracking worker returns it with
-  its pose; it holds at most `ceil((--tracking-wait-ms + 250 ms) × fps)` frames. Other programs' inputs (synthetic,
-  software video) are copied into shared memory when sent, as they were copied
-  into the input ring before. The UYVY result is copied once by the worker
+- **No copy of a captured frame:** `chr-sdi-in` writes each frame into a memfd
+  that the GStreamer core, the tracking worker and the render worker all map
+  (until #154 phase 5 chr-server copied it once, from the capture input ring).
+  The tracking worker returns it with its pose; it holds at most
+  `ceil((--program-delay-ms + 250 ms) × fps)` frames. Generated programs' inputs
+  (synthetic, software video) are copied into shared memory when sent. The UYVY result is copied once by the worker
   into shared memory and once by `chr-server` out of it.
 - Test-only: `CHR_WORKER_TEST_DELAY_MS` delays every worker reply by that many
   milliseconds. The worker inherits it from `chr-server`'s environment.
@@ -390,16 +394,17 @@ time per frame in `bench`.
 | --- | --- | --- | --- | --- |
 | RGBA8 input frame | 3.7 MB | 8.3 MB | 33 MB | 35 MB |
 | UYVY output frame | 1.8 MB | 4.1 MB | 17 MB | 18 MB |
-| Input ring + program tap (8 + 8 slots, in `dir`) | 44 MB | 100 MB | 398 MB | 425 MB |
-| Shared input frames in `chr-server`, about | 70 MB | 158 MB | 630 MB | 672 MB |
+| Program tap (8 slots, in `dir`) | 15 MB | 33 MB | 133 MB | 142 MB |
+| Captured frames in flight (memfds of `chr-sdi-in`, mapped by the core), at D = 3 periods, about | 70 MB | 158 MB | 630 MB | 672 MB |
 | Frame-resource pool budget (`64 * w * h`) | 59 MB | 133 MB | 531 MB | 566 MB |
 | Composition budget, GPU (`max(256 MiB, (3 * native + output) * 8)`) | 268 MB | 268 MB | 268 MB | 283 MB |
 
-The shared input frames are the capture backlog (the wait in frame periods plus
-two, at least four; five at the default 3-period wait), two ready frames, the
-four frames the render worker may hold and eight released memories kept for
-reuse (`RECYCLED`). Every one of these queues has a fixed length, so memory
-grows with the frame size only. The composition budget covers the native and
+The captured frames in flight are those within the program delay D (D × fps
+frames, each also with its UYVY clean feed until its slot is decided), the
+capture and hop queues (two frames each) and the four frames the render worker
+may hold; before #154 phase 5 they were the timer path's capture backlog and the
+capture ring (8 slots). Every one of these queues has a bounded length, so
+memory grows with the frame size and D only. The composition budget covers the native and
 output RGBA16Float canvases and a guard-banded ideal canvas of up to twice the
 native area; MSAA targets and shadow maps are outside it. Description assets
 keep their own limits (64 assets, 1 GiB, 256 MiB per file). A synthetic program's
@@ -408,8 +413,11 @@ tracked program no longer allocates it in both `chr-server` and the worker.
 
 ### Measurements
 
-Recorded on the RTX 3090 host (i9-10900X, 62 GiB RAM, 6.3 GB `$XDG_RUNTIME_DIR`)
-with nothing else on the GPU, using `server/scripts/resolution_bench.py`: the
+Recorded before #154 phase 5, on the timer-paced tracked path with `chr-sdi-sim`
+and the capture ring, on the RTX 3090 host (i9-10900X, 62 GiB RAM, 6.3 GB
+`$XDG_RUNTIME_DIR`) with nothing else on the GPU, using
+`server/scripts/resolution_bench.py` (which now runs the GStreamer core with
+`chr-sdi-in`): the
 synthetic camera is a testsrc2 clip with a fixed top-down camera, four image
 quads, 4x MSAA and a radial lens; "onsite" is the onsite description with the
 recorded 1080p clip. Every run used the tracking worker and `chr-monitor

@@ -9,6 +9,14 @@ The separate [owner-local pitch demo](pitch-demo.md) uses this same program
 chain with explicit local camera/model registration and a named five-light
 configuration; it does not change `synthetic-program-v1` limits.
 
+These are **generated programs**: they have no capture input to follow, so
+they run on chr-server's internal clock, the render loop and the simulated SDI
+port described here, with the program tap written by that port. A tracked
+program (`--tracked-scene`, `--description`) runs on the
+[GStreamer core](gst-core.md) instead (#154), whose output is timed by the
+pipeline clock and the input's frames; `sdi.get_status` reports both, the core
+with its `core` telemetry.
+
 From the repository root (`cargo run` builds only `chr-server`; the package
 build also produces its render worker, `chr-renderer-cli`):
 
