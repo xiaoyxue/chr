@@ -302,21 +302,23 @@ vchao tool at `f209fc9` and its state: **implemented** (a CLI exists),
 
 **Input.** A sweep video of one station that pans, tilts and zooms over the
 whole pitch with a fixed optical centre; the standard pitch model
-$\mathcal{M}(L, W)$ (top view in pitch metres: lines, circles and goals with
-fixed standard dimensions, default $L = 105$, $W = 68$); a declared lens model
-$\psi$.
+$\mathcal{M}(L, W)$ (top view in pitch metres: lines, circles and goals; $L$ and $W$ are free,
+default $L = 105$, $W = 68$, while local markings and goals keep fixed standard
+dimensions); optionally a declared lens model $\psi$.
 
 **Output.** The V/Q map ③ $\big(\lbrace (q_k, d_k) \rbrace, \lbrace V_i \rbrace, T_{\mathrm{ref}}\big)$,
-the optical centre $C$ and the lens $\psi$; optionally $L$, $W$, $K_i$, $R_i$.
+and the optical centre $C$; optionally $L$, $W$, $K_i$, $R_i$ and $\psi$.
 
 **Step O1 (frames of one station).** Split the video into shots and keep the
 frames $F$ of one station (Definition 2); mask screen overlays.
 `tracklet-shot`, `ui-mask` — implemented. The common-centre assumption is
 declared by the caller, not verified.
 
-**Step O2 (undistorted coordinates).** Map native pixels $\tilde u$ to
-undistorted SNC, $p = \psi^{-1}\left(\varphi(\Lambda_i \tilde u)\right)$, so that
-Proposition 3 applies.
+**Step O2 (lens).** Proposition 3 holds exactly only in undistorted SNC. With a
+declared $\psi$, map native pixels $\tilde u$ to
+$p = \psi^{-1}\left(\varphi(\Lambda_i \tilde u)\right)$ first. vchao's current map
+and estimator skip this step and work on native (distorted) pixels, treating
+distortion as negligible. No vchao tool — research.
 
 **Step O3 (texture correspondences).** Match static texture (stands, boards,
 turf, lines); players, the ball and overlays are outliers. Adjacent frames:
@@ -357,8 +359,8 @@ points, lines and conics with known model IDs (`pitch-detect-*`, planned).
 (`fit-anchor-camera`, planned) and set $T_{\mathrm{ref}} = V_a^{-1} T_a$
 (Proposition 5). Then refine with every frame, $V_i$ fixed
 (`calibrate-shot-from-g`, planned). A model line $\ell$ maps to the image line
-$T_i^{-\top} \ell$, so with observed line points $p \in \mathcal{O}_{i,\ell}$
-(homogeneous, undistorted SNC) in frame $i$:
+$T_i^{-\top} \ell$, so with observed line points $p = (x, y, 1)^\top \in \mathcal{O}_{i,\ell}$
+in frame $i$:
 
 $$
 \left( \hat T_{\mathrm{ref}}, \hat L, \hat W \right) = \operatorname*{arg\,min}_{T_{\mathrm{ref}},\, L,\, W}\ \sum_i \sum_{\ell \in \mathcal{M}(L, W)} \sum_{p \in \mathcal{O}_{i,\ell}} \rho\left( \frac{\left| \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)^\top p \right|}{\left\lVert \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)_{1:2} \right\rVert} \right).
@@ -386,12 +388,12 @@ score RGB reprojection (`h-graph-eval-rgb-reproject`) and track consistency
 
 **Step O12 (export).** Write the V/Q map (`landmarks`, `observations`, `views`
 and a manifest holding the anchor and $T_{\mathrm{ref}}$; see
-`atlas-vq-estimate/README.md`), together with $\hat C$ and $\psi$.
+`atlas-vq-estimate/README.md`), together with $\hat C$. Research; there is no
+exporting CLI at `f209fc9`, and `atlas-vq-estimate` only loads the map.
 
 ### Online algorithm: one frame at a time
 
-**Input.** The V/Q map, $C$, $\psi$, and live frames $f$ with source times
-$t_f$. **Output.** For every frame, in order: $T_f$ and a status
+**Input.** The V/Q map, $C$, and live frames $f$ with source times $t_f$. **Output.** For every frame, in order: $T_f$ and a status
 `fresh`, `interpolated`, `reused` or `unavailable`.
 
 **Step I1 (scheduling).** `pitch-analysis` estimates scheduled targets on an
@@ -443,15 +445,19 @@ with $\log$ the principal real logarithm. Without a bracket, reuse the latest
 valid $T$ (`reused`), or report none (`unavailable`; never the identity).
 Implemented (`pitch-analysis`, from `pitch-live`).
 
-**Step I9 (rendering in chr).** chr receives $T_f$ in the VchaoFrame metadata
-and renders a world point $X$ at
+**Step I9 (rendering in chr).** chr receives $T_f$ in the VchaoFrame metadata.
+Because I2 to I5 fit the real (distorted) native pixels, $T_f$ already maps to
+the real image, and chr renders a world point $X$ pinhole at
 
 $$
-p = \psi\left( \varphi\left( T_f\, G_0(C)^{-1} (X - C) \right) \right)
+p = \varphi\left( T_f\, G_0(C)^{-1} (X - C) \right)
 $$
 
 (Proposition 2), composited before the program deadline
-(`server/docs/tracking-worker.md`, `server/docs/gst-core.md`).
+(`server/docs/tracking-worker.md`, `server/docs/gst-core.md`). A lens $\psi$,
+$p = \psi\left(\varphi(\cdots)\right)$, applies only when the producer's $T$
+maps to the undistorted image and a lens is supplied (chr's `lens` and
+`frame_warp`, or a CLI lens).
 
 ## Summary
 

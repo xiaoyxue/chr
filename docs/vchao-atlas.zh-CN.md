@@ -270,17 +270,18 @@ $$
 ### 离线算法：建图
 
 **输入。** 同一机位的一段扫场视频：光心固定，通过摇、俯仰、变焦覆盖全场；标准球场模型
-$\mathcal{M}(L, W)$（以球场米为单位的俯视图：场线、圆和球门，局部尺寸固定，默认
-$L = 105$，$W = 68$）；声明的镜头模型 $\psi$。
+$\mathcal{M}(L, W)$（以球场米为单位的俯视图：场线、圆和球门；$L$、$W$ 可调，默认
+$L = 105$，$W = 68$，场线局部和球门保持固定的标准尺寸）；可选的已声明镜头模型 $\psi$。
 
 **输出。** V/Q map ③ $\big(\lbrace (q_k, d_k) \rbrace, \lbrace V_i \rbrace, T_{\mathrm{ref}}\big)$、
-光心 $C$ 和镜头 $\psi$；可选输出 $L$、$W$、$K_i$、$R_i$。
+以及光心 $C$；可选输出 $L$、$W$、$K_i$、$R_i$ 和 $\psi$。
 
 **步骤 O1（同一机位的帧）。** 把视频切成镜头，保留同一机位的帧 $F$（定义 2），并遮掉屏幕叠加图文。
 `tracklet-shot`、`ui-mask` — 已实现。光心相同是调用方声明的假设，不做验证。
 
-**步骤 O2（去畸变坐标）。** 把原生像素 $\tilde u$ 映为去畸变的 SNC，
-$p = \psi^{-1}\left(\varphi(\Lambda_i \tilde u)\right)$，使命题 3 成立。
+**步骤 O2（镜头）。** 命题 3 只在去畸变的 SNC 中严格成立。若声明了 $\psi$，先把原生像素 $\tilde u$
+映为 $p = \psi^{-1}\left(\varphi(\Lambda_i \tilde u)\right)$。vchao 目前的 map 和估计器跳过这一步，
+直接在原生（带畸变）像素上工作，视畸变为可忽略。没有 vchao 工具 — 研究。
 
 **步骤 O3（纹理对应）。** 匹配静止的纹理（看台、广告牌、草皮、场线）；球员、球和叠加图文是外点。
 相邻帧：ALIKED N16ROT 加 LightGlue 和 SEA-RAFT 光流（`frame-track`，已实现）。
@@ -313,7 +314,7 @@ $$
 **步骤 O8（锚定球场）。** 用一帧 $a$ 对模型拟合（`fit-anchor-camera`，规划），令
 $T_{\mathrm{ref}} = V_a^{-1} T_a$（命题 5）。再固定 $V_i$，用所有帧精化（`calibrate-shot-from-g`，规划）。
 模型直线 $\ell$ 映为图像直线 $T_i^{-\top} \ell$，因此对第 $i$ 帧中观测到的线点
-$p \in \mathcal{O}_{i,\ell}$（齐次、去畸变的 SNC）：
+$p = (x, y, 1)^\top \in \mathcal{O}_{i,\ell}$：
 
 $$
 \left( \hat T_{\mathrm{ref}}, \hat L, \hat W \right) = \operatorname*{arg\,min}_{T_{\mathrm{ref}},\, L,\, W}\ \sum_i \sum_{\ell \in \mathcal{M}(L, W)} \sum_{p \in \mathcal{O}_{i,\ell}} \rho\left( \frac{\left| \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)^\top p \right|}{\left\lVert \left( (V_i T_{\mathrm{ref}})^{-\top} \ell \right)_{1:2} \right\rVert} \right).
@@ -335,11 +336,12 @@ $K_i$ 和 $R_i$（命题 6），进而生成正式 Atlas ①（`make-canonical-a
 （`h-graph-eval-rgb-reproject`）和轨迹一致性（`eval-track-consistency`）— 已实现。
 
 **步骤 O12（导出）。** 写出 V/Q map（`landmarks`、`observations`、`views` 三张表，以及记录锚点和
-$T_{\mathrm{ref}}$ 的 manifest，见 `atlas-vq-estimate/README.md`），连同 $\hat C$ 和 $\psi$。
+$T_{\mathrm{ref}}$ 的 manifest，见 `atlas-vq-estimate/README.md`），连同 $\hat C$。研究；`f209fc9` 中没有导出用的 CLI，
+`atlas-vq-estimate` 只负责读取 map。
 
 ### 在线算法：逐帧
 
-**输入。** V/Q map、$C$、$\psi$，以及带源时间 $t_f$ 的实时帧 $f$。
+**输入。** V/Q map、$C$，以及带源时间 $t_f$ 的实时帧 $f$。
 **输出。** 按顺序为每一帧给出 $T_f$ 和状态 `fresh`、`interpolated`、`reused` 或 `unavailable`。
 
 **步骤 I1（调度）。** `pitch-analysis` 在 $N = 8$、$S = 4$ 的网格上对计划的目标帧做估计
@@ -382,13 +384,16 @@ $$
 其中 $\log$ 为主实对数。没有前后端点时，沿用最近一次有效的 $T$（`reused`），或报告无（`unavailable`；
 绝不用单位矩阵代替）。已实现（`pitch-analysis`，来自 `pitch-live`）。
 
-**步骤 I9（chr 渲染）。** chr 从 VchaoFrame 元数据收到 $T_f$，把世界点 $X$ 渲染在
+**步骤 I9（chr 渲染）。** chr 从 VchaoFrame 元数据收到 $T_f$。由于 I2 到 I5 拟合的是真实（带畸变）
+的原生像素，$T_f$ 已经直接对应真实画面，chr 按针孔把世界点 $X$ 渲染在
 
 $$
-p = \psi\left( \varphi\left( T_f\, G_0(C)^{-1} (X - C) \right) \right)
+p = \varphi\left( T_f\, G_0(C)^{-1} (X - C) \right)
 $$
 
 处（命题 2），并在节目截止时间前合成（`server/docs/tracking-worker.md`、`server/docs/gst-core.md`）。
+只有当生产方的 $T$ 对应去畸变画面并提供了镜头时，才使用 $p = \psi\left(\varphi(\cdots)\right)$
+（chr 的 `lens` 和 `frame_warp`，或 CLI 指定的镜头）。
 
 ## 总结
 
