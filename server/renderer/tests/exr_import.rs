@@ -349,6 +349,7 @@ fn replacement_keeps_old_scene_snapshot_and_failed_import_is_not_published() {
                 gain: 1.0,
                 rotation: 0.0,
                 visible: false,
+                max_radiance: None,
             }),
         )
         .unwrap()

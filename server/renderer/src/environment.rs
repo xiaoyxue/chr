@@ -52,6 +52,7 @@ struct BakeUniform {
 
 struct CachedEnvironment {
     source: Arc<EnvironmentMap>,
+    max_radiance: Option<f32>,
     resolution: u32,
     samples: u32,
     scale: f32,
@@ -242,10 +243,16 @@ impl EnvironmentGpu {
             }
             if self.cache.as_ref().is_none_or(|cache| {
                 !Arc::ptr_eq(&cache.source, &sky.environment)
+                    || cache.max_radiance != sky.max_radiance
                     || cache.resolution != settings.resolution
                     || cache.samples != settings.samples
             }) {
-                self.rebuild(gpu, Arc::clone(&sky.environment), settings);
+                self.rebuild(
+                    gpu,
+                    Arc::clone(&sky.environment),
+                    sky.max_radiance,
+                    settings,
+                );
                 changed = true;
                 self.preprocessed = true;
             }
@@ -290,17 +297,27 @@ impl EnvironmentGpu {
         Ok(changed)
     }
 
-    fn rebuild(&mut self, gpu: &Gpu, source: Arc<EnvironmentMap>, settings: EnvironmentSettings) {
+    fn rebuild(
+        &mut self,
+        gpu: &Gpu,
+        source: Arc<EnvironmentMap>,
+        max_radiance: Option<f32>,
+        settings: EnvironmentSettings,
+    ) {
+        let cap = max_radiance.unwrap_or(f32::INFINITY);
         let scale = source
             .pixels()
             .iter()
             .flatten()
-            .copied()
+            .map(|v| v.min(cap))
             .fold(1.0_f32, f32::max);
         let pixels: Vec<[f32; 4]> = source
             .pixels()
             .iter()
-            .map(|p| [p[0] / scale, p[1] / scale, p[2] / scale, 1.0])
+            .map(|p| {
+                let [r, g, b] = p.map(|v| v.min(cap) / scale);
+                [r, g, b, 1.0]
+            })
             .collect();
         let extent = source.extent();
         let input = texture(
@@ -356,8 +373,9 @@ impl EnvironmentGpu {
         }
         gpu.queue.submit([encoder.finish()]);
         self.cache = Some(CachedEnvironment {
-            sh: diffuse_sh(&source, scale),
+            sh: diffuse_sh(&source, cap, scale),
             source,
+            max_radiance,
             resolution: settings.resolution,
             samples: settings.samples,
             scale,
@@ -456,7 +474,7 @@ fn texture(
 }
 
 // Integrate each lat-long pixel's SH basis exactly; even a 1x1 constant map stays isotropic.
-fn diffuse_sh(source: &EnvironmentMap, scale: f32) -> [[f32; 4]; 9] {
+fn diffuse_sh(source: &EnvironmentMap, cap: f32, scale: f32) -> [[f32; 4]; 9] {
     use std::f64::consts::PI;
     let width = source.extent().width() as usize;
     let height = source.extent().height() as usize;
@@ -498,7 +516,7 @@ fn diffuse_sh(source: &EnvironmentMap, scale: f32) -> [[f32; 4]; 9] {
                 for (channel, radiance) in
                     coefficient.iter_mut().zip(source.pixels()[y * width + x])
                 {
-                    *channel += value * f64::from(radiance) / f64::from(scale);
+                    *channel += value * f64::from(radiance.min(cap)) / f64::from(scale);
                 }
             }
         }
@@ -535,7 +553,7 @@ mod tests {
                 vec![[4.0, 2.0, 1.0]; (width * height) as usize],
             )
             .unwrap();
-            let sh = diffuse_sh(&source, 4.0);
+            let sh = diffuse_sh(&source, f32::INFINITY, 4.0);
             for (value, expected) in sh[0][..3].iter().zip([4.0, 2.0, 1.0]) {
                 assert!((value * 0.2820948 * 4.0 - expected).abs() < 1e-5);
             }

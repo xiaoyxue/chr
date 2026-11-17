@@ -199,7 +199,11 @@ object!(Environment {
     asset_ref: Id,
     gain: Finite,
     rotation: Finite,
-    visible: bool
+    visible: bool,
+    /// Largest radiance taken from the panorama, linear RGB W/(m^2 sr) before
+    /// `gain`; brighter texels are clamped. Absent means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_radiance: Option<Finite>,
 });
 object!(Lighting {
     lights: Vec<Light>,

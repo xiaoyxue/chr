@@ -278,6 +278,7 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
             gain: 2.0,
             rotation: 0.5,
             visible: false,
+            max_radiance: None,
         }),
     )
     .unwrap();
@@ -293,6 +294,20 @@ fn lighting_is_validated_and_owned_by_each_snapshot() {
     assert!(!old.lighting().sky().unwrap().visible);
     assert!(scene.snapshot().lighting().lights().is_empty());
     assert!(scene.snapshot().lighting().sky().is_none());
+    let sky = old.lighting().sky().unwrap();
+    for cap in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        let capped = SkyLight {
+            max_radiance: Some(cap),
+            ..sky.clone()
+        };
+        assert!(
+            matches!(
+                Lighting::new(Vec::new(), Some(capped)),
+                Err(SceneError::InvalidLighting)
+            ),
+            "max_radiance {cap}"
+        );
+    }
     for light in [
         Light::Directional {
             direction: [0.0; 3],

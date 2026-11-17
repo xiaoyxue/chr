@@ -85,6 +85,7 @@ fn sky(
                     rotation,
                     gain,
                     visible,
+                    max_radiance: None,
                 }),
             )
             .unwrap(),
@@ -435,6 +436,7 @@ fn punctual_shadows_do_not_multiply_unoccluded_ibl() {
                     gain: 1.0,
                     rotation: 0.0,
                     visible: false,
+                    max_radiance: None,
                 }),
             )
             .unwrap(),
@@ -551,6 +553,7 @@ fn constant_fill_shades_like_a_uniform_environment_and_adds_to_one() {
             rotation: 0.0,
             gain: 0.25,
             visible: false,
+            max_radiance: None,
         };
         constant(&mut scene, Some(half), [1.0, 0.5, 0.25]);
         let added = rgb(
@@ -572,4 +575,89 @@ fn constant_fill_shades_like_a_uniform_environment_and_adds_to_one() {
             "{environment:?} is lit"
         );
     }
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn max_radiance_clamps_the_panorama_before_prefiltering() {
+    let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
+    assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let extent = ImageExtent::new(64, 64).unwrap();
+    let camera = Camera::look_at(
+        extent,
+        [0.0, 0.0, -3.0],
+        [0.0; 3],
+        [0.0, -1.0, 0.0],
+        1.0,
+        0.1,
+        20.0,
+    )
+    .unwrap();
+    let (mut scene, _) = plane(PbrMaterial {
+        roughness: 1.0,
+        ..Default::default()
+    });
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    // What a cap of 1 must leave of the panorama below.
+    let reference = Arc::new(
+        EnvironmentMap::new(
+            ImageExtent::new(2, 1).unwrap(),
+            vec![[1.0, 0.5, 0.25], [1.0, 1.0, 1.0]],
+        )
+        .unwrap(),
+    );
+    sky(&mut scene, &reference, 0.0, 1.0, false);
+    let expected = rgb(
+        &render(&gpu, &mut renderer, &scene, &camera, 1.0),
+        extent,
+        32,
+        32,
+    );
+    // A "sun" texel a thousand times brighter, capped back to the rest of the sky.
+    let sunny = Arc::new(
+        EnvironmentMap::new(
+            ImageExtent::new(2, 1).unwrap(),
+            vec![[1.0, 0.5, 0.25], [1000.0, 1000.0, 1000.0]],
+        )
+        .unwrap(),
+    );
+    let capped = |cap| {
+        Lighting::new(
+            Vec::new(),
+            Some(SkyLight {
+                environment: Arc::clone(&sunny),
+                rotation: 0.0,
+                gain: 1.0,
+                visible: false,
+                max_radiance: cap,
+            }),
+        )
+        .unwrap()
+    };
+    scene.set_lighting(capped(None)).unwrap();
+    let bright = rgb(
+        &render(&gpu, &mut renderer, &scene, &camera, 1.0),
+        extent,
+        32,
+        32,
+    );
+    scene.set_lighting(capped(Some(1.0))).unwrap();
+    let clamped = render(&gpu, &mut renderer, &scene, &camera, 1.0);
+    assert!(
+        renderer.environment_preprocessed_last_prepare(),
+        "a new cap prefilters again"
+    );
+    let clamped = rgb(&clamped, extent, 32, 32);
+    assert!(bright[0] > expected[0] + 40, "{bright:?} carries the sun");
+    for (a, e) in clamped.into_iter().zip(expected) {
+        assert!(
+            a.abs_diff(e) <= 1,
+            "capped {clamped:?} vs clamped reference {expected:?}"
+        );
+    }
+    render(&gpu, &mut renderer, &scene, &camera, 1.0);
+    assert!(
+        !renderer.environment_preprocessed_last_prepare(),
+        "the same cap is cached"
+    );
 }

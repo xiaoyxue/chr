@@ -230,6 +230,17 @@ impl Registrations {
                     gain: f(sky.gain)?,
                     rotation: sky.rotation.get(),
                     visible: sky.visible,
+                    max_radiance: sky
+                        .max_radiance
+                        .map(|cap| {
+                            if cap.get() <= 0.0 {
+                                return Err(incompatible(
+                                    "environment max_radiance must be positive",
+                                ));
+                            }
+                            f(cap)
+                        })
+                        .transpose()?,
                 })
             })
             .transpose()?;

@@ -136,6 +136,7 @@ fn lights(variant: u32) -> Lighting {
             gain,
             rotation: 0.3,
             visible: true,
+            max_radiance: None,
         }),
     )
     .unwrap()

@@ -93,7 +93,8 @@ All lights inherit the scene's `shadow_mode` unless they set their own.
     {"light_id": "lamp", "kind": "point", "position": [0, 30, -12],
      "intensity": [800, 800, 800], "source_radius": 0.3, "shadow_mode": "off"}
   ],
-  "environment": {"asset_ref": "IBL-orlando", "gain": 0.5, "rotation": 0.0, "visible": false},
+  "environment": {"asset_ref": "IBL-orlando", "gain": 0.5, "rotation": 0.0, "visible": false,
+                  "max_radiance": 50},
   "constant": [0.1, 0.1, 0.1]
 }
 ```
@@ -102,8 +103,11 @@ All lights inherit the scene's `shadow_mode` unless they set their own.
   description. `gain` scales its radiance, `rotation` turns it about the up axis.
   Keep `visible: false`: the program composites CG over the camera's picture, so a
   drawn sky would cover it. Image-based light is unoccluded (no shadows); keep the
-  sun a `directional` light, which casts them, and prefer panoramas without it, or
-  lower `gain`, to avoid lighting twice. A server prefilters each panorama once on
+  sun a `directional` light, which casts them. `max_radiance` (optional, before
+  `gain`) clamps brighter panorama texels: set it when the panorama holds a sun
+  that a directional light already carries, which would otherwise light shadows a
+  second time and sparkle on glossy, finely bumped surfaces (#177). A server
+  prefilters each panorama once per cap on
   the GPU (256 x 128 x 6 roughness layers, 64 samples); a source plus its layers may
   take up to 256 MiB of GPU memory, enough for 4096 x 2048.
 - **Constant fill:** `constant` is a uniform radiance from every direction, added

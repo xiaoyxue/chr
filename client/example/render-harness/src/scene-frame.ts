@@ -133,7 +133,10 @@ const light = union(
 );
 const lightingFields = {
   lights: refine(array(light), values => unique(values, value => value.light_id)),
-  environment: nullable(object({ asset_ref: id, gain: finite, rotation: finite, visible: bool })),
+  environment: nullable(union(
+    object({ asset_ref: id, gain: finite, rotation: finite, visible: bool }),
+    object({ asset_ref: id, gain: finite, rotation: finite, visible: bool, max_radiance: finite }),
+  )),
 };
 // `constant` (uniform fill radiance, linear RGB W/(m^2 sr)) is omitted when absent.
 const lighting = union(object(lightingFields), object({ ...lightingFields, constant: vec3 }));
