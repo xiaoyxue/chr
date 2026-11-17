@@ -198,8 +198,9 @@ impl Tracker {
     }
 
     /// [`Self::track`] for a frame already in fd-backed memory, such as a frame
-    /// that the GStreamer core received from its capture process.
-    pub fn track_memory(&mut self, sequence: u64, rgba: gstreamer::Memory) {
+    /// that the GStreamer core received from its capture process. Returns
+    /// whether the frame was sent: a frame that was not gets no answer.
+    pub fn track_memory(&mut self, sequence: u64, rgba: gstreamer::Memory) -> bool {
         self.maintain();
         let sent = match &mut self.state {
             State::Ready {
@@ -208,12 +209,16 @@ impl Tracker {
             _ => Err(None),
         };
         match sent {
-            Ok(()) => self.status().requests += 1,
+            Ok(()) => {
+                self.status().requests += 1;
+                true
+            }
             Err(failure) => {
                 self.status().not_sent += 1;
                 if let Some(reason) = failure {
                     self.reap(reason);
                 }
+                false
             }
         }
     }

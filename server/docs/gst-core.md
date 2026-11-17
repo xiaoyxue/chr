@@ -79,6 +79,15 @@ only when no frame came at all (input loss).
   if it has arrived, else the clean feed of the same frame. Every frame's slot
   is decided, in capture order; a rendered frame that comes later is dropped
   (`late CG`), never shown in another slot.
+- **Waiting for the camera.** Frames go to the render worker in capture
+  order, each as soon as its camera is in. A frame whose camera cannot come
+  any more is given up at once (clean feed): its answer had none (an
+  `unavailable` pose) or it was never sent to the tracking worker (not ready,
+  restarting, at its in-flight limit). Only a frame whose answer is still due
+  waits, at most until its slot is decided; the worker answers in order, so
+  no later camera is in yet. Every rendered frame therefore gets the whole
+  budget left after tracking (about D − 4 ms − the tracking latency), also
+  the first one after a tracking dropout or restart.
 - **Output.** Program frames carry their due time as PTS (the `appsrc` reports
   no latency), `livesync` emits each one when due, and the output sink takes it
   on the clock (`processing-deadline` 0, so the pipeline adds no latency). The
@@ -151,8 +160,10 @@ target/linux/release/chr-server --pipeline gst --description <description.json> 
 Both default to `$XDG_RUNTIME_DIR/chr/capture.sock` (`--socket`,
 `--capture-socket`). chr-server logs the output every 10 s: slots, CG,
 clean feed, repeats, skipped frames, interval and capture-to-output delay
-(min/mean/max and standard deviation), the tap's slot − frame, and the
-selector's decisions. `chr-monitor` reads the program tap unchanged;
+(min/mean/max and standard deviation), the tap's slot − frame, the
+selector's decisions, the frames joined with a camera and given up without
+one, and the render budget: the time left until each rendered frame's slot is
+decided when it was submitted. `chr-monitor` reads the program tap unchanged;
 `cargo run --release -p chr-shm --example tap_stats -- <tap> <s> <fps>` reports
 the same cadence for either pipeline from the tap.
 `CHR_WORKER_TEST_SOLID=<luma>` makes `chr-renderer-cli worker` answer with solid
@@ -195,6 +206,17 @@ for both pipelines.
   worker's replacement was relinked; no repeat, no skipped frame. A stopped
   render worker costs the 2 s hang limit (`--worker-hang-ms`) plus its restart;
   the GPU worker's restart adds Vulkan initialization (28 vs 13 slots).
+- **Tracking dropouts** (a later fix, 60 s runs at 50 fps, render worker
+  answering after 15 ms): before it, a frame without a camera held back the
+  frames behind it until its own deadline, so the first rendered frame after
+  it got about one period of budget and the burst behind it ran out of render
+  credits. With every 25th frame `unavailable` (`--unavailable-every 25`) the
+  tap showed 211 slots without CG of 2500 instead of the 100 unavailable
+  frames, and the minimum render budget was 17.4 ms; now it shows exactly 100
+  and the budget stays 90.9–95.3 ms. After `kill -9` and `SIGSTOP` of the
+  tracking worker the first frame of the new worker got 18.9 and 19.2 ms
+  (one extra clean slot each); now it gets 92.4 and 92.2 ms, and the clean
+  slots are exactly the 13 and 32 frames without a camera.
 - **The real render worker** composited 1080p50 within the 100 ms delay with
   the live stack on the same GPU (4411 CG slots, 1 late); #146's slow uploads
   did not show in these runs.

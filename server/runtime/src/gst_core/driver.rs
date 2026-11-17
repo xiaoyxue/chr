@@ -17,7 +17,7 @@ use chr_tracker::{
 use gstreamer as gst;
 use serde_json::json;
 
-use super::{Core, Error, capture::Captured};
+use super::{Core, Error, capture::Captured, output::Summary};
 use crate::{
     program::synthetic::{Synthetic, id},
     retained::SceneControl,
@@ -117,6 +117,9 @@ pub struct Driver<'a> {
     /// Render requests in flight: their frame's sequence and capture time.
     rendering: HashMap<u64, (u64, gst::ClockTime)>,
     unrendered: Unrendered,
+    /// Time left until each rendered frame's slot is decided, when it was
+    /// submitted: the render's budget, since the last report.
+    budget: Summary,
 }
 
 impl<'a> Driver<'a> {
@@ -139,6 +142,7 @@ impl<'a> Driver<'a> {
             program,
             rendering: HashMap::new(),
             unrendered: Unrendered::default(),
+            budget: Summary::default(),
         }
     }
 
@@ -154,14 +158,27 @@ impl<'a> Driver<'a> {
             tokio::select! {
                 frame = frames.recv() => self.captured(frame.ok_or("the capture channel closed")?),
                 _ = tick.tick() => {}
-                _ = report.tick() => log::info!("{}; driver: {:?}", self.core.report(), self.unrendered),
+                _ = report.tick() => {
+                    let budget = std::mem::take(&mut self.budget);
+                    let tracking = self.feed.status();
+                    log::info!(
+                        "{}; tracking: {} joined, {} without a camera; render budget at submit {} over {} frames; not rendered: {:?}",
+                        self.core.report(),
+                        tracking.frames_joined,
+                        tracking.frames_clean_feed,
+                        budget.ms(),
+                        budget.count,
+                        self.unrendered
+                    );
+                }
             }
             self.step().await?;
         }
     }
 
     fn captured(&mut self, frame: Captured) {
-        self.tracker
+        let sent = self
+            .tracker
             .track_memory(frame.sequence, frame.memory.clone());
         let deadline = self
             .core
@@ -175,6 +192,10 @@ impl<'a> Driver<'a> {
             },
             deadline,
         );
+        if !sent {
+            // No answer will come: it must not hold back the frames after it.
+            self.join.without_camera(frame.sequence);
+        }
     }
 
     async fn step(&mut self) -> Result<(), Error> {
@@ -182,7 +203,7 @@ impl<'a> Driver<'a> {
             self.join.reset();
             self.tracker.forget();
         }
-        self.feed.accept(self.tracker.poll());
+        self.join.accept(self.tracker.poll());
         for (frame, camera) in self.join.joined(Instant::now()) {
             self.render(frame, camera).await;
         }
@@ -225,6 +246,9 @@ impl<'a> Driver<'a> {
         {
             Ok(id) => {
                 self.rendering.insert(id, (sequence, capture));
+                let left = self.core.deadline(capture).nseconds() as i64
+                    - self.core.timeline().now().nseconds() as i64;
+                self.budget.add(left);
             }
             Err(Miss::NotReady) => self.unrendered.not_ready += 1,
             Err(Miss::NoCredit) => self.unrendered.no_credit += 1,

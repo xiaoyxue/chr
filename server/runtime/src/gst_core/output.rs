@@ -74,7 +74,8 @@ impl Summary {
             .sqrt()
     }
 
-    fn ms(&self) -> String {
+    /// `min/mean/max ms (sd)`, or `-` without values.
+    pub fn ms(&self) -> String {
         if self.count == 0 {
             return "-".to_owned();
         }
