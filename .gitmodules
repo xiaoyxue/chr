@@ -2,3 +2,7 @@
 	path = external/vchao
 	url = ../../Hong-Xiang/vchao.git
 	branch = main
+[submodule "asset"]
+	path = asset
+	url = ../chr-assets.git
+	branch = main

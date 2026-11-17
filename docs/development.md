@@ -49,6 +49,7 @@ common/                   chr-common: JSON-RPC 2.0 messages and local IPC (Rust)
 common/shm/               chr-shm: the shared-memory program tap; the only crate with unsafe
 docs/                     Repository-wide documentation
 external/vchao/           Git submodule: Hong-Xiang/vchao (soccer video VPP, Python), pinned
+asset/                    Git submodule: xiaoyxue/chr-assets (Git LFS), large binary assets
 reference/                Private, local-only reference materials
 output/<module>/          Generated runtime artifacts, including output/renderer/
 .worktree/                Dedicated feature worktrees
@@ -106,6 +107,29 @@ git submodule update --remote external/vchao   # move the pin to vchao's latest 
   `nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis`
   ([tracking worker](../server/docs/tracking-worker.md#running-vchaos-pitch-analysis)).
 
+### Asset repository
+
+`asset/` is the private repository `xiaoyxue/chr-assets` as a Git submodule (relative
+URL, branch `main`). It holds chr's own large binary assets in Git LFS, today
+`asset/ibl/`: 4K equirectangular OpenEXR environment maps for image-based lighting,
+with their sources and licences in its README. They stay out of chr itself because
+Nix copies every tracked file of chr into the flake source on each evaluation; Git
+LFS does not prevent that, and `export-ignore` does not either, while submodules are
+left out.
+
+```sh
+nix develop                                  # provides git-lfs
+git lfs install --skip-repo                  # once per user: the LFS filter, no hooks in chr
+git submodule update --init asset            # about 450 MB
+```
+
+Run Git commands that touch `asset/` inside `nix develop`. Do not run `git lfs install`
+without `--skip-repo` in chr: it would put LFS hooks into chr's shared `.git/hooks`, and
+pushes outside the shell would then fail.
+
+Builds and checks never need `asset/`. chr-server reads its files at runtime when
+`asset/` is one of its asset roots.
+
 `chr-server` creates no GPU device. As decided in #94 and implemented in #97, it
 starts and supervises a `chr-renderer-cli worker` process that renders every
 frame, and transmits clean feed while that worker is late, failed or being
@@ -137,7 +161,7 @@ The root development shell provides:
 | --- | --- |
 | TypeScript client | Node.js, its bundled npm, and TypeScript (`tsc`) |
 | Rust server | Rust/Cargo, rustfmt, and Clippy from `rust-toolchain.toml` via the locked Rust overlay |
-| Build and maintenance | Git, pkg-config, and nixfmt |
+| Build and maintenance | Git, Git LFS, pkg-config, and nixfmt |
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
 | Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`, 1.28 or later), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
 | GStreamer core (#154) | `livesync` and `fallbackswitch` copied out of the pinned gst-plugins-rs and `deinterlace` out of gst-plugins-good (the `chr-gst-livesync` derivation, on the same plugin path); the `decklink` elements come with the bad plugins and need Blackmagic Desktop Video on the host to open a card ([operations](operations.md#host-checklist)) |

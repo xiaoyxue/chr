@@ -15,6 +15,7 @@
 | `flake.nix`, `flake.lock` | Shared, pinned Linux development environment and renderer build/check entry points | Nix |
 | `docs/` | Repository-wide documentation, including `docs/development.md`; server contracts live in `server/docs/` | |
 | `external/vchao/` | Git submodule of [Hong-Xiang/vchao](https://github.com/Hong-Xiang/vchao) (soccer video VPP), pinned; never edited here | Python |
+| `asset/` | Git submodule of the private `xiaoyxue/chr-assets` (Git LFS): large binary assets, today `asset/ibl/` environment maps; not needed to build | EXR |
 | `reference/` | All reference materials (private, local-only, ignored by Git) | |
 | `output/<module>/` | Generated runtime artifacts, including renderer images in `output/renderer/` (local-only, ignored by Git) | |
 

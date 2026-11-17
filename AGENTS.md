@@ -11,6 +11,7 @@
   development environment and directory ownership; server-specific contracts
   live in `server/docs/`.
 - `external/`: Other projects' repositories as Git submodules pinned to a commit, currently `external/vchao` (Hong-Xiang/vchao). Never edit files inside them here: change the upstream repository, then move the pin in a chr pull request. Builds and checks must not depend on submodules being initialized; see `docs/development.md`.
+- `asset/`: chr's own large binary assets, the private Git submodule `xiaoyxue/chr-assets` stored with Git LFS; today `asset/ibl/`, environment maps for image-based lighting. Builds and checks never need it; initialize it inside `nix develop`, which provides `git-lfs`. Never commit large binaries to chr itself: Nix copies every tracked file into the flake source.
 - `reference/`: All reference materials belong here at the repository root. These materials are private and local-only; never stage or upload them.
 - `output/`: Generated runtime artifacts, ignored by Git. Renderer PNGs belong in `output/renderer/`.
 - Onsite runtime data (Fusion offline ZIPs, logo/flag/model files and the pitch-studio store) lives outside the repository, under chr-server's asset root; `docs/operations.md` defines these locations and how to launch and operate the stack.
@@ -20,8 +21,8 @@
 - Maintain one `flake.nix` and `flake.lock` at the repository root. Extend its
   existing outputs for future module tooling rather than adding independent flakes.
 - Use the root Nix shell for Linux development tools and dependencies. It provides
-  Node.js/npm, TypeScript (`tsc`), the renderer Rust toolchain, Git, pkg-config,
-  nixfmt, rendering libraries, and GStreamer core/base/bad (the `unixfd` elements of
+  Node.js/npm, TypeScript (`tsc`), the renderer Rust toolchain, Git, Git LFS,
+  pkg-config, nixfmt, rendering libraries, and GStreamer core/base/bad (the `unixfd` elements of
   chr-server's worker transport, a hard dependency of `chr-runtime`) plus the
   `livesync` and `fallbackswitch` plugins of gst-plugins-rs and the `deinterlace`
   plugin of gst-plugins-good (chr-server's GStreamer core, #154). Do not install global
