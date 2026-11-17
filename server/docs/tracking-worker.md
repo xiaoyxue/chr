@@ -16,7 +16,7 @@ its own GPU device; for now both workers share one GPU.
 ```text
 chr-server ─unixfd: frame + VchaoFrame{selection: null}───────────► tracking worker
            ◄─unixfd: same frame + VchaoFrame{selection.pose.t}────┘   (pitch-analysis, or the stand-in)
-     └ joins by frame_id ↔ capture sequence → render worker → SDI
+     └ joins by frame_id ↔ program sequence → render worker → per-slot selector → output
 ```
 
 The tracking hop speaks vchao's raw-frame boundary unchanged: the contract of
@@ -37,7 +37,7 @@ sockets, GStreamer or async runtime, and does not depend on the GPU renderer:
 | `protocol` | The VchaoFrame v1 mirror, chr's [lens extensions](#chr-lens-extensions), and the meta's [validation](#validation) as functions of its JSON |
 | `pose` | A returned pose as its frame's camera ([Mapping to cameras](#mapping-to-cameras)) and that camera as render geometry |
 | `lens` | The camera-model choice ([Lens](#lens)) and the session's fixed lens |
-| `join` | Frames paired with cameras by capture sequence, the [program delay](#latency-and-program-delay) and the [clean-feed](#clean-feed) decision |
+| `join` | Frames paired with cameras by sequence until each frame's deadline ([program delay](#latency-and-program-delay)), and the [clean-feed](#clean-feed) decision |
 | `replay` | The stand-in's poses and lens from a `calibrated-video-v1` manifest |
 
 Geometry is checked by the renderer's own constructors (`Ti::new`,
@@ -131,9 +131,10 @@ Every buffer on both sockets is one video frame:
 - `offset` = `frame_id`, `offset_end` = `frame_id + 1`;
 - PTS = `source_ns`, the duration is the frame period, and there is no DTS.
 
-chr-server copies each captured frame once, from the capture input ring into
-shared memory. It hands that same memory to the tracking worker and the render
-worker. The worker returns it unchanged; it must only read it.
+Nothing copies a captured frame: `chr-sdi-in` writes it into a memfd, and
+chr-server's GStreamer core hands that same memory (or, for an interlaced input,
+the deinterlaced first field's) to the tracking worker and the render worker.
+The worker returns it unchanged; it must only read it.
 
 ### Caps
 
@@ -267,10 +268,10 @@ with the first of:
   the image by about 1–3 px. A worker that does send `frame_warp` is rendered
   `radial+warp`, pixel for pixel as the calibrated replay renders the same frame
   (GPU test `gpu_tracked_frames_match_the_calibrated_replay`), and
-  `tracking.frame` from `chr-sdi-sim --send-cameras` sends each frame's warp by
-  capture sequence.
+  `tracking.frame` from `chr-sdi-in --send-cameras` sends each frame's warp by
+  `frame_id`.
 - A lens in the description or manifest is **never** applied to tracked frames
-  implicitly; only the stand-in, `chr-sdi-sim --send-cameras` and still renders
+  implicitly; only the stand-in, `chr-sdi-in --send-cameras` and still renders
   of a reference camera replay it, as tracking data.
 - **Debug switch:** `--tracking-lens auto|pinhole` (default `auto`). `pinhole`
   forces the ideal camera and ignores every lens source, frame warps included.
@@ -313,23 +314,24 @@ without a camera.
   stall of 2 s. While a worker is ready, chr-server therefore sends **every**
   captured frame. A frame is never skipped on the way to the worker.
 - **In-flight limit:** the worker may hold at most
-  `ceil((wait + 250 ms) × fps)` frames (at least 8), where `wait` is
-  `--tracking-wait-ms`. Examples: 38 at 1000 ms and 30 fps, 88 at 1500 ms and
+  `ceil((D + 250 ms) × fps)` frames (at least 8), where `D` is the program
+  delay `--program-delay-ms`. Examples: 38 at 1000 ms and 30 fps, 88 at 1500 ms and
   50 fps. `pitch-analysis` holds at most `ceil(500 ms / period) + 10` frames,
   plus its 8-frame input queue: 25 + 8 at 30 fps.
   - A worker that would exceed the limit is replaced, and the frame counts as
     `not_sent`. Frames it holds that long would come back too late to be
     rendered anyway.
   - chr-server's send queue is bounded by the same limit, so memory stays
-    bounded and the capture loop never blocks.
+    bounded and the capture never blocks.
 - **Restarts:** a restarted worker is a new session. It gets a new stream ID,
   `chr-<server pid>-<session>`, and its `frame_id`s start at 0 again, as
   `pitch-analysis` requires (a stream change within a session is fatal there).
   Frames captured while no worker is ready are not sent: they belong to no
   stream, get no camera and go out as clean feed.
-- **Capture restart:** after the capture restarts its sequence numbers, frames
-  in flight are forgotten. They still come back in order and keep their
-  `frame_id`s, but their answers are ignored.
+- **Capture restart:** after a new capture session (a restarted `chr-sdi-in`),
+  frames in flight are forgotten. They still come back in order and keep their
+  `frame_id`s, but their answers are ignored. A new input format starts a new
+  worker session ([GStreamer core](gst-core.md#a-change-of-format-at-runtime)).
 
 ## Supervision
 
@@ -345,7 +347,7 @@ Starting ──output socket connected──► Ready ──exit / invalid frame
   2000 ms) is killed (SIGKILL) and restarted. The backoff grows from 250 ms to
   5 s. Its frames are released with its sockets.
 - **While no worker is ready** (starting, loading its model, restarting):
-  frames are not sent, so they get no camera and go out as clean feed. The SDI
+  frames are not sent, so they get no camera and go out as clean feed. The
   output keeps its cadence and its delay.
 
 ## Clean feed
@@ -355,46 +357,47 @@ pixels, converted to UYVY and scaled bilinearly to the output size if the
 camera's differs, without CG. It is never rendered with another frame's camera.
 This covers frames sent while no worker is ready, frames returned `unavailable`
 (as in vchao, "unavailable geometry passes the original pixels through
-unchanged"), and frames whose camera is later than the wait. The join releases
-them at the same fixed delay as joined frames, and the render loop transmits
-them in their place among the rendered frames. `tracking.get_status` counts
-them as `frames_clean_feed`; `frames_without_tracking` counts the frames whose
-camera did not arrive. Frames a render deadline miss turns into clean feed are
-counted by the render worker (`render.get_worker_status`).
+unchanged"), and frames whose camera or render is not back when their slot is
+decided. Each goes out in its own slot, the program delay after its capture,
+as every frame does ([GStreamer core](gst-core.md#timing)). `tracking.get_status`
+counts the frames without a camera as `frames_clean_feed` and
+`frames_without_tracking`; `sdi.get_status.core` counts every slot, CG or clean
+feed, with the CG ratio, the per-slot slack and the render budget.
 
 ## Latency and program delay
 
-- With a tracking worker, the join releases every joined frame at the output
-  period nearest to `--tracking-wait-ms` after its capture (it decides half a
-  period early, so tick jitter cannot shift frames by a whole period, which
-  showed as pairs of frames and gaps: 5 % drops and repeats in a first test). This is a constant program delay,
-  quantized to the output period. `pitch-analysis` returns frames in bursts:
-  a frame waits for the next scheduled estimate to resolve. Releasing each frame
-  as soon as it is joined would drop most of a burst. A frame whose camera has
-  not arrived by then is skipped, and its late camera is rejected.
-- `--tracking-wait-ms` defaults to three frame periods and may be up to
-  1500 ms.
+Every tracked program runs on chr-server's [GStreamer core](gst-core.md) (#154):
+a frame captured at `t` leaves at `t + D`, the program delay
+(`--program-delay-ms`, `program_delay_ms` in `stack.toml`), with its CG if its
+camera and render are back 4 ms before, else as its own clean feed; its
+neighbours keep their CG. Frames go to the render worker in capture order as
+soon as their camera is in, and wait for one of its four credits until their
+slot is decided: `pitch-analysis` returns frames in batches (a frame waits for
+the next scheduled estimate to resolve), more at once than the render worker
+takes. A frame whose camera has not arrived by then is clean feed, and its late
+camera is rejected.
+
+- `--program-delay-ms` defaults to three frame periods and may be up to
+  1500 ms. It replaced `--tracking-wait-ms` (#154 phase 5), the wait of the
+  former timer-paced path, which released joined frames on its own output
+  ticks; that flag now fails with a pointer to its replacement.
   - The stand-in answers at once, so the default suffices.
   - `pitch-analysis` releases a frame when its selection is final (LogH
     lookahead to the next target, about 4 frames plus one estimate), or after
     at most 500 ms with a reused or unavailable pose (`overdue`). Give it about
     800 ms.
-- The SDI program delay is then the wait plus rendering: about 0.8 s. On the
-  SC1464 fixture `pitch-analysis` selected each frame's pose 198 ms (median),
-  305 ms (95th percentile) and at most 376 ms after capture, so 600 ms would
-  also suffice there ([Measured](#measured)).
-- **Memory:** every waiting frame holds its RGBA8 pixels: 8 MiB at 1080p,
-  32 MiB at 4K. The capture backlog holds `wait × fps + 2` frames, about
-  0.6 GiB at 1500 ms and 1080p50.
-- **GStreamer core** (`--pipeline gst`, #154, experimental): the same worker
-  and contract, with frames from `chr-sdi-in` instead of the input ring. The
-  program delay is `--program-delay-ms` from capture to output; a frame whose
-  camera and render are not back 4 ms before its slot is due goes out as its
-  own clean feed, and its neighbours keep their CG. The worker's two sockets
-  are bins of the core's pipeline, relinked for every new session
-  ([GStreamer core](gst-core.md)).
-- Without a tracking worker (`tracking.frame`), frames still leave as soon as
-  their camera arrives.
+- The program delay is the whole capture-to-output delay: about 0.8 s with
+  `pitch-analysis`. On the SC1464 fixture it selected each frame's pose 198 ms
+  (median), 305 ms (95th percentile) and at most 376 ms after capture, so 600 ms
+  would also suffice there ([Measured](#measured)); `sdi.get_status.core`'s
+  per-slot slack shows the margin left.
+- **Memory:** every frame waiting for its slot holds its memfd (RGBA8: 8 MiB at
+  1080p, 32 MiB at 4K) and its clean feed (UYVY at the output size): about
+  D × fps frames, some 0.4 GiB at 800 ms and 1080p30.
+- The worker's two sockets are bins of the core's pipeline, relinked for every
+  new session.
+- Without a tracking worker (`tracking.frame`), frames wait for their camera the
+  same way, until their slot is decided.
 
 ## Image coordinates
 
@@ -413,7 +416,9 @@ convention of integer sample centres ([coordinates](coordinates.md)).
   and `unavailable`, and frames `not_sent`;
 - the last error.
 
-`tracking.get_status` reports the join:
+`tracking.get_status` reports the join (and `sdi.get_status.core` the slots:
+the program delay, CG / clean / empty slots, the CG ratio, the per-slot slack
+and the render budget, see [GStreamer core](gst-core.md#telemetry)):
 - `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable`:
   every returned frame, by pose;
 - `poses_overdue`: frames released by the worker's overload rule, whatever
@@ -433,16 +438,17 @@ server/scripts/run-tracked.sh --scene clip-manifest.json --video clip.mp4 --trac
 
 - `--tracking-worker` runs the stand-in with the manifest
   (`--tracking-worker-arg --manifest ...`), which sends the manifest's lens. It starts
-  `chr-sdi-sim` without `--send-cameras`, so the simulator is the camera only.
+  `chr-sdi-in` without `--send-cameras`, so the input is the camera only.
 - `--tracking-cli <path>` runs another worker instead. Pass its arguments as
   `--tracking-worker-arg <arg>`, and set `--tracking-centre` and
-  `--tracking-wait-ms`.
+  `--program-delay-ms`.
 - `stack.py` does this from `stack.toml`: `tracking = "worker"`, `tracking_cli`,
-  `tracking_worker_args`, `tracking_centre` and `tracking_wait_ms`, and the
+  `tracking_worker_args`, `tracking_centre` and `program_delay_ms`, and the
   `tracking_lens*` keys (`server/scripts/stack.example.toml`).
 - `run-tracked.sh` passes the `--tracking-lens*` options to chr-server.
-- `tracking = "external"` keeps the previous behaviour, in which the simulator
-  sends the cameras.
+- `tracking = "external"` runs no tracking worker: `chr-sdi-in --send-cameras`
+  sends the manifest's recorded cameras as `tracking.frame`
+  ([SDI simulation](sdi-simulation.md)).
 
 ## Running vchao's pitch-analysis
 
@@ -465,8 +471,8 @@ nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
   --estimate-every 4 --interpolation logh --overload-ms 500` and a new
   `--ledger <dir>/{stream_id}.arrow` per session. chr-server adds
   `--stream-id` and both sockets.
-- Give the station centre with `--tracking-centre` and the wait (program
-  delay) with `--tracking-wait-ms`. It sends no lens: its frames are rendered
+- Give the station centre with `--tracking-centre` and the program delay with
+  `--program-delay-ms`. It sends no lens: its frames are rendered
   pinhole unless a `--tracking-lens-*` lens is given.
 - `pitch-analysis` fails on an input stall of 2 s or an estimator without
   progress for 5 s; chr-server then restarts it as a new stream, with clean feed
@@ -477,9 +483,9 @@ nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
 
 ### Measured
 
-SC1464 fixture (1212x654p30 clip, looped by `chr-sdi-sim`; private,
-not in the repository), RTX 3090 shared with a running stack, 150 s,
-`--tracking-wait-ms 800`:
+SC1464 fixture (1212x654p30 clip; private, not in the repository), RTX 3090
+shared with a running stack, 150 s, on the former timer-paced path (looped by
+`chr-sdi-sim` into the retired capture ring, `--tracking-wait-ms 800`):
 
 | Quantity | Value |
 | --- | --- |
@@ -500,6 +506,17 @@ sit on the pitch markings in the SRT preview. GPU memory: render worker 463 MiB,
 `atlas-vq-estimate` 1.8 GiB. CPU: `atlas-vq-estimate` 112 %, `chr-monitor`
 (OpenH264) 83 %, the simulator's `ffmpeg` 29 %, `chr-sdi-sim` 15 %, `chr-server`
 and the render worker 7 % each, `pitch-analysis` 4 %.
+
+On the GStreamer core (#154 phase 5; `stack.py` with `chr-sdi-in` looping the
+clip, D 800 ms, RTX 3090 shared with the live stack and its own
+`pitch-analysis`): after the 11 s model load (its frames clean feed) every slot
+had CG (300 of 300 per 10 s), 0 repeats, the output interval 33.333 ms mean
+(30.30–36.46 ms, sd 0.29), capture to output 800.1/800.2/803.2 ms, per-slot
+slack of the CG slots 315–617 ms (mean 482 ms), render budget at submit 323–638
+ms; `description.load` accepted. Before joined frames waited for a render
+credit, a batch of 8 cameras against 4 credits cost about 4 of every 8 slots
+their CG (CG 62 % per 10 s). CPU: `chr-server` 16 %, `chr-sdi-in` 12 % plus
+FFmpeg's decoding.
 
 #146 does not hit a CUDA process next to a Vulkan one: `chr-renderer-cli bench`
 of this description (1212x654, 300 frames) takes 1.80 ms wall per frame

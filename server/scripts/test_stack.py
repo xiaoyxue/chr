@@ -51,6 +51,21 @@ class ConfigTests(unittest.TestCase):
         lens = self.load('scene = "a"\nvideo = "b"\ntracking = "external"\ntracking_lens_k = [-0.05, 0, 0]\n'
                          'tracking_lens_centre = [960, 540]\ntracking_lens_scale = 960\n')
         self.assertEqual(lens.tracking_lens_scale, 960, "a CLI lens needs no tracking worker")
+        for bad, message in (("program_delay_ms = 1501", "program_delay_ms must be"),
+                             ("program_delay_ms = 4", "program_delay_ms must be"),
+                             ('input_loss = "freeze"', "input_loss must be"),
+                             ('output_rate = "50"', "output_rate must be"),
+                             ('audio = "no"', "audio must be")):
+            with self.assertRaisesRegex(SystemExit, message):
+                self.load(f'scene = "a"\nvideo = "b"\n{bad}\n')
+
+    def test_migrates_the_tracking_wait_to_the_program_delay(self):
+        with mock.patch("builtins.print") as printed:
+            config = self.load('scene = "a"\nvideo = "b"\ntracking_wait_ms = 800\n')
+        self.assertEqual(config.program_delay_ms, 800)
+        self.assertIn("tracking_wait_ms is now program_delay_ms", printed.call_args.args[0])
+        with self.assertRaisesRegex(SystemExit, "remove tracking_wait_ms"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_wait_ms = 800\nprogram_delay_ms = 600\n')
 
 
 class ComponentTests(unittest.TestCase):
@@ -69,7 +84,8 @@ class ComponentTests(unittest.TestCase):
         self.assertNotIn("--tracking-worker", render)
         analysis = stack.Config(scene="s.json", video="v.mp4", tracking_cli="/opt/pitch-analysis",
                                 tracking_worker_args=["--ledger", "/runs/{stream_id}.arrow"],
-                                tracking_centre=[14.5, 60.6, -9.9], tracking_wait_ms=800)
+                                tracking_centre=[14.5, 60.6, -9.9], program_delay_ms=800,
+                                input_loss="slate", output_rate="fixed:50", audio=False)
         render = next(c for c in stack.components(analysis) if c.name == "render").command
         self.assertEqual(render[render.index("--tracking-cli") + 1], "/opt/pitch-analysis")
         self.assertNotIn("--tracking-worker", render, "--tracking-cli implies it in run-tracked.sh")
@@ -77,7 +93,10 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(args, ["--ledger", "/runs/{stream_id}.arrow"])
         centre = render.index("--tracking-centre")
         self.assertEqual(render[centre + 1:centre + 4], ["14.5", "60.6", "-9.9"])
-        self.assertEqual(render[render.index("--tracking-wait-ms") + 1], "800")
+        self.assertEqual(render[render.index("--program-delay-ms") + 1], "800")
+        self.assertEqual(render[render.index("--input-loss") + 1], "slate")
+        self.assertEqual(render[render.index("--output-rate") + 1], "fixed:50")
+        self.assertIn("--no-audio", render)
         self.assertNotIn("--tracking-lens", render, "auto and no CLI lens are chr-server's defaults")
         lens = stack.Config(scene="s.json", video="v.mp4", tracking_lens="pinhole", tracking_lens_k=[-0.05, 0, 0],
                             tracking_lens_centre=[960, 540], tracking_lens_scale=960,
@@ -98,7 +117,8 @@ class ReportTests(unittest.TestCase):
     def test_short_names(self):
         self.assertEqual(stack.describe(["/x/target/chr-renderer-cli", "worker"]), "chr-renderer-cli worker")
         self.assertIn(stack.describe(["/x/target/chr-tracking-sim-cli", "--manifest", "m.json"]), stack.PORTLESS)
-        self.assertIn(stack.describe(["/x/target/chr-sdi-sim", "--scene", "s.json"]), stack.PORTLESS)
+        config = stack.Config(scene="s.json", video="v.mp4", dir="/run/chr")
+        self.assertIn("unix /run/chr/capture.sock", stack.roles(config, False))
         self.assertIn(stack.describe(["/nix/store/x/bin/pitch-analysis", "--input-socket", "a"]), stack.PORTLESS)
         self.assertEqual(stack.describe(["bash", "/x/server/scripts/run-tracked.sh", "--scene", "s.json"]), "bash run-tracked.sh")
         self.assertEqual(stack.describe(["python3", "server/scripts/stack.py", "relay", "srt://a:1"]), "python3 stack.py relay")
@@ -162,7 +182,7 @@ class HealthTests(unittest.TestCase):
         tracker = {"state": "backoff", "worker": "pitch-analysis", "stream_id": None, "pid": None, "restarts": 1,
                    "requests": 50, "cameras": 49, "unavailable": 0, "not_sent": 3,
                    "last_error": "the tracking worker exited"}
-        join = {"frames_joined": 40, "frames_without_tracking": 3, "samples_late": 0, "frames_dropped": 1,
+        join = {"frames_joined": 40, "frames_without_tracking": 3, "samples_late": 0,
                 "poses_fresh": 13, "poses_interpolated": 26, "poses_reused": 10, "poses_unavailable": 1,
                 "poses_overdue": 2, "camera_model": {"model": "radial+warp", "source": "worker"}}
         first = {"sdi.get_status": sdi, "render.get_worker_status": render, "tracking.get_worker_status": tracker,
@@ -171,11 +191,25 @@ class HealthTests(unittest.TestCase):
                   "tracking.get_status": {**join, "frames_without_tracking": 13}}
         text = "\n".join(stack.health(first, second, 1.0))
         self.assertIn("30.0 slots/s, 10.0 repeats/s", text)
+        self.assertNotIn("program (core)", text, "a generated program has no core")
         self.assertIn("PROBLEM: tracking worker backoff: the tracking worker exited", text)
         self.assertIn("tracking worker   pitch-analysis: backoff", text)
         self.assertIn("13 fresh, 26 interpolated, 10 reused, 1 unavailable, 2 overdue", text)
         self.assertIn("camera model      radial+warp (lens source: worker)", text)
         self.assertIn("PROBLEM: no frame was paired with a camera", text)
+        spread = {"min": 20.5, "mean": 60.25, "max": 90.0, "count": 280}
+        core = {"program_delay_ms": 800.0, "decision_margin_ms": 4.0, "cg_slots": 900, "clean_slots": 100,
+                "empty_slots": 0, "late_cg": 2, "late_decisions": 0, "cg_ratio": 0.9,
+                "window": {"seconds": 10.0, "cg_slots": 120, "clean_slots": 180, "cg_ratio": 0.4,
+                           "slack_ms": spread, "render_budget_ms": spread, "delay_ms": None}}
+        cored = {**second, "sdi.get_status": {**second["sdi.get_status"], "core": core, "input_loss_slots": 5,
+                                              "input_losses": 1}}
+        text = "\n".join(stack.health(first, cored, 1.0))
+        self.assertIn("program (core)    D 800 ms, decided 4 ms before due; CG 90.0 % since start, 40.0 %", text)
+        self.assertIn("900 CG, 100 clean feed, 0 empty (repeated), 2 late CG", text)
+        self.assertIn("input loss 5 slots in 1 losses", text)
+        self.assertIn("slack of CG slots 20.5/60.2/90.0 ms", text)
+        self.assertIn("PROBLEM: only 40.0 % of the slots had CG", text)
         external = {**second, "tracking.get_worker_status": {"error": "Method not found"}}
         self.assertIn("none: cameras come from tracking.frame", "\n".join(stack.health(first, external, 1.0)))
 

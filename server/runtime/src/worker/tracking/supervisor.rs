@@ -558,7 +558,7 @@ fn send(
     if session.in_flight.len() >= limit {
         return Err(Some(format!(
             "the tracking worker holds {} frames, the most chr-server keeps in flight \
-             (--tracking-wait-ms plus {IN_FLIGHT_MARGIN:?})",
+             (--program-delay-ms plus {IN_FLIGHT_MARGIN:?})",
             session.in_flight.len()
         )));
     }

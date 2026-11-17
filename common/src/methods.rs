@@ -84,9 +84,10 @@ pub mod mesh {
     }
 }
 
-/// Per-frame camera of a tracked program (`--tracked-scene`), sent by a tracking
-/// source such as `chr-sdi-sim --send-cameras`. Only `chr-server` running a tracked program
-/// answers these methods. See `server/docs/sdi-simulation.md`.
+/// Per-frame camera of a tracked program (`--tracked-scene` or `--description`),
+/// sent by an external tracking source such as `chr-sdi-in --send-cameras` when
+/// chr-server runs without `--tracking-worker`. Only `chr-server` running a
+/// tracked program answers these methods. See `server/docs/sdi-simulation.md`.
 pub mod tracking {
     use super::*;
     use crate::scene_frame::{Matrix3, RadialLens, U64, Vec3};
@@ -98,9 +99,10 @@ pub mod tracking {
     /// Reads join counters. No params. Result: [`TrackingStatus`].
     pub const GET_STATUS: &str = "tracking.get_status";
 
-    /// Camera of the input frame whose capture sequence is `sequence`: the same
-    /// number the capture process writes into the input ring slot. The runtime
-    /// pairs both by this number only, never by arrival order.
+    /// Camera of the input frame whose `frame_id` in the input's current
+    /// stream is `sequence`: the number the capture process (`chr-sdi-in`)
+    /// stamps on the frame (VchaoFrame `frame_id`, from 0 in each stream).
+    /// The runtime pairs both by this number only, never by arrival order.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct TrackingFrame {
@@ -170,12 +172,6 @@ pub mod tracking {
         /// because they had no camera. They keep the output's cadence and delay.
         #[serde(default)]
         pub frames_clean_feed: u64,
-        /// Input frames not rendered because the bounded input backlog was full, or
-        /// because a newer frame resolved in the same output period (the output
-        /// stays live instead of falling behind).
-        pub frames_dropped: u64,
-        /// Captured frames the input ring overwrote before the server read them.
-        pub frames_overwritten: u64,
         /// Frames a tracking worker returned with their own estimate (`fresh`).
         /// The four `poses_*` counters cover every returned frame of every
         /// worker session; the first three come with a camera.
@@ -275,7 +271,7 @@ pub mod sdi {
 
     /// Counters since the server started. Output slots tick at the video mode's cadence
     /// whether or not a new rendered frame is ready.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct SdiStatus {
         /// For example `1280x720p30` or `1920x1080p59.94`.
         pub video_mode: String,
@@ -292,8 +288,7 @@ pub mod sdi {
         pub dropped_frames: u64,
         /// Render frame index of the most recent output slot.
         pub last_source_frame: Option<u64>,
-        /// Input format (rate or extent) changes followed at runtime
-        /// (`--pipeline gst`).
+        /// Input format (rate or extent) changes followed at runtime.
         #[serde(default)]
         pub format_changes: u64,
         /// Slots sent as clean feed while a format change was in progress: from
@@ -301,7 +296,7 @@ pub mod sdi {
         #[serde(default)]
         pub transition_clean_slots: u64,
         /// Slots filled (hold, black or slate) because the input delivered no
-        /// frames (`--pipeline gst`, `--input-loss`).
+        /// frames (`--input-loss`).
         #[serde(default)]
         pub input_loss_slots: u64,
         /// Times the input stopped delivering frames.
@@ -309,15 +304,71 @@ pub mod sdi {
         pub input_losses: u64,
         /// Timecode of the most recent output slot's frame, `hh:mm:ss:ff`
         /// (`hh:mm:ss;ff` drop-frame), the input's timecode output with the
-        /// same delay as its frame (`--pipeline gst`).
+        /// same delay as its frame.
         #[serde(default)]
         pub last_timecode: Option<String>,
         /// Output slots whose frame carried captions (CEA-608/708).
         #[serde(default)]
         pub caption_frames: u64,
-        /// The embedded audio passed through with the video (`--pipeline gst`).
+        /// The embedded audio passed through with the video.
         #[serde(default)]
         pub audio: Option<AudioStatus>,
+        /// The GStreamer core's program: its delay, what each slot got and how
+        /// much time the CG had (#131). `null` for a generated program (the
+        /// triangle, `--synthetic-program`, `--pitch-demo`, `--software-video`),
+        /// which has no capture input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub core: Option<CoreStatus>,
+    }
+
+    /// Telemetry of the GStreamer core (a tracked or description program).
+    /// Repeats, input-loss and format-change slots are [`SdiStatus`]'s.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct CoreStatus {
+        /// The program delay D: capture to output of every frame, ms.
+        pub program_delay_ms: f64,
+        /// How long before it is due each slot is decided, ms.
+        pub decision_margin_ms: f64,
+        /// Slots decided since start with their rendered frame (CG).
+        pub cg_slots: u64,
+        /// Slots decided with their clean feed: no CG by the decision.
+        pub clean_slots: u64,
+        /// Slots with neither frame at their decision; the output repeats.
+        pub empty_slots: u64,
+        /// Rendered frames that arrived after their slot was decided.
+        pub late_cg: u64,
+        /// Slots decided after they were due, which the output skips.
+        pub late_decisions: u64,
+        /// `cg_slots / (cg_slots + clean_slots)`; `null` before the first slot.
+        pub cg_ratio: Option<f64>,
+        /// The last complete report window; `null` during the first.
+        pub window: Option<CoreWindow>,
+    }
+
+    /// The core's program over one report window (10 s).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct CoreWindow {
+        pub seconds: f64,
+        pub cg_slots: u64,
+        pub clean_slots: u64,
+        pub cg_ratio: Option<f64>,
+        /// Per-slot slack of the CG slots: how long before its slot was
+        /// decided each rendered frame arrived, ms.
+        pub slack_ms: Option<Spread>,
+        /// Render budget at submit: the time left until each rendered frame's
+        /// slot is decided when it went to the render worker, ms.
+        pub render_budget_ms: Option<Spread>,
+        /// Capture to output of the slots, measured at the output, ms.
+        pub delay_ms: Option<Spread>,
+    }
+
+    /// Minimum, mean and maximum of `count` values.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Spread {
+        pub min: f64,
+        pub mean: f64,
+        pub max: f64,
+        pub count: u64,
     }
 
     /// Audio output of the GStreamer core: the input's audio delayed by the

@@ -127,7 +127,7 @@ export interface SdiStatus {
   /** Rendered frames discarded because the output queue was full. */
   dropped_frames: number;
   last_source_frame: number | null;
-  /** Input format changes followed at runtime (`--pipeline gst`). */
+  /** Input format changes followed at runtime. */
   format_changes: number;
   /** Clean-feed slots while a format change was in progress. */
   transition_clean_slots: number;
@@ -139,8 +139,52 @@ export interface SdiStatus {
   last_timecode: string | null;
   /** Output slots whose frame carried captions (CEA-608/708). */
   caption_frames: number;
-  /** The input's audio, passed through with its video's delay (`--pipeline gst`). */
+  /** The input's audio, passed through with its video's delay. */
   audio: AudioStatus | null;
+  /** The GStreamer core's program telemetry; absent for a generated program. */
+  core?: CoreStatus;
+}
+
+/** Telemetry of the GStreamer core (a tracked or description program, #131). */
+export interface CoreStatus {
+  /** The program delay D: capture to output of every frame, ms. */
+  program_delay_ms: number;
+  /** How long before it is due each slot is decided, ms. */
+  decision_margin_ms: number;
+  /** Slots decided since start with their CG, their clean feed, or neither (the output repeats). */
+  cg_slots: number;
+  clean_slots: number;
+  empty_slots: number;
+  /** Rendered frames that arrived after their slot was decided. */
+  late_cg: number;
+  /** Slots decided after they were due. */
+  late_decisions: number;
+  /** `cg_slots / (cg_slots + clean_slots)`; `null` before the first slot. */
+  cg_ratio: number | null;
+  /** The last complete report window (10 s); `null` during the first. */
+  window: CoreWindow | null;
+}
+
+/** The core's program over one report window. */
+export interface CoreWindow {
+  seconds: number;
+  cg_slots: number;
+  clean_slots: number;
+  cg_ratio: number | null;
+  /** Per-slot slack of the CG slots: how long before its slot was decided each rendered frame arrived, ms. */
+  slack_ms: Spread | null;
+  /** Time left until each rendered frame's slot was decided when it was submitted, ms. */
+  render_budget_ms: Spread | null;
+  /** Capture to output of the slots, ms. */
+  delay_ms: Spread | null;
+}
+
+/** Minimum, mean and maximum of `count` values. */
+export interface Spread {
+  min: number;
+  mean: number;
+  max: number;
+  count: number;
 }
 
 /** Audio output of the GStreamer core. */
@@ -182,10 +226,6 @@ export interface TrackingStatus {
   frames_without_tracking: number;
   /** Input frames transmitted as clean feed (their own pixels, no CG) because they had no camera. */
   frames_clean_feed: number;
-  /** Input frames not rendered because the backlog was full or a newer frame resolved first. */
-  frames_dropped: number;
-  /** Captured frames the input ring overwrote before the server read them. */
-  frames_overwritten: number;
   /** Frames a tracking worker returned with their own estimate (`fresh`). */
   poses_fresh: number;
   /** Frames returned with a pose interpolated between two estimates. */

@@ -1,4 +1,4 @@
-//! chr-server's GStreamer core (`--pipeline gst`, #154) end to end without a
+//! chr-server's GStreamer core (#154) end to end without a
 //! GPU: an in-process capture (`chr-sdi-in`'s test pattern), the real
 //! `chr-tracking-sim-cli` replay, and `chr-renderer-cli worker` answering with
 //! solid frames (`CHR_WORKER_TEST_SOLID`). Every slot leaves at its capture
@@ -8,7 +8,9 @@
 //! fixed output rate) without a restart, with a new tracking stream.
 //! Interlaced input keeps its fields on the output and is deinterlaced for
 //! tracking and rendering; a lost input is filled on the cadence; audio,
-//! timecode and captions leave with their frame's delay. The tests that play a
+//! timecode and captions leave with their frame's delay. Without a tracking
+//! worker, cameras from `tracking.frame` (keyed by `frame_id`) are joined the
+//! same way. The tests that play a
 //! clip need FFmpeg (`nix develop .#media`) and are skipped without it.
 
 use std::{
@@ -134,6 +136,8 @@ struct Run<'a> {
     workers: &'a Workers,
     input: std::cell::RefCell<Input>,
     sdi: SdiStats,
+    /// The tracking feed that `tracking.frame` fills.
+    feed: TrackingFeed,
 }
 
 /// What a run plays and how its output behaves.
@@ -142,6 +146,9 @@ struct Setup {
     options: Options,
     policy: OutputRate,
     input_loss: InputLoss,
+    /// No tracking worker: cameras come from `tracking.frame`.
+    external: bool,
+    program_delay: Duration,
 }
 
 impl Default for Setup {
@@ -151,6 +158,8 @@ impl Default for Setup {
             options: Options::default(),
             policy: OutputRate::Follow,
             input_loss: InputLoss::Hold,
+            external: false,
+            program_delay: DELAY,
         }
     }
 }
@@ -197,7 +206,7 @@ async fn with_setup<T>(
         output,
         output_rate: policy,
         capture_socket: fixture.path("capture.sock"),
-        program_delay: DELAY,
+        program_delay: setup.program_delay,
         tap: Some(fixture.path("program.tap")),
         recorder,
         sink: OutputSink::Simulated,
@@ -210,25 +219,27 @@ async fn with_setup<T>(
         render: status_handle(),
         tracking: chr_runtime::worker::tracking::supervisor::status_handle(),
     };
-    let tracker = Tracker::new(
-        TrackerConfig {
-            executable: env!("CARGO_BIN_EXE_chr-tracking-sim-cli").into(),
-            args: vec![
-                "--manifest".into(),
-                fixture.path("manifest.json").display().to_string(),
-            ],
-            width: MODE.width,
-            height: MODE.height,
-            fps: MODE.fps,
-            camera_center: [0., 0., -8.],
-            socket_dir: fixture.path("tracking"),
-            hang: Duration::from_millis(500),
-            in_flight: in_flight_limit(DELAY, MODE.fps),
-            host: core.host(),
-        },
-        Arc::clone(&workers.tracking),
-    )
-    .unwrap();
+    let tracker = (!setup.external).then(|| {
+        Tracker::new(
+            TrackerConfig {
+                executable: env!("CARGO_BIN_EXE_chr-tracking-sim-cli").into(),
+                args: vec![
+                    "--manifest".into(),
+                    fixture.path("manifest.json").display().to_string(),
+                ],
+                width: MODE.width,
+                height: MODE.height,
+                fps: MODE.fps,
+                camera_center: [0., 0., -8.],
+                socket_dir: fixture.path("tracking"),
+                hang: Duration::from_millis(500),
+                in_flight: in_flight_limit(setup.program_delay, MODE.fps),
+                host: core.host(),
+            },
+            Arc::clone(&workers.tracking),
+        )
+        .unwrap()
+    });
     let render = Supervisor::new(
         WorkerConfig {
             executable: fixture.path("render-worker.sh"),
@@ -252,11 +263,12 @@ async fn with_setup<T>(
     let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
     synthetic.create_scene(&control).await.unwrap();
     let program = Program::new(&synthetic, control.clone()).unwrap();
+    let feed = TrackingFeed::new(64, CHECKS);
     let driver = Driver::new(
         &core,
         tracker,
         render,
-        TrackingFeed::new(64, CHECKS),
+        feed.clone(),
         LensSelection::auto(None),
         program,
         16,
@@ -266,6 +278,7 @@ async fn with_setup<T>(
         workers: &workers,
         input: std::cell::RefCell::new(input),
         sdi,
+        feed,
     };
     let result = tokio::select! {
         result = driver.run(frames) => panic!("the driver stopped: {result:?}"),
@@ -384,6 +397,145 @@ async fn every_slot_leaves_at_the_program_delay_with_its_cg() {
             deltas.iter().all(|delta| *delta == deltas[0]),
             "the tap's slot - frame is constant: {deltas:?}"
         );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_cameras_join_their_frames_by_frame_id_and_feed_the_telemetry() {
+    let fixture = Fixture::new("external", 0);
+    let setup = Setup {
+        external: true,
+        ..Setup::default()
+    };
+    let replay = chr_tracker::replay::load(&fixture.path("manifest.json"), &CHECKS).unwrap();
+    with_setup(&fixture, setup, async |run| {
+        run.input.borrow().watch_frames();
+        // tracking.frame's camera of every frame but each tenth, keyed by frame_id.
+        let send = async {
+            loop {
+                for stamped in run.input.borrow().take_frames() {
+                    if stamped.frame_id % 10 != 0 {
+                        run.feed.push(replay.frame(stamped.frame_id)).unwrap();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let check = async {
+            until(Duration::from_secs(10), || {
+                run.core.selector_counters().cg > 20
+            })
+            .await;
+            let (totals, counters) = over(run.core, Duration::from_secs(2)).await;
+            assert_eq!(totals.repeats, 0, "{counters:?}");
+            assert!(
+                (8..=12).contains(&counters.clean) && counters.cg + counters.clean >= 95,
+                "each tenth frame has no camera: {counters:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            let core = run.sdi.status().core.expect("the core's telemetry");
+            assert_eq!(core.program_delay_ms, 100.);
+            assert!(core.cg_slots > 100 && core.clean_slots > 8, "{core:?}");
+            let ratio = core.cg_ratio.unwrap();
+            assert!((0.8..0.95).contains(&ratio), "{core:?}");
+            assert!(run.feed.status().samples_received > 100);
+        };
+        tokio::select! {
+            () = send => unreachable!(),
+            () = check => {}
+        }
+    })
+    .await;
+}
+
+#[test]
+fn frames_lost_by_the_input_still_count_in_the_source() {
+    // chr-sdi-in --send-cameras picks each camera by the frame's source index:
+    // frames dropped while the input is lost get no frame_id but still count.
+    let dir = std::env::temp_dir().join(format!("chr-gst-core-source-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = Input::start(
+        &Source::TestPattern(MODE.into()),
+        &dir.join("capture.sock"),
+        &Options {
+            audio: false,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    input.watch_frames();
+    std::thread::sleep(Duration::from_millis(300));
+    input.set_lost(true);
+    std::thread::sleep(Duration::from_millis(300));
+    input.set_lost(false);
+    std::thread::sleep(Duration::from_millis(300));
+    let stamped = input.take_frames();
+    drop(input);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(stamped.len() > 20, "{stamped:?}");
+    let steps: Vec<(u64, u64)> = stamped
+        .windows(2)
+        .map(|pair| {
+            (
+                pair[1].frame_id - pair[0].frame_id,
+                pair[1].source_index - pair[0].source_index,
+            )
+        })
+        .collect();
+    assert!(
+        steps.iter().all(|(frame_id, _)| *frame_id == 1),
+        "frame_ids leave no gap: {steps:?}"
+    );
+    let skipped: u64 = steps.iter().map(|(_, source)| source - 1).sum();
+    // 300 ms at 50 fps: about 15 frames lost.
+    assert!(
+        (10..=20).contains(&skipped),
+        "the source index skips the lost frames: {steps:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cameras_answered_in_batches_wait_for_render_credits() {
+    // vchao answers in batches (--batch-frames 8): more cameras at once than
+    // the render worker's credits; each waits for one while its slot allows.
+    let fixture = Fixture::new("batches", 10);
+    let setup = Setup {
+        external: true,
+        program_delay: Duration::from_millis(300),
+        ..Setup::default()
+    };
+    let replay = chr_tracker::replay::load(&fixture.path("manifest.json"), &CHECKS).unwrap();
+    with_setup(&fixture, setup, async |run| {
+        run.input.borrow().watch_frames();
+        let send = async {
+            let mut batch = Vec::new();
+            loop {
+                batch.extend(run.input.borrow().take_frames());
+                if batch.len() >= 8 {
+                    for stamped in batch.drain(..) {
+                        run.feed.push(replay.frame(stamped.frame_id)).unwrap();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let check = async {
+            until(Duration::from_secs(10), || {
+                run.core.selector_counters().cg > 20
+            })
+            .await;
+            let (totals, counters) = over(run.core, Duration::from_secs(2)).await;
+            assert!(
+                counters.clean <= 1 && counters.cg >= 95,
+                "every batch rendered: {counters:?}"
+            );
+            assert_eq!(totals.repeats, 0);
+        };
+        tokio::select! {
+            () = send => unreachable!(),
+            () = check => {}
+        }
     })
     .await;
 }

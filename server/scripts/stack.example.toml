@@ -2,7 +2,8 @@
 # `uv run server/scripts/stack.py start|stop|restart|status`.
 # Relative paths are from the repository root.
 
-# calibrated-video-v1 manifest and its clip: the simulated tracked camera.
+# calibrated-video-v1 manifest and its clip: the simulated tracked camera. chr-sdi-in
+# plays the clip at its own rate, looped, into chr-server's GStreamer core.
 scene = "/path/to/clip-manifest.json"
 video = "/path/to/clip.mp4"
 
@@ -12,8 +13,8 @@ video = "/path/to/clip.mp4"
 # asset_root = "/path/to/packages"
 
 # "worker": chr-server hands every frame to its tracking worker over vchao's VchaoFrame
-# unixfd contract (server/docs/tracking-worker.md). "external": chr-sdi-sim --send-cameras sends
-# the cameras over tracking.frame.
+# unixfd contract (server/docs/tracking-worker.md). "external": chr-sdi-in --send-cameras sends
+# the manifest's recorded cameras over tracking.frame.
 tracking = "worker"
 # The tracking worker executable; empty: chr-tracking-sim-cli, which replays the
 # manifest's recorded Ti and sends the manifest's lens (not its per-frame warps).
@@ -31,10 +32,19 @@ tracking = "worker"
 # Station optical centre of every camera: world metres, negative Z up. Default: the
 # reference camera of the description or manifest.
 # tracking_centre = [14.52857216404143, 60.620266710663365, -9.91514362632655]
-# How long a frame waits for its camera, at most 1500 ms. With a tracking worker every
-# frame leaves exactly this long after capture: the program delay. pitch-analysis may
-# hold a frame up to its 500 ms overload threshold, so give it about 800.
-# tracking_wait_ms = 800
+# The program delay D: every frame leaves exactly this long after its capture, with its
+# CG or, if that is not in by then, its clean feed; above 4 and at most 1500 ms
+# [default: 3 frame periods]. pitch-analysis may hold a frame up to its 500 ms overload
+# threshold, so give it about 800. (Formerly tracking_wait_ms, still read with a warning.)
+# program_delay_ms = 800
+# What the output shows while the input delivers no frames: "hold" (the last frame),
+# "black", "slate" (colour bars) or "slate:/path/to.png" [default: hold].
+# input_loss = "hold"
+# The output's rate: "follow" the input's (default) or "fixed:<rate>" (fixed:50,
+# fixed:59.94, fixed:50i), converting other input rates.
+# output_rate = "follow"
+# Pass the clip's audio through with the same delay as its video [default: true].
+# audio = true
 # Camera model of tracked frames (server/docs/tracking-worker.md#lens): the lens the
 # tracking data carries, else the tracking_lens_* lens below, else none (pinhole).
 # "pinhole" ignores every lens; a description's or manifest's lens is never applied.
@@ -51,7 +61,7 @@ tracking = "worker"
 # the camera's aspect ratio. Use the camera's own size to render natively: onsite
 # that is "1920x1080". chr-monitor scales its preview down to at most 1920x1080.
 size = "1280x720"
-# Socket, input ring and program tap; kept between runs.
+# Control and capture sockets and the program tap; kept between runs.
 # dir = "/run/user/1000/chr-stack"
 # Wrap GPU processes with nixGLNvidia (non-NixOS NVIDIA hosts).
 nixgl = true

@@ -204,11 +204,12 @@ impl Deref for SharedPixels {
 /// Where a channel's GStreamer elements run.
 #[derive(Clone, Debug, Default)]
 pub enum Host {
-    /// Each direction in a pipeline of its own (the timer-paced render loop).
+    /// Each direction in a pipeline of its own (a generated program's render
+    /// loop, tests).
     #[default]
     Standalone,
     /// Each direction as a bin inside this running pipeline: chr-server's
-    /// GStreamer core (`--pipeline gst`, #154). A bin is added when its worker
+    /// GStreamer core (#154). A bin is added when its worker
     /// starts and removed with it, so a restarted worker's hop is relinked into
     /// the running pipeline. Its errors reach that pipeline's bus as messages of
     /// elements under a bin named `hop-*`, which the core logs and does not act

@@ -1,47 +1,51 @@
 #!/usr/bin/env bash
-# Starts a tracked-camera simulation: chr-sdi-sim (simulated SDI capture input),
-# chr-server --tracked-scene and chr-monitor. Without --tracking-worker the simulator
-# also sends the manifest's recorded cameras (chr-sdi-sim --send-cameras). With it
-# the simulator is the camera only and chr-server's tracking worker supplies the cameras over vchao's
-# VchaoFrame contract: the chr-tracking-sim-cli replay stand-in, or the --tracking-cli
-# executable such as vchao's pitch-analysis. Each runs on its own: a process that exits
-# is restarted after a short delay while the others keep running. Ctrl-C stops all.
+# Starts a tracked-camera simulation: chr-sdi-in (the capture input: the clip at its own
+# rate, looped, sent as memfd frames over unixfd), chr-server --tracked-scene on its
+# GStreamer core and chr-monitor. With --tracking-worker chr-server hands every frame
+# to its tracking worker over vchao's VchaoFrame contract: the chr-tracking-sim-cli
+# replay stand-in, or the --tracking-cli executable such as vchao's pitch-analysis.
+# Without it chr-sdi-in also sends the manifest's recorded cameras as tracking.frame
+# (chr-sdi-in --send-cameras). Each runs on its own: a process that exits is restarted
+# after a short delay while the others keep running. Ctrl-C stops all.
 #
-# Usage: server/scripts/run-tracked.sh --scene <json> --video <mp4> [--description <json>]
-#            [--size <WxH>] [--srt <ip:port>] [--dir <path>] [--no-monitor] [--tracking-worker]
-#            [--tracking-cli <path>] [--sim-arg <arg>]... [--monitor-arg <arg>]...
-#            [chr-server options]
+# Usage: server/scripts/run-tracked.sh --scene <json> --video <file> [--description <json>]
+#            [--size <WxH>] [--srt <ip:port>] [--dir <path>] [--no-monitor] [--no-audio]
+#            [--tracking-worker] [--tracking-cli <path>] [--input-arg <arg>]...
+#            [--monitor-arg <arg>]... [chr-server options]
 #
-#   --scene <json>    calibrated-video-v1 manifest: the server's scene, the simulator's
-#                     per-frame Ti/C, lens and warp (the stand-in's Ti and lens)
-#   --video <mp4>     The manifest's clip, played in a loop as the camera
+#   --scene <json>    calibrated-video-v1 manifest: the server's scene, the stand-in's or
+#                     the external cameras' per-frame Ti/C, lens and warp
+#   --video <file>    The manifest's clip, played at its own rate in a loop as the camera
 #   --description <json>  Run chr-server with this render description instead of the
-#                     manifest's scene; the simulator still replays the manifest's cameras.
+#                     manifest's scene; the cameras still replay the manifest's.
 #                     Add --asset-root <dir> to let clients load scenes (description.load)
 #   --size <WxH>      Program output size: even, up to 4096x2160, with the camera's
 #                     aspect ratio; chr-monitor previews at most 1920x1080 [default: 1280x720]
 #   --srt <ip:port>   chr-monitor SRT listener [default: 127.0.0.1:9001]
-#   --sim-arg <arg>   Pass one argument to chr-sdi-sim (repeatable), for example
-#                     --sim-arg --tracking-delay-ms --sim-arg 40 (without --tracking-worker)
+#   --input-arg <arg> Pass one argument to chr-sdi-in (repeatable), for example
+#                     --input-arg --tracking-delay-ms --input-arg 40 (without --tracking-worker)
 #   --monitor-arg <arg>  Pass one argument to chr-monitor (repeatable)
-#   --dir <path>      Directory for the socket, input ring and program tap, kept on exit
+#   --dir <path>      Directory for the sockets and the program tap, kept on exit
 #                     [default: a private directory removed on exit]
 #   --no-monitor      Do not start chr-monitor; start it separately with
 #                     --tap <dir>/program.tap and the same --size/--fps
-#   --tracking-worker chr-server hands every frame to its tracking worker; the
-#                     simulator sends no cameras. Without --tracking-cli the worker is
+#   --no-audio        Neither send nor pass through the clip's audio
+#   --tracking-worker chr-server hands every frame to its tracking worker; chr-sdi-in
+#                     sends no cameras. Without --tracking-cli the worker is
 #                     chr-tracking-sim-cli replaying the manifest's Ti and lens (no warps)
 #   --tracking-cli <path>  Tracking worker executable instead of the stand-in, for
 #                     example pitch-analysis (implies --tracking-worker). Give its own
 #                     arguments as chr-server options --tracking-worker-arg <arg>, and
-#                     --tracking-centre <x> <y> <z> and --tracking-wait-ms <n>
+#                     --tracking-centre <x> <y> <z>
 #
-# The lens options --tracking-lens <auto|pinhole>, --tracking-lens-k <k1> <k2> <k3>,
-# --tracking-lens-centre <x> <y>, --tracking-lens-scale <px> and
-# --tracking-lens-support <4 numbers> are chr-server options too and pass through.
+# Other chr-server options pass through: --program-delay-ms <n> (the program delay D),
+# --input-loss, --output-rate, the lens options --tracking-lens <auto|pinhole>,
+# --tracking-lens-k <k1> <k2> <k3>, --tracking-lens-centre <x> <y>, --tracking-lens-scale
+# <px> and --tracking-lens-support <4 numbers>.
 #
-# The output rate is the manifest's fps. Run from the repository root inside
-# `nix develop .#media`; on a non-NixOS NVIDIA host wrap this script with nixGL.
+# The output follows the clip's rate (the manifest's fps is chr-server's nominal rate).
+# Run from the repository root inside `nix develop .#media`; on a non-NixOS NVIDIA host
+# wrap this script with nixGL.
 set -euo pipefail
 
 scene=
@@ -51,9 +55,10 @@ size=1280x720
 srt=127.0.0.1:9001
 dir=
 with_monitor=1
+audio=1
 tracking_worker=
 tracking_cli=
-sim_args=()
+input_args=()
 monitor_args=()
 server_args=()
 while (($#)); do
@@ -65,15 +70,16 @@ while (($#)); do
     --srt) srt=$2; shift 2 ;;
     --dir) dir=$2; shift 2 ;;
     --no-monitor) with_monitor=; shift ;;
+    --no-audio) audio=; shift ;;
     --tracking-worker) tracking_worker=1; shift ;;
     --tracking-cli) tracking_worker=1; tracking_cli=$2; shift 2 ;;
-    --sim-arg) sim_args+=("$2"); shift 2 ;;
+    --input-arg) input_args+=("$2"); shift 2 ;;
     --monitor-arg) monitor_args+=("$2"); shift 2 ;;
     *) server_args+=("$1"); shift ;;
   esac
 done
 if [[ -z $scene || -z $video ]]; then
-  echo "usage: $0 --scene <json> --video <mp4> [--size <WxH>] [--srt <ip:port>] [--dir <path>] [--no-monitor] [--sim-arg <arg>]... [--monitor-arg <arg>]... [chr-server options]" >&2
+  echo "usage: $0 --scene <json> --video <file> [--size <WxH>] [--srt <ip:port>] [--dir <path>] [--no-monitor] [--no-audio] [--input-arg <arg>]... [--monitor-arg <arg>]... [chr-server options]" >&2
   exit 2
 fi
 # The manifest's rate: an integer (50) or a string ("30000/1001").
@@ -93,7 +99,7 @@ else
   dir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/chr-tracked.XXXXXX")
   trap 'stop_supervised; rm -rf "$dir"' EXIT INT TERM
 fi
-echo "socket $dir/render.sock, input ring $dir/input.ring, program tap $dir/program.tap" >&2
+echo "control socket $dir/render.sock, capture socket $dir/capture.sock, program tap $dir/program.tap" >&2
 program=(--tracked-scene "$scene")
 if [[ -n $description ]]; then
   program=(--description "$description")
@@ -107,15 +113,19 @@ if [[ -n $tracking_worker ]]; then
     program+=(--tracking-worker-arg --manifest --tracking-worker-arg "$scene")
   fi
 else
-  sim_args+=(--send-cameras)
+  input_args+=(--send-cameras "$scene" --server-socket "$dir/render.sock")
+fi
+if [[ -z $audio ]]; then
+  program+=(--no-audio)
+  input_args+=(--no-audio)
 fi
 supervise chr-server "$target/release/chr-server" "${program[@]}" --size "$size" --fps "$fps" \
-  --socket "$dir/render.sock" --input-ring "$dir/input.ring" --monitor-tap "$dir/program.tap" \
-  "${server_args[@]}"
+  --socket "$dir/render.sock" --capture-socket "$dir/capture.sock" \
+  --monitor-tap "$dir/program.tap" "${server_args[@]}"
 if [[ -n $with_monitor ]]; then
   supervise chr-monitor "$target/release/chr-monitor" --tap "$dir/program.tap" --size "$size" \
     --fps "$fps" --srt "$srt" "${monitor_args[@]}"
 fi
-supervise chr-sdi-sim "$target/release/chr-sdi-sim" --scene "$scene" --video "$video" \
-  --socket "$dir/render.sock" --input-ring "$dir/input.ring" "${sim_args[@]}"
+supervise chr-sdi-in "$target/release/chr-sdi-in" --video "$video" --socket "$dir/capture.sock" \
+  "${input_args[@]}"
 wait

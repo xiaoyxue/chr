@@ -1,8 +1,7 @@
-# GStreamer core pipeline (#154, phases 1 to 4, experimental)
+# GStreamer core pipeline (#154)
 
-**Status:** `experimental` simulation prototype behind `chr-server --pipeline gst`
-on Linux. The timer-paced loop (`--pipeline timer`, the input ring and the
-simulated SDI port) stays the default. Done:
+**Status:** `implemented` on Linux in simulation: the only live path of every
+tracked program (`chr-server --tracked-scene` or `--description`). Done:
 
 - phase 1: the pipeline, fixed delay, per-slot clean feed, relinking;
 - phase 2: fractional rates, rates and formats from the caps, runtime format
@@ -12,9 +11,15 @@ simulated SDI port) stays the default. Done:
   clock as the pipeline clock, **built and tested without a card but not
   verified on hardware** (the development host has none);
 - phase 4 (simulated): audio with the same delay D, timecode and captions
-  carried across the capture hop and output with their frame.
+  carried across the capture hop and output with their frame;
+- phase 5: the switch-over. The core is the default and only path of tracked
+  programs; the timer-paced tracked path, the shared-memory capture ring and
+  its writer `chr-sdi-sim` are removed, `chr-sdi-in` is the one capture
+  process, `stack.py` starts it, and the core reports its telemetry
+  ([Phase 5](#phase-5-switch-over)).
 
-The switch-over (phase 5) is not started.
+Open: verification on a DeckLink card with house sync (#80), the 1-hour soak
+of the acceptance criteria, and a new vchao stream without a model reload.
 
 `chr-server` owns one GStreamer pipeline from the input to the output. Its time
 is the pipeline clock (the system clock in simulation; with `--output decklink`
@@ -92,7 +97,7 @@ only when no frame came at all (input loss).
   time and the core's `unixfdsrc` turns it back into the core's running time
   `t`, so both processes agree on the instant without a common pipeline.
 - **Program delay D** (`--program-delay-ms`, default 3 frame periods, at most
-  1500 ms; it replaces `--tracking-wait-ms` in this mode). Frame `t`'s slot is
+  1500 ms; it replaced `--tracking-wait-ms`, which now fails). Frame `t`'s slot is
   due at `t + D`. The selector decides it at `t + D - 4 ms`: the rendered frame
   if it has arrived, else the clean feed of the same frame. Every frame's slot
   is decided, in capture order; a rendered frame that comes later is dropped
@@ -105,7 +110,9 @@ only when no frame came at all (input loss).
   waits, at most until its slot is decided; the worker answers in order, so
   no later camera is in yet. Every rendered frame therefore gets the whole
   budget left after tracking (about D − 4 ms − the tracking latency), also
-  the first one after a tracking dropout or restart.
+  the first one after a tracking dropout or restart. A joined frame that finds
+  the render worker's four credits taken waits for one, in capture order,
+  until its slot is decided (phase 5): vchao answers in batches of eight.
 - **Output.** Program frames carry their due time as PTS (the `appsrc` reports
   no latency), `livesync` emits each one when due, and the output sink takes it
   on the clock (`processing-deadline` 0, so the pipeline adds no latency). The
@@ -134,7 +141,7 @@ only when no frame came at all (input loss).
 
 Both workers keep their protocols and supervisors: VchaoFrame for tracking
 (#148), render protocol v4 with the bound scene snapshot of every frame
-(`scene.get` on the program scene, as the timer loop's submissions carry) and
+(`scene.get` on the program scene, as a generated program's submissions carry) and
 its `time_base` (the core's requests count nanoseconds of capture time). The
 transport's `Host::Bin` puts each worker session's two sockets into the core's
 pipeline as bins `hop-<n>`, added when the supervisor starts the worker and
@@ -183,7 +190,7 @@ Where it is used:
 | Render worker protocol (**v4**): `hello.output.fps`; each `render` carries its frame's `time_base` | JSON |
 | Program configuration `output_rate` (seconds per frame, `den/num`) | time base |
 | Tracking (VchaoFrame): caps `framerate=num/den`, `duration_ns` = the rounded-down period, `vchao-replay-duration-ns` the same; PTS from the clock | unchanged contract |
-| chr-shm input ring and program tap (layout **CHRSHM02**): `meta[3] = num << 32 \| den` | binary |
+| chr-shm program tap (layout **CHRSHM02**; and the capture ring until phase 5): `meta[3] = num << 32 \| den` | binary |
 | Timer loop: SDI output slots and render deadlines at `epoch + Rate::frame_time(n)` | exact |
 
 The VchaoFrame contract is unchanged: chr sends vchao no field of its own, and a
@@ -319,7 +326,7 @@ embedded audio on a real card are **not verified**.
   renegotiates caps: the input starts a new stream, exactly as the test
   pattern's `--then` switch, so the core follows it (phase 2). The card is not
   paced by `clocksync` (it delivers in real time and timestamps on its own).
-- **Output** (`chr-server --pipeline gst --output decklink [--device N]
+- **Output** (`chr-server --output decklink [--device N]
   --output-rate fixed:<rate>`): `decklinkvideosink` replaces the simulated
   `appsink` after `livesync`, `decklinkaudiosink` the audio `appsink`. Its mode
   is the fixed output format's (table below), for the whole run:
@@ -522,6 +529,118 @@ pairs (`--captions`, two digits counting frames, odd parity). FFmpeg's raw
 pipe does not carry a file's A/53 captions: files have none. Counted:
 `sdi.get_status.caption_frames`, the output's `captioned`.
 
+## Phase 5: switch-over
+
+### What runs where
+
+- **A tracked program** (`--tracked-scene`, `--description`) always runs on
+  the core. `--pipeline` is gone (it fails with a pointer to this), and so is
+  the timer-paced tracked path: the injection loop that read the shared-memory
+  capture ring (`chr_shm::input`, `input/ring.rs`), the `TrackingJoin` that
+  released joined frames at a fixed delay on the loop's output ticks, the
+  render loop's clean-frame channel, and `chr-sdi-sim`, the ring's writer.
+  `chr-sdi-in` is the one capture process (a file, a test pattern or a
+  DeckLink card); `chr-shm` keeps only the program tap.
+- **A generated program** (the default triangle, `--synthetic-program`,
+  `--pitch-demo`, `--software-video` with `--video-scene`) has no capture
+  input whose clock the output could follow, so it keeps the internal clock:
+  the render loop (`pipeline.rs`) paces itself and the simulated SDI port
+  (`sdi.rs`) sends one slot per period and writes the tap, as before. Driving
+  these through the core would need a synthetic INPUT process for a program
+  that does not track anything and gain nothing; the internal clock is the
+  simplest correct design there. Its `--render-deadline-ms` is its own; a
+  tracked program refuses it.
+
+### Flags and configuration
+
+| Before | Now |
+| --- | --- |
+| `--pipeline timer\|gst` | removed: a tracked program is the core's |
+| `--tracking-wait-ms <n>` | removed (fails, naming its replacement): `--program-delay-ms <n>` is D for every tracked program, with or without a tracking worker |
+| `--input-ring <path>` | removed: `--capture-socket <path>` (default `$XDG_RUNTIME_DIR/chr/capture.sock`) |
+| `chr-sdi-sim --video --scene [--send-cameras]` | `chr-sdi-in --video [--send-cameras <manifest>] [--server-socket <path>]` |
+| `stack.toml` `tracking_wait_ms` | `program_delay_ms`; the old key is still read, with a warning, and refused next to the new one |
+| – | `stack.toml` `input_loss`, `output_rate`, `audio` (`--input-loss`, `--output-rate`, `--no-audio`) |
+
+The core's own flags (`--capture-socket`, `--program-delay-ms`,
+`--output-rate`, `--input-loss`, `--output`, `--device`, `--audio-channels`,
+`--no-audio`) require a tracked program.
+
+### External tracking on the core
+
+Without `--tracking-worker` no tracking worker runs, and the cameras come as
+`tracking.frame` ([SDI simulation](sdi-simulation.md#trackingframe)). Its
+`sequence` is the frame's `frame_id` in the input's current stream (what
+`chr-sdi-in` stamps, from 0 per stream); the driver tells the feed the program
+sequence of the newest stream's first frame (`TrackingFeed::rebase`), so a
+camera finds its frame across input restarts and format changes. A frame waits
+for its camera until its slot is decided, exactly as for a worker's answer.
+`chr-sdi-in --send-cameras <manifest>` replays a calibrated clip's cameras
+(`Ti`, `C`, lens, and the warp of the clip frame each frame shows, counted
+through drops and loops; [SDI simulation](sdi-simulation.md#run)), optionally late
+(`--tracking-delay-ms`) or with gaps (`--drop-tracking-every`).
+
+### Telemetry
+
+`sdi.get_status` carries `core` for a tracked program (#131; TS mirror
+`CoreStatus` in the render harness, shown on its monitor page):
+
+| Field | Meaning |
+| --- | --- |
+| `program_delay_ms` | D |
+| `decision_margin_ms` | how long before it is due each slot is decided (4 ms) |
+| `cg_slots`, `clean_slots`, `empty_slots` | slots decided since start with their CG, their clean feed, or neither (the output repeats) |
+| `late_cg`, `late_decisions` | rendered frames that came after their slot was decided; slots decided after they were due |
+| `cg_ratio` | `cg / (cg + clean)` since start |
+| `window` | the last complete 10 s report: `seconds`, `cg_slots`, `clean_slots`, `cg_ratio`, and `{min, mean, max, count}` in ms of `slack_ms` (per-slot slack: how long before its slot's decision each CG slot's frame arrived), `render_budget_ms` (time left until the slot's decision when the frame went to the render worker) and `delay_ms` (capture to output at the output) |
+
+Repeats (`repeated_frames`), input loss (`input_loss_slots`, `input_losses`),
+format changes and their clean slots (`format_changes`,
+`transition_clean_slots`) stay `sdi.get_status`'s own fields; the camera model is
+`tracking.get_status.camera_model`. The counters refresh every second, the
+window every 10 s with the log line, which now also prints the per-slot slack.
+`stack.py status` shows all of it:
+
+```text
+  program (core)    D 800 ms, decided 4 ms before due; CG 80.9 % since start, 100.0 % in the last 10 s
+  slots             1436 CG, 338 clean feed, 0 empty (repeated), 0 late CG, 0 decided late; input loss 0 slots in 0 losses; 0 format changes (0 clean slots)
+  timing            slack of CG slots 309.9/477.7/615.8 ms, render budget at submit 317.0/491.6/635.6 ms, capture to output 800.1/800.3/804.8 ms (min/mean/max)
+```
+
+and flags a last window with less than half its slots CG as a `PROBLEM`.
+
+### The stack
+
+`stack.py` (through `run-tracked.sh`) starts `chr-sdi-in --video <clip>` on
+`<dir>/capture.sock`, chr-server's core on it with `--program-delay-ms`,
+`--input-loss`, `--output-rate` and `--no-audio` from `stack.toml`, its workers
+(the stand-in, or vchao's `pitch-analysis` through `with-cuda-driver.sh`), and
+chr-monitor on the tap; with `tracking = "external"` it adds
+`--send-cameras <scene>` to `chr-sdi-in` instead of a worker. The output
+follows the clip's rate.
+
+### CPU of the clean feed
+
+The core converts every frame's clean feed (RGBA to UYVY at the output size)
+ahead of its deadline: at 1080p30 `chr-server` used 34.9 % of a core with the
+GPU render worker (phase 5 stack run below), against 10–15 % on the former
+timer path, which converted only the frames that needed it. Converting lazily,
+only for a slot without CG, would have to happen in the 4 ms between the
+decision and the due time (a 1080p conversion takes about that on one thread),
+or decide clean earlier and so shorten every frame's render budget. That trade
+is not taken here; the CPU is affordable on the render host.
+
+### Measured
+
+`stack.py` with test ports beside the live stack on the RTX 3090 host, release
+build:
+
+| Run | Output | Slots | Timing (min/mean/max) | Other |
+| --- | --- | --- | --- | --- |
+| Replay stand-in, panda clip 1920x1080p30 (342 frames) with the onsite start description, D 200 ms (`tracking_wait_ms = 200`, migrated with a warning) | 1920x1080p30, 30.0 slots/s, 0 repeats | 1443 CG, 15 clean (6 at the start, 9 while `description.load` replaced the render worker), 100 % CG in the last 10 s | slack 179.6/185.2/188.9 ms, render budget 192.8/194.2/195.2 ms, delay 200.1/200.2/200.7 ms | camera model `radial` (worker); SRT caller: 1920x1080 30 fps; `description.load` of a one-asset package accepted (1 imported); CPU chr-server 35 %, chr-sdi-in 33 % + FFmpeg 61 %, chr-monitor 10 %, render worker 17 % |
+| The same, `tracking = "external"` (`chr-sdi-in --send-cameras`) | 1920x1080p30, 0 repeats | 553 CG, 5 clean (start) | slack 123.7/183.7/188.3 ms, budget 191.4/193.4/195.6 ms, delay 200.0/200.2/201.0 ms | camera model `radial+warp` |
+| vchao `pitch-analysis`, SC1464 fixture 1212x654p30, D 800 ms, beside the live stack's own `pitch-analysis` (GPU 94 % busy, 5.2 GB) | 1212x654p30, 1 repeat (start) | 300 of 300 CG per 10 s after the 11 s model load (338 clean before); without the render-credit wait 62 % | slack 315/482/617 ms, budget 323/498/638 ms, delay 800.1/800.2/803.2 ms; interval 30.30/33.333/36.46 ms (sd 0.29) | camera model `pinhole` (none); SRT caller: 1212x654 30 fps; `description.load` accepted; CPU chr-server 16 %, chr-sdi-in 12 % |
+
 ## Run
 
 From the repository root, in `nix develop .#media` (FFmpeg for `--video`;
@@ -532,7 +651,7 @@ ffmpeg -f lavfi -i testsrc2=size=1920x1080:rate=60000/1001:duration=30 \
   -vf setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,setsar=1 \
   -c:v libx264 -pix_fmt yuv420p output/gst-core/clip5994.mp4
 target/linux/release/chr-sdi-in --video output/gst-core/clip5994.mp4 &
-target/linux/release/chr-server --pipeline gst --description <description.json> \
+target/linux/release/chr-server --description <description.json> \
   --size 1920x1080 --fps 59.94 --tracking-worker \
   --tracking-worker-arg --manifest --tracking-worker-arg <calibrated-video-v1.json> \
   --program-delay-ms 100 [--output-rate fixed:50]
@@ -557,7 +676,7 @@ h=1080:color=white:t=fill:enable='lt(mod(n\,50)\,2)',tinterlace=interleave_top,s
   -c:v libx264 -crf 16 -pix_fmt yuv420p -flags +ilme+ildct -x264-params tff=1 \
   -timecode 10:00:00:00 -c:a pcm_s16le output/gst-core/i50.mov
 target/linux/release/chr-sdi-in --video output/gst-core/i50.mov &
-target/linux/release/chr-server --pipeline gst --fps 25 --size 1920x1080 ... \
+target/linux/release/chr-server --fps 25 --size 1920x1080 ... \
   --input-loss slate:/srv/chr/slate.png
 ```
 
@@ -583,6 +702,10 @@ and the fields kept their order).
 frames without a GPU, for timing and fault tests.
 
 ## Measurements
+
+"Timer loop" below is the former default path of tracked programs (the capture
+ring and the timer-paced render loop), measured for comparison; phase 5 removed
+it.
 
 Phase 1 runs on the development host (RTX 3090, the live stack running beside
 them), 1920x1080 `testsrc2` clips (H.264, BT.709) at 25, 30 and 50 fps,
@@ -793,10 +916,10 @@ decoders.
 
 ## Limitations
 
-- Frames of this mode are not render submissions: `render.get` does not see
+- Frames of the core are not render submissions: `render.get` does not see
   them, and `render.get_worker_status` counts restarts but not clean feed.
-  The core's log line and `sdi.get_status` (slots, repeats, last frame) report
-  the output.
+  The core's log line and `sdi.get_status` (slots, repeats, last frame, and
+  its `core` telemetry) report the output.
 - DeckLink input and output, the card clock and genlock, RP 188 timecode,
   captions on line 9 and embedded audio on a card are built and tested
   without a card only: not verified on hardware.
@@ -806,8 +929,7 @@ decoders.
 - Timecode restarts with each new stream (a format change, a restarted input);
   files' A/53 captions do not pass FFmpeg's raw pipe.
 - The decision margin is a fixed 4 ms; the clean conversion costs CPU
-  (videoconvertscale, 2 threads per started 1080p).
-- `stack.py` does not start this mode.
+  (videoconvertscale, 2 threads per started 1080p; [Phase 5](#cpu-of-the-clean-feed)).
 - Startup frames, before both workers are ready, are clean feed.
 - A format change restarts the tracking worker: with vchao about 11 s without
   CG until vchao can start a new stream without reloading its model.
@@ -819,5 +941,5 @@ decoders.
 - A DeckLink output keeps one mode: it needs a fixed output rate. SD modes
   are not mapped.
 
-Next (#154): verify phase 3 and 4 on a DeckLink card with house sync (#80);
-removing the timer loop, the capture ring and the old join (phase 5).
+Next (#154): verify phases 3 and 4 on a DeckLink card with house sync (#80);
+the 1-hour soak; a vchao stream without a model reload.

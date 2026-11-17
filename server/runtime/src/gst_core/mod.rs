@@ -1,9 +1,9 @@
-//! chr-server's GStreamer core (#154, phases 1 to 4, experimental): `--pipeline gst`.
+//! chr-server's GStreamer core (#154): the live program path of every tracked
+//! program (`--tracked-scene`, `--description`).
 //!
 //! One GStreamer pipeline carries the program from the capture process to the
 //! output, timed by the pipeline clock (the system clock in simulation, the
-//! DeckLink output card's with `--output decklink`) instead of the
-//! timer-paced render loop:
+//! DeckLink output card's with `--output decklink`):
 //!
 //! ```text
 //! INPUT (chr-sdi-in) ─unixfd─► capture bin: unixfdsrc ! RGBA ! tee
@@ -562,15 +562,30 @@ impl Core {
         Ok(())
     }
 
-    /// A summary of the output, the audio and the selector since the last report.
-    pub fn report(&self) -> String {
+    /// The output, the audio and the selector since the last report.
+    pub fn report(&self) -> Report {
         let (output, window) = self.output.report();
+        let slack = self.selector.take_slack();
         let video_delay = (window.delay.count > 0).then(|| window.delay.mean());
         let audio = self.audio.as_ref().map_or_else(
             || "audio: off".to_owned(),
             |audio| audio.report(video_delay),
         );
-        format!("{output}; {audio}; {}", self.selector.counters().report())
+        Report {
+            text: format!(
+                "{output}; per-slot slack of CG slots {}; {audio}; {}",
+                slack.ms(),
+                self.selector.counters().report()
+            ),
+            window,
+            slack,
+        }
+    }
+
+    /// The program sequence of the newest input stream's first frame
+    /// (`frame_id` 0).
+    pub fn stream_base(&self) -> u64 {
+        self.streams.base()
     }
 
     pub fn selector_counters(&self) -> select::Counters {
@@ -579,6 +594,21 @@ impl Core {
 
     pub fn output_totals(&self) -> output::Totals {
         self.output.totals()
+    }
+}
+
+/// One report of the core: its text for the log, and the window it covers.
+pub struct Report {
+    pub text: String,
+    /// The output's slots since the previous report.
+    pub window: output::Totals,
+    /// How long before its slot's deadline each CG slot's frame arrived, ns.
+    pub slack: output::Summary,
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
     }
 }
 

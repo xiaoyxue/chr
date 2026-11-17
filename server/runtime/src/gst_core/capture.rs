@@ -95,6 +95,12 @@ impl Streams {
         }
     }
 
+    /// The first program sequence of the newest stream; 0 before the first.
+    pub fn base(&self) -> u64 {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.recent.back().map_or(0, |(_, base)| *base)
+    }
+
     /// The program sequence of frame `frame_id` of `stream_id` in `format`;
     /// a new stream numbers its frames on from the highest sequence so far.
     pub fn sequence(&self, stream_id: &str, frame_id: u64, format: Format) -> u64 {
@@ -531,6 +537,7 @@ mod tests {
         // stream keeps its number.
         assert_eq!(streams.sequence("b", 0, mode(50)), 5);
         assert_eq!(streams.sequence("a", 3, mode(25)), 3);
+        assert_eq!(streams.base(), 5, "b is the newest stream");
         assert_eq!(streams.sequence("b", 2, mode(50)), 7);
         // A reconnected capture in the same format is no format change.
         assert_eq!(streams.sequence("c", 1, mode(50)), 9);

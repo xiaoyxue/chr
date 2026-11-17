@@ -1,36 +1,48 @@
-//! `chr-sdi-in`: the INPUT process of chr-server's GStreamer core
-//! (`chr-server --pipeline gst`, #154). It plays a video file at its own rate,
-//! looped, or a moving test pattern, in real time, or captures a DeckLink
+//! `chr-sdi-in`: the INPUT process of chr-server's GStreamer core (#154), the
+//! one capture process of a tracked program. It plays a video file at its own
+//! rate, looped, or a moving test pattern, in real time, or captures a DeckLink
 //! card's input, and hands the frames to chr-server over a unixfd socket as
 //! memfd frames stamped with their identity, timecode and captions, and the
 //! audio over a second socket ([`chr_runtime::gst_core::input`]). The test
 //! pattern can change its format on a schedule (`--then`), as a signal that
 //! changes, and any input can lose its signal for a while (`--then <s> loss`).
-//! It writes no input ring; that is `chr-sdi-sim`, the timer-paced loop's
-//! simulator.
+//!
+//! With `--send-cameras <manifest>` it is also the external tracking source of
+//! a chr-server without a tracking worker: each frame's recorded camera (the
+//! calibrated clip's `Ti`, `C`, lens and the warp of the clip frame it shows)
+//! goes to chr-server as `tracking.frame`, keyed by the frame's `frame_id`.
+//! Nothing estimates it.
 
-use std::{error::Error, path::PathBuf, time::Duration};
+use std::{
+    collections::VecDeque,
+    error::Error,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
+use chr_common::{client::NativeSocketClient, methods::tracking};
 use chr_runtime::{
+    calibration::lens::CHECKS,
     gst_core::{
         decklink::{self, Connection},
-        input::{Input, Options, Source, audio_socket},
+        input::{Input, Options, Source, Stamped, audio_socket, decoded_frames},
     },
     sdi::{Format, VideoMode, scanned_rate},
 };
+use chr_tracker::replay::TrackingReplay;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 const USAGE: &str = "\
 Usage: chr-sdi-in (--video <file> | --test-pattern <WxH> <rate> | --source decklink) [options]
 
-The INPUT process of chr-server's GStreamer core (chr-server --pipeline gst):
+The INPUT process of chr-server's GStreamer core (a tracked chr-server program):
 plays a video file at the file's own rate, looped, or a moving test pattern,
 in real time on the system clock, or captures a DeckLink card's input, and
 hands every frame to chr-server over a unixfd socket: RGBA8 in memfd memory,
 stamped with its frame_id and capture time (VchaoFrame, stage source), its
-timecode and captions; the audio goes over <socket>.audio. It writes no input
-ring.
+timecode and captions; the audio goes over <socket>.audio. With --send-cameras
+it also sends each frame's recorded camera to chr-server as tracking.frame.
 
 Rates are frames per second: an integer, N/D (30000/1001) or 29.97, 59.94 ...;
 a rate with an i suffix is interlaced, named by its field rate as broadcast
@@ -60,6 +72,14 @@ Options:
   --no-audio                  Send no audio
   --audio-channels <n>        Audio channels: 2, 8 or 16 [default: 2]
   --captions                  Give the test pattern's frames synthetic CEA-608 captions
+  --send-cameras <json>       Also send each frame's recorded camera from this
+                              calibrated-video-v1 manifest (Ti, C, radial, frame_warps; the
+                              clip's) to chr-server as tracking.frame, keyed by frame_id: the
+                              external tracking of a chr-server without --tracking-worker
+  --server-socket <path>      chr-server's NativeSocket for --send-cameras
+                              [default: $XDG_RUNTIME_DIR/chr/render.sock]
+  --tracking-delay-ms <n>     Send each camera this long after its frame [default: 0]
+  --drop-tracking-every <n>   Withhold every n-th camera to exercise frames without one
   -h, --help                  Show this help";
 
 /// One step of the `--then` schedule.
@@ -78,6 +98,16 @@ struct Args {
     /// Steps, each after the previous state lasted this long.
     then: Vec<(Duration, Step)>,
     cycle: bool,
+    cameras: Option<Cameras>,
+}
+
+/// `--send-cameras`: the recorded cameras of a calibrated clip.
+#[derive(Debug, PartialEq)]
+struct Cameras {
+    manifest: PathBuf,
+    server: PathBuf,
+    delay: Duration,
+    drop_every: Option<u64>,
 }
 
 /// `<WxH> <rate>` of `flag`.
@@ -112,6 +142,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     let (mut sources, mut socket, mut options) = (Vec::new(), None, Options::default());
     let (mut then, mut cycle) = (Vec::new(), false);
     let (mut device, mut mode, mut connection) = (None, None, None);
+    let (mut manifest, mut server, mut delay_ms, mut drop_every) = (None, None, None, None);
     while let Some(flag) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
@@ -161,6 +192,15 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                 }
             }
             "--captions" => options.captions = true,
+            "--send-cameras" => manifest = Some(PathBuf::from(value()?)),
+            "--server-socket" => server = Some(PathBuf::from(value()?)),
+            "--tracking-delay-ms" => delay_ms = Some(value()?.parse::<u64>()?),
+            "--drop-tracking-every" => {
+                drop_every = Some(value()?.parse::<u64>()?).filter(|n| *n > 0);
+                if drop_every.is_none() {
+                    return Err("--drop-tracking-every must be positive".into());
+                }
+            }
             "-h" | "--help" => return Ok(None),
             other => return Err(format!("unknown argument {other:?}\n\n{USAGE}").into()),
         }
@@ -192,15 +232,38 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if options.captions && !matches!(source, Source::TestPattern(_)) {
         return Err("--captions is for the test pattern; files and cards carry their own".into());
     }
+    let runtime_dir = |flag: &str| {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(|dir| PathBuf::from(dir).join("chr"))
+            .ok_or_else(|| format!("XDG_RUNTIME_DIR is not set; pass {flag} <path>"))
+    };
+    let cameras = match manifest {
+        Some(manifest) => Some(Cameras {
+            manifest,
+            server: match server {
+                Some(server) => server,
+                None => runtime_dir("--server-socket")?.join("render.sock"),
+            },
+            delay: Duration::from_millis(delay_ms.unwrap_or(0)),
+            drop_every,
+        }),
+        None if server.is_some() || delay_ms.is_some() || drop_every.is_some() => {
+            return Err(
+                "--server-socket, --tracking-delay-ms and --drop-tracking-every need \
+                 --send-cameras"
+                    .into(),
+            );
+        }
+        None => None,
+    };
     Ok(Some(Args {
         source,
         then,
         cycle,
+        cameras,
         socket: match socket {
             Some(socket) => socket,
-            None => std::env::var_os("XDG_RUNTIME_DIR")
-                .map(|dir| PathBuf::from(dir).join("chr").join("capture.sock"))
-                .ok_or("XDG_RUNTIME_DIR is not set; pass --socket <path>")?,
+            None => runtime_dir("--socket")?.join("capture.sock"),
         },
         options,
     }))
@@ -229,7 +292,15 @@ fn run(args: Args) -> Result<()> {
     if let Some(parent) = args.socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let mut cameras = match (&args.cameras, &args.source) {
+        (Some(cameras), Source::File(video)) => Some(CameraSender::new(cameras, video)?),
+        (Some(_), _) => return Err("--send-cameras replays a calibrated clip: give --video".into()),
+        (None, _) => None,
+    };
     let mut input = Input::start(&args.source, &args.socket, &args.options)?;
+    if cameras.is_some() {
+        input.watch_frames();
+    }
     log::info!(
         "simulated SDI input: {} into {}{}",
         match &args.source {
@@ -260,6 +331,7 @@ fn run(args: Args) -> Result<()> {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut check = tokio::time::interval(Duration::from_millis(100));
+        let mut poll = tokio::time::interval(Duration::from_millis(2));
         let mut report = tokio::time::interval(Duration::from_secs(10));
         let mut last = (0, 0, 0);
         let mut next = schedule.next();
@@ -294,6 +366,9 @@ fn run(args: Args) -> Result<()> {
                     }
                 }
                 _ = check.tick() => input.check()?,
+                _ = poll.tick(), if cameras.is_some() => {
+                    cameras.as_mut().expect("guarded").send(&input).await?;
+                }
                 _ = report.tick() => {
                     let (stamped, sent, audio, stale) = input.counts();
                     log::info!(
@@ -305,10 +380,157 @@ fn run(args: Args) -> Result<()> {
                         input.stream_id().unwrap_or_default()
                     );
                     last = (stamped, sent, audio);
+                    if let Some(cameras) = &cameras {
+                        cameras.report();
+                    }
                 }
             }
         }
     })
+}
+
+/// The recorded camera of the clip frame `stamped` shows (its warp of
+/// `source_index % warps`), keyed by its `frame_id`: frames the input dropped
+/// (lost, stale) are not stamped but still count in the clip.
+fn camera(replay: &TrackingReplay, stamped: Stamped) -> tracking::TrackingFrame {
+    let mut camera = replay.frame(stamped.source_index);
+    camera.sequence = stamped.frame_id.into();
+    camera
+}
+
+/// `--send-cameras`: sends each stamped frame's recorded camera to chr-server
+/// as `tracking.frame`, `delay` after its frame, keyed by its `frame_id`.
+struct CameraSender {
+    replay: TrackingReplay,
+    server: PathBuf,
+    delay: Duration,
+    drop_every: Option<u64>,
+    client: Option<NativeSocketClient>,
+    next_connect: Instant,
+    due: VecDeque<(Instant, tracking::TrackingFrame)>,
+    sent: u64,
+    rejected: u64,
+    withheld: u64,
+}
+
+/// Cameras waiting to be sent: stale ones are dropped, like a tracking link's.
+const DUE_CAMERAS: usize = 64;
+
+impl CameraSender {
+    /// The cameras of the calibrated clip `video`, which must decode to one
+    /// frame per warp of the manifest, at its extent.
+    fn new(cameras: &Cameras, video: &std::path::Path) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct Extent {
+            width: u32,
+            height: u32,
+        }
+        let replay = chr_tracker::replay::load(&cameras.manifest, &CHECKS)?;
+        let extent: Extent = serde_json::from_slice(&std::fs::read(&cameras.manifest)?)?;
+        let (width, height, frames) = decoded_frames(video)?;
+        if replay.warp_count() == 0
+            || frames != replay.warp_count() as u64
+            || (width, height) != (extent.width, extent.height)
+        {
+            return Err(format!(
+                "--send-cameras needs the manifest's clip: {} decodes to {frames} frames of \
+                 {width}x{height}, the manifest has {} frame_warps at {}x{}",
+                video.display(),
+                replay.warp_count(),
+                extent.width,
+                extent.height
+            )
+            .into());
+        }
+        log::info!(
+            "sending the recorded cameras of {} to {} (+{} ms)",
+            cameras.manifest.display(),
+            cameras.server.display(),
+            cameras.delay.as_millis()
+        );
+        Ok(Self {
+            replay,
+            server: cameras.server.clone(),
+            delay: cameras.delay,
+            drop_every: cameras.drop_every,
+            client: None,
+            next_connect: Instant::now(),
+            due: VecDeque::new(),
+            sent: 0,
+            rejected: 0,
+            withheld: 0,
+        })
+    }
+
+    async fn send(&mut self, input: &Input) -> Result<()> {
+        for stamped in input.take_frames() {
+            if self
+                .drop_every
+                .is_some_and(|n| (stamped.frame_id + 1) % n == 0)
+            {
+                self.withheld += 1;
+            } else {
+                self.due
+                    .push_back((Instant::now() + self.delay, camera(&self.replay, stamped)));
+            }
+        }
+        while self.due.len() > DUE_CAMERAS {
+            self.due.pop_front();
+        }
+        while self
+            .due
+            .front()
+            .is_some_and(|(at, _)| *at <= Instant::now())
+        {
+            if self.client.is_none() && Instant::now() >= self.next_connect {
+                match NativeSocketClient::connect(&self.server).await {
+                    Ok(client) => {
+                        log::info!("connected to chr-server at {}", self.server.display());
+                        self.client = Some(client);
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "waiting for chr-server at {}: {error}",
+                            self.server.display()
+                        );
+                        self.next_connect = Instant::now() + Duration::from_secs(1);
+                    }
+                }
+            }
+            let (_, camera) = self.due.pop_front().expect("front exists");
+            let Some(client) = self.client.as_mut() else {
+                continue;
+            };
+            match client
+                .call(tracking::FRAME, Some(serde_json::to_value(&camera)?))
+                .await
+            {
+                Ok(_) => self.sent += 1,
+                Err(chr_common::client::ClientError::Rpc(error)) => {
+                    self.rejected += 1;
+                    log::debug!(
+                        "camera {} rejected: {}",
+                        camera.sequence.get(),
+                        error.message
+                    );
+                }
+                Err(error) => {
+                    log::warn!("chr-server connection lost: {error}");
+                    self.client = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn report(&self) {
+        log::info!(
+            "cameras sent {}, rejected {}, withheld {}",
+            self.sent,
+            self.rejected,
+            self.withheld
+        );
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +551,42 @@ mod tests {
     }
 
     #[test]
+    fn cameras_follow_the_clip_frame_after_dropped_frames_and_loops() {
+        let warp = |x: f64| [[0.001, 0., x], [0., 0.001, -0.5], [0., 0., 1.]];
+        let replay = TrackingReplay::new(
+            [[0.02, 0., 0.], [0., 0.02, 0.], [0., 0., 1.]],
+            [0., 0., -10.],
+            chr_tracker::lens::wire([2., 1.], 2., [-0.05, 0., 0.], None, &CHECKS).unwrap(),
+            &[warp(-1.), warp(-0.9), warp(-0.8), warp(-0.7)],
+            &CHECKS,
+        )
+        .unwrap();
+        // Clip frames 2 and 3 were dropped (input lost), 6 is frame 2 of the next loop.
+        let shown = [0, 1, 4, 5, 6, 7];
+        for (frame_id, source_index) in (0..).zip(shown) {
+            let camera = camera(
+                &replay,
+                Stamped {
+                    frame_id,
+                    source_index,
+                },
+            );
+            assert_eq!(camera.sequence.get(), frame_id, "keyed by frame_id");
+            assert_eq!(
+                camera.frame_warp,
+                replay.warp(source_index % 4),
+                "frame {frame_id} shows clip frame {}",
+                source_index % 4
+            );
+        }
+        assert_ne!(
+            replay.warp(2),
+            replay.warp(0),
+            "frame_id 2 shows clip frame 0, not 2"
+        );
+    }
+
+    #[test]
     fn parses_a_source_and_rejects_bad_options() {
         let args = parse(&["--test-pattern", "64x36", "50", "--socket", "/x/c.sock"])
             .unwrap()
@@ -341,7 +599,33 @@ mod tests {
                 options: Options::default(),
                 then: Vec::new(),
                 cycle: false,
+                cameras: None,
             }
+        );
+        let cameras = parse(&[
+            "--video",
+            "a.mp4",
+            "--socket",
+            "/s",
+            "--send-cameras",
+            "m.json",
+            "--server-socket",
+            "/r.sock",
+            "--tracking-delay-ms",
+            "40",
+            "--drop-tracking-every",
+            "25",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cameras.cameras,
+            Some(Cameras {
+                manifest: "m.json".into(),
+                server: "/r.sock".into(),
+                delay: Duration::from_millis(40),
+                drop_every: Some(25),
+            })
         );
         let switching = parse(&[
             "--test-pattern",
@@ -504,6 +788,24 @@ mod tests {
             ],
             &["--video", "a.mp4", "--device", "1", "--socket", "/s"],
             &["--video", "a.mp4", "--captions", "--socket", "/s"],
+            &[
+                "--video",
+                "a.mp4",
+                "--tracking-delay-ms",
+                "5",
+                "--socket",
+                "/s",
+            ],
+            &[
+                "--video",
+                "a.mp4",
+                "--send-cameras",
+                "m.json",
+                "--drop-tracking-every",
+                "0",
+                "--socket",
+                "/s",
+            ],
             &[
                 "--test-pattern",
                 "64x36",

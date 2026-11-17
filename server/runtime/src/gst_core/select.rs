@@ -51,7 +51,8 @@ use gstreamer as gst;
 use gstreamer_app::AppSrc;
 
 use super::{
-    DECISION_MARGIN, Error, OutputRate, PROGRAM_META, Timeline, ancillary::Ancillary, uyvy_caps,
+    DECISION_MARGIN, Error, OutputRate, PROGRAM_META, Timeline, ancillary::Ancillary,
+    output::Summary, uyvy_caps,
 };
 use crate::sdi::{Format, Scan, SdiRecorder, VideoMode};
 
@@ -175,6 +176,8 @@ struct Slot<B> {
     scan: Scan,
     clean: Option<B>,
     cg: Option<B>,
+    /// When the CG arrived (running time).
+    cg_at: Option<gst::ClockTime>,
     ancillary: Option<Ancillary>,
 }
 
@@ -190,6 +193,9 @@ struct Slots<B> {
     /// When the latest captured frame was offered (running time).
     last_capture: Option<gst::ClockTime>,
     counters: Counters,
+    /// How long before its slot's deadline each decided CG frame arrived,
+    /// since [`Selector::take_slack`].
+    slack: Summary,
 }
 
 impl<B> Slots<B> {
@@ -201,6 +207,7 @@ impl<B> Slots<B> {
             transition: None,
             last_capture: None,
             counters: Counters::default(),
+            slack: Summary::default(),
         }
     }
 
@@ -218,19 +225,21 @@ impl<B> Slots<B> {
             scan: key.scan,
             clean: None,
             cg: None,
+            cg_at: None,
             ancillary: None,
         }))
     }
 
-    /// Adds one branch's frame to its slot. A frame for a decided slot is
-    /// dropped (and counted if it is CG).
-    fn offer(&mut self, key: Frame, frame: B, cg: bool) {
+    /// Adds one branch's frame, offered at running time `now`, to its slot.
+    /// A frame for a decided slot is dropped (and counted if it is CG).
+    fn offer(&mut self, key: Frame, frame: B, cg: bool, now: gst::ClockTime) {
         let Some(slot) = self.slot(key) else {
             self.counters.late_cg += u64::from(cg);
             return;
         };
         if cg {
             slot.cg = Some(frame);
+            slot.cg_at = Some(now);
         } else {
             slot.clean = Some(frame);
         }
@@ -313,6 +322,7 @@ impl<B> Slots<B> {
             key,
             choice,
             frame,
+            cg_at: slot.cg_at.filter(|_| choice == Choice::Cg),
             ancillary: slot.ancillary,
             transition,
         })
@@ -324,6 +334,8 @@ struct Decision<B> {
     key: Frame,
     choice: Choice,
     frame: Option<B>,
+    /// When its CG arrived, if the slot got its CG.
+    cg_at: Option<gst::ClockTime>,
     ancillary: Option<Ancillary>,
     /// A slot without CG that belongs to a format change.
     transition: bool,
@@ -539,7 +551,8 @@ impl Selector {
     }
 
     fn offer(&self, key: Frame, frame: gst::Buffer, cg: bool) {
-        lock(&self.shared.slots).offer(key, frame, cg);
+        let now = self.timeline.now();
+        lock(&self.shared.slots).offer(key, frame, cg, now);
         self.shared.wake.notify_one();
     }
 
@@ -550,6 +563,12 @@ impl Selector {
 
     pub fn counters(&self) -> Counters {
         lock(&self.shared.slots).counters
+    }
+
+    /// The per-slot slack of the CG slots decided since the last call: how
+    /// long before its slot's deadline each rendered frame arrived, ns.
+    pub fn take_slack(&self) -> Summary {
+        std::mem::take(&mut lock(&self.shared.slots).slack)
     }
 
     /// Stops the thread; frames still held are released.
@@ -621,9 +640,14 @@ fn run(shared: &Shared, program: &Program, timeline: &Timeline, timing: Timing) 
             key,
             choice,
             frame,
+            cg_at,
             ancillary,
             transition,
         } = slots.decide().expect("a next slot");
+        if let Some(at) = cg_at {
+            let slack = timing.deadline(key.capture).nseconds() as i64 - at.nseconds() as i64;
+            slots.slack.add(slack);
+        }
         if transition {
             program.recorder.transition_clean();
         }
@@ -874,10 +898,11 @@ mod tests {
                 key(sequence, 20 * sequence),
                 format!("clean {sequence}"),
                 false,
+                at(0),
             );
         }
-        slots.offer(key(1, 20), "cg 1".to_owned(), true);
-        slots.offer(key(2, 40), "cg 2".to_owned(), true);
+        slots.offer(key(1, 20), "cg 1".to_owned(), true, at(0));
+        slots.offer(key(2, 40), "cg 2".to_owned(), true, at(0));
         assert_eq!(
             decided(&mut slots),
             [
@@ -886,7 +911,7 @@ mod tests {
                 (2, Choice::Cg, Some("cg 2".to_owned())),
             ]
         );
-        slots.offer(key(0, 0), "cg 0".to_owned(), true);
+        slots.offer(key(0, 0), "cg 0".to_owned(), true, at(0));
         assert!(slots.next().is_none(), "a late CG frame takes no slot");
         assert_eq!(
             slots.counters,
@@ -900,18 +925,30 @@ mod tests {
     }
 
     #[test]
+    fn a_cg_slot_knows_when_its_cg_arrived() {
+        let mut slots = Slots::new(4);
+        slots.offer(key(0, 0), "clean 0", false, at(0));
+        slots.offer(key(1, 20), "clean 1", false, at(20));
+        slots.offer(key(1, 20), "cg 1", true, at(70));
+        let arrivals: Vec<_> = std::iter::from_fn(|| slots.decide())
+            .map(|decision| decision.cg_at)
+            .collect();
+        assert_eq!(arrivals, [None, Some(at(70))], "only a CG slot has slack");
+    }
+
+    #[test]
     fn slots_are_decided_in_capture_order_and_bounded() {
         let mut slots = Slots::new(2);
-        slots.offer(key(5, 100), "cg 5", true);
-        slots.offer(key(4, 80), "clean 4", false);
+        slots.offer(key(5, 100), "cg 5", true, at(0));
+        slots.offer(key(4, 80), "clean 4", false, at(0));
         assert_eq!(
             slots.next(),
             Some((4, at(80))),
             "a CG-first slot keeps its place"
         );
-        slots.offer(key(6, 120), "clean 6", false);
+        slots.offer(key(6, 120), "clean 6", false, at(0));
         assert_eq!(slots.counters.evicted, 1, "4 is given up");
-        slots.offer(key(4, 80), "cg 4", true);
+        slots.offer(key(4, 80), "cg 4", true, at(0));
         assert_eq!(slots.counters.late_cg, 1);
         let choices: Vec<_> = decided(&mut slots)
             .into_iter()
@@ -924,9 +961,9 @@ mod tests {
     fn a_format_change_counts_its_slots_without_cg_until_the_first_cg() {
         let mut slots = Slots::new(16);
         for sequence in 0..8 {
-            slots.offer(key(sequence, 20 * sequence), "clean", false);
+            slots.offer(key(sequence, 20 * sequence), "clean", false, at(0));
         }
-        slots.offer(key(0, 0), "cg", true);
+        slots.offer(key(0, 0), "cg", true, at(0));
         assert_eq!(
             slots.decide().map(|d| (d.key.sequence, d.choice)),
             Some((0, Choice::Cg))
@@ -934,8 +971,8 @@ mod tests {
         // Frame 3 is the first of the new format; 1 and 2 are still undecided:
         // 1 lost CG with the old tracking session, 2 still got it.
         slots.begin_transition(3);
-        slots.offer(key(2, 40), "cg", true);
-        slots.offer(key(6, 120), "cg", true);
+        slots.offer(key(2, 40), "cg", true, at(0));
+        slots.offer(key(6, 120), "cg", true, at(0));
         let transition: Vec<_> = std::iter::from_fn(|| slots.decide())
             .map(|decision| (decision.key.sequence, decision.choice, decision.transition))
             .collect();

@@ -9,8 +9,8 @@ asset is needed.
 `bench WxH` times the render worker's path for that description with
 `chr-renderer-cli bench` (GPU and wall time per frame).
 
-`run WxH` starts run-tracked.sh (chr-server with both workers, chr-sdi-sim and
-chr-monitor with --encoder gstreamer) in its own process group on separate ports and
+`run WxH` starts run-tracked.sh (chr-sdi-in, chr-server's GStreamer core with both
+workers and chr-monitor with --encoder gstreamer) in its own process group on separate ports and
 runtime directory, waits until frames are tracked and rendered, records the SRT
 preview while it samples for --seconds, then stops everything it started and
 removes the runtime directory. It prints the program counters, CPU and memory per
@@ -263,9 +263,7 @@ def report(width, height, args, first, second, seconds, procs0, procs1, gpu0, gp
           f"misses, {delta('render.get_worker_status', 'clean_feed_frames')} clean-feed frames, "
           f"{worker['restarts']} restarts")
     print(f"- tracking: {delta('tracking.get_status', 'frames_joined') / seconds:.1f} joined/s, "
-          f"{delta('tracking.get_status', 'frames_without_tracking')} without camera, "
-          f"{delta('tracking.get_status', 'frames_dropped')} dropped, "
-          f"{delta('tracking.get_status', 'frames_overwritten')} overwritten")
+          f"{delta('tracking.get_status', 'frames_without_tracking')} without camera")
     print("- processes (CPU % of one core over the window; RSS / of it shared memory):")
     for pid, (name, ticks, rss, shmem) in sorted(procs1.items(), key=lambda item: item[1][0]):
         before = procs0.get(pid)
@@ -300,7 +298,7 @@ def main() -> None:
     parser.add_argument("--dir", default=f"{os.environ.get('XDG_RUNTIME_DIR', '/tmp')}/chr-resolution-bench")
     parser.add_argument("--encoder", default="gstreamer", help="run: chr-monitor --encoder")
     parser.add_argument("--server-arg", action="append", default=[],
-                        help="run: extra chr-server argument (repeatable), e.g. --server-arg=--render-deadline-ms")
+                        help="run: extra chr-server argument (repeatable), e.g. --server-arg=--program-delay-ms --server-arg=200")
     parser.add_argument("--scene")
     parser.add_argument("--video")
     parser.add_argument("--description")

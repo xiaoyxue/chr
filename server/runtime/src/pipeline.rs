@@ -1,20 +1,21 @@
-//! The render pipeline: owns the scene and the output clock, applies commands between
-//! frames, and paces frames with the monotonic clock. It holds no GPU: every frame is
+//! The render loop of a generated program (the triangle, `--synthetic-program`,
+//! `--pitch-demo`, `--software-video`), which has no capture input to follow:
+//! it owns the scene and the output clock, applies commands between frames, and
+//! paces frames with the monotonic clock. It holds no GPU: every frame is
 //! rendered by the supervised `chr-renderer-cli worker` (see [`crate::worker`]).
+//! A tracked program runs on the GStreamer core instead ([`crate::gst_core`]).
 //!
 //! Its only product is the program output in SDI form, queued for the SDI port.
 //! Everything clients see is derived from what that port transmits (the program tap
 //! read by `chr-monitor`). A frame the worker does not deliver in time is
 //! transmitted as its clean feed: the input image without CG, scaled to the
-//! output. A tracked frame without a camera is clean feed too ([`CleanFrame`]).
+//! output.
 
 use std::{
-    collections::VecDeque,
     error::Error,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::Receiver,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -28,10 +29,7 @@ use crate::{
     frame_submissions::{Execution, FrameSubmissions},
     scene::Scene,
     sdi::{SdiFrame, SdiInput, VideoMode},
-    worker::{
-        supervisor::{Miss, StatusHandle, Supervisor, WorkerConfig},
-        transport::SharedPixels,
-    },
+    worker::supervisor::{Miss, StatusHandle, Supervisor, WorkerConfig},
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -55,8 +53,8 @@ pub enum Command {
 pub const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Answers the triangle's commands without a render loop, for chr-server's
-/// GStreamer core (`--pipeline gst`), which renders only its program: the
-/// triangle's state is kept and reported but never drawn.
+/// GStreamer core, which renders only its program: the triangle's state is
+/// kept and reported but never drawn.
 pub async fn answer_commands(mut commands: mpsc::Receiver<Command>, fps: Rate) {
     let mut scene = Scene::new(fps);
     while let Some(command) = commands.recv().await {
@@ -76,19 +74,6 @@ pub async fn answer_commands(mut commands: mpsc::Receiver<Command>, fps: Rate) {
         }
     }
 }
-
-/// A captured frame without a camera, transmitted as its clean feed in its
-/// place among the program frames.
-pub struct CleanFrame {
-    /// The program input sequence the frame takes.
-    pub sequence: u64,
-    /// RGBA8 BT.709 code values at `extent`, tightly packed.
-    pub rgba: SharedPixels,
-    pub extent: w::Extent,
-}
-
-/// Clean frames that may wait for the render loop.
-pub const CLEAN_QUEUE: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -113,21 +98,19 @@ impl RenderWorker {
         worker: WorkerConfig,
         status: StatusHandle,
     ) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, worker, status, None, None)
+        Self::spawn_inner(config, sdi, worker, status, None)
     }
 
     /// Starts the render loop for an installed program; until the worker is ready
-    /// its frames are clean feed. `clean` delivers the frames without a camera
-    /// of a tracked program.
+    /// its frames are clean feed.
     pub fn spawn_program(
         config: RenderConfig,
         sdi: SdiInput,
         worker: WorkerConfig,
         status: StatusHandle,
         scheduler: FrameSubmissions,
-        clean: Option<Receiver<CleanFrame>>,
     ) -> Result<Self, BoxError> {
-        Self::spawn_inner(config, sdi, worker, status, Some(scheduler), clean)
+        Self::spawn_inner(config, sdi, worker, status, Some(scheduler))
     }
 
     fn spawn_inner(
@@ -136,7 +119,6 @@ impl RenderWorker {
         worker: WorkerConfig,
         status: StatusHandle,
         scheduler: Option<FrameSubmissions>,
-        clean: Option<Receiver<CleanFrame>>,
     ) -> Result<Self, BoxError> {
         let supervisor = Supervisor::new(worker, Arc::clone(&status))?;
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
@@ -150,8 +132,6 @@ impl RenderWorker {
             scene: Scene::new(config.mode.fps),
             config,
             scheduler,
-            clean,
-            clean_pending: VecDeque::new(),
         };
         let thread = std::thread::Builder::new()
             .name("chr-render".into())
@@ -185,9 +165,6 @@ struct Pipeline {
     scene: Scene,
     config: RenderConfig,
     scheduler: Option<FrameSubmissions>,
-    clean: Option<Receiver<CleanFrame>>,
-    /// Clean frames received but not transmitted yet, in sequence order.
-    clean_pending: VecDeque<CleanFrame>,
 }
 
 impl Pipeline {
@@ -261,47 +238,13 @@ impl Pipeline {
         scheduler
             .handoff(&mut self.sdi)
             .map_err(|e| e.to_string())?;
-        if let Some(clean) = &self.clean {
-            self.clean_pending.extend(clean.try_iter());
-        }
-        // Clean frames keep their place: those before the next program frame
-        // go first, the others once no program frame waits.
-        match scheduler.next_ready().map_err(|e| e.to_string())? {
-            Some(execution) => {
-                let sequence = execution.provenance.input.frame.sequence.get();
-                self.transmit_clean(Some(sequence));
-                self.render_program(execution, deadline);
-            }
-            None => self.transmit_clean(None),
+        if let Some(execution) = scheduler.next_ready().map_err(|e| e.to_string())? {
+            self.render_program(execution, deadline);
         }
         scheduler
             .handoff(&mut self.sdi)
             .map_err(|e| e.to_string())?;
         Ok(())
-    }
-
-    /// Transmits the pending clean frames before `before`, or all of them.
-    fn transmit_clean(&mut self, before: Option<u64>) {
-        while self
-            .clean_pending
-            .front()
-            .is_some_and(|clean| before.is_none_or(|before| clean.sequence < before))
-        {
-            let clean = self.clean_pending.pop_front().expect("front exists");
-            match clean_uyvy(
-                &clean.rgba,
-                clean.extent,
-                ChannelOrder::Rgba,
-                self.config.mode,
-            ) {
-                Some(uyvy) => self.sdi.submit(SdiFrame {
-                    source_frame: clean.sequence,
-                    uyvy: Arc::new(uyvy),
-                    program: None,
-                }),
-                None => log::warn!("clean frame {} could not be converted", clean.sequence),
-            }
-        }
     }
 
     fn render_program(&mut self, execution: Execution, deadline: Instant) {
