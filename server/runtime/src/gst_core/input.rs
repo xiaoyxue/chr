@@ -41,10 +41,9 @@
 //!   delivers a stale frame.
 //! - **Never waits for the core:** without a connected core frames are
 //!   dropped, and a core that does not read makes the queues drop their oldest.
-//!
-//! The capture ring of `chr-sdi-sim` is not written.
 
 use std::{
+    collections::VecDeque,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, Stdio},
@@ -153,7 +152,13 @@ struct Shared {
     audio_sent: AtomicU64,
     stale: AtomicU64,
     stream: Mutex<Option<Stamping>>,
+    /// The `frame_id`s stamped since [`Input::take_frames`], once
+    /// [`Input::watch_frames`] asked for them.
+    frames: Mutex<Option<VecDeque<u64>>>,
 }
+
+/// Stamped `frame_id`s kept for [`Input::take_frames`].
+const WATCHED_FRAMES: usize = 256;
 
 /// Where a stream's timecode comes from, unless the source's frames carry one.
 #[derive(Clone, Debug)]
@@ -350,6 +355,20 @@ impl Input {
     /// Loses the input (no frames, no audio) or brings it back.
     pub fn set_lost(&self, lost: bool) {
         self.shared.lost.store(lost, Ordering::Release);
+    }
+
+    /// Keeps the `frame_id` of every frame stamped from now on, for
+    /// [`Self::take_frames`] (`--send-cameras`).
+    pub fn watch_frames(&self) {
+        lock(&self.shared.frames).get_or_insert_with(VecDeque::new);
+    }
+
+    /// The `frame_id`s stamped since the last call, oldest first, at most
+    /// the newest [`WATCHED_FRAMES`].
+    pub fn take_frames(&self) -> Vec<u64> {
+        lock(&self.shared.frames)
+            .as_mut()
+            .map_or_else(Vec::new, |frames| frames.drain(..).collect())
     }
 
     /// Frames stamped so far, frames handed to the socket, audio buffers
@@ -723,6 +742,12 @@ fn stamp(pace: &gst::Element, shared: Arc<Shared>, stamper: Stamper) -> Result<(
                 let frame_id = stamping.next;
                 stamping.next += 1;
                 shared.stamped.fetch_add(1, Ordering::Relaxed);
+                if let Some(frames) = lock(&shared.frames).as_mut() {
+                    if frames.len() == WATCHED_FRAMES {
+                        frames.pop_front();
+                    }
+                    frames.push_back(frame_id);
+                }
                 let mut ancillary = Ancillary::of_gst_metas(buffer);
                 if ancillary.timecode.is_none() {
                     match stamper.timecode(stamping, frame_id, capture_ns) {

@@ -34,7 +34,7 @@ pub struct Manifest {
     pub radial: Radial,
     /// Presentation-order reference-native-pixel -> frame-SNC matrices. A tracked
     /// program receives them, and the lens, per frame instead and ignores this
-    /// list; only `chr-sdi-sim`, the `chr-tracking-sim-cli` replay and still
+    /// list; only `chr-sdi-in --send-cameras`, the `chr-tracking-sim-cli` replay and still
     /// renders replay it.
     #[serde(default)]
     pub frame_warps: Vec<[[f64; 3]; 3]>,

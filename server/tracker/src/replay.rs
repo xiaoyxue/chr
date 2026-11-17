@@ -1,6 +1,6 @@
 //! The replay stand-in's logic: the recorded camera of a calibrated clip
 //! (`calibrated-video-v1`) as tracking data. `chr-tracking-sim-cli` returns it
-//! as every frame's pose ([`TrackingReplay::select`]), `chr-sdi-sim
+//! as every frame's pose ([`TrackingReplay::select`]), `chr-sdi-in
 //! --send-cameras` sends it as `tracking.frame` ([`TrackingReplay::frame`]).
 //! It replays; it never estimates.
 

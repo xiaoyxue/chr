@@ -1,6 +1,6 @@
 //! Reads a program tap as chr-monitor would and reports its cadence and frame
-//! sequence: the same measurement for chr-server's timer-paced loop and its
-//! GStreamer core (#154).
+//! sequence: the same measurement for chr-server's GStreamer core (#154) and a
+//! generated program's internal clock.
 //!
 //! `cargo run --release -p chr-shm --example tap_stats -- <tap> <seconds> [<x0> <x1>]`
 //!

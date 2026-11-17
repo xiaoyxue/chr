@@ -7,7 +7,15 @@
 // the stream and writes a JSON report to #result for the headless browser check
 // (src/harness/browser.ts).
 
-import { ErrorCode, type MonitorStatus, type SdiStatus, type TrackingStatus, type WorkerStatus } from "../protocol.ts";
+import {
+  type CoreStatus,
+  ErrorCode,
+  type MonitorStatus,
+  type SdiStatus,
+  type Spread,
+  type TrackingStatus,
+  type WorkerStatus,
+} from "../protocol.ts";
 import { RpcClient, RpcError, connectWebSocket } from "../rpc.ts";
 
 const POLL_MS = 1000;
@@ -216,7 +224,24 @@ function showSdi(status: SdiStatus): void {
         ? "-"
         : `${status.audio.channels} ch, A-V ${(status.audio.offset_us / 1000).toFixed(1)} ms`,
     ],
+    ...coreRows(status.core),
   ]);
+}
+
+/** The GStreamer core's telemetry: D, CG ratio, per-slot slack and the render budget. */
+function coreRows(core: CoreStatus | undefined): Entry[] {
+  if (core === undefined) return [];
+  const percent = (ratio: number | null) => (ratio === null ? "-" : `${(ratio * 100).toFixed(1)} %`);
+  const spread = (value: Spread | null | undefined) =>
+    value == null ? "-" : `${value.min.toFixed(1)}/${value.mean.toFixed(1)}/${value.max.toFixed(1)} ms`;
+  return [
+    ["program delay", `${core.program_delay_ms.toFixed(0)} ms`],
+    ["CG / clean / empty", `${core.cg_slots} / ${core.clean_slots} / ${core.empty_slots}`],
+    ["CG ratio", `${percent(core.cg_ratio)} (last 10 s ${percent(core.window?.cg_ratio ?? null)})`],
+    ["late CG", String(core.late_cg), core.late_cg > 0],
+    ["slack min/mean/max", spread(core.window?.slack_ms)],
+    ["render budget", spread(core.window?.render_budget_ms)],
+  ];
 }
 
 function showWorker(status: WorkerStatus): void {
@@ -249,8 +274,6 @@ function showTracking(status: TrackingStatus | null): void {
     count("frames joined", "tracking.joined", status.frames_joined),
     count("without tracking", "tracking.missing", status.frames_without_tracking, true),
     count("clean feed", "tracking.clean", status.frames_clean_feed, true),
-    count("dropped", "tracking.dropped", status.frames_dropped, true),
-    count("overwritten", "tracking.overwritten", status.frames_overwritten, true),
     count("poses fresh", "tracking.fresh", status.poses_fresh),
     count("poses interpolated", "tracking.interpolated", status.poses_interpolated),
     count("poses reused", "tracking.reused", status.poses_reused, true),

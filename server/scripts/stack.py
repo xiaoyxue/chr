@@ -5,8 +5,9 @@
 # ///
 """Starts, stops and reports the local development stack with one command.
 
-The stack is the tracked-camera simulation (chr-sdi-sim, chr-server and
-chr-monitor through run-tracked.sh, which restarts whichever exits), the
+The stack is the tracked-camera simulation (chr-sdi-in, chr-server's GStreamer core
+with its workers and chr-monitor through run-tracked.sh, which restarts whichever
+exits), the
 pitch-studio client, the program monitor page and an optional SRT-to-TCP relay for
 viewers behind an SSH port forward. Machine-specific paths live in a local TOML
 file (default output/stack/stack.toml; see stack.example.toml).
@@ -64,7 +65,7 @@ class Config:
     # (STUDIO_DATA_DIR); inside asset_root so chr-server can read the uploads.
     studio_data_dir: str | None = None
     monitor_page_port: int = 5173
-    # "worker": chr-server's tracking worker supplies cameras; "external": chr-sdi-sim
+    # "worker": chr-server's tracking worker supplies cameras; "external": chr-sdi-in
     # sends the recorded ones (--send-cameras).
     tracking: str = "worker"
     # Tracking worker executable (VchaoFrame contract, e.g. vchao's pitch-analysis);
@@ -75,9 +76,16 @@ class Config:
     # Station optical centre [x, y, z] (world metres, negative Z up); default: the
     # reference camera of the description or manifest.
     tracking_centre: list[float] | None = None
-    # How long a frame waits for its camera, which with a tracking worker is also the
-    # program delay; at most 1500. Default: three frame periods.
-    tracking_wait_ms: int | None = None
+    # The program delay D: every frame leaves this long after its capture, with its CG
+    # or its clean feed; above 4, at most 1500. Default: three frame periods.
+    program_delay_ms: int | None = None
+    # What the output shows while the input delivers no frames: "hold", "black",
+    # "slate" or "slate:<png>". Default: chr-server's (hold).
+    input_loss: str | None = None
+    # The output's rate: "follow" (the input's) or "fixed:<rate>" such as "fixed:50".
+    output_rate: str | None = None
+    # Pass the clip's audio through with the same delay as its video.
+    audio: bool = True
     # Camera model of tracked frames: "auto" takes the tracking data's lens, else the
     # tracking_lens_* lens below, else none (pinhole); "pinhole" ignores every lens.
     tracking_lens: str = "auto"
@@ -90,10 +98,22 @@ class Config:
     tracking_lens_support: list[float] | None = None
 
 
+# Keys of earlier stacks and what replaced them.
+RENAMED = {"tracking_wait_ms": "program_delay_ms"}
+
+
 def load_config(path: Path) -> Config:
     if not path.exists():
         raise SystemExit(f"{path} not found: copy server/scripts/stack.example.toml there and edit it")
     values = tomllib.loads(path.read_text())
+    for old, new in RENAMED.items():
+        if old not in values:
+            continue
+        if new in values:
+            raise SystemExit(f"{path}: {old} was renamed {new}; remove {old}")
+        print(f"warning: {path}: {old} is now {new} (the program delay of every frame); "
+              f"rename it", file=sys.stderr)
+        values[new] = values.pop(old)
     known = Config.__dataclass_fields__
     unknown = sorted(set(values) - set(known))
     if unknown:
@@ -124,6 +144,17 @@ def load_config(path: Path) -> Config:
     if any(lens) and not all(lens) or numbers("tracking_lens_support", 4) and not all(lens):
         raise SystemExit(f"{path}: tracking_lens_k, tracking_lens_centre and tracking_lens_scale go together "
                          "(tracking_lens_support needs them)")
+    delay = values.get("program_delay_ms")
+    if delay is not None and (not isinstance(delay, int) or not 4 < delay <= 1500):
+        raise SystemExit(f"{path}: program_delay_ms must be an integer above 4 and at most 1500")
+    loss = values.get("input_loss")
+    if loss is not None and loss not in ("hold", "black", "slate") and not str(loss).startswith("slate:"):
+        raise SystemExit(f"{path}: input_loss must be \"hold\", \"black\", \"slate\" or \"slate:<png>\"")
+    rate = values.get("output_rate")
+    if rate is not None and rate != "follow" and not str(rate).startswith("fixed:"):
+        raise SystemExit(f"{path}: output_rate must be \"follow\" or \"fixed:<rate>\"")
+    if not isinstance(values.get("audio", True), bool):
+        raise SystemExit(f"{path}: audio must be true or false")
     return Config(**values)
 
 
@@ -172,8 +203,14 @@ def components(config: Config) -> list[Component]:
             render += ["--tracking-worker-arg", arg]
         if config.tracking_centre:
             render += ["--tracking-centre", *(repr(float(v)) for v in config.tracking_centre)]
-    if config.tracking_wait_ms is not None:
-        render += ["--tracking-wait-ms", str(config.tracking_wait_ms)]
+    if config.program_delay_ms is not None:
+        render += ["--program-delay-ms", str(config.program_delay_ms)]
+    if config.input_loss is not None:
+        render += ["--input-loss", config.input_loss]
+    if config.output_rate is not None:
+        render += ["--output-rate", config.output_rate]
+    if not config.audio:
+        render += ["--no-audio"]
     render += lens_args(config)
     if config.nixgl:
         render = NIXGL + render
@@ -220,7 +257,9 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
     known = {
         f"tcp {config.server_ws}": "chr-server control JSON-RPC WebSocket (description.load, status)",
         f"unix {config.dir}/render.sock": "chr-server NativeSocket: local control"
-                                         + (", tracking.frame from chr-sdi-sim" if external_tracking else ""),
+                                         + (", tracking.frame from chr-sdi-in" if external_tracking else ""),
+        f"unix {config.dir}/capture.sock": "chr-sdi-in capture: memfd frames to chr-server's GStreamer core",
+        f"unix {config.dir}/capture.sock.audio": "chr-sdi-in capture: audio to chr-server",
         f"tcp {config.monitor_ws}": "chr-monitor WebSocket: status and WebRTC signalling",
         f"udp {config.srt}": "chr-monitor SRT listener: the program for VLC / ffplay",
         **{f"tcp {host}:{port + i}": "chr-monitor WebRTC ICE-TCP, one per open stream" for i in range(4)},
@@ -233,8 +272,7 @@ def roles(config: Config, external_tracking: bool) -> dict[str, str]:
 
 # Processes that hold no socket, and what they do instead.
 PORTLESS = {
-    "chr-sdi-sim": "simulated SDI input: frames into the input ring (shared memory)",
-    "ffmpeg": "decodes the clip in a loop for chr-sdi-sim",
+    "ffmpeg": "decodes the clip (video, audio) in a loop for chr-sdi-in",
     "chr-renderer-cli worker": "GPU renderer; frames and replies over chr-server's unixfd sockets",
     "chr-tracking-sim-cli": "tracking worker stand-in (replays recorded Ti); VchaoFrame frames from"
                             " chr-server and back over unixfd sockets",
@@ -397,6 +435,7 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
         lines.append(f"  SDI output        {sdi['video_mode']}: {rate('sdi.get_status', 'frames_output'):.1f} slots/s, "
                      f"{rate('sdi.get_status', 'repeated_frames'):.1f} repeats/s; since start {sdi['frames_output']} slots, "
                      f"{sdi['repeated_frames']} repeated, {sdi['dropped_frames']} dropped")
+        lines += core_health(sdi, problems)
     render = second.get("render.get_worker_status")
     if isinstance(render, dict) and "error" not in render:
         lines.append(f"  render worker     {worker(render)}, {render['deadline_misses']} deadline misses, "
@@ -423,7 +462,7 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
                      f"{rate('tracking.get_status', 'frames_without_tracking'):.1f} without camera/s; since start "
                      f"{join['frames_joined']} joined, {join['frames_without_tracking']} without camera "
                      f"({join.get('frames_clean_feed', 0)} sent as clean feed), "
-                     f"{join['samples_late']} late cameras, {join['frames_dropped']} dropped")
+                     f"{join['samples_late']} late cameras")
         model = join.get("camera_model")
         lines.append("  camera model      " + (f"{model['model']} (lens source: {model['source']})" if model
                                                  else "none yet: no frame was rendered with its camera"))
@@ -434,6 +473,37 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
         if joined == 0:
             problems.append("no frame was paired with a camera in the last second (is the camera running?)")
     lines += [f"  PROBLEM: {problem}" for problem in problems]
+    return lines
+
+
+def core_health(sdi: dict, problems: list[str]) -> list[str]:
+    """The GStreamer core's state from `sdi.get_status`: D, what the slots got, the
+    CG ratio, per-slot slack and the render budget (#131)."""
+    core = sdi.get("core")
+    if not isinstance(core, dict):
+        return []
+
+    def percent(ratio: float | None) -> str:
+        return "-" if ratio is None else f"{ratio * 100:.1f} %"
+
+    def spread(value: dict | None) -> str:
+        return "-" if not value else f"{value['min']:.1f}/{value['mean']:.1f}/{value['max']:.1f} ms"
+    window = core.get("window") or {}
+    lines = [
+        f"  program (core)    D {core['program_delay_ms']:.0f} ms, decided {core['decision_margin_ms']:.0f} ms "
+        f"before due; CG {percent(core.get('cg_ratio'))} since start, "
+        + (f"{percent(window.get('cg_ratio'))} in the last {window['seconds']:.0f} s" if window
+           else "first report window pending"),
+        f"  slots             {core['cg_slots']} CG, {core['clean_slots']} clean feed, {core['empty_slots']} empty "
+        f"(repeated), {core['late_cg']} late CG, {core['late_decisions']} decided late; input loss "
+        f"{sdi.get('input_loss_slots', 0)} slots in {sdi.get('input_losses', 0)} losses; "
+        f"{sdi.get('format_changes', 0)} format changes ({sdi.get('transition_clean_slots', 0)} clean slots)",
+        f"  timing            slack of CG slots {spread(window.get('slack_ms'))}, render budget at submit "
+        f"{spread(window.get('render_budget_ms'))}, capture to output {spread(window.get('delay_ms'))} "
+        "(min/mean/max)",
+    ]
+    if window and window.get("cg_ratio") is not None and window["cg_ratio"] < 0.5:
+        problems.append(f"only {percent(window['cg_ratio'])} of the slots had CG in the last report window")
     return lines
 
 
@@ -466,7 +536,7 @@ def report(config: Config) -> str:
             others = len(held) - len(ports)
             notes = f"up {uptime(pid)}" + (", OLD BUILD: rebuilt since it started, restart to run it" if old_build(pid) else "")
             role = "" if ports else PORTLESS.get(name, "no listening socket")
-            if name == "chr-sdi-sim" and external_tracking:
+            if name == "chr-sdi-in" and external_tracking:
                 role += "; Ti/C to chr-server's socket (tracking.frame)"
             lines.append(f"  {name:28} pid {pid:<8} {notes:8} {role}".rstrip())
             lines += [f"      {address:40} {known[address]}" for address in ports]
@@ -560,7 +630,7 @@ def runs(component: str, config: Config) -> str:
     tracker = Path(config.tracking_cli).name if config.tracking_cli else "chr-tracking-sim-cli"
     workers = f"render and tracking ({tracker}) workers" if config.tracking == "worker" else "render worker"
     return {
-        "render": f"run-tracked.sh: chr-server with its {workers}, chr-sdi-sim, chr-monitor",
+        "render": f"run-tracked.sh: chr-sdi-in, chr-server's GStreamer core with its {workers}, chr-monitor",
         "srt-relay": "SRT-to-TCP relay",
         "pitch-studio": "built client/pitch-studio served by vite preview",
         "monitor-page": "built client/example/render-harness served by vite preview",

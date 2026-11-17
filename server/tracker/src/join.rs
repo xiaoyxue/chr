@@ -3,13 +3,11 @@
 //! lens it is rendered with is [`lens`](crate::lens)'s choice.
 //!
 //! [`TrackingFeed`] is the bounded backlog that `tracking.frame` or the tracking
-//! worker fills; [`TrackingJoin`] holds captured frames until their camera
-//! arrives or their wait ends, and paces the timer-driven output.
-//! [`DeadlineJoin`] only pairs, until each frame's deadline, for chr-server's
-//! GStreamer core (#154), whose selector decides each output slot. A frame is
-//! never rendered with another frame's camera: a frame without its camera goes
-//! out as clean feed (its own pixels, no CG), and its late camera is then
-//! rejected.
+//! worker fills; [`DeadlineJoin`] pairs captured frames with their camera
+//! until each frame's deadline, for chr-server's GStreamer core (#154), whose
+//! selector decides each output slot. A frame is never rendered with another
+//! frame's camera: a frame without its camera goes out as clean feed (its own
+//! pixels, no CG), and its late camera is then rejected.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -51,6 +49,8 @@ struct Feed {
     samples: BTreeMap<u64, TrackingFrame>,
     /// Highest capture sequence already rendered or skipped.
     done_through: Option<u64>,
+    /// What [`TrackingFeed::push`] adds to a `tracking.frame` sequence.
+    base: u64,
     status: TrackingStatus,
 }
 
@@ -62,14 +62,31 @@ impl TrackingFeed {
                 capacity,
                 samples: BTreeMap::new(),
                 done_through: None,
+                base: 0,
                 status: TrackingStatus::default(),
             })),
             checks,
         }
     }
 
-    /// Accepts the camera of one frame that has not been rendered or skipped yet.
-    pub fn push(&self, frame: TrackingFrame) -> Result<(), ErrorObject> {
+    /// Accepts the camera of one frame that has not been rendered or skipped
+    /// yet, from `tracking.frame`: its `sequence` counts from the
+    /// [`Self::rebase`] base, the program sequence of the input stream's first
+    /// frame, so a camera is keyed by the frame's `frame_id` in its stream.
+    pub fn push(&self, mut frame: TrackingFrame) -> Result<(), ErrorObject> {
+        let base = self.lock().base;
+        frame.sequence = frame.sequence.get().saturating_add(base).into();
+        self.insert(frame)
+    }
+
+    /// The program sequence of the input stream's first frame: `tracking.frame`
+    /// sequences count from it from now on.
+    pub fn rebase(&self, base: u64) {
+        self.lock().base = base;
+    }
+
+    /// Accepts the camera of program frame `frame.sequence`.
+    fn insert(&self, frame: TrackingFrame) -> Result<(), ErrorObject> {
         validate(&frame, &self.checks)
             .map_err(|error| reject(w::RejectionKind::IncompatibleInput, error))?;
         let sequence = frame.sequence.get();
@@ -104,7 +121,7 @@ impl TrackingFeed {
         for answer in answers {
             self.count_pose(answer.pose, answer.overdue);
             if let Some(camera) = answer.camera
-                && let Err(error) = self.push(camera)
+                && let Err(error) = self.insert(camera)
             {
                 log::debug!(
                     "camera of frame {} not used: {}",
@@ -130,10 +147,6 @@ impl TrackingFeed {
         let mut feed = self.lock();
         feed.samples.clear();
         feed.done_through = None;
-    }
-
-    pub fn count_overwritten(&self, frames: u64) {
-        self.lock().status.frames_overwritten += frames;
     }
 
     /// Counts the pose a tracking worker returned for one frame.
@@ -198,131 +211,8 @@ pub struct CapturedFrame<P> {
 /// backlog's memory: 1.5 s at 1080p50 is about 0.6 GiB.
 pub const MAX_WAIT: Duration = Duration::from_millis(1500);
 
-/// Captured frames the join must hold so that none leaves before its `wait`
-/// ends: one per output `period` of the wait, plus the frame being read and
-/// one of slack, and never fewer than four.
-pub fn capture_backlog(wait: Duration, period: Duration) -> usize {
-    let periods = wait.as_nanos().div_ceil(period.as_nanos().max(1));
-    usize::try_from(periods).map_or(usize::MAX, |n| n.saturating_add(2).max(4))
-}
-
-/// Joined frames held for the next output periods: a capture burst of two frames
-/// is rendered one per period instead of being dropped.
-pub const READY: usize = 2;
-
-/// Captured frames waiting for their camera, oldest first, and joined frames
-/// waiting for an output period.
-pub struct TrackingJoin<P> {
-    feed: TrackingFeed,
-    wait: Duration,
-    capacity: usize,
-    /// How long after capture a joined frame leaves; zero: as soon as it is joined.
-    playout: Duration,
-    frames: VecDeque<CapturedFrame<P>>,
-    /// Resolved frames, with their camera or `None` for clean feed.
-    ready: VecDeque<(CapturedFrame<P>, Option<TrackingFrame>)>,
-}
-
-impl<P> TrackingJoin<P> {
-    /// `wait` bounds how long a frame waits for its camera; `capacity` bounds the
-    /// frames held, so latency cannot grow when capture runs ahead of the output.
-    /// Joined frames leave as soon as they are joined.
-    pub fn new(feed: TrackingFeed, wait: Duration, capacity: usize) -> Self {
-        Self {
-            feed,
-            wait,
-            capacity,
-            playout: Duration::ZERO,
-            frames: VecDeque::new(),
-            ready: VecDeque::new(),
-        }
-    }
-
-    /// Releases every resolved frame at the output period nearest to `wait`
-    /// after its capture instead: a constant program delay for cameras that
-    /// arrive in bursts, such as a tracking worker that holds frames until a
-    /// later estimate resolves them. A wait of whole periods puts every
-    /// deadline on an output tick, so tick jitter would move frames by a whole
-    /// period, in pairs and gaps; deciding half a `period` early avoids that.
-    pub fn with_fixed_delay(mut self, period: Duration) -> Self {
-        self.wait = self.wait.saturating_sub(period / 2);
-        self.playout = self.wait;
-        self
-    }
-
-    /// Forgets waiting frames and the feed's samples after a capture restart.
-    pub fn reset(&mut self) {
-        self.frames.clear();
-        self.ready.clear();
-        self.feed.reset();
-    }
-
-    /// Adds a captured frame; frames arrive in increasing sequence.
-    pub fn frame(&mut self, frame: CapturedFrame<P>) {
-        if self.frames.len() == self.capacity
-            && let Some(oldest) = self.frames.pop_front()
-        {
-            match self.feed.close(oldest.sequence) {
-                Some(_) => self.feed.count(|status| status.frames_dropped += 1),
-                None => self
-                    .feed
-                    .count(|status| status.frames_without_tracking += 1),
-            }
-        }
-        self.frames.push_back(frame);
-    }
-
-    /// The next frame to output, oldest first, with its camera, or `None` for
-    /// clean feed. Frames resolve in sequence order: joined with their camera,
-    /// or without one once their wait ended, never with a neighbour's camera.
-    /// A resolved frame is due once its playout delay has passed. Up to
-    /// [`READY`] due frames wait for an output period, absorbing capture bursts;
-    /// beyond that the oldest are dropped, so a stall cannot raise the latency
-    /// for good.
-    pub fn next(&mut self, now: Instant) -> Option<(CapturedFrame<P>, Option<TrackingFrame>)> {
-        while let Some(front) = self.frames.front() {
-            let waited = now.saturating_duration_since(front.arrived) >= self.wait;
-            let sequence = front.sequence;
-            let has_camera = self.feed.lock().samples.contains_key(&sequence);
-            if !has_camera && !waited {
-                break;
-            }
-            let frame = self.frames.pop_front().expect("front exists");
-            let sample = self.feed.close(sequence);
-            if sample.is_none() {
-                self.feed
-                    .count(|status| status.frames_without_tracking += 1);
-            }
-            self.ready.push_back((frame, sample));
-        }
-        let due = self
-            .ready
-            .iter()
-            .take_while(|(frame, _)| now.saturating_duration_since(frame.arrived) >= self.playout)
-            .count();
-        let excess = due
-            .saturating_sub(READY)
-            .max(self.ready.len().saturating_sub(self.capacity));
-        for _ in 0..excess {
-            self.ready.pop_front();
-            self.feed.count(|status| status.frames_dropped += 1);
-        }
-        if due <= excess {
-            return None;
-        }
-        let next = self.ready.pop_front();
-        match &next {
-            Some((_, Some(_))) => self.feed.count(|status| status.frames_joined += 1),
-            Some((_, None)) => self.feed.count(|status| status.frames_clean_feed += 1),
-            None => {}
-        }
-        next
-    }
-}
-
 /// Captured frames waiting for their camera until their own deadline, for
-/// chr-server's GStreamer core (#154). Unlike [`TrackingJoin`] it does not pace
-/// the output: a frame leaves as soon as its camera is in the feed, to be
+/// chr-server's GStreamer core (#154). It does not pace the output: a frame leaves as soon as its camera is in the feed, to be
 /// rendered, or without one, and the core's selector puts the rendered frame or
 /// the clean feed into the frame's output slot. Frames leave in capture order.
 /// A frame leaves without a camera at its deadline, or as soon as it is known
@@ -551,6 +441,25 @@ mod tests {
         assert_eq!(feed.status().frames_clean_feed, 1);
     }
 
+    #[test]
+    fn external_cameras_count_from_the_input_streams_first_frame() {
+        let feed = feed(8);
+        feed.rebase(100);
+        feed.push(replay().frame(2)).unwrap();
+        let mut join = DeadlineJoin::new(feed.clone(), 4);
+        let start = Instant::now();
+        join.frame(captured(102, start), start + Duration::from_secs(1));
+        let joined = join.joined(start);
+        assert_eq!(
+            (joined[0].0.sequence, joined[0].1.sequence.get()),
+            (102, 102),
+            "frame_id 2 of the stream whose first frame is 100"
+        );
+        let late = feed.push(replay().frame(1)).unwrap_err();
+        assert_eq!(late.code, w::RejectionKind::InvalidState.code());
+        assert_eq!(feed.status().samples_late, 1);
+    }
+
     fn captured(sequence: u64, arrived: Instant) -> CapturedFrame<u64> {
         CapturedFrame {
             sequence,
@@ -561,115 +470,6 @@ mod tests {
 
     fn feed(capacity: usize) -> TrackingFeed {
         TrackingFeed::new(capacity, CHECKS)
-    }
-
-    #[test]
-    fn the_capture_backlog_outlasts_the_wait() {
-        let period = Duration::from_millis(40);
-        assert_eq!(capture_backlog(period * 3, period), 5);
-        assert_eq!(capture_backlog(Duration::from_millis(201), period), 8);
-        assert_eq!(capture_backlog(Duration::ZERO, period), 4);
-        assert_eq!(capture_backlog(MAX_WAIT, Duration::from_millis(20)), 77);
-    }
-
-    #[test]
-    fn pairs_by_sequence_regardless_of_arrival_order() {
-        let feed = feed(8);
-        let mut join = TrackingJoin::new(feed.clone(), Duration::from_millis(100), 4);
-        let start = Instant::now();
-        join.frame(captured(10, start));
-        join.frame(captured(11, start));
-        feed.push(replay().frame(11)).unwrap();
-        assert!(
-            join.next(start).is_none(),
-            "frame 10 still waits for its camera"
-        );
-        feed.push(replay().frame(10)).unwrap();
-        for sequence in [10, 11] {
-            let (frame, sample) = join.next(start).unwrap();
-            assert_eq!(
-                (frame.sequence, sample.unwrap().sequence.get()),
-                (sequence, sequence)
-            );
-        }
-        assert!(join.next(start).is_none());
-        assert_eq!(feed.status().frames_joined, 2);
-    }
-
-    #[test]
-    fn a_burst_is_spread_over_output_periods_and_a_backlog_is_dropped() {
-        let feed = feed(8);
-        let mut join = TrackingJoin::new(feed.clone(), Duration::from_millis(100), 8);
-        let start = Instant::now();
-        for sequence in 0..5 {
-            join.frame(captured(sequence, start));
-            feed.push(replay().frame(sequence)).unwrap();
-        }
-        let served: Vec<_> = std::iter::from_fn(|| join.next(start))
-            .map(|(frame, _)| frame.sequence)
-            .collect();
-        assert_eq!(served, [3, 4], "the oldest joined frames give way");
-        assert_eq!(feed.status().frames_dropped, 3);
-    }
-
-    #[test]
-    fn a_fixed_delay_releases_a_burst_of_cameras_one_frame_per_period() {
-        let feed = feed(8);
-        let wait = Duration::from_millis(100);
-        let period = Duration::from_millis(20);
-        let mut join = TrackingJoin::new(feed.clone(), wait, 8).with_fixed_delay(period);
-        let start = Instant::now();
-        for sequence in 0..4 {
-            join.frame(captured(sequence, start + period * sequence as u32));
-        }
-        // A worker returns four frames together once a later estimate resolves them.
-        for sequence in 0..4 {
-            feed.push(replay().frame(sequence)).unwrap();
-        }
-        assert!(join.next(start + period * 4).is_none(), "joined, not due");
-        let served: Vec<_> = (0..6)
-            .filter_map(|tick| join.next(start + wait + period * tick))
-            .map(|(frame, _)| frame.sequence)
-            .collect();
-        assert_eq!(served, [0, 1, 2, 3], "each leaves `wait` after its capture");
-        let status = feed.status();
-        assert_eq!((status.frames_joined, status.frames_dropped), (4, 0));
-    }
-
-    #[test]
-    fn a_frame_without_camera_goes_out_as_clean_feed_and_its_late_camera_is_rejected() {
-        let feed = feed(8);
-        let wait = Duration::from_millis(100);
-        let period = Duration::from_millis(20);
-        let mut join = TrackingJoin::new(feed.clone(), wait, 4).with_fixed_delay(period);
-        let start = Instant::now();
-        join.frame(captured(1, start));
-        join.frame(captured(2, start + period));
-        feed.push(replay().frame(2)).unwrap();
-        assert!(
-            join.next(start + wait - period).is_none(),
-            "frame 2 never overtakes the unresolved frame 1"
-        );
-        let (frame, camera) = join.next(start + wait).unwrap();
-        assert_eq!(
-            (frame.sequence, camera),
-            (1, None),
-            "clean feed at its own time"
-        );
-        let (frame, camera) = join.next(start + wait + period).unwrap();
-        assert_eq!((frame.sequence, camera.is_some()), (2, true));
-        let late = feed.push(replay().frame(1)).unwrap_err();
-        assert_eq!(late.code, w::RejectionKind::InvalidState.code());
-        let status = feed.status();
-        assert_eq!(
-            (
-                status.frames_without_tracking,
-                status.frames_clean_feed,
-                status.frames_joined,
-                status.samples_late
-            ),
-            (1, 1, 1, 1)
-        );
     }
 
     #[test]
@@ -685,18 +485,17 @@ mod tests {
             feed.push(replay().frame(10)).unwrap_err().code,
             w::RejectionKind::Capacity.code()
         );
-        let mut join = TrackingJoin::new(feed.clone(), Duration::ZERO, 1);
+        let mut join = DeadlineJoin::new(feed.clone(), 1);
         let start = Instant::now();
-        join.frame(captured(4, start));
-        join.frame(captured(5, start));
+        join.frame(captured(4, start), start);
+        join.frame(captured(5, start), start);
         assert_eq!(
             feed.status().frames_without_tracking,
             1,
-            "an overflowing frame without camera is not counted as dropped"
+            "frame 4 overflowed without a camera"
         );
-        let (frame, camera) = join.next(start).unwrap();
-        assert_eq!((frame.sequence, camera), (5, None), "frame 5 has no camera");
-        // Dropping frame 4 discarded the sample of the never-captured frame 3.
+        assert!(join.joined(start).is_empty(), "frame 5 has no camera");
+        // Giving up frame 4 discarded the sample of the never-captured frame 3.
         feed.push(replay().frame(10)).unwrap();
         let mut bad = replay().frame(11);
         bad.frame_warp = Some(matrix3([[0.; 3]; 3]).unwrap());

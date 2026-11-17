@@ -13,8 +13,9 @@
 //! Assets registered at runtime ([`WorkerAssets`]) reach a worker in its `hello`;
 //! when they change, the current worker is replaced at once, without backoff.
 //!
-//! The timer-paced render loop waits for each frame ([`Supervisor::render`]).
-//! chr-server's GStreamer core (`--pipeline gst`, #154) submits frames without
+//! A generated program's render loop, on its internal clock, waits for each
+//! frame ([`Supervisor::render`]). chr-server's GStreamer core (#154), which
+//! runs every tracked program, submits frames without
 //! waiting ([`Supervisor::submit`]) and takes their completions later
 //! ([`Supervisor::completions`]); its worker's sockets are bins in the core's
 //! pipeline ([`Host::Bin`]), which never wait for a connection: the `hello`
@@ -185,6 +186,11 @@ impl Supervisor {
 
     pub fn is_ready(&self) -> bool {
         matches!(self.state, State::Ready { .. })
+    }
+
+    /// Whether a ready worker would take another request now.
+    pub fn has_credit(&self) -> bool {
+        self.is_ready() && self.outstanding.len() < CREDITS
     }
 
     /// Advances supervision without blocking: handles replies, replaces exited,

@@ -1,4 +1,6 @@
-//! Shared-memory frame rings between chr processes.
+//! Shared-memory frame rings between chr processes: the program tap
+//! ([`tap`]) that chr-server writes and chr-monitor reads. Capture frames
+//! travel as memfds over GStreamer unixfd sockets instead (#154).
 //!
 //! A ring is one file, created by its single writer and mapped by any number of
 //! readers. Each slot is protected by a seqlock, so the writer never waits for a
@@ -23,7 +25,6 @@
 //!
 //! Integers use the host byte order: rings connect processes on one host.
 
-pub mod input;
 #[allow(unsafe_code)]
 mod mapping;
 pub mod tap;

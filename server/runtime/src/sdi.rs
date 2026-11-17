@@ -22,7 +22,7 @@ use std::{
 };
 
 use crate::frame_submissions::{OutputFrame, OutputPort, Provenance};
-use chr_common::methods::sdi::{AudioStatus, SdiStatus};
+use chr_common::methods::sdi::{AudioStatus, CoreStatus, SdiStatus};
 use chr_common::rate::Rate;
 use chr_common::scene_frame as w;
 
@@ -51,16 +51,6 @@ impl VideoMode {
     /// [`Rate::frame_time`], which does not drift.
     pub fn frame_duration(&self) -> Duration {
         self.fps.period()
-    }
-
-    /// The input ring's metadata of a frame in this mode.
-    pub fn input_meta(&self) -> chr_shm::input::SlotMeta {
-        chr_shm::input::SlotMeta {
-            width: self.width,
-            height: self.height,
-            rate_num: self.fps.num(),
-            rate_den: self.fps.den(),
-        }
     }
 
     /// The program tap's metadata of a slot in this mode.
@@ -213,6 +203,7 @@ struct Counters {
 struct Details {
     last_timecode: Option<String>,
     audio: Option<AudioStatus>,
+    core: Option<CoreStatus>,
 }
 
 /// The pipeline's handle for submitting frames.
@@ -276,7 +267,7 @@ pub struct SdiStats {
 }
 
 /// Records the slots of an output driven elsewhere: chr-server's GStreamer
-/// core (`--pipeline gst`, #154), whose output sink takes every slot.
+/// core (#154), whose output sink takes every slot.
 #[derive(Clone)]
 pub struct SdiRecorder {
     format: Arc<Mutex<Format>>,
@@ -340,6 +331,11 @@ impl SdiRecorder {
     pub fn audio(&self, audio: AudioStatus) {
         lock(&self.counters.details).audio = Some(audio);
     }
+
+    /// The core's program telemetry as it is now.
+    pub fn core(&self, core: CoreStatus) {
+        lock(&self.counters.details).core = Some(core);
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -392,6 +388,7 @@ impl SdiStats {
             last_timecode: details.last_timecode.clone(),
             caption_frames: counters.caption_frames.load(Ordering::Relaxed),
             audio: details.audio.clone(),
+            core: details.core.clone(),
         }
     }
 }

@@ -3,7 +3,7 @@ name = "chr-shm"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
-description = "Shared-memory frame rings between chr processes"
+description = "The shared-memory program tap between chr-server and chr-monitor"
 
 # The workspace forbids `unsafe`, which a crate cannot relax while inheriting the
 # workspace lints. This crate denies it and allows it only in its mapping module.

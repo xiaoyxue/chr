@@ -1,18 +1,25 @@
 //! Headless render server.
 //!
-//! One process, one GPU context, one direction of video:
+//! A tracked program (`--tracked-scene`, `--description`) runs on the
+//! GStreamer core (#154, `server/docs/gst-core.md`): one pipeline from the
+//! frames `chr-sdi-in` sends over unixfd to the output, timed by the pipeline
+//! clock, with every frame leaving the program delay after its capture, its CG
+//! or its clean feed, and the program tap for `chr-monitor`. With
+//! `--tracking-worker` the server hands every frame to a supervised tracking
+//! worker over vchao's VchaoFrame contract (vchao's `pitch-analysis`, or the
+//! `chr-tracking-sim-cli` replay stand-in) and takes its cameras; otherwise
+//! cameras arrive as `tracking.frame` calls.
+//!
+//! A generated program has no capture input to follow: the triangle,
+//! `--synthetic-program`, `--pitch-demo` and `--software-video` run on an
+//! internal clock instead, a render loop paced by the monotonic clock and the
+//! simulated SDI port:
 //!
 //! ```text
 //! args (JSON-RPC) -> control -> pipeline: render -> SDI frame (UYVY)
 //!                                  -> sdi: program output port (own clock)
 //!                                       -> program tap (shared memory) -> chr-monitor
 //! ```
-//!
-//! A tracked program pairs each captured frame with its camera. With
-//! `--tracking-worker` the server hands every frame to a supervised tracking
-//! worker over vchao's VchaoFrame contract (vchao's `pitch-analysis`, or the
-//! `chr-tracking-sim-cli` replay stand-in) and takes its cameras; otherwise
-//! cameras arrive as `tracking.frame` calls.
 //!
 //! Control arrives over a NativeSocket (Unix Domain Socket) and a loopback WebSocket.
 //! The renderer's only product is the SDI program output. Viewers watch it through the
@@ -29,9 +36,7 @@ use chr_renderer::coordinates::ImageExtent;
 
 use chr_runtime::calibration::lens::CHECKS;
 use chr_runtime::control::ControlHandler;
-use chr_runtime::frame_resources::Pixels;
-use chr_runtime::input::ring::RingInput;
-use chr_runtime::pipeline::{CLEAN_QUEUE, CleanFrame, RenderConfig, RenderWorker};
+use chr_runtime::pipeline::{RenderConfig, RenderWorker};
 use chr_runtime::program::spec::ProgramSpec;
 use chr_runtime::sdi::{self, SdiOutput, Taps, VideoMode};
 use chr_runtime::worker::tracking::supervisor::{Tracker, TrackerConfig, in_flight_limit};
@@ -41,7 +46,7 @@ use chr_runtime::worker::{
 };
 
 use chr_tracker::{
-    join::{CapturedFrame, MAX_WAIT, TrackingFeed, TrackingJoin, capture_backlog},
+    join::{MAX_WAIT, TrackingFeed},
     lens::{self, LensSelection},
 };
 
@@ -53,33 +58,38 @@ const TRACKING_BACKLOG: usize = 64;
 const USAGE: &str = "\
 Usage: chr-server [options]
 
+A tracked program (--tracked-scene, --description) runs on the GStreamer core: frames
+from chr-sdi-in over unixfd, each leaving --program-delay-ms after its capture with its
+CG or its clean feed, the output timed by the pipeline clock. Without one, a generated
+program (the RGB triangle, --synthetic-program, --pitch-demo, --software-video) runs on
+an internal clock with the simulated SDI port.
+
 Options:
   --ws <addr>             Loopback WebSocket address [default: 127.0.0.1:8787]
   --socket <path>         NativeSocket path [default: $XDG_RUNTIME_DIR/chr/render.sock]
   --no-socket             Do not listen on a NativeSocket
-  --size <WxH>            Render size; both even, up to 4096x2160 and with the camera's
+  --size <WxH>            Output size; both even, up to 4096x2160 and with the camera's
                           aspect for a camera program [default: 1280x720]
   --fps <rate>            Frames per second, 1-120: an integer, N/D (30000/1001) or one of
                           23.976, 29.97, 47.95, 59.94, 119.88 [default: 50]; frames, not
-                          fields (25 for 1080i50). With --pipeline gst the nominal rate:
+                          fields (25 for 1080i50). For a tracked program the nominal rate:
                           the input's caps set the rate
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
   --video-scene <json>   Local calibrated-video-v1 scene/lens manifest (requires --software-video)
-  --tracked-scene <json> The same manifest as tracked-video-v1: frames come from the input
-                          ring (chr-sdi-sim) and each frame's camera from the tracking worker
-                          or tracking.frame (chr-sdi-sim --send-cameras)
+  --tracked-scene <json> The same manifest as tracked-video-v1: frames come from chr-sdi-in
+                          and each frame's camera from the tracking worker or tracking.frame
+                          (chr-sdi-in --send-cameras)
   --description <json>    A chr-render-description-v1 scene and lens, with the same tracked
                           input as --tracked-scene
   --asset-root <dir>      Folder that description.load may read assets from (repeatable;
                           requires --description)
-  --input-ring <path>     Shared-memory input ring for --tracked-scene or --description
-                          [default: $XDG_RUNTIME_DIR/chr/input.ring]
-  --tracking-wait-ms <n>  How long a captured frame waits for its camera before it is
-                          skipped, at most 1500 [default: 3 frame periods]. With a
-                          tracking worker every frame leaves exactly this long after
-                          capture: the program delay
+  --capture-socket <path> The unixfd socket of chr-sdi-in (tracked program)
+                          [default: $XDG_RUNTIME_DIR/chr/capture.sock]
+  --program-delay-ms <n>  The program delay D of a tracked program: capture to output,
+                          every frame; a frame without CG by then is its clean feed; above
+                          4 and at most 1500 [default: 3 frame periods]
   --tracking-worker       Take cameras from a supervised tracking worker that gets every
                           captured frame over vchao's VchaoFrame unixfd contract, instead
                           of from tracking.frame (requires --tracked-scene or --description)
@@ -101,42 +111,29 @@ Options:
   --tracking-lens-scale <px> Its normalisation scale, native pixels, positive
   --tracking-lens-support <min_x> <min_y> <max_x> <max_y> Its validated ideal-pixel
                           rectangle [default: none]
-  --pipeline <timer|gst>  timer: the timer-paced render loop with the input ring and the
-                          simulated SDI port. gst (#154, experimental): one GStreamer
-                          pipeline, from frames chr-sdi-in sends over unixfd, with a
-                          fixed program delay and per-slot clean feed (requires
-                          --tracked-scene or --description and --tracking-worker). The
-                          input's caps set its rate and extent, which may change at any
-                          time; frames whose extent is not the program camera's go out
-                          as clean feed [default: timer]
-  --output-rate <follow|fixed:<rate>> The program output's rate (--pipeline gst): the
+  --output-rate <follow|fixed:<rate>> The program output's rate (tracked program): the
                           input's rate and scan, changing with them, or a fixed rate such
                           as fixed:50 (progressive) or fixed:50i (1080i50: 25 interlaced
                           frames), repeating or dropping input frames [default: follow]
-  --capture-socket <path> The unixfd socket of chr-sdi-in (--pipeline gst)
-                          [default: $XDG_RUNTIME_DIR/chr/capture.sock]
-  --program-delay-ms <n>  Capture to output, every frame (--pipeline gst); a frame
-                          without CG by then is its clean feed, at most 1500
-                          [default: 3 frame periods]
   --input-loss <hold|black|slate[:<png>]> What the output shows while the input delivers
-                          no frames (--pipeline gst): the last frame, black, colour bars
+                          no frames (tracked program): the last frame, black, colour bars
                           or a PNG scaled to the output [default: hold]
-  --output <sim|decklink> The program output (--pipeline gst): a simulated sink on the
+  --output <sim|decklink> The program output (tracked program): a simulated sink on the
                           system clock, or a DeckLink card in the mode of the fixed output
                           rate (needs --output-rate fixed:<rate>), whose clock (genlocked
                           to its reference input) times the pipeline; HD and UHD modes;
                           not verified on hardware [default: sim]
   --device <n>            The DeckLink output device (--output decklink) [default: 0]
   --audio-channels <n>    Audio channels of the DeckLink output: 2, 8 or 16 [default: 2]
-  --no-audio              Do not pass the input's audio through (--pipeline gst)
+  --no-audio              Do not pass the input's audio through (tracked program)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
                           [default: $XDG_RUNTIME_DIR/chr/program.tap]
   --renderer-cli <path>   chr-renderer-cli executable that runs the render worker
                           [default: next to chr-server]
-  --render-deadline-ms <n> Worker time per frame before it is sent as clean feed
-                          [default: 3/4 of the frame period]
+  --render-deadline-ms <n> Worker time per frame before it is sent as clean feed, for a
+                          generated program [default: 3/4 of the frame period]
   --worker-hang-ms <n>    Replace a worker whose oldest request is older [default: 2000]
   --allow-origin <origin> Extra browser origin for the WebSocket (repeatable); loopback
                           origins are always allowed
@@ -162,8 +159,6 @@ struct Args {
     tracked_scene: Option<PathBuf>,
     description: Option<PathBuf>,
     asset_roots: Vec<PathBuf>,
-    input_ring: Option<PathBuf>,
-    tracking_wait_ms: Option<u64>,
     tracking_worker: bool,
     tracking_cli: Option<PathBuf>,
     tracking_worker_args: Vec<String>,
@@ -172,8 +167,6 @@ struct Args {
     tracking_pinhole: bool,
     /// The validated `--tracking-lens-*` lens.
     tracking_lens: Option<w::RadialLens>,
-    /// `--pipeline gst`.
-    gst: bool,
     capture_socket: Option<PathBuf>,
     program_delay_ms: Option<u64>,
     output_rate: Option<chr_runtime::gst_core::OutputRate>,
@@ -220,15 +213,12 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         tracked_scene: None,
         description: None,
         asset_roots: Vec::new(),
-        input_ring: None,
-        tracking_wait_ms: None,
         tracking_worker: false,
         tracking_cli: None,
         tracking_worker_args: Vec::new(),
         tracking_centre: None,
         tracking_pinhole: false,
         tracking_lens: None,
-        gst: false,
         capture_socket: None,
         program_delay_ms: None,
         output_rate: None,
@@ -262,8 +252,27 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--tracked-scene" => args.tracked_scene = Some(value()?.into()),
             "--description" => args.description = Some(value()?.into()),
             "--asset-root" => args.asset_roots.push(value()?.into()),
-            "--input-ring" => args.input_ring = Some(value()?.into()),
-            "--tracking-wait-ms" => args.tracking_wait_ms = Some(value()?.parse()?),
+            "--input-ring" => {
+                return Err(
+                    "--input-ring was removed with the capture input ring (#154): \
+                            chr-sdi-in sends the frames to --capture-socket"
+                        .into(),
+                );
+            }
+            "--tracking-wait-ms" => {
+                return Err(
+                    "--tracking-wait-ms was removed (#154): --program-delay-ms is \
+                            the delay of every tracked frame"
+                        .into(),
+                );
+            }
+            "--pipeline" => {
+                return Err(
+                    "--pipeline was removed (#154): a tracked program always runs on \
+                            the GStreamer core, a generated one on the internal clock"
+                        .into(),
+                );
+            }
             "--tracking-worker" => args.tracking_worker = true,
             "--tracking-cli" => args.tracking_cli = Some(value()?.into()),
             "--tracking-worker-arg" => args.tracking_worker_args.push(value()?),
@@ -287,17 +296,6 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--tracking-lens-support" => {
                 let [x0, y0, x1, y1] = numbers(&flag, &mut raw)?;
                 lens_support = Some([[x0, y0], [x1, y1]]);
-            }
-            "--pipeline" => {
-                args.gst = match value()?.as_str() {
-                    "timer" => false,
-                    "gst" => true,
-                    other => {
-                        return Err(
-                            format!("--pipeline must be timer or gst, not {other:?}").into()
-                        );
-                    }
-                }
             }
             "--capture-socket" => args.capture_socket = Some(value()?.into()),
             "--program-delay-ms" => args.program_delay_ms = Some(value()?.parse()?),
@@ -354,13 +352,8 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         return Err("--video-scene requires --software-video".into());
     }
     let tracked = args.tracked_scene.is_some() || args.description.is_some();
-    if (args.input_ring.is_some() || args.tracking_wait_ms.is_some() || args.tracking_worker)
-        && !tracked
-    {
-        return Err(
-            "--input-ring, --tracking-wait-ms and --tracking-worker require --tracked-scene or --description"
-                .into(),
-        );
+    if args.tracking_worker && !tracked {
+        return Err("--tracking-worker requires --tracked-scene or --description".into());
     }
     if (args.tracking_cli.is_some()
         || !args.tracking_worker_args.is_empty()
@@ -394,30 +387,11 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     if !args.asset_roots.is_empty() && args.description.is_none() {
         return Err("--asset-root requires --description".into());
     }
-    if args
-        .tracking_wait_ms
-        .is_some_and(|ms| Duration::from_millis(ms) > MAX_WAIT)
-    {
-        return Err(format!(
-            "--tracking-wait-ms must be at most {} ms",
-            MAX_WAIT.as_millis()
-        )
-        .into());
-    }
-    if args.gst {
-        if !args.tracking_worker {
+    if tracked {
+        if args.render_deadline_ms.is_some() {
             return Err(
-                "--pipeline gst requires --tracked-scene or --description and --tracking-worker"
-                    .into(),
-            );
-        }
-        if args.input_ring.is_some()
-            || args.tracking_wait_ms.is_some()
-            || args.render_deadline_ms.is_some()
-        {
-            return Err(
-                "--pipeline gst takes --capture-socket and --program-delay-ms instead of \
-                 --input-ring, --tracking-wait-ms and --render-deadline-ms"
+                "--render-deadline-ms is for a generated program; a tracked program's frames \
+                 have the program delay (--program-delay-ms)"
                     .into(),
             );
         }
@@ -454,17 +428,12 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         || args.output_decklink
         || args.decklink.is_some()
         || args.no_audio
+        || args.audio_channels.is_some()
     {
         return Err(
             "--capture-socket, --program-delay-ms, --output-rate, --input-loss, --output, \
-             --device and --no-audio require --pipeline gst"
+             --device, --audio-channels and --no-audio require --tracked-scene or --description"
                 .into(),
-        );
-    }
-    if tracked && args.input_ring.is_none() && !args.gst {
-        args.input_ring = Some(
-            chr_shm::input::default_path()
-                .ok_or("XDG_RUNTIME_DIR is not set; pass --input-ring <path>")?,
         );
     }
     if args.render_deadline_ms == Some(0) || args.worker_hang_ms == 0 {
@@ -546,9 +515,15 @@ fn run(args: Args) -> Result<()> {
     // Fail at once, not on every worker start, if GStreamer cannot carry the workers.
     chr_runtime::worker::transport::check()?;
     remove_stale_private_dirs();
-    if args.gst {
-        return run_gst(args);
+    if args.tracked_scene.is_some() || args.description.is_some() {
+        return run_core(args);
     }
+    run_generated(args)
+}
+
+/// A generated program on the internal clock: the render loop and the
+/// simulated SDI port pace themselves, as there is no capture input to follow.
+fn run_generated(args: Args) -> Result<()> {
     if args.software_video.is_some() && !cfg!(all(unix, feature = "gstreamer-media")) {
         return Err("--software-video requires Linux/Unix and the gstreamer-media feature".into());
     }
@@ -562,10 +537,6 @@ fn run(args: Args) -> Result<()> {
         Some(ProgramSpec::PitchDemo { path: path.clone() })
     } else if let Some(path) = &args.video_scene {
         Some(ProgramSpec::VideoScene { path: path.clone() })
-    } else if let Some(path) = &args.tracked_scene {
-        Some(ProgramSpec::TrackedScene { path: path.clone() })
-    } else if let Some(path) = &args.description {
-        Some(ProgramSpec::Description { path: path.clone() })
     } else if args.software_video.is_some() {
         Some(ProgramSpec::SoftwareVideo)
     } else if args.synthetic_program {
@@ -611,104 +582,6 @@ fn run(args: Args) -> Result<()> {
             )
         })
         .transpose()?;
-    // The capture side of a tracked program: frames from the input ring wait in the
-    // join for the camera that the tracking worker or tracking.frame delivers.
-    let tracker_status = chr_runtime::worker::tracking::supervisor::status_handle();
-    // The lens belongs to whoever produces Ti: the tracking data's, else the CLI's.
-    let lenses = if args.tracking_pinhole {
-        LensSelection::pinhole()
-    } else {
-        LensSelection::auto(args.tracking_lens.clone())
-    };
-    let tracking = match (&installation, &args.input_ring) {
-        (Some((program, _)), Some(path)) => {
-            let native = program.configuration.native_extent;
-            let wait = args
-                .tracking_wait_ms
-                .map_or(mode.frame_duration() * 3, Duration::from_millis);
-            let in_flight = in_flight_limit(wait, mode.fps);
-            // A worker's cameras arrive in order, so the feed holds few at once.
-            let feed = TrackingFeed::new(TRACKING_BACKLOG.max(in_flight), CHECKS);
-            let join = TrackingJoin::new(
-                feed.clone(),
-                wait,
-                capture_backlog(wait, mode.frame_duration()),
-            );
-            let join = if args.tracking_worker {
-                join.with_fixed_delay(mode.frame_duration())
-            } else {
-                join
-            };
-            let input = RingInput::new(
-                path.clone(),
-                VideoMode {
-                    width: native.width,
-                    height: native.height,
-                    fps: mode.fps,
-                },
-            );
-            let tracker = if args.tracking_worker {
-                let camera_center = args
-                    .tracking_centre
-                    .or_else(|| {
-                        let tracked = program.tracking.as_ref()?;
-                        Some(tracked.replay.as_ref()?.camera_center())
-                    })
-                    .ok_or(
-                        "the tracking worker needs the station centre: pass --tracking-centre \
-                         <x> <y> <z> or give the description a reference camera",
-                    )?;
-                let config = TrackerConfig {
-                    executable: match &args.tracking_cli {
-                        Some(path) => path.clone(),
-                        None => std::env::current_exe()?.with_file_name(format!(
-                            "chr-tracking-sim-cli{}",
-                            std::env::consts::EXE_SUFFIX
-                        )),
-                    },
-                    args: args.tracking_worker_args.clone(),
-                    width: native.width,
-                    height: native.height,
-                    fps: mode.fps,
-                    camera_center,
-                    socket_dir: private_dir("tracking"),
-                    hang: Duration::from_millis(args.worker_hang_ms),
-                    in_flight,
-                    host: Default::default(),
-                };
-                log::info!(
-                    "tracking worker {}: station centre {camera_center:?}, at most \
-                     {in_flight} frames in flight, program delay {wait:?}",
-                    config.executable.display(),
-                );
-                Some(Tracker::new(config, Arc::clone(&tracker_status))?)
-            } else {
-                None
-            };
-            log::info!(
-                "tracked input: frames from {}, cameras from {}, wait {wait:?}, lens: {}",
-                path.display(),
-                if args.tracking_worker {
-                    "the tracking worker"
-                } else {
-                    "tracking.frame"
-                },
-                match (lenses.is_forced_pinhole(), lenses.cli()) {
-                    (true, _) => "pinhole (--tracking-lens pinhole; every lens ignored)".to_owned(),
-                    (false, Some(cli)) => format!(
-                        "the tracking data's, else the CLI's {}",
-                        lens::describe(cli)
-                    ),
-                    (false, None) => "the tracking data's, else none (pinhole)".to_owned(),
-                }
-            );
-            Some((feed, join, input, tracker))
-        }
-        _ => None,
-    };
-    let feed = tracking.as_ref().map(|(feed, ..)| feed.clone());
-    // Frames without a camera go to the render loop as clean feed.
-    let (clean, clean_frames) = std::sync::mpsc::sync_channel::<CleanFrame>(CLEAN_QUEUE);
     let taps = match &args.monitor_tap {
         Some(path) => {
             let taps = Taps::ring(mode, path)?;
@@ -730,13 +603,6 @@ fn run(args: Args) -> Result<()> {
         SdiOutput::spawn(mode, taps)?
     };
     let status = status_handle();
-    let worker_assets = WorkerAssets::default();
-    // Asset roots are compared as canonical paths, like the asset paths themselves.
-    let asset_roots = args
-        .asset_roots
-        .iter()
-        .map(|root| root.canonicalize())
-        .collect::<std::io::Result<Vec<_>>>()?;
     let worker_config = WorkerConfig {
         executable: match &args.renderer_cli {
             Some(path) => path.clone(),
@@ -755,7 +621,7 @@ fn run(args: Args) -> Result<()> {
         },
         socket_dir: worker_dir(),
         hang: Duration::from_millis(args.worker_hang_ms),
-        assets: worker_assets.clone(),
+        assets: WorkerAssets::default(),
         host: Default::default(),
     };
     log::info!("render worker: {}", worker_config.executable.display());
@@ -773,7 +639,6 @@ fn run(args: Args) -> Result<()> {
             worker_config,
             Arc::clone(&status),
             synthetic.scheduler.clone(),
-            tracking.is_some().then_some(clean_frames),
         )?
     } else {
         RenderWorker::spawn(
@@ -796,7 +661,7 @@ fn run(args: Args) -> Result<()> {
     let served = runtime.block_on(async {
         let installed = match installation {
             Some((synthetic, adapter)) => {
-                let adapter = if args.software_video.is_some() || args.tracked_scene.is_some() || args.description.is_some() { adapter.with_rotation() } else { adapter };
+                let adapter = if args.software_video.is_some() { adapter.with_rotation() } else { adapter };
                 let (control, owner) = chr_runtime::retained::SceneControl::spawn(adapter, 64).map_err(|e| e.to_string())?;
                 synthetic.create_scene(&control).await?;
                 log::info!("local program runtime_id={} scene_id={} configuration_id={}",
@@ -809,18 +674,9 @@ fn run(args: Args) -> Result<()> {
             Some((synthetic, control, owner)) => (Some(synthetic), Some(control), Some(owner)),
             None => (None, None, None),
         };
-        let loader = match (&synthetic, &scenes) {
-            (Some(program), Some(control)) if program.described.is_some() => Some(Arc::new(
-                chr_runtime::program::description::Loader::new(program, control.clone(), asset_roots.clone(), worker_assets.clone(), worker_dir().join("assets"))?,
-            )),
-            _ => None,
-        };
         let result = {
         let handler = ControlHandler::new(commands, sdi.stats()).with_worker(Arc::clone(&status));
-        let handler = match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler };
-        let handler = match feed { Some(feed) => handler.with_tracking(feed), None => handler };
-        let handler = if args.tracking_worker { handler.with_tracking_worker(Arc::clone(&tracker_status)) } else { handler };
-        let handler = Arc::new(match loader { Some(loader) => handler.with_description(loader), None => handler });
+        let handler = Arc::new(match &scenes { Some(control) => handler.with_scenes(control.clone()), None => handler });
         let server = IpcServer::new(
             handler,
             ServerConfig {
@@ -839,13 +695,6 @@ fn run(args: Args) -> Result<()> {
         let injection = async {
             let Some(mut synthetic) = synthetic else { return std::future::pending::<Result<()>>().await };
             let control = scenes.as_ref().expect("synthetic scene endpoint");
-            let mut tracking = tracking;
-            let mut lenses = lenses;
-            // Capture sequences restart with the capture process; input sequences may not.
-            let mut capture_offset = 0;
-            // One past the highest input sequence given to either the render or the
-            // clean-feed path; clean frames never advance `synthetic`'s own counter.
-            let mut emitted_end = 0;
             let mut progress = tokio::time::interval(Duration::from_millis(5));
             progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut frames = tokio::time::interval(mode.frame_duration());
@@ -854,50 +703,8 @@ fn run(args: Args) -> Result<()> {
                 tokio::select! {
                     _ = progress.tick() => {
                         synthetic.scheduler.tick().map_err(|e| e.to_string())?;
-                        if let Some((feed, _, _, Some(tracker))) = &mut tracking {
-                            feed.accept(tracker.poll());
-                        }
                     }
                     _ = frames.tick() => {
-                        if let Some((feed, join, input, tracker)) = &mut tracking {
-                            control.advance_rotation(sdi.stats().status().frames_output).await.map_err(|e| e.to_string())?;
-                            let polled = input.poll();
-                            if polled.restarted {
-                                log::info!("input ring at {} was replaced; capture sequences restart", input.path().display());
-                                join.reset();
-                                if let Some(tracker) = tracker { tracker.forget(); }
-                                capture_offset = synthetic.next_sequence().max(emitted_end);
-                            }
-                            feed.count_overwritten(polled.overwritten);
-                            let arrived = std::time::Instant::now();
-                            for (sequence, rgba) in polled.frames {
-                                if let Some(tracker) = tracker { tracker.track(sequence, &rgba); }
-                                join.frame(CapturedFrame { sequence, rgba, arrived });
-                            }
-                            if let Some(tracker) = tracker { feed.accept(tracker.poll()); }
-                            let next = join.next(std::time::Instant::now());
-                            if let Some((frame, _)) = &next {
-                                emitted_end = emitted_end.max(capture_offset + frame.sequence + 1);
-                            }
-                            match next {
-                                Some((frame, Some(sample))) => {
-                                    let (sample, model) = lenses.apply(sample);
-                                    feed.record_model(model);
-                                    let geometry = synthetic.tracking.as_ref().expect("tracked program").geometry(&sample);
-                                    if let Err(error) = synthetic.inject_pixels(control, capture_offset + frame.sequence, Pixels::Shared(frame.rgba), geometry).await {
-                                        log::warn!("tracked frame {} skipped: {error}", frame.sequence);
-                                    }
-                                }
-                                Some((frame, None)) => {
-                                    let clean_frame = CleanFrame { sequence: capture_offset + frame.sequence, rgba: frame.rgba, extent: synthetic.configuration.native_extent };
-                                    if clean.try_send(clean_frame).is_err() {
-                                        log::debug!("clean frame {} dropped: the render loop is behind", frame.sequence);
-                                    }
-                                }
-                                None => {}
-                            }
-                            continue;
-                        }
                         #[cfg(all(unix, feature = "gstreamer-media"))]
                         if let Some(source) = &mut video_source {
                             control.advance_rotation(sdi.stats().status().frames_output).await.map_err(|e| e.to_string())?;
@@ -945,11 +752,10 @@ fn run(args: Args) -> Result<()> {
     stopped.map_err(Into::into)
 }
 
-/// `--pipeline gst`: chr-server's GStreamer core (#154). The control
-/// plane, the program and the workers are those of the timer-paced loop; the
-/// input ring, the render loop and the simulated SDI port are replaced by one
-/// GStreamer pipeline ([`chr_runtime::gst_core`]).
-fn run_gst(args: Args) -> Result<()> {
+/// A tracked program on chr-server's GStreamer core (#154): one GStreamer
+/// pipeline ([`chr_runtime::gst_core`]) from chr-sdi-in's frames to the output
+/// and the program tap, timed by the pipeline clock.
+fn run_core(args: Args) -> Result<()> {
     use chr_runtime::gst_core::{
         Core, CoreConfig, OutputRate,
         driver::{Driver, Program},
@@ -1008,44 +814,55 @@ fn run_gst(args: Args) -> Result<()> {
     };
     let in_flight = in_flight_limit(delay, mode.fps);
     let feed = TrackingFeed::new(TRACKING_BACKLOG.max(in_flight), CHECKS);
-    let camera_center = args
-        .tracking_centre
-        .or_else(|| {
-            Some(
-                synthetic
-                    .tracking
-                    .as_ref()?
-                    .replay
-                    .as_ref()?
-                    .camera_center(),
-            )
-        })
-        .ok_or(
-            "the tracking worker needs the station centre: pass --tracking-centre <x> <y> <z> \
-             or give the description a reference camera",
-        )?;
     let tracker_status = chr_runtime::worker::tracking::supervisor::status_handle();
-    let tracker = Tracker::new(
-        TrackerConfig {
-            executable: match &args.tracking_cli {
-                Some(path) => path.clone(),
-                None => std::env::current_exe()?.with_file_name(format!(
-                    "chr-tracking-sim-cli{}",
-                    std::env::consts::EXE_SUFFIX
-                )),
+    let tracker = if args.tracking_worker {
+        let camera_center = args
+            .tracking_centre
+            .or_else(|| {
+                Some(
+                    synthetic
+                        .tracking
+                        .as_ref()?
+                        .replay
+                        .as_ref()?
+                        .camera_center(),
+                )
+            })
+            .ok_or(
+                "the tracking worker needs the station centre: pass --tracking-centre <x> <y> \
+                 <z> or give the description a reference camera",
+            )?;
+        let executable = match &args.tracking_cli {
+            Some(path) => path.clone(),
+            None => std::env::current_exe()?.with_file_name(format!(
+                "chr-tracking-sim-cli{}",
+                std::env::consts::EXE_SUFFIX
+            )),
+        };
+        log::info!(
+            "tracking worker {} (station centre {camera_center:?}, at most {in_flight} frames \
+             in flight)",
+            executable.display()
+        );
+        Some(Tracker::new(
+            TrackerConfig {
+                executable,
+                args: args.tracking_worker_args.clone(),
+                width: native.width,
+                height: native.height,
+                fps: mode.fps,
+                camera_center,
+                socket_dir: private_dir("tracking"),
+                hang: Duration::from_millis(args.worker_hang_ms),
+                in_flight,
+                host: core.host(),
             },
-            args: args.tracking_worker_args.clone(),
-            width: native.width,
-            height: native.height,
-            fps: mode.fps,
-            camera_center,
-            socket_dir: private_dir("tracking"),
-            hang: Duration::from_millis(args.worker_hang_ms),
-            in_flight,
-            host: core.host(),
-        },
-        Arc::clone(&tracker_status),
-    )?;
+            Arc::clone(&tracker_status),
+        )?)
+    } else {
+        log::info!("no tracking worker: cameras come from tracking.frame");
+        None
+    };
     let status = status_handle();
     let worker_assets = WorkerAssets::default();
     let asset_roots = args
@@ -1075,12 +892,7 @@ fn run_gst(args: Args) -> Result<()> {
         Arc::clone(&status),
     )?;
     log::info!(
-        "tracking worker {} (station centre {camera_center:?}, at most {in_flight} frames in \
-         flight), render worker {}; lens: {}",
-        args.tracking_cli.as_deref().map_or_else(
-            || "chr-tracking-sim-cli".into(),
-            |path| path.display().to_string()
-        ),
+        "render worker {}; lens: {}",
         args.renderer_cli.as_deref().map_or_else(
             || "chr-renderer-cli".into(),
             |path| path.display().to_string()
@@ -1122,8 +934,12 @@ fn run_gst(args: Args) -> Result<()> {
             let handler = ControlHandler::new(commands, sdi_stats)
                 .with_worker(Arc::clone(&status))
                 .with_scenes(control.clone())
-                .with_tracking(feed.clone())
-                .with_tracking_worker(Arc::clone(&tracker_status));
+                .with_tracking(feed.clone());
+            let handler = if args.tracking_worker {
+                handler.with_tracking_worker(Arc::clone(&tracker_status))
+            } else {
+                handler
+            };
             let handler = Arc::new(match loader {
                 Some(loader) => handler.with_description(loader),
                 None => handler,
@@ -1283,9 +1099,15 @@ mod tests {
             "--monitor-tap",
             "/tmp/chr-test.tap",
         ];
+        let capture = ["--capture-socket", "/run/c.sock"];
+        let tracked = args
+            .iter()
+            .any(|arg| matches!(*arg, "--tracked-scene" | "--description"));
+        let capture: &[&str] = if tracked { &capture } else { &[] };
         parse_args(
             explicit_paths
                 .iter()
+                .chain(capture)
                 .chain(args)
                 .map(|arg| (*arg).to_owned()),
         )
@@ -1352,40 +1174,33 @@ mod tests {
         assert!(parse(&["--software-video", "video.mp4", "--synthetic-program"]).is_err());
         assert!(parse(&["--software-video", "video.mp4", "--pitch-demo", "demo.json"]).is_err());
         assert!(parse(&["--video-scene", "scene.json"]).is_err());
-        let tracked = parse(&[
-            "--tracked-scene",
-            "scene.json",
-            "--input-ring",
-            "/tmp/in.ring",
-            "--tracking-wait-ms",
-            "60",
-        ])
-        .unwrap()
-        .unwrap();
+        let tracked = parse(&["--tracked-scene", "scene.json", "--program-delay-ms", "60"])
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            (tracked.input_ring, tracked.tracking_wait_ms),
-            (Some(PathBuf::from("/tmp/in.ring")), Some(60))
+            (tracked.program_delay_ms, tracked.capture_socket),
+            (Some(60), Some(PathBuf::from("/run/c.sock")))
         );
         assert!(parse(&["--tracked-scene", "scene.json", "--synthetic-program"]).is_err());
-        assert!(parse(&["--input-ring", "/tmp/in.ring"]).is_err());
-        assert!(parse(&["--tracking-wait-ms", "60"]).is_err());
-        let waiting = |ms| {
-            parse(&[
-                "--tracked-scene",
-                "scene.json",
-                "--input-ring",
-                "/tmp/in.ring",
-                "--tracking-wait-ms",
-                ms,
-            ])
-        };
-        assert!(waiting("1500").is_ok());
-        assert!(waiting("1501").is_err());
+        assert!(parse(&["--program-delay-ms", "60"]).is_err());
+        let delayed = |ms| parse(&["--tracked-scene", "scene.json", "--program-delay-ms", ms]);
+        assert!(delayed("1500").is_ok());
+        assert!(delayed("1501").is_err());
+        assert!(delayed("4").is_err(), "not above the decision margin");
+        for (removed, hint) in [
+            (
+                &["--tracked-scene", "s.json", "--tracking-wait-ms", "60"][..],
+                "--program-delay-ms",
+            ),
+            (&["--input-ring", "/tmp/in.ring"], "chr-sdi-in"),
+            (&["--pipeline", "gst"], "GStreamer core"),
+        ] {
+            let error = parse(removed).unwrap_err().to_string();
+            assert!(error.contains(hint), "{removed:?}: {error}");
+        }
         let worker = parse(&[
             "--description",
             "start.json",
-            "--input-ring",
-            "/tmp/in.ring",
             "--tracking-worker",
             "--tracking-cli",
             "/opt/tracker",
@@ -1418,7 +1233,7 @@ mod tests {
                 true,
             )
         );
-        let tracked = ["--tracked-scene", "s.json", "--input-ring", "/tmp/in.ring"];
+        let tracked = ["--tracked-scene", "s.json"];
         let lens_args = [
             "--tracking-lens-k",
             "-0.05",
@@ -1485,11 +1300,7 @@ mod tests {
             &["--tracking-cli", "/opt/tracker"][..],
             &["--tracking-centre", "1", "2", "3"],
         ] {
-            let args = [
-                &["--tracked-scene", "s.json", "--input-ring", "/tmp/in.ring"][..],
-                bad,
-            ]
-            .concat();
+            let args = [&["--tracked-scene", "s.json"][..], bad].concat();
             assert!(parse(&args).is_err(), "{bad:?} without --tracking-worker");
         }
         for bad in [
@@ -1498,7 +1309,6 @@ mod tests {
             &["--tracking-lens", "radial"],
             &["--tracking-lens", "identity"],
         ] {
-            let tracked = ["--tracked-scene", "s.json", "--input-ring", "/tmp/in.ring"];
             let args = [&tracked[..], &["--tracking-worker"], bad].concat();
             assert!(parse(&args).is_err(), "{bad:?}");
         }
@@ -1570,19 +1380,16 @@ mod tests {
             (defaults.render_deadline_ms, defaults.worker_hang_ms),
             (None, 2000)
         );
-        assert!(!defaults.gst, "the timer-paced loop stays the default");
-        let gst = [
-            "--pipeline",
-            "gst",
+        let core = [
             "--description",
             "d.json",
             "--tracking-worker",
             "--capture-socket",
-            "/run/c.sock",
+            "/run/x.sock",
         ];
-        let core = parse(
+        let fixed = parse(
             &[
-                &gst[..],
+                &core[..],
                 &["--program-delay-ms", "80", "--output-rate", "fixed:59.94"],
             ]
             .concat(),
@@ -1591,17 +1398,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             (
-                core.gst,
-                core.capture_socket,
-                core.program_delay_ms,
-                core.input_ring,
-                core.output_rate
+                fixed.capture_socket,
+                fixed.program_delay_ms,
+                fixed.output_rate
             ),
             (
-                true,
-                Some(PathBuf::from("/run/c.sock")),
+                Some(PathBuf::from("/run/x.sock")),
                 Some(80),
-                None,
                 Some(chr_runtime::gst_core::OutputRate::Fixed(
                     Rate::new(60000, 1001).unwrap(),
                     chr_runtime::sdi::Scan::Progressive
@@ -1609,34 +1412,30 @@ mod tests {
             )
         );
         for bad in [
-            &gst[..2],
-            &gst[..4],
-            &[&gst[..], &["--input-ring", "/tmp/in.ring"]].concat(),
-            &[&gst[..], &["--tracking-wait-ms", "80"]].concat(),
-            &[&gst[..], &["--render-deadline-ms", "15"]].concat(),
-            &[&gst[..], &["--program-delay-ms", "4"]].concat(),
-            &[&gst[..], &["--program-delay-ms", "1501"]].concat(),
-            &["--pipeline", "fast"],
-            &[&gst[..], &["--output-rate", "fixed:0"]].concat(),
-            &[&gst[..], &["--output-rate", "50"]].concat(),
-            &["--program-delay-ms", "80"],
+            &[&core[..], &["--render-deadline-ms", "15"]].concat()[..],
+            &[&core[..], &["--output-rate", "fixed:0"]].concat(),
+            &[&core[..], &["--output-rate", "50"]].concat(),
             &["--capture-socket", "/run/c.sock"],
             &["--output-rate", "follow"],
             &["--fps", "29.9"],
-            &[&gst[..], &["--input-loss", "freeze"]].concat(),
-            &[&gst[..], &["--output", "sdi"]].concat(),
-            &[&gst[..], &["--device", "1"]].concat(),
+            &[&core[..], &["--input-loss", "freeze"]].concat(),
+            &[&core[..], &["--output", "sdi"]].concat(),
+            &[&core[..], &["--device", "1"]].concat(),
             &["--input-loss", "black"],
             &["--output", "decklink"],
             &["--no-audio"],
-            &[&gst[..], &["--audio-channels", "8"]].concat(),
-            &[&gst[..], &["--output", "decklink", "--audio-channels", "6"]].concat(),
+            &[&core[..], &["--audio-channels", "8"]].concat(),
+            &[
+                &core[..],
+                &["--output", "decklink", "--audio-channels", "6"],
+            ]
+            .concat(),
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
         let card = parse(
             &[
-                &gst[..],
+                &core[..],
                 &[
                     "--output",
                     "decklink",
@@ -1659,14 +1458,19 @@ mod tests {
                 true
             )
         );
-        let sim = parse(&gst).unwrap().unwrap();
+        let sim = parse(&core).unwrap().unwrap();
         assert_eq!(
             (sim.decklink, sim.input_loss, sim.no_audio),
             (None, None, false)
         );
-        let second = parse(&[&gst[..], &["--output", "decklink", "--device", "1"]].concat())
+        let second = parse(&[&core[..], &["--output", "decklink", "--device", "1"]].concat())
             .unwrap()
             .unwrap();
         assert_eq!(second.decklink, Some(1));
+        let external = parse(&["--description", "d.json"]).unwrap().unwrap();
+        assert!(
+            !external.tracking_worker,
+            "cameras from tracking.frame on the core"
+        );
     }
 }
