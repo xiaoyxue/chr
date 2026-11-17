@@ -3,8 +3,8 @@
 **状态：** `draft` — 面向 chr 读者解释 vchao 的几何关系。以 vchao 自己的文档为准；
 本页依据当前固定的子模块 `external/vchao`（`f209fc9`）。
 
-**范围：** vchao 中「atlas」指什么、这个词被用于哪三种产物、配图的直观解释与单位，以及联系 $K$、$R$、$C$、
-$H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的几何关系的形式化表述，以及离线（建图）和在线（逐帧）算法。
+**范围：** vchao 中「atlas」指什么、这个词被用于哪三种产物、配图的直观解释与单位、联系 $K$、$R$、$C$、
+$H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的符号与公式关系，以及离线（建图）和在线（逐帧）算法及其优化目标。证明和商空间的形式化表述放在附录。
 本页不定义 chr 协议。英文版：[vchao-atlas.md](vchao-atlas.md)。
 
 `external/vchao` 中的出处：`README.md`（`Atlas`）、`docs/camera-geometry.md`
@@ -33,7 +33,7 @@ $H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的几何关�
 - **V/Q map** 是 vchao（`atlas-vq-estimate`）对一组存储内容的命名：**V** 指各视图的单应
   $V_i : \Sigma \to \mathcal{I}_i$（`views` 表的 `v` 列），**Q** 指特征点（`landmarks` 表的 `q` 列），
   另外还有连接两者的观测，以及记录锚点和 $T_{\mathrm{ref}}$ 的 manifest。
-  斜杠并不表示商，不过 map 的内容本身确实是一个商空间（第 8 节）。
+  斜杠并不表示商，不过 map 的内容本身确实是一个商空间（第 8 节、[附录 B](#appendix-b)）。
 - 本页把单个特征点记作 $q_k$，即 vchao 的 Q 中的一行。它是从光心出发的一条射线（定义 4），
   不是三维点，也不是球场坐标点。
 - 定义 5 中的 $Q_a$ 是图块旋转（沿用 vchao `camera-geometry.md` 的记号），与特征点 Q 无关。
@@ -115,7 +115,7 @@ $V_i \mapsto V_i M$，$q_k \mapsto M^{-1} q_k$，$T_{\mathrm{ref}} \mapsto M^{-1
 | $\Lambda_f$ | 原生像素到 SNC | 每像素缩放 $2/s$ |
 | $\rho_3$ 阈值、RANSAC 内点阈值 | 原生图像 | 像素 |
 
-## 形式化表述
+## 符号与公式关系
 
 ### 0. 记号
 
@@ -173,7 +173,7 @@ $$
 T_i := A_{i,0} = D_i^{-1} G_0(C_i) = K_i R_i \begin{bmatrix} e_1 & e_2 & -C_i \end{bmatrix}.
 $$
 
-*证明。* $\begin{bmatrix} I & -C \end{bmatrix} E_h = G_h(C)$，且 $K_i R_i = D_i^{-1}$。$\square$
+证明见[附录 A](#appendix-a)，命题 1。
 
 **命题 2（由 $T_i$ 与 $C$ 投影三维点）。** 若 $C_{i,z} \neq 0$，则任意
 $X \in W \setminus \lbrace C_i \rbrace$ 的投影为
@@ -182,8 +182,7 @@ $$
 p \sim T_i\, G_0(C_i)^{-1} (X - C_i).
 $$
 
-*证明。* $P_i (X, 1)^\top = D_i^{-1}(X - C_i)$；由 $T_i = D_i^{-1} G_0(C_i)$ 且
-$G_0(C_i)$ 可逆，得 $D_i^{-1} = T_i\, G_0(C_i)^{-1}$。$\square$
+证明见[附录 A](#appendix-a)，命题 2。
 
 因此，渲染离开地面的物体恰好需要 $(T_i, C_i)$。
 
@@ -199,8 +198,7 @@ $$
 
 与场景深度无关。
 
-*证明。* 对 $X = C + t\,D_i p$（$t \neq 0$），
-$P_j (X, 1)^\top = D_j^{-1}(X - C) = t\, D_j^{-1} D_i\, p$。$\square$
+证明见[附录 A](#appendix-a)，命题 3。
 
 ### 3. 配准与参考平面
 
@@ -220,9 +218,7 @@ $$
    $V'_i = V_i M$。全体配准构成一个右 $\mathrm{PGL}(3)$ 主齐性空间。
 3. 任意配准都形如 $V_i = [D_i^{-1} A]$，其中 $A = D_r V_r$，$r \in F$ 任取。
 
-*证明。* (1) $V_j V_i^{-1} = D_j^{-1} A A^{-1} D_i = H_{j \leftarrow i}$。
-(2) 由 $V'_j V'^{-1}_i = V_j V_i^{-1}$ 得 $V_j^{-1} V'_j = V_i^{-1} V'_i$，为常量 $M$。
-(3) $D_i^{-1} D_r V_r = H_{i \leftarrow r} V_r = V_i V_r^{-1} V_r = V_i$。$\square$
+证明见[附录 A](#appendix-a)，命题 4。
 
 **几何意义。** 点 $[s] \in \Sigma$ 是过 $C$、方向为 $[A s]$ 的射线，因为
 $p = V_i s$ 时 $D_i p = A s$。所以 $\Sigma$ 是光心处的射线空间，以 $A$ 坐标化；
@@ -273,8 +269,7 @@ $$
 T_{\mathrm{ref}} = \left[ A^{-1} G_0(C) \right] = V_a^{-1} T_a \qquad \text{锚点 } a \in F \text{ 任取}.
 $$
 
-*证明。* 存在：$V_i A^{-1} G_0(C) = D_i^{-1} G_0(C) = T_i$。唯一：$V_i$ 可逆。
-锚点形式由 $T_a = V_a T_{\mathrm{ref}}$ 得出。$\square$
+证明见[附录 A](#appendix-a)，命题 5。
 
 $T_{\mathrm{ref}} : \Pi_0 \to \Sigma$ 把地面点映为过该点的射线。在规范变换
 $V_i \mapsto V_i M$ 下，$T_{\mathrm{ref}} \mapsto M^{-1} T_{\mathrm{ref}}$，而
@@ -348,93 +343,28 @@ $$
 **关系。** ② 和 ③ 都是 $A$ 未知的配准（定义 3）；① 是 $A$ 取已知物理旋转的配准。
 把 ② 或 ③ 升级为 ①，所需条件正是命题 6 的条件。
 
-### 8. 作为商空间的 V/Q map
+### 8. 规范：存储的数值意味着什么
 
-「V/Q」中的斜杠只表示「V 和 Q」。但从数学上看，一个 map 的内容确实是商，而且有两层。
-
-**第一层：每个元素是一个等价类。** $V_i \in \mathrm{PGL}(3) = \mathrm{GL}(3)/\mathbb{R}^\times$，
-$q_k \in \mathbb{P}^2 = (\mathbb{R}^3 \setminus \lbrace 0 \rbrace)/\mathbb{R}^\times$，
-都只在相差一个非零倍数的意义下有定义。存储时选取代表元：$V_i$ 取 $\det = 1$ 的 $N(V_i)$，
-$q_k$ 取任意非零的 float64 三元组。
-
-**定义 7（代表元与规范作用）。** 设 $I \subseteq F$ 为 map 的视图集合，$\mathcal{K}$ 为其特征点集合。
-map 的一个代表元是
+参考底片可以用任意 $M \in \mathrm{PGL}(3)$ 更换（命题 4）。map 中的数值随之改变：
 
 $$
-\mathbf{m} = \left( (V_i)_{i \in I},\ (q_k)_{k \in \mathcal{K}},\ T_{\mathrm{ref}} \right)
-\in \mathcal{R} := \mathrm{PGL}(3)^{I} \times (\mathbb{P}^2)^{\mathcal{K}} \times \mathrm{PGL}(3).
+V_i \mapsto V_i M, \qquad q_k \mapsto M^{-1} q_k, \qquad T_{\mathrm{ref}} \mapsto M^{-1} T_{\mathrm{ref}},
 $$
 
-描述子 $d_k$ 和观测 $x_{ik}$ 附着在下标上，不受作用。规范群 $G = \mathrm{PGL}(3)$ 从右边作用：
+而有物理意义的量不变：
 
 $$
-\mathbf{m} \cdot M = \left( (V_i M)_i,\ (M^{-1} q_k)_k,\ M^{-1} T_{\mathrm{ref}} \right).
+T_i = V_i\, T_{\mathrm{ref}}, \qquad H_{j \leftarrow i} = V_j V_i^{-1}, \qquad [\,V_i\, q_k\,] .
 $$
 
-这是右作用：由于 $(MM')^{-1} = M'^{-1} M^{-1}$，有 $(\mathbf{m} \cdot M) \cdot M' = \mathbf{m} \cdot (M M')$。
-
-**第二层：map 是一条轨道。** map 的物理内容是它的轨道 $\mathbf{m} \cdot G$，即商空间
-
-$$
-\mathcal{M} = \mathcal{R} / G
-$$
-
-中的一个点。
-
-**命题 7（不变量）。** 以下各量在每条轨道上保持不变：
-
-$$
-T_i = V_i\, T_{\mathrm{ref}}, \qquad
-H_{j \leftarrow i} = V_j V_i^{-1}, \qquad
-[\,V_i\, q_k\,] \in \mathcal{I}_i .
-$$
-
-*证明。* $V_i M \cdot M^{-1} T_{\mathrm{ref}} = V_i T_{\mathrm{ref}}$，
-$V_j M (V_i M)^{-1} = V_j V_i^{-1}$，$V_i M \cdot M^{-1} q_k = V_i q_k$。$\square$
-
-**命题 8（自由作用）。** $G$ 在 $\mathcal{R}$ 上的作用是自由的：每条轨道都是 $G$-torsor，
-与 $\mathrm{PGL}(3)$ 一一对应。因此
-
-$$
-\dim \mathcal{M} = \dim \mathcal{R} - 8 = 8\,|I| + 2\,|\mathcal{K}| .
-$$
-
-*证明。* $\mathbf{m} \cdot M = \mathbf{m}$ 意味着在 $\mathrm{PGL}(3)$ 中 $V_i M = V_i$，故 $M = I$。$\square$
-
-**命题 9（不变量决定轨道）。** 若对某个 $r \in I$，$\mathbf{m}$ 与 $\mathbf{m}'$ 对所有
-$i, j \in I$ 有相同的 $H_{j \leftarrow i}$、相同的 $T_r$，并对所有 $k$ 有相同的 $[V_r q_k]$，则
-$\mathbf{m}' = \mathbf{m} \cdot M$，其中 $M = V_r^{-1} V'_r$。
-
-*证明。* $V'_i = H_{i \leftarrow r} V'_r = V_i V_r^{-1} V'_r = V_i M$；
-$T'_{\mathrm{ref}} = V'^{-1}_r T_r = M^{-1} V_r^{-1} T_r = M^{-1} T_{\mathrm{ref}}$；
-由 $[V'_r q'_k] = [V_r q_k]$ 得 $[q'_k] = [V'^{-1}_r V_r q_k] = [M^{-1} q_k]$。$\square$
-
-所以 map 的物理内容恰好就是它的不变量：帧间单应、球场单应，以及每个特征点出现在哪里。
-
-**固定规范：参考帧是一个截面。** 对 $r \in I$，切片 $\mathcal{S}_r = \lbrace \mathbf{m} : V_r = I \rbrace$
-与每条轨道恰好相交一次，交点为 $\mathbf{m} \cdot V_r^{-1}$，因为 $V_r M = I$ 迫使 $M = V_r^{-1}$。
-因此 $\mathcal{M} \cong \mathcal{S}_r$，该切片中的代表元为
-
-$$
-\mathbf{m} \cdot V_r^{-1} = \left( (H_{i \leftarrow r})_i,\ ([V_r q_k])_k,\ T_r \right):
-$$
-
-每个视图就是它相对第 $r$ 帧的单应，每个特征点就是它在第 $r$ 帧（无限延伸的）底片上的位置，
-$T_{\mathrm{ref}}$ 就是第 $r$ 帧自己的球场单应。这就是「一切都相对参考帧展开」的精确含义。
-正式 Atlas ① 是另一个截面：它固定的是 $A = S Q_a$ 而不是 $V_r = I$，因此需要命题 6 的标定。
-
-**推论。**
-
-1. 存储的 V/Q map 是某个切片中的一个点；其中的数是该规范下的坐标，单独拿出来没有物理意义。
-2. 不同代表元的分量不能混用：$V_i$ 取自 $\mathbf{m}$、$q'_k$ 取自 $\mathbf{m} \cdot M$ 时，预测值是
-   $V_i M^{-1} q_k$ 而不是 $V_i q_k$，除非 $M = I$，否则是错的。这就是 vchao「Q 必须与其实际拟合出的
-   V 配套」的规则。
-3. 在线估计是协变的：对代表元 $\mathbf{m} \cdot M$，第 6 节的拟合会得到 $\hat V_f M$，因为它只看
-   $x \sim V q$。输出 $T_f = N(\hat V_f M \cdot M^{-1} T_{\mathrm{ref}})$ 不变。
+选定参考帧 $r$ 并令 $V_r = I$，就固定了规范。此时存储的 map 含义为：$V_i = H_{i \leftarrow r}$，
+每个 $q_k$ 是特征点在第 $r$ 帧（无限延伸的）底片上的位置，$T_{\mathrm{ref}} = T_r$。
+因此同一个 map 的 $V$、$q$、$T_{\mathrm{ref}}$ 必须配套使用；除非两个 map 规范相同，否则不能混用。
+形式上，一个 map 是该作用下商空间中的一个点（[附录 B](#appendix-b)）。
 
 ## 算法
 
-两个算法都沿用形式化表述中的记号。每一步注明 vchao（`f209fc9`）中对应的工具及其状态：
+两个算法都沿用上文的记号。每一步注明 vchao（`f209fc9`）中对应的工具及其状态：
 **已实现**（有 CLI）、**规划**（`docs/cli-contracts.md` 中的候选，还没有 CLI）、
 **研究**（目前由 vchao CLI 之外的研究代码完成）。
 
@@ -573,3 +503,118 @@ $$
 - 只保存 $q$、描述子、$V$、$T_{\mathrm{ref}}$，就是 V/Q map ③，用来实时求 $T_f$。
 - 按 $V$ 把各帧像素贴回去，就是全景图 ②，用来查看和评估配准。
 - 把 $A$ 定为机位的物理方向，就是 ①，即正式的 `Atlas`，目前还没实现。
+
+<a id="appendix-a"></a>
+
+## 附录 A：证明
+
+**命题 1。**
+
+*证明。* $\begin{bmatrix} I & -C \end{bmatrix} E_h = G_h(C)$，且 $K_i R_i = D_i^{-1}$。$\square$
+
+**命题 2。**
+
+*证明。* $P_i (X, 1)^\top = D_i^{-1}(X - C_i)$；由 $T_i = D_i^{-1} G_0(C_i)$ 且
+$G_0(C_i)$ 可逆，得 $D_i^{-1} = T_i\, G_0(C_i)^{-1}$。$\square$
+
+**命题 3。**
+
+*证明。* 对 $X = C + t\,D_i p$（$t \neq 0$），
+$P_j (X, 1)^\top = D_j^{-1}(X - C) = t\, D_j^{-1} D_i\, p$。$\square$
+
+**命题 4。**
+
+*证明。* (1) $V_j V_i^{-1} = D_j^{-1} A A^{-1} D_i = H_{j \leftarrow i}$。
+(2) 由 $V'_j V'^{-1}_i = V_j V_i^{-1}$ 得 $V_j^{-1} V'_j = V_i^{-1} V'_i$，为常量 $M$。
+(3) $D_i^{-1} D_r V_r = H_{i \leftarrow r} V_r = V_i V_r^{-1} V_r = V_i$。$\square$
+
+**命题 5。**
+
+*证明。* 存在：$V_i A^{-1} G_0(C) = D_i^{-1} G_0(C) = T_i$。唯一：$V_i$ 可逆。
+锚点形式由 $T_a = V_a T_{\mathrm{ref}}$ 得出。$\square$
+
+<a id="appendix-b"></a>
+
+## 附录 B：作为商空间的 V/Q map
+
+「V/Q」中的斜杠只表示「V 和 Q」。但从数学上看，一个 map 的内容确实是商，而且有两层。
+
+**第一层：每个元素是一个等价类。** $V_i \in \mathrm{PGL}(3) = \mathrm{GL}(3)/\mathbb{R}^\times$，
+$q_k \in \mathbb{P}^2 = (\mathbb{R}^3 \setminus \lbrace 0 \rbrace)/\mathbb{R}^\times$，
+都只在相差一个非零倍数的意义下有定义。存储时选取代表元：$V_i$ 取 $\det = 1$ 的 $N(V_i)$，
+$q_k$ 取任意非零的 float64 三元组。
+
+**定义 7（代表元与规范作用）。** 设 $I \subseteq F$ 为 map 的视图集合，$\mathcal{K}$ 为其特征点集合。
+map 的一个代表元是
+
+$$
+\mathbf{m} = \left( (V_i)_{i \in I},\ (q_k)_{k \in \mathcal{K}},\ T_{\mathrm{ref}} \right)
+\in \mathcal{R} := \mathrm{PGL}(3)^{I} \times (\mathbb{P}^2)^{\mathcal{K}} \times \mathrm{PGL}(3).
+$$
+
+描述子 $d_k$ 和观测 $x_{ik}$ 附着在下标上，不受作用。规范群 $G = \mathrm{PGL}(3)$ 从右边作用：
+
+$$
+\mathbf{m} \cdot M = \left( (V_i M)_i,\ (M^{-1} q_k)_k,\ M^{-1} T_{\mathrm{ref}} \right).
+$$
+
+这是右作用：由于 $(MM')^{-1} = M'^{-1} M^{-1}$，有 $(\mathbf{m} \cdot M) \cdot M' = \mathbf{m} \cdot (M M')$。
+
+**第二层：map 是一条轨道。** map 的物理内容是它的轨道 $\mathbf{m} \cdot G$，即商空间
+
+$$
+\mathcal{M} = \mathcal{R} / G
+$$
+
+中的一个点。
+
+**命题 7（不变量）。** 以下各量在每条轨道上保持不变：
+
+$$
+T_i = V_i\, T_{\mathrm{ref}}, \qquad
+H_{j \leftarrow i} = V_j V_i^{-1}, \qquad
+[\,V_i\, q_k\,] \in \mathcal{I}_i .
+$$
+
+*证明。* $V_i M \cdot M^{-1} T_{\mathrm{ref}} = V_i T_{\mathrm{ref}}$，
+$V_j M (V_i M)^{-1} = V_j V_i^{-1}$，$V_i M \cdot M^{-1} q_k = V_i q_k$。$\square$
+
+**命题 8（自由作用）。** $G$ 在 $\mathcal{R}$ 上的作用是自由的：每条轨道都是 $G$-torsor，
+与 $\mathrm{PGL}(3)$ 一一对应。因此
+
+$$
+\dim \mathcal{M} = \dim \mathcal{R} - 8 = 8\,|I| + 2\,|\mathcal{K}| .
+$$
+
+*证明。* $\mathbf{m} \cdot M = \mathbf{m}$ 意味着在 $\mathrm{PGL}(3)$ 中 $V_i M = V_i$，故 $M = I$。$\square$
+
+**命题 9（不变量决定轨道）。** 若对某个 $r \in I$，$\mathbf{m}$ 与 $\mathbf{m}'$ 对所有
+$i, j \in I$ 有相同的 $H_{j \leftarrow i}$、相同的 $T_r$，并对所有 $k$ 有相同的 $[V_r q_k]$，则
+$\mathbf{m}' = \mathbf{m} \cdot M$，其中 $M = V_r^{-1} V'_r$。
+
+*证明。* $V'_i = H_{i \leftarrow r} V'_r = V_i V_r^{-1} V'_r = V_i M$；
+$T'_{\mathrm{ref}} = V'^{-1}_r T_r = M^{-1} V_r^{-1} T_r = M^{-1} T_{\mathrm{ref}}$；
+由 $[V'_r q'_k] = [V_r q_k]$ 得 $[q'_k] = [V'^{-1}_r V_r q_k] = [M^{-1} q_k]$。$\square$
+
+所以 map 的物理内容恰好就是它的不变量：帧间单应、球场单应，以及每个特征点出现在哪里。
+
+**固定规范：参考帧是一个截面。** 对 $r \in I$，切片 $\mathcal{S}_r = \lbrace \mathbf{m} : V_r = I \rbrace$
+与每条轨道恰好相交一次，交点为 $\mathbf{m} \cdot V_r^{-1}$，因为 $V_r M = I$ 迫使 $M = V_r^{-1}$。
+因此 $\mathcal{M} \cong \mathcal{S}_r$，该切片中的代表元为
+
+$$
+\mathbf{m} \cdot V_r^{-1} = \left( (H_{i \leftarrow r})_i,\ ([V_r q_k])_k,\ T_r \right):
+$$
+
+每个视图就是它相对第 $r$ 帧的单应，每个特征点就是它在第 $r$ 帧（无限延伸的）底片上的位置，
+$T_{\mathrm{ref}}$ 就是第 $r$ 帧自己的球场单应。这就是「一切都相对参考帧展开」的精确含义。
+正式 Atlas ① 是另一个截面：它固定的是 $A = S Q_a$ 而不是 $V_r = I$，因此需要命题 6 的标定。
+
+**推论。**
+
+1. 存储的 V/Q map 是某个切片中的一个点；其中的数是该规范下的坐标，单独拿出来没有物理意义。
+2. 不同代表元的分量不能混用：$V_i$ 取自 $\mathbf{m}$、$q'_k$ 取自 $\mathbf{m} \cdot M$ 时，预测值是
+   $V_i M^{-1} q_k$ 而不是 $V_i q_k$，除非 $M = I$，否则是错的。这就是 vchao「Q 必须与其实际拟合出的
+   V 配套」的规则。
+3. 在线估计是协变的：对代表元 $\mathbf{m} \cdot M$，第 6 节的拟合会得到 $\hat V_f M$，因为它只看
+   $x \sim V q$。输出 $T_f = N(\hat V_f M \cdot M^{-1} T_{\mathrm{ref}})$ 不变。
