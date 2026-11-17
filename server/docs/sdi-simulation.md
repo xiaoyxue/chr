@@ -12,8 +12,10 @@ capture card or calibration contract. The default daemon and the initial
 
 > **GStreamer core (#154):** the experimental `chr-server --pipeline gst` takes
 > its frames from `chr-sdi-in` over a unixfd socket instead of this ring: any
-> progressive clip at an integer rate (or a test pattern) at its own pace, no
-> manifest ([GStreamer core](gst-core.md)).
+> progressive clip at its own integer or fractional rate (or a test pattern,
+> which can also change its format on a schedule) at its own pace, no manifest
+> ([GStreamer core](gst-core.md)). This ring's slots carry the rate as
+> `num << 32 | den` (`CHRSHM02`).
 
 `chr-sdi-sim` stands in for the SDI capture card: it decodes a calibrated clip
 in a loop and writes every frame into `chr-server`'s capture input ring. A real

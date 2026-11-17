@@ -39,7 +39,8 @@ with which lens, independent of any client's own scene model. The schema lives i
 }
 ```
 
-- `camera` fixes the native extent, rate and `radial-poly-native-px-v1` lens for
+- `camera` fixes the native extent, rate (`fps`: an integer, or a string such as
+  `"30000/1001"`; it must be `chr-server`'s `--fps`) and `radial-poly-native-px-v1` lens for
   the server's lifetime. Each frame's `Ti`, `C` and warp arrive with the frame
   (`tracking.frame`). The optional `reference` camera serves still renders
   (`chr-renderer-cli render --description <json> --frame <n>`); the live server

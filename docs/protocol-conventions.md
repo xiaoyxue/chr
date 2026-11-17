@@ -28,6 +28,7 @@ TypeScript 客户端镜像其类型，不另造不相容的消息或 socket fram
 | --- | --- |
 | Message types and validation | [common/src/jsonrpc.rs](../common/src/jsonrpc.rs) |
 | Implemented method payloads | [common/src/methods.rs](../common/src/methods.rs) |
+| Frame rates (`50` or `"30000/1001"`; TS `Rate`) | [common/src/rate.rs](../common/src/rate.rs) |
 | NativeSocket framing | [common/src/framing.rs](../common/src/framing.rs) |
 | Transport handlers | [common/src/server.rs](../common/src/server.rs) |
 
