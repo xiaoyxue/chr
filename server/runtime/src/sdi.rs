@@ -22,7 +22,7 @@ use std::{
 };
 
 use crate::frame_submissions::{OutputFrame, OutputPort, Provenance};
-use chr_common::methods::sdi::SdiStatus;
+use chr_common::methods::sdi::{AudioStatus, SdiStatus};
 use chr_common::rate::Rate;
 use chr_common::scene_frame as w;
 
@@ -76,6 +76,98 @@ impl VideoMode {
     }
 }
 
+/// Which of an interlaced frame's two fields comes first in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldOrder {
+    /// The top field (even lines from 0): 1080i, SMPTE 274M.
+    TopFirst,
+    /// The bottom field (odd lines): 480i/NTSC SD.
+    BottomFirst,
+}
+
+/// How a frame's lines are scanned. An interlaced frame carries two fields
+/// half a frame period apart, woven line by line; its rate is the **frame**
+/// rate, as in GStreamer's caps: 1080i50 is 25 frames (50 fields) per second,
+/// its `Rate` 25. Deadlines, the program delay and every frame's slot count
+/// frames; only names use the field rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scan {
+    #[default]
+    Progressive,
+    Interlaced(FieldOrder),
+}
+
+impl Scan {
+    /// GStreamer's `interlace-mode` and `field-order` caps fields.
+    pub fn caps_fields(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Self::Progressive => ("progressive", None),
+            Self::Interlaced(FieldOrder::TopFirst) => ("interleaved", Some("top-field-first")),
+            Self::Interlaced(FieldOrder::BottomFirst) => {
+                ("interleaved", Some("bottom-field-first"))
+            }
+        }
+    }
+}
+
+/// A video format: extent, frame rate and scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Format {
+    pub mode: VideoMode,
+    pub scan: Scan,
+}
+
+impl Format {
+    /// `1920x1080p50`, or `1920x1080i50` for 25 interlaced frames per second:
+    /// interlaced formats are named by their field rate.
+    pub fn name(&self) -> String {
+        match self.scan {
+            Scan::Progressive => self.mode.name(),
+            Scan::Interlaced(_) => format!(
+                "{}x{}i{}",
+                self.mode.width,
+                self.mode.height,
+                self.field_rate()
+                    .map_or_else(|| format!("{}x2", self.mode.fps.label()), Rate::label)
+            ),
+        }
+    }
+
+    /// Fields per second: twice the frame rate if interlaced; `None` above
+    /// the highest rate.
+    pub fn field_rate(&self) -> Option<Rate> {
+        match self.scan {
+            Scan::Progressive => Some(self.mode.fps),
+            Scan::Interlaced(_) => Rate::new(self.mode.fps.num() * 2, self.mode.fps.den()).ok(),
+        }
+    }
+}
+
+/// A rate as the command lines take it: frames per second (`50`, `59.94`,
+/// `30000/1001`), or with an `i` suffix interlaced, named by its field rate as
+/// broadcast does: `50i` is 25 interlaced frames per second, top field first.
+pub fn scanned_rate(text: &str) -> Result<(Rate, Scan), String> {
+    match text.strip_suffix('i') {
+        None => Ok((text.parse().map_err(|e| format!("{e}"))?, Scan::Progressive)),
+        Some(fields) => {
+            let fields: Rate = fields.parse().map_err(|e| format!("{e}"))?;
+            Ok((
+                Rate::new(fields.num(), fields.den() * 2).map_err(|e| format!("{e}"))?,
+                Scan::Interlaced(FieldOrder::TopFirst),
+            ))
+        }
+    }
+}
+
+impl From<VideoMode> for Format {
+    fn from(mode: VideoMode) -> Self {
+        Self {
+            mode,
+            scan: Scan::Progressive,
+        }
+    }
+}
+
 /// One rendered frame in the SDI pixel format: packed UYVY rows, `width * 2` bytes each.
 pub struct SdiFrame {
     /// Render frame index (logical time).
@@ -110,6 +202,17 @@ struct Counters {
     has_source_frame: AtomicBool,
     format_changes: AtomicU64,
     transition_clean_slots: AtomicU64,
+    input_loss_slots: AtomicU64,
+    input_losses: AtomicU64,
+    caption_frames: AtomicU64,
+    /// The latest slot's timecode and the audio output, of the GStreamer core.
+    details: Mutex<Details>,
+}
+
+#[derive(Default)]
+struct Details {
+    last_timecode: Option<String>,
+    audio: Option<AudioStatus>,
 }
 
 /// The pipeline's handle for submitting frames.
@@ -168,7 +271,7 @@ impl SdiInput {
 /// Read-only view of the output counters.
 #[derive(Clone)]
 pub struct SdiStats {
-    mode: Arc<Mutex<VideoMode>>,
+    format: Arc<Mutex<Format>>,
     counters: Arc<Counters>,
 }
 
@@ -176,7 +279,7 @@ pub struct SdiStats {
 /// core (`--pipeline gst`, #154), whose output sink takes every slot.
 #[derive(Clone)]
 pub struct SdiRecorder {
-    mode: Arc<Mutex<VideoMode>>,
+    format: Arc<Mutex<Format>>,
     counters: Arc<Counters>,
 }
 
@@ -195,9 +298,9 @@ impl SdiRecorder {
         counters.has_source_frame.store(true, Ordering::Release);
     }
 
-    /// The output's mode from its next slot on.
-    pub fn set_mode(&self, output: VideoMode) {
-        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = output;
+    /// The output's format from its next slot on.
+    pub fn set_format(&self, output: Format) {
+        *self.format.lock().unwrap_or_else(PoisonError::into_inner) = output;
     }
 
     /// One change of the input's format, whether or not the output's mode
@@ -212,21 +315,50 @@ impl SdiRecorder {
             .transition_clean_slots
             .fetch_add(1, Ordering::Relaxed);
     }
+
+    /// One slot filled for a lost input; `first` if the loss begins with it.
+    pub fn input_loss(&self, first: bool) {
+        self.counters
+            .input_loss_slots
+            .fetch_add(1, Ordering::Relaxed);
+        if first {
+            self.counters.input_losses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The timecode of the slot just output and whether it carried captions.
+    pub fn ancillary(&self, timecode: Option<String>, captions: bool) {
+        if captions {
+            self.counters.caption_frames.fetch_add(1, Ordering::Relaxed);
+        }
+        if timecode.is_some() {
+            lock(&self.counters.details).last_timecode = timecode;
+        }
+    }
+
+    /// The audio output as it is now.
+    pub fn audio(&self, audio: AudioStatus) {
+        lock(&self.counters.details).audio = Some(audio);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl SdiStats {
-    fn new(mode: VideoMode, counters: Arc<Counters>) -> Self {
+    fn new(format: Format, counters: Arc<Counters>) -> Self {
         Self {
-            mode: Arc::new(Mutex::new(mode)),
+            format: Arc::new(Mutex::new(format)),
             counters,
         }
     }
 
     /// Stats of an output that `SdiRecorder` records.
-    pub fn recorded(mode: VideoMode) -> (Self, SdiRecorder) {
-        let stats = Self::new(mode, Arc::default());
+    pub fn recorded(format: impl Into<Format>) -> (Self, SdiRecorder) {
+        let stats = Self::new(format.into(), Arc::default());
         let recorder = SdiRecorder {
-            mode: Arc::clone(&stats.mode),
+            format: Arc::clone(&stats.format),
             counters: Arc::clone(&stats.counters),
         };
         (stats, recorder)
@@ -235,15 +367,16 @@ impl SdiStats {
     /// Stats for an output that never runs, for tests of status reporting.
     #[cfg(test)]
     pub fn idle(mode: VideoMode) -> Self {
-        Self::new(mode, Arc::default())
+        Self::new(mode.into(), Arc::default())
     }
 
     pub fn status(&self) -> SdiStatus {
         let counters = &self.counters;
-        let mode = *self.mode.lock().unwrap_or_else(PoisonError::into_inner);
+        let format = *lock(&self.format);
+        let details = lock(&counters.details);
         SdiStatus {
-            video_mode: mode.name(),
-            rate: mode.fps,
+            video_mode: format.name(),
+            rate: format.mode.fps,
             pixel_format: PIXEL_FORMAT.to_owned(),
             frames_output: counters.frames_output.load(Ordering::Relaxed),
             repeated_frames: counters.repeated.load(Ordering::Relaxed),
@@ -254,6 +387,11 @@ impl SdiStats {
                 .then(|| counters.last_source_frame.load(Ordering::Relaxed)),
             format_changes: counters.format_changes.load(Ordering::Relaxed),
             transition_clean_slots: counters.transition_clean_slots.load(Ordering::Relaxed),
+            input_loss_slots: counters.input_loss_slots.load(Ordering::Relaxed),
+            input_losses: counters.input_losses.load(Ordering::Relaxed),
+            last_timecode: details.last_timecode.clone(),
+            caption_frames: counters.caption_frames.load(Ordering::Relaxed),
+            audio: details.audio.clone(),
         }
     }
 }
@@ -326,7 +464,7 @@ impl SdiOutput {
                 frame_bytes: mode.width as usize * mode.height as usize * 2,
                 program_enabled,
             },
-            stats: SdiStats::new(mode, counters),
+            stats: SdiStats::new(mode.into(), counters),
             stop,
             thread: Some(thread),
         })

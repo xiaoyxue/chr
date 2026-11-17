@@ -166,9 +166,10 @@ loop and the simulated SDI port with **one GStreamer pipeline** owned by
 measurements: [GStreamer core](../server/docs/gst-core.md).
 
 - **Input:** a separate INPUT process, `chr-sdi-in`, plays a file at its own
-  rate (or a test pattern) in real time and sends every frame over a unixfd
-  socket as memfd memory stamped with its identity (VchaoFrame). It stands in
-  for `decklinkvideosrc` (phase 3).
+  rate (or a test pattern) in real time, or captures a DeckLink card
+  (`decklinkvideosrc mode=auto`, not verified on hardware), and sends every
+  frame over a unixfd socket as memfd memory stamped with its identity
+  (VchaoFrame), timecode and captions, and its audio over a second socket.
 - **Timing:** each captured frame owns one output slot, due a fixed program
   delay D (`--program-delay-ms`) after its capture on the pipeline clock. At
   the slot's deadline a selector puts in the frame's CG if the workers
@@ -190,8 +191,16 @@ measurements: [GStreamer core](../server/docs/gst-core.md).
   converts it to a fixed one (`fixed:<rate>`); chr-monitor follows the tap's
   mode without a restart.
 
-Phases 3–5 of #154 (DeckLink and genlock, audio/ANC/timecode, switch-over) are
-open.
+- **Interlaced, input loss, audio and ancillary data** (phases 3 and 4):
+  interlaced frames keep their fields on the output and are deinterlaced (first
+  field) for tracking and rendering only; while the input delivers nothing the
+  slots are filled (`--input-loss hold|black|slate`) on the cadence, and the
+  first frame after it leaves at its own capture time plus D; audio, timecode
+  and captions leave with their frame's delay D. With `--output decklink` the
+  card's clock, genlocked to its reference input, is the pipeline clock (not
+  verified on hardware).
+
+Phase 5 of #154 (switch-over) is open.
 
 ## Failure handling
 

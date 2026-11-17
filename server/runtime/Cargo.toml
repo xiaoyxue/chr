@@ -30,7 +30,7 @@ name = "chr-tracking-sim-cli"
 path = "src/tracking_sim_cli.rs"
 
 [features]
-gstreamer-media = ["dep:gstreamer-video"]
+gstreamer-media = []
 
 [dependencies]
 chr-renderer.workspace = true
@@ -50,7 +50,8 @@ image.workspace = true
 gstreamer.workspace = true
 gstreamer-allocators.workspace = true
 gstreamer-app.workspace = true
-gstreamer-video = { workspace = true, optional = true }
+# The GStreamer core puts timecode and captions on its program frames.
+gstreamer-video.workspace = true
 sha2 = "0.10"
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 

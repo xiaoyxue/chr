@@ -1,7 +1,8 @@
-//! The program's consumers after `livesync`: the simulated OUTPUT, an `appsink`
-//! that takes every slot on the clock as an SDI card would (phase 3 puts
-//! `decklinkvideosink` here), with cadence and delay statistics; and the
-//! shared-memory program tap that chr-monitor reads. Both take each slot's
+//! The program's consumers after `livesync`: the OUTPUT, either simulated (an
+//! `appsink` that takes every slot on the clock as an SDI card would) or a
+//! DeckLink card's `decklinkvideosink` (whose slots are counted as they are
+//! handed to it, ahead of air), with cadence, delay, input-loss and timecode
+//! statistics; and the shared-memory program tap that chr-monitor reads. Both take each slot's
 //! rate from its caps, which change with the input's rate when the output
 //! follows it; the tap's slots carry it to chr-monitor, which follows it.
 //! Neither can delay the other: the tap's queue drops.
@@ -17,7 +18,7 @@ use super::{PROGRAM_META, Timeline, capture::format_of};
 use crate::sdi::{SdiRecorder, VideoMode};
 
 /// One program slot as the output took it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rendered {
     /// Clock time the output sink took the slot.
     pub at_ns: u64,
@@ -29,6 +30,11 @@ pub struct Rendered {
     pub cg: bool,
     /// A repeat of the previous slot's frame (`livesync` filled a gap).
     pub repeat: bool,
+    /// Filled for a lost input (hold, black or slate).
+    pub fill: bool,
+    /// The frame's timecode and its frame count since midnight.
+    pub timecode: Option<(String, u64)>,
+    pub captions: bool,
 }
 
 impl Rendered {
@@ -42,6 +48,12 @@ impl Rendered {
             sequence: structure.get("sequence").ok()?,
             cg: structure.get("cg").ok()?,
             repeat: buffer.flags().contains(gst::BufferFlags::GAP),
+            fill: structure.get("fill").unwrap_or(false),
+            timecode: structure
+                .get::<String>("timecode")
+                .ok()
+                .zip(structure.get::<u64>("timecode-frames").ok()),
+            captions: structure.get("captions").unwrap_or(false),
         })
     }
 }
@@ -107,6 +119,11 @@ pub struct Totals {
     pub duplicates: u64,
     /// Captured frames that never reached the output between two that did.
     pub skipped: u64,
+    /// Slots filled for a lost input.
+    pub fills: u64,
+    /// Consecutive frames whose timecodes are not one frame apart.
+    pub timecode_breaks: u64,
+    pub captioned: u64,
     /// Time between consecutive slots at each rate, the current one last; the
     /// interval across a change of rate is in none.
     pub intervals: Vec<(Rate, Summary)>,
@@ -118,6 +135,7 @@ pub struct Totals {
     pub delay: Summary,
     last_at: Option<u64>,
     last_sequence: Option<u64>,
+    last_timecode: Option<u64>,
 }
 
 impl Totals {
@@ -162,10 +180,27 @@ impl Totals {
             self.repeats += 1;
             return;
         }
+        if slot.fill {
+            self.fills += 1;
+            return;
+        }
         if self.last_sequence == Some(slot.sequence) {
             self.duplicates += 1;
             return;
         }
+        let timecode = slot.timecode.as_ref().map(|(_, frames)| *frames);
+        if let (Some(last), Some(sequence), Some(now), Some(before)) = (
+            self.last_sequence,
+            Some(slot.sequence),
+            timecode,
+            self.last_timecode,
+        ) && sequence == last + 1
+            && now != before + 1
+        {
+            self.timecode_breaks += 1;
+        }
+        self.last_timecode = timecode;
+        self.captioned += u64::from(slot.captions);
         if slot.cg {
             self.cg += 1;
         } else {
@@ -187,14 +222,18 @@ impl Totals {
             .map(|(rate, summary)| format!("at {} fps {}", rate.label(), summary.ms()))
             .collect();
         format!(
-            "output: {} slots ({} CG, {} clean feed, {} repeats, {} duplicates, {} frames \
-             skipped), interval min/mean/max {}, {} irregular, delay {}, lateness {}",
+            "output: {} slots ({} CG, {} clean feed, {} repeats, {} duplicates, {} input-loss \
+             fills, {} frames skipped; {} timecode breaks, {} captioned), interval \
+             min/mean/max {}, {} irregular, delay {}, lateness {}",
             self.slots,
             self.cg,
             self.clean,
             self.repeats,
             self.duplicates,
+            self.fills,
             self.skipped,
+            self.timecode_breaks,
+            self.captioned,
             if intervals.is_empty() {
                 "-".to_owned()
             } else {
@@ -254,7 +293,7 @@ impl Output {
         sample
             .caps()
             .and_then(|caps| format_of(caps).ok())
-            .map_or(self.mode.fps, |format| format.fps)
+            .map_or(self.mode.fps, |format| format.mode.fps)
     }
 
     fn rendered(&self, sample: &gst::Sample) {
@@ -267,9 +306,15 @@ impl Output {
             return;
         };
         let rate = self.rate(sample);
+        self.record(slot, rate);
+    }
+
+    fn record(&self, slot: Rendered, rate: Rate) {
         lock(&self.window).record(&slot, rate);
         lock(&self.totals).record(&slot, rate);
         self.recorder.output(slot.sequence, slot.repeat);
+        self.recorder
+            .ancillary(slot.timecode.map(|(text, _)| text), slot.captions);
     }
 
     fn tapped(&self, sample: &gst::Sample) {
@@ -315,10 +360,10 @@ impl Output {
     }
 
     /// The output since the last report, and the tap's slot delay.
-    pub fn report(&self) -> String {
+    pub fn report(&self) -> (String, Totals) {
         let window = std::mem::take(&mut *lock(&self.window));
         let tap = lock(&self.tap);
-        match tap.as_ref() {
+        let text = match tap.as_ref() {
             Some(tap) => format!(
                 "{}; tap slot - frame {:?} ({} changes)",
                 window.report(),
@@ -326,7 +371,8 @@ impl Output {
                 tap.delta_changes
             ),
             None => window.report(),
-        }
+        };
+        (text, window)
     }
 
     pub fn totals(&self) -> Totals {
@@ -334,18 +380,43 @@ impl Output {
     }
 }
 
-/// Feeds the output and tap sinks' slots to `output`.
-pub fn attach(output: &Arc<Output>, output_sink: &AppSink, tap_sink: &AppSink) {
+/// Feeds the output and tap sinks' slots to `output`: a simulated output's
+/// as it renders them on the clock, a card's as they are handed to it.
+pub fn attach(
+    output: &Arc<Output>,
+    output_sink: &gst::Element,
+    tap_sink: &AppSink,
+) -> Result<(), super::Error> {
     let rendering = Arc::clone(output);
-    output_sink.set_callbacks(
-        AppSinkCallbacks::builder()
-            .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Flushing)?;
-                rendering.rendered(&sample);
-                Ok(gst::FlowSuccess::Ok)
-            })
-            .build(),
-    );
+    match output_sink.downcast_ref::<AppSink>() {
+        Some(simulated) => simulated.set_callbacks(
+            AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Flushing)?;
+                    rendering.rendered(&sample);
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        ),
+        None => {
+            output_sink
+                .static_pad("sink")
+                .ok_or("the output sink has no sink pad")?
+                .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+                    if let Some(buffer) = info.buffer() {
+                        let at = rendering.timeline.clock.time();
+                        if let Some(slot) = Rendered::of(buffer, at, &rendering.timeline) {
+                            let rate = pad
+                                .current_caps()
+                                .and_then(|caps| format_of(&caps).ok())
+                                .map_or(rendering.mode.fps, |format| format.mode.fps);
+                            rendering.record(slot, rate);
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+        }
+    }
     let tapping = Arc::clone(output);
     tap_sink.set_callbacks(
         AppSinkCallbacks::builder()
@@ -356,6 +427,7 @@ pub fn attach(output: &Arc<Output>, output_sink: &AppSink, tap_sink: &AppSink) {
             })
             .build(),
     );
+    Ok(())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -374,6 +446,9 @@ mod tests {
             sequence,
             cg,
             repeat,
+            fill: false,
+            timecode: Some((String::new(), 1000 + sequence)),
+            captions: false,
         }
     }
 
@@ -420,5 +495,36 @@ mod tests {
         assert_eq!(totals.interval(fifty).unwrap().count, 2);
         assert_eq!(totals.interval(fifty).unwrap().mean(), 20_000_000.0);
         assert_eq!((totals.irregular, totals.duplicates, totals.cg), (0, 1, 4));
+    }
+
+    #[test]
+    fn totals_count_input_loss_fills_and_timecode_breaks() {
+        let fifty = Rate::fps(50);
+        let mut totals = Totals::default();
+        totals.record(&slot(1000, 0, true, false), fifty);
+        // The input is lost: two fills on the cadence, no delay of their own.
+        for at in [1020, 1040] {
+            totals.record(
+                &Rendered {
+                    fill: true,
+                    timecode: None,
+                    ..slot(at, 0, false, false)
+                },
+                fifty,
+            );
+        }
+        // Back: frame 1's timecode follows frame 0's; frame 2's jumps.
+        totals.record(&slot(1060, 1, true, false), fifty);
+        totals.record(
+            &Rendered {
+                timecode: Some((String::new(), 5000)),
+                ..slot(1080, 2, true, false)
+            },
+            fifty,
+        );
+        assert_eq!((totals.fills, totals.cg, totals.skipped), (2, 3, 0));
+        assert_eq!(totals.timecode_breaks, 1);
+        assert_eq!(totals.delay.count, 3);
+        assert_eq!(totals.irregular, 0, "fills keep the cadence");
     }
 }

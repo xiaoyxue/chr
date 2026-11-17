@@ -207,6 +207,15 @@ function showSdi(status: SdiStatus): void {
     count("dropped", "sdi.dropped", status.dropped_frames, true),
     ["source frame", String(status.last_source_frame ?? "-")],
     ["format changes", `${status.format_changes} (${status.transition_clean_slots} clean slots)`],
+    ["input losses", `${status.input_losses} (${status.input_loss_slots} filled slots)`],
+    ["timecode", status.last_timecode ?? "-"],
+    ["captions", String(status.caption_frames)],
+    [
+      "audio",
+      status.audio === null
+        ? "-"
+        : `${status.audio.channels} ch, A-V ${(status.audio.offset_us / 1000).toFixed(1)} ms`,
+    ],
   ]);
 }
 

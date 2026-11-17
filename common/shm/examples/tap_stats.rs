@@ -2,7 +2,13 @@
 //! sequence: the same measurement for chr-server's timer-paced loop and its
 //! GStreamer core (#154).
 //!
-//! `cargo run --release -p chr-shm --example tap_stats -- <tap> <seconds>`
+//! `cargo run --release -p chr-shm --example tap_stats -- <tap> <seconds> [<x0> <x1>]`
+//!
+//! With `<x0> <x1>` it also reports the field parity of every slot: the mean
+//! luma of the odd rows minus the even rows in columns `x0..x1`, for CG and
+//! other slots apart. On a test clip whose bottom fields show a later, brighter
+//! picture than its top fields, an interlaced output that kept its fields in
+//! their order reads positive (#154 phase 3).
 //!
 //! The expected period comes from each slot's rate; a change of rate starts a
 //! new segment with its own interval statistics. It polls the tap every 200 µs, so intervals include up to that much of
@@ -21,9 +27,15 @@ use chr_shm::{Read, Reader, tap::SlotMeta};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [path, seconds, ..] = args.as_slice() else {
-        return Err("usage: tap_stats <tap> <seconds>".into());
+    let [path, seconds, columns @ ..] = args.as_slice() else {
+        return Err("usage: tap_stats <tap> <seconds> [<x0> <x1>]".into());
     };
+    let columns = match columns {
+        [x0, x1] => Some((x0.parse::<usize>()?, x1.parse::<usize>()?)),
+        _ => None,
+    };
+    // Field parity of (CG, other) slots: count, min, sum, max.
+    let mut parity = [(0_u64, f64::MAX, 0.0_f64, f64::MIN); 2];
     let tap = Reader::open(path.as_ref())?;
     let end = Instant::now() + Duration::from_secs(seconds.parse()?);
     let (mut seen, mut payload) = (tap.write_count(), Vec::new());
@@ -46,6 +58,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
         let meta = SlotMeta::from_meta(header.meta);
+        if let Some((x0, x1)) = columns {
+            let (width, height) = (meta.width as usize, meta.height as usize);
+            let luma = |y: usize| -> f64 {
+                (x0..x1.min(width))
+                    .map(|x| f64::from(payload[(y * width + x) * 2 + 1]))
+                    .sum::<f64>()
+            };
+            let (mut odd, mut even) = (0.0, 0.0);
+            for y in 0..height {
+                *if y % 2 == 1 { &mut odd } else { &mut even } += luma(y);
+            }
+            let n = ((x1.min(width) - x0) * height / 2) as f64;
+            let value = (odd - even) / n;
+            let entry = &mut parity[usize::from(!meta.program)];
+            *entry = (
+                entry.0 + 1,
+                entry.1.min(value),
+                entry.2 + value,
+                entry.3.max(value),
+            );
+        }
         slots += 1;
         program += u64::from(meta.program);
         if last_program.is_some_and(|last| last != meta.program) {
@@ -107,6 +140,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!("slot - frame: {deltas:?}");
+    if columns.is_some() {
+        for (kind, (count, min, sum, max)) in ["CG", "other"].iter().zip(parity) {
+            if count > 0 {
+                println!(
+                    "field parity (odd - even rows) of {kind} slots: {count} slots, \
+                     min/mean/max {min:.2}/{:.2}/{max:.2}",
+                    sum / count as f64
+                );
+            }
+        }
+    }
     for pair in changes.windows(2).filter(|pair| !pair[0].2) {
         let ((at, from, _), (_, to, _)) = (pair[0], pair[1]);
         println!("t={at:.2}s: {} slots without CG", to - from);

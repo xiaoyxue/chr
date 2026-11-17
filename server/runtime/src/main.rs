@@ -60,8 +60,9 @@ Options:
   --size <WxH>            Render size; both even, up to 4096x2160 and with the camera's
                           aspect for a camera program [default: 1280x720]
   --fps <rate>            Frames per second, 1-120: an integer, N/D (30000/1001) or one of
-                          23.976, 29.97, 47.95, 59.94, 119.88 [default: 50]. With
-                          --pipeline gst the nominal rate: the input's caps set the rate
+                          23.976, 29.97, 47.95, 59.94, 119.88 [default: 50]; frames, not
+                          fields (25 for 1080i50). With --pipeline gst the nominal rate:
+                          the input's caps set the rate
   --synthetic-program    Opt in to synthetic-program-v1 scene/image output (max 1280x720)
   --software-video <mp4> Loop a local MP4 through FFmpeg/GStreamer and simulated SDI
                           (Linux gstreamer-media feature; --fps must match source)
@@ -109,13 +110,25 @@ Options:
                           time; frames whose extent is not the program camera's go out
                           as clean feed [default: timer]
   --output-rate <follow|fixed:<rate>> The program output's rate (--pipeline gst): the
-                          input's, changing with it, or a fixed rate such as fixed:50,
-                          repeating or dropping input frames [default: follow]
+                          input's rate and scan, changing with them, or a fixed rate such
+                          as fixed:50 (progressive) or fixed:50i (1080i50: 25 interlaced
+                          frames), repeating or dropping input frames [default: follow]
   --capture-socket <path> The unixfd socket of chr-sdi-in (--pipeline gst)
                           [default: $XDG_RUNTIME_DIR/chr/capture.sock]
   --program-delay-ms <n>  Capture to output, every frame (--pipeline gst); a frame
                           without CG by then is its clean feed, at most 1500
                           [default: 3 frame periods]
+  --input-loss <hold|black|slate[:<png>]> What the output shows while the input delivers
+                          no frames (--pipeline gst): the last frame, black, colour bars
+                          or a PNG scaled to the output [default: hold]
+  --output <sim|decklink> The program output (--pipeline gst): a simulated sink on the
+                          system clock, or a DeckLink card in the mode of the fixed output
+                          rate (needs --output-rate fixed:<rate>), whose clock (genlocked
+                          to its reference input) times the pipeline; HD and UHD modes;
+                          not verified on hardware [default: sim]
+  --device <n>            The DeckLink output device (--output decklink) [default: 0]
+  --audio-channels <n>    Audio channels of the DeckLink output: 2, 8 or 16 [default: 2]
+  --no-audio              Do not pass the input's audio through (--pipeline gst)
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
@@ -164,6 +177,12 @@ struct Args {
     capture_socket: Option<PathBuf>,
     program_delay_ms: Option<u64>,
     output_rate: Option<chr_runtime::gst_core::OutputRate>,
+    input_loss: Option<chr_runtime::gst_core::InputLoss>,
+    /// `--output decklink --device <n>`.
+    decklink: Option<u32>,
+    output_decklink: bool,
+    no_audio: bool,
+    audio_channels: Option<u32>,
 }
 
 /// Reads `N` finite numbers that follow `flag`.
@@ -213,6 +232,11 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         capture_socket: None,
         program_delay_ms: None,
         output_rate: None,
+        input_loss: None,
+        decklink: None,
+        output_decklink: false,
+        no_audio: false,
+        audio_channels: None,
     };
     let mut lens_given = false;
     let (mut lens_k, mut lens_centre, mut lens_scale, mut lens_support) = (None, None, None, None);
@@ -278,6 +302,27 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--capture-socket" => args.capture_socket = Some(value()?.into()),
             "--program-delay-ms" => args.program_delay_ms = Some(value()?.parse()?),
             "--output-rate" => args.output_rate = Some(value()?.parse()?),
+            "--input-loss" => args.input_loss = Some(value()?.parse()?),
+            "--output" => {
+                args.output_decklink = match value()?.as_str() {
+                    "sim" => false,
+                    "decklink" => true,
+                    other => {
+                        return Err(
+                            format!("--output must be sim or decklink, not {other:?}").into()
+                        );
+                    }
+                }
+            }
+            "--device" => args.decklink = Some(value()?.parse()?),
+            "--no-audio" => args.no_audio = true,
+            "--audio-channels" => {
+                let channels = value()?.parse()?;
+                if ![2, 8, 16].contains(&channels) {
+                    return Err("--audio-channels is 2, 8 or 16".into());
+                }
+                args.audio_channels = Some(channels);
+            }
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--renderer-cli" => args.renderer_cli = Some(value()?.into()),
@@ -394,12 +439,26 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                     .ok_or("XDG_RUNTIME_DIR is not set; pass --capture-socket <path>")?,
             );
         }
+        match (args.output_decklink, args.decklink) {
+            (true, None) => args.decklink = Some(0),
+            (false, Some(_)) => return Err("--device requires --output decklink".into()),
+            _ => {}
+        }
+        if args.audio_channels.is_some() && !args.output_decklink {
+            return Err("--audio-channels requires --output decklink".into());
+        }
     } else if args.capture_socket.is_some()
         || args.program_delay_ms.is_some()
         || args.output_rate.is_some()
+        || args.input_loss.is_some()
+        || args.output_decklink
+        || args.decklink.is_some()
+        || args.no_audio
     {
         return Err(
-            "--capture-socket, --program-delay-ms and --output-rate require --pipeline gst".into(),
+            "--capture-socket, --program-delay-ms, --output-rate, --input-loss, --output, \
+             --device and --no-audio require --pipeline gst"
+                .into(),
         );
     }
     if tracked && args.input_ring.is_none() && !args.gst {
@@ -913,11 +972,12 @@ fn run_gst(args: Args) -> Result<()> {
         .program_delay_ms
         .map_or(mode.frame_duration() * 3, Duration::from_millis);
     let output_rate = args.output_rate.unwrap_or(OutputRate::Follow);
-    let output = match output_rate {
-        OutputRate::Follow => mode,
-        OutputRate::Fixed(fps) => VideoMode { fps, ..mode },
+    let (output, scan) = match output_rate {
+        OutputRate::Follow => (mode, chr_runtime::sdi::Scan::Progressive),
+        OutputRate::Fixed(fps, scan) => (VideoMode { fps, ..mode }, scan),
     };
-    let (sdi_stats, recorder) = chr_runtime::sdi::SdiStats::recorded(output);
+    let (sdi_stats, recorder) =
+        chr_runtime::sdi::SdiStats::recorded(chr_runtime::sdi::Format { mode: output, scan });
     let (core, frames) = Core::start(CoreConfig {
         capture: VideoMode {
             width: native.width,
@@ -930,6 +990,13 @@ fn run_gst(args: Args) -> Result<()> {
         program_delay: delay,
         tap: args.monitor_tap.clone(),
         recorder,
+        sink: match args.decklink {
+            Some(device) => chr_runtime::gst_core::OutputSink::DeckLink { device },
+            None => chr_runtime::gst_core::OutputSink::Simulated,
+        },
+        input_loss: args.input_loss.clone().unwrap_or_default(),
+        audio: !args.no_audio,
+        audio_channels: args.audio_channels.unwrap_or(2),
     })?;
     if let Some(path) = &args.monitor_tap {
         log::info!("program tap for chr-monitor at {}", path.display());
@@ -1536,7 +1603,8 @@ mod tests {
                 Some(80),
                 None,
                 Some(chr_runtime::gst_core::OutputRate::Fixed(
-                    Rate::new(60000, 1001).unwrap()
+                    Rate::new(60000, 1001).unwrap(),
+                    chr_runtime::sdi::Scan::Progressive
                 ))
             )
         );
@@ -1555,8 +1623,50 @@ mod tests {
             &["--capture-socket", "/run/c.sock"],
             &["--output-rate", "follow"],
             &["--fps", "29.9"],
+            &[&gst[..], &["--input-loss", "freeze"]].concat(),
+            &[&gst[..], &["--output", "sdi"]].concat(),
+            &[&gst[..], &["--device", "1"]].concat(),
+            &["--input-loss", "black"],
+            &["--output", "decklink"],
+            &["--no-audio"],
+            &[&gst[..], &["--audio-channels", "8"]].concat(),
+            &[&gst[..], &["--output", "decklink", "--audio-channels", "6"]].concat(),
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+        let card = parse(
+            &[
+                &gst[..],
+                &[
+                    "--output",
+                    "decklink",
+                    "--input-loss",
+                    "slate:/s.png",
+                    "--no-audio",
+                ],
+            ]
+            .concat(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (card.decklink, card.input_loss, card.no_audio),
+            (
+                Some(0),
+                Some(chr_runtime::gst_core::InputLoss::Slate(Some(
+                    "/s.png".into()
+                ))),
+                true
+            )
+        );
+        let sim = parse(&gst).unwrap().unwrap();
+        assert_eq!(
+            (sim.decklink, sim.input_loss, sim.no_audio),
+            (None, None, false)
+        );
+        let second = parse(&[&gst[..], &["--output", "decklink", "--device", "1"]].concat())
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.decklink, Some(1));
     }
 }

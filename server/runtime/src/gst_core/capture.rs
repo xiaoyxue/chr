@@ -6,17 +6,31 @@
 //!
 //! ```text
 //! unixfdsrc ! video/x-raw,format=RGBA ! [number] ! tee
-//!   tee. ! queue leaky ! appsink (CG)
-//!   tee. ! queue leaky ! videoconvertscale ! video/x-raw,format=UYVY,<output extent> ! appsink (clean)
+//!   tee. ! queue leaky ! deinterlace (first field) ! appsink (CG)
+//!   tee. ! queue leaky ! [deinterlace, fixed rate] ! videoconvertscale
+//!        ! video/x-raw,format=UYVY,<output extent> ! appsink (clean)
 //! ```
 //!
-//! The capture's caps carry its format: any extent and rate, which may change
-//! at any time (a new input format). Every captured frame carries the capture
-//! process's VchaoFrame stamp; chr-sdi-in starts a new stream (stream id,
-//! `frame_id`s from 0) for each format. Before the tee every frame gets its
-//! program sequence as its offset ([`Streams`]), so sequences only grow across
-//! streams and capture sessions, and both branches read the frame's format
-//! from their caps.
+//! The capture's caps carry its format: any extent and rate, progressive or
+//! interlaced, which may change at any time (a new input format). Every
+//! captured frame carries the capture process's VchaoFrame stamp and its
+//! ancillary data (timecode, captions); chr-sdi-in starts a new stream (stream
+//! id, `frame_id`s from 0) for each format. Before the tee every frame gets its
+//! program sequence as its offset ([`Streams`]) and its capture time as
+//! running time of the core's clock, and its ancillary data goes to its slot;
+//! sequences only grow across streams and capture sessions, and both branches
+//! read the frame's format from their caps.
+//!
+//! **Interlaced input.** Tracking and rendering need a progressive picture of
+//! one instant: the CG branch's `deinterlace` (`method=linear`, `fields` the
+//! first field) turns every interlaced frame into one progressive frame of its
+//! first field, line-interpolated, at the frame's own time and rate; it uses no
+//! other field, so it holds nothing back and adds no latency. Progressive frames
+//! pass through untouched (the same memfd). Its frames are allocated by the
+//! shared-memory allocator, as the workers' sockets require. The clean branch
+//! keeps the interlaced picture as it came (both fields, their order) for an
+//! output that follows the input or is interlaced at a fixed rate; a fixed,
+//! progressive output gets it deinterlaced the same way.
 
 use std::{
     collections::VecDeque,
@@ -29,22 +43,29 @@ use std::{
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 
-use super::{CoreConfig, Error, queue, select::Frame, select::Selector};
-use crate::{sdi::VideoMode, worker::tracking::wire};
+use super::{
+    CoreConfig, Error, OutputRate, Timeline, ancillary::Ancillary, queue, select::Frame,
+    select::Selector,
+};
+use crate::{
+    sdi::{FieldOrder, Format, Scan, VideoMode},
+    worker::tracking::wire,
+};
 
 /// A captured frame for the CG branch.
 #[derive(Debug)]
 pub struct Captured {
     pub key: Frame,
-    /// Its extent and rate.
+    /// Its extent and rate; progressive (the CG branch deinterlaces).
     pub format: VideoMode,
-    /// Packed RGBA8 at the frame's extent, in the capture process's memfd.
+    /// Packed RGBA8 at the frame's extent in a memfd: the capture process's,
+    /// or the deinterlacer's.
     pub memory: gst::Memory,
 }
 
 /// Called with a new stream's first program sequence and its format, and
 /// whether the format differs from the previous stream's.
-pub type OnFormat = Box<dyn Fn(u64, VideoMode, bool) + Send + Sync>;
+pub type OnFormat = Box<dyn Fn(u64, Format, bool) + Send + Sync>;
 
 /// The capture's streams and their numbering, for every capture session of
 /// the core.
@@ -58,7 +79,7 @@ pub struct Streams {
 struct StreamState {
     /// The newest streams, by stream id: their base sequence.
     recent: VecDeque<(String, u64)>,
-    format: Option<VideoMode>,
+    format: Option<Format>,
 }
 
 /// Streams remembered at once: frames of the previous stream may still be
@@ -76,7 +97,7 @@ impl Streams {
 
     /// The program sequence of frame `frame_id` of `stream_id` in `format`;
     /// a new stream numbers its frames on from the highest sequence so far.
-    pub fn sequence(&self, stream_id: &str, frame_id: u64, format: VideoMode) -> u64 {
+    pub fn sequence(&self, stream_id: &str, frame_id: u64, format: Format) -> u64 {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let base = match state.recent.iter().find(|(id, _)| id == stream_id) {
             Some((_, base)) => *base,
@@ -98,16 +119,115 @@ impl Streams {
     }
 }
 
-/// The extent and rate of video caps.
-pub fn format_of(caps: &gst::CapsRef) -> Result<VideoMode, Error> {
+/// The extent, frame rate and scan of video caps. Interlaced video is
+/// `interlace-mode=interleaved` (or `mixed`), both fields in one frame;
+/// without a `field-order` the top field is taken to come first, as in HD.
+pub fn format_of(caps: &gst::CapsRef) -> Result<Format, Error> {
     let structure = caps.structure(0).ok_or("caps without a structure")?;
     let dimension =
         |name: &str| -> Result<u32, Error> { Ok(u32::try_from(structure.get::<i32>(name)?)?) };
-    Ok(VideoMode {
-        width: dimension("width")?,
-        height: dimension("height")?,
-        fps: wire::rate_of(structure.get::<gst::Fraction>("framerate")?)?,
+    let scan = match structure
+        .get::<&str>("interlace-mode")
+        .unwrap_or("progressive")
+    {
+        "progressive" => Scan::Progressive,
+        "interleaved" | "mixed" => Scan::Interlaced(
+            match structure
+                .get::<&str>("field-order")
+                .unwrap_or("top-field-first")
+            {
+                "bottom-field-first" => FieldOrder::BottomFirst,
+                _ => FieldOrder::TopFirst,
+            },
+        ),
+        other => return Err(format!("interlace-mode {other} is not supported").into()),
+    };
+    Ok(Format {
+        mode: VideoMode {
+            width: dimension("width")?,
+            height: dimension("height")?,
+            fps: wire::rate_of(structure.get::<gst::Fraction>("framerate")?)?,
+        },
+        scan,
     })
+}
+
+/// `deinterlace` keeping each interlaced frame's first field (top or bottom,
+/// from the caps' field order), line-interpolated: one progressive frame per
+/// frame at its own time. Progressive frames pass through. It does not keep
+/// buffer offsets, so the frame's sequence is carried over by its time.
+pub fn first_field_deinterlacer() -> Result<gst::Element, Error> {
+    let deinterlace = gst::ElementFactory::make("deinterlace")
+        .property_from_str("mode", "auto")
+        .property_from_str("method", "linear")
+        .property_from_str("fields", "top")
+        .build()
+        .map_err(|_| {
+            "GStreamer has no deinterlace element; the core needs gst-plugins-good's \
+             deinterlace on GST_PLUGIN_SYSTEM_PATH_1_0 (the Nix shells provide it)"
+        })?;
+    let element = deinterlace.downgrade();
+    let sequences = Arc::new(Mutex::new(VecDeque::<(gst::ClockTime, u64)>::new()));
+    let seen = Arc::clone(&sequences);
+    deinterlace
+        .static_pad("sink")
+        .ok_or("deinterlace has no sink pad")?
+        .add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                match &info.data {
+                    Some(gst::PadProbeData::Event(event)) => {
+                        if let gst::EventView::Caps(caps) = event.view()
+                            && let (Some(element), Ok(format)) =
+                                (element.upgrade(), format_of(caps.caps()))
+                        {
+                            let first = match format.scan {
+                                Scan::Interlaced(FieldOrder::BottomFirst) => "bottom",
+                                _ => "top",
+                            };
+                            element.set_property_from_str("fields", first);
+                        }
+                    }
+                    Some(gst::PadProbeData::Buffer(buffer)) => {
+                        if let Some(pts) = buffer.pts() {
+                            let mut seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
+                            seen.push_back((pts, buffer.offset()));
+                            if seen.len() > 16 {
+                                seen.pop_front();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+    deinterlace
+        .static_pad("src")
+        .ok_or("deinterlace has no src pad")?
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            let Some(gst::PadProbeData::Buffer(buffer)) = &mut info.data else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let sequence = buffer.pts().and_then(|pts| {
+                sequences
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .find(|(at, _)| *at == pts)
+                    .map(|(_, sequence)| *sequence)
+            });
+            match sequence {
+                Some(sequence) => {
+                    let buffer = buffer.make_mut();
+                    buffer.set_offset(sequence);
+                    buffer.set_offset_end(sequence + 1);
+                    gst::PadProbeReturn::Ok
+                }
+                None => gst::PadProbeReturn::Drop,
+            }
+        });
+    Ok(deinterlace)
 }
 
 pub struct Capture {
@@ -122,6 +242,7 @@ impl Capture {
     pub fn open(
         pipeline: &gst::Pipeline,
         config: &CoreConfig,
+        timeline: Timeline,
         streams: Arc<Streams>,
         frames: tokio::sync::mpsc::Sender<Captured>,
         selector: Selector,
@@ -152,27 +273,38 @@ impl Capture {
                             gst::Fraction::new(chr_common::rate::MAX_FPS as i32, 1),
                         ),
                     )
+                    .field(
+                        "interlace-mode",
+                        gst::List::new(["progressive", "interleaved", "mixed"]),
+                    )
                     .build(),
             )
             .build()?;
-        number(&captured, streams)?;
+        number(&captured, streams, timeline, selector.clone())?;
         let tee = gst::ElementFactory::make("tee")
             .property("allow-not-linked", true)
             .build()?;
         let cg_queue = queue(2, true)?;
+        let progressive = first_field_deinterlacer()?;
         let cg = sink("cg");
         let clean_queue = queue(2, true)?;
         let convert = gst::ElementFactory::make("videoconvertscale")
             .property("n-threads", convert_threads(config))
             .build()?;
-        // The output's extent; the rate stays the frame's.
+        // A fixed progressive output deinterlaces; following the input, or a
+        // fixed interlaced output, keeps the frame's fields.
+        let progressive_output =
+            matches!(config.output_rate, OutputRate::Fixed(_, Scan::Progressive));
+        // The output's extent; the rate and scan stay the frame's, unless the
+        // output is progressive at a fixed rate.
         let clean_caps = gst::ElementFactory::make("capsfilter")
             .property("caps", {
-                let mut caps = super::uyvy_caps(config.output);
-                caps.make_mut()
-                    .structure_mut(0)
-                    .expect("one structure")
-                    .remove_field("framerate");
+                let mut caps = super::uyvy_caps(config.output.into());
+                let structure = caps.make_mut().structure_mut(0).expect("one structure");
+                structure.remove_field("framerate");
+                if !progressive_output {
+                    structure.remove_fields(["interlace-mode", "field-order"]);
+                }
                 caps
             })
             .build()?;
@@ -182,6 +314,7 @@ impl Capture {
             &captured,
             &tee,
             &cg_queue,
+            &progressive,
             cg.upcast_ref(),
             &clean_queue,
             &convert,
@@ -189,22 +322,35 @@ impl Capture {
             clean.upcast_ref(),
         ])?;
         gst::Element::link_many([&source, &captured, &tee])?;
-        gst::Element::link_many([&tee, &cg_queue, cg.upcast_ref()])?;
-        gst::Element::link_many([
-            &tee,
-            &clean_queue,
-            &convert,
-            &clean_caps,
-            clean.upcast_ref(),
-        ])?;
+        gst::Element::link_many([&tee, &cg_queue, &progressive, cg.upcast_ref()])?;
+        let mut clean_branch = vec![&tee, &clean_queue];
+        let fixed_deinterlace = if progressive_output {
+            Some(first_field_deinterlacer()?)
+        } else {
+            None
+        };
+        if let Some(deinterlace) = &fixed_deinterlace {
+            bin.add(deinterlace)?;
+            clean_branch.push(deinterlace);
+        }
+        clean_branch.extend([&convert, &clean_caps, clean.upcast_ref()]);
+        gst::Element::link_many(clean_branch)?;
 
         let failed = Arc::new(AtomicBool::new(false));
         let ended = |failed: &Arc<AtomicBool>| {
             let failed = Arc::clone(failed);
             move |_: &AppSink| failed.store(true, Ordering::Release)
         };
+        // Frames the deinterlacer writes go to the workers' sockets as they are.
         cg.set_callbacks(
             AppSinkCallbacks::builder()
+                .propose_allocation(|_, query| {
+                    query.add_allocation_param(
+                        gstreamer_allocators::ShmAllocator::get().as_ref(),
+                        gst::AllocationParams::default(),
+                    );
+                    true
+                })
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Flushing)?;
                     match captured_frame(&sample) {
@@ -273,8 +419,15 @@ fn sink(name: &str) -> AppSink {
 }
 
 /// Numbers every frame before the tee: its offset becomes its program
-/// sequence. Frames without a valid VchaoFrame stamp are dropped.
-fn number(element: &gst::Element, streams: Arc<Streams>) -> Result<(), Error> {
+/// sequence, its PTS its capture time in the core's running time, and its
+/// ancillary data goes to its slot. Frames without a valid VchaoFrame stamp
+/// are dropped.
+fn number(
+    element: &gst::Element,
+    streams: Arc<Streams>,
+    timeline: Timeline,
+    selector: Selector,
+) -> Result<(), Error> {
     element
         .static_pad("src")
         .ok_or("capsfilter has no src pad")?
@@ -286,13 +439,26 @@ fn number(element: &gst::Element, streams: Arc<Streams>) -> Result<(), Error> {
                 .current_caps()
                 .ok_or_else(|| Error::from("a frame without caps"))
                 .and_then(|caps| format_of(&caps))
-                .and_then(|format| Ok((wire::read(buffer)?, format)));
+                .and_then(|format| Ok((wire::read(buffer)?, Ancillary::read(buffer)?, format)));
             match numbered {
-                Ok((meta, format)) => {
+                Ok((meta, ancillary, format)) => {
                     let sequence = streams.sequence(&meta.stream_id, meta.frame_id, format);
+                    let capture = timeline.of_system(meta.source_ns);
                     let buffer = buffer.make_mut();
                     buffer.set_offset(sequence);
                     buffer.set_offset_end(sequence + 1);
+                    buffer.set_pts(capture);
+                    if let Some(ancillary) = ancillary.filter(|ancillary| !ancillary.is_empty()) {
+                        selector.ancillary(
+                            Frame {
+                                sequence,
+                                capture,
+                                rate: format.mode.fps,
+                                scan: format.scan,
+                            },
+                            ancillary,
+                        );
+                    }
                     gst::PadProbeReturn::Ok
                 }
                 Err(error) => {
@@ -305,14 +471,15 @@ fn number(element: &gst::Element, streams: Arc<Streams>) -> Result<(), Error> {
     Ok(())
 }
 
-/// A numbered frame's sequence, capture time and rate.
+/// A numbered frame's sequence, capture time, rate and scan.
 fn frame_key(sample: &gst::Sample) -> Result<Frame, Error> {
     let buffer = sample.buffer().ok_or("a sample without a buffer")?;
-    let caps = sample.caps().ok_or("a sample without caps")?;
+    let format = format_of(sample.caps().ok_or("a sample without caps")?)?;
     Ok(Frame {
         sequence: buffer.offset(),
         capture: buffer.pts().ok_or("a captured frame without a timestamp")?,
-        rate: format_of(caps)?.fps,
+        rate: format.mode.fps,
+        scan: format.scan,
     })
 }
 
@@ -324,7 +491,7 @@ fn captured_frame(sample: &gst::Sample) -> Result<Captured, Error> {
     }
     Ok(Captured {
         key: frame_key(sample)?,
-        format: format_of(sample.caps().ok_or("a sample without caps")?)?,
+        format: format_of(sample.caps().ok_or("a sample without caps")?)?.mode,
         memory: buffer.memory(0).expect("one memory"),
     })
 }
@@ -342,12 +509,13 @@ mod tests {
     use super::*;
     use chr_common::rate::Rate;
 
-    fn mode(fps: u32) -> VideoMode {
+    fn mode(fps: u32) -> Format {
         VideoMode {
             width: 64,
             height: 36,
             fps: Rate::fps(fps),
         }
+        .into()
     }
 
     #[test]
@@ -355,7 +523,7 @@ mod tests {
         let changes = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&changes);
         let streams = Streams::new(Box::new(move |first, format, changed| {
-            seen.lock().unwrap().push((first, format.fps, changed));
+            seen.lock().unwrap().push((first, format.mode.fps, changed));
         }));
         assert_eq!(streams.sequence("a", 0, mode(25)), 0);
         assert_eq!(streams.sequence("a", 4, mode(25)), 4);
@@ -391,7 +559,23 @@ mod tests {
                 height: 1080,
                 fps: Rate::new(60000, 1001).unwrap()
             }
+            .into()
         );
+        let i5994 = gst::Caps::builder("video/x-raw")
+            .field("width", 1920)
+            .field("height", 1080)
+            .field("framerate", gst::Fraction::new(30000, 1001))
+            .field("interlace-mode", "interleaved")
+            .field("field-order", "bottom-field-first")
+            .build();
+        let format = format_of(&i5994).unwrap();
+        assert_eq!(format.scan, Scan::Interlaced(FieldOrder::BottomFirst));
+        assert_eq!(
+            format.mode.fps,
+            Rate::new(30000, 1001).unwrap(),
+            "the frame rate"
+        );
+        assert_eq!(format.name(), "1920x1080i59.94");
         let variable = gst::Caps::builder("video/x-raw")
             .field("width", 1920)
             .field("height", 1080)

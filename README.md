@@ -126,7 +126,7 @@ Working today:
   - The monitor preview is at most 1080p and encoded with NVENC.
 - **Worker transport:** chr-server and its render and tracking workers exchange frames and messages over GStreamer `unixfdsink`/`unixfdsrc` (#141). Each captured frame is copied once and shared by both workers.
 - **Camera model from the lens that arrives (#150):** each tracked frame is rendered with the tracking worker's lens, else a `--tracking-lens-*` lens, else pinhole; vchao's `pitch-analysis` sends none (pinhole), the replay stand-in sends its manifest's lens (radial, without per-frame warps). `stack.py status` shows the model and its source ([lens](server/docs/tracking-worker.md#lens)).
-- **GStreamer core (#154, phases 1 and 2, experimental):** `chr-server --pipeline gst` runs one GStreamer pipeline from `chr-sdi-in`'s memfd frames to the output: a fixed capture-to-output delay, each slot's own clean feed when its CG is late, workers relinked into the running pipeline after a crash, and the input's rate and format from its caps, followed at runtime (or converted to a fixed output rate) with a new tracking stream ([GStreamer core](server/docs/gst-core.md)). Rates are exact fractions everywhere (`--fps 30000/1001` or `29.97`). The timer-paced loop stays the default.
+- **GStreamer core (#154, phases 1 to 4, experimental):** `chr-server --pipeline gst` runs one GStreamer pipeline from `chr-sdi-in`'s memfd frames to the output: a fixed capture-to-output delay, each slot's own clean feed when its CG is late, workers relinked into the running pipeline after a crash, and the input's rate and format from its caps, followed at runtime (or converted to a fixed output rate) with a new tracking stream ([GStreamer core](server/docs/gst-core.md)). Rates are exact fractions everywhere (`--fps 30000/1001` or `29.97`). Interlaced input (1080i50, 1080i59.94) keeps its fields on the output and is deinterlaced for tracking and rendering only; a lost input is filled with the last frame, black or a slate on the cadence; the input's audio, timecode and captions leave with their frame's delay. DeckLink input and output (`--source decklink`, `--output decklink` at a fixed output rate, the card's clock as the pipeline's) are built and tested without a card but not verified on hardware. The timer-paced loop stays the default.
 - **Tracking crate (#151):** chr's tracking logic (VchaoFrame contract, pose-to-camera mapping, lens selection, frame/camera join, replay stand-in) is the pure-logic crate `chr-tracker` beside `chr-renderer`; `chr-runtime` keeps the worker processes and their GStreamer transport.
 - **Pitch studio:**
   - waving flags;
@@ -178,7 +178,8 @@ Run Cargo commands from the repository root. See `server/README.md` for setup an
 The single root `flake.nix` and `flake.lock` provide Node.js/npm, TypeScript
 (`tsc`), the Rust toolchain, renderer libraries and GStreamer (core, base, the
 bad plugins' `unixfd` elements, which carry chr-server's worker messages, and
-gst-plugins-rs' `livesync` and `fallbackswitch` for the GStreamer core) in one
+gst-plugins-rs' `livesync` and `fallbackswitch` and gst-plugins-good's
+`deinterlace` for the GStreamer core) in one
 development shell.
 They also retain the renderer package and checks. Tool versions come from the
 existing locked inputs; the Cargo workspace and Rust toolchain file are at the
