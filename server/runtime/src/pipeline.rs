@@ -54,6 +54,29 @@ pub enum Command {
 /// Bounded so a flood of commands is refused instead of growing memory.
 pub const COMMAND_QUEUE_CAPACITY: usize = 64;
 
+/// Answers the triangle's commands without a render loop, for chr-server's
+/// GStreamer core (`--pipeline gst`), which renders only its program: the
+/// triangle's state is kept and reported but never drawn.
+pub async fn answer_commands(mut commands: mpsc::Receiver<Command>, fps: u32) {
+    let mut scene = Scene::new(fps);
+    while let Some(command) = commands.recv().await {
+        match command {
+            Command::StartRotation {
+                angular_velocity_rad_per_s,
+                reply,
+            } => {
+                let _ = reply.send(scene.start_rotation(angular_velocity_rad_per_s));
+            }
+            Command::StopRotation { reply } => {
+                let _ = reply.send(scene.stop_rotation());
+            }
+            Command::GetState { reply } => {
+                let _ = reply.send(scene.state());
+            }
+        }
+    }
+}
+
 /// A captured frame without a camera, transmitted as its clean feed in its
 /// place among the program frames.
 pub struct CleanFrame {

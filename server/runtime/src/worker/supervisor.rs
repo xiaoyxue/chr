@@ -12,9 +12,16 @@
 //!
 //! Assets registered at runtime ([`WorkerAssets`]) reach a worker in its `hello`;
 //! when they change, the current worker is replaced at once, without backoff.
+//!
+//! The timer-paced render loop waits for each frame ([`Supervisor::render`]).
+//! chr-server's GStreamer core (`--pipeline gst`, #154) submits frames without
+//! waiting ([`Supervisor::submit`]) and takes their completions later
+//! ([`Supervisor::completions`]); its worker's sockets are bins in the core's
+//! pipeline ([`Host::Bin`]), which never wait for a connection: the `hello`
+//! goes out once the worker has connected.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -29,7 +36,7 @@ use chr_common::{
 
 use super::{
     protocol::{CREDITS, Output, Reply, Request, VERSION, WorkerProgram},
-    transport::{self, Channel, Event, Inbound, Incoming, SharedPixels},
+    transport::{self, Channel, Event, Host, Inbound, Incoming, SharedPixels},
 };
 use crate::frame_resources::Pixels;
 
@@ -54,6 +61,8 @@ pub struct WorkerConfig {
     pub hang: Duration,
     /// Assets every worker registers after installing its program.
     pub assets: WorkerAssets,
+    /// Where the worker's socket elements run.
+    pub host: Host,
 }
 
 /// Assets registered after startup, shared by the control plane and the supervisor.
@@ -109,6 +118,14 @@ pub enum Miss {
     Failed(String),
 }
 
+/// The outcome of one [`Supervisor::submit`]ted frame.
+#[derive(Debug)]
+pub struct Completion {
+    pub id: u64,
+    /// The UYVY frame at the output size: the worker's memory, not a copy.
+    pub result: Result<gstreamer::Buffer, Miss>,
+}
+
 pub struct Supervisor {
     config: WorkerConfig,
     status: StatusHandle,
@@ -120,15 +137,24 @@ pub struct Supervisor {
     started: bool,
     /// Runtime assets the current worker received.
     assets_sent: usize,
+    /// Outstanding requests of [`Self::submit`].
+    submitted: HashSet<u64>,
+    /// Their outcomes since the last [`Self::completions`].
+    completed: Vec<Completion>,
 }
+
+/// A running render worker process and its sockets.
+type Worker = Running<Incoming<Reply>>;
 
 enum State {
     Starting {
-        worker: Running<Incoming<Reply>>,
+        worker: Worker,
         since: Instant,
+        /// The `hello` of a worker whose input does not wait for it to connect.
+        hello: Option<Box<Request>>,
     },
     Ready {
-        worker: Running<Incoming<Reply>>,
+        worker: Worker,
         since: Instant,
     },
     Backoff {
@@ -152,6 +178,8 @@ impl Supervisor {
             backoff: FIRST_BACKOFF,
             started: false,
             assets_sent: 0,
+            submitted: HashSet::new(),
+            completed: Vec::new(),
         })
     }
 
@@ -172,7 +200,17 @@ impl Supervisor {
                 spawn = now >= *until;
                 None
             }
-            State::Starting { worker, since } => worker.check().or_else(|| {
+            State::Starting {
+                worker,
+                since,
+                hello,
+            } => worker.check().or_else(|| {
+                if worker.channel.worker_connected()
+                    && let Some(hello) = hello.take()
+                    && let Err(error) = worker.channel.send(&hello, None)
+                {
+                    return Some(format!("cannot send hello to the worker: {error}"));
+                }
                 (now.duration_since(*since) > STARTUP_TIMEOUT)
                     .then(|| "the worker did not become ready in time".to_owned())
             }),
@@ -235,6 +273,43 @@ impl Supervisor {
             Some(memory),
             deadline,
         )
+    }
+
+    /// Submits one program frame without waiting: `memory` (the input image as
+    /// `image` describes it, already in shared memory) goes to the worker as it
+    /// is, and the frame's UYVY comes back from [`Self::completions`] by the
+    /// returned ID, however late.
+    pub fn submit(
+        &mut self,
+        image: &w::ImageDescription,
+        memory: gstreamer::Memory,
+        frame: &w::FrameInput,
+        scene: &w::SceneSnapshot,
+    ) -> Result<u64, Miss> {
+        let id = self.reserve()?;
+        let request = Request::Render {
+            id,
+            image: image.clone(),
+            frame: frame.clone(),
+            scene: Box::new(scene.clone()),
+        };
+        let State::Ready { worker, .. } = &mut self.state else {
+            unreachable!("reserved while ready");
+        };
+        if let Err(error) = worker.channel.send(&request, Some(memory)) {
+            self.reap(format!("cannot send to the worker: {error}"));
+            return Err(Miss::Failed(error.to_string()));
+        }
+        self.outstanding.push_back((id, Instant::now()));
+        self.submitted.insert(id);
+        Ok(id)
+    }
+
+    /// Advances supervision and returns the outcomes of submitted frames since
+    /// the last call; a replaced worker's frames fail.
+    pub fn completions(&mut self) -> Vec<Completion> {
+        self.maintain();
+        std::mem::take(&mut self.completed)
     }
 
     /// Renders one frame of the default triangle.
@@ -346,12 +421,22 @@ impl Supervisor {
             }
             Reply::Done { id } => {
                 let result = (awaited == Some(*id)).then(|| self.output(&incoming));
+                if self.submitted.remove(id) {
+                    let result = self.frame(&incoming);
+                    self.completed.push(Completion { id: *id, result });
+                }
                 self.complete(*id);
                 result
             }
             Reply::Failed { id, message } => {
                 log::warn!("render request {id} failed: {message}");
                 self.status().last_error = Some(message.clone());
+                if self.submitted.remove(id) {
+                    self.completed.push(Completion {
+                        id: *id,
+                        result: Err(Miss::Failed(message.clone())),
+                    });
+                }
                 self.complete(*id);
                 (awaited == Some(*id)).then(|| Err(Miss::Failed(message.clone())))
             }
@@ -370,6 +455,26 @@ impl Supervisor {
                 uyvy.len()
             ))),
             Err(error) => Err(Miss::Failed(error.to_string())),
+        }
+    }
+
+    /// The UYVY frame of a `done` reply as a buffer of the worker's memory.
+    fn frame(&self, done: &Incoming<Reply>) -> Result<gstreamer::Buffer, Miss> {
+        let Output { width, height, .. } = self.config.output;
+        let expected = width as usize * height as usize * 2;
+        match done.buffer.memory(0) {
+            Some(memory) if done.buffer.n_memory() == 1 && memory.size() == expected => {
+                let mut buffer = gstreamer::Buffer::new();
+                buffer
+                    .get_mut()
+                    .expect("new buffer is not shared")
+                    .append_memory(memory);
+                Ok(buffer)
+            }
+            _ => Err(Miss::Failed(format!(
+                "the worker returned {} bytes of UYVY, not {expected}",
+                done.buffer.size()
+            ))),
         }
     }
 
@@ -393,7 +498,7 @@ impl Supervisor {
         }
         self.started = true;
         match self.start() {
-            Ok(worker) => {
+            Ok((worker, hello)) => {
                 let mut status = self.status();
                 status.state = WorkerState::Starting;
                 status.pid = Some(worker.child.id());
@@ -401,36 +506,44 @@ impl Supervisor {
                 self.state = State::Starting {
                     worker,
                     since: Instant::now(),
+                    hello,
                 };
             }
             Err(error) => self.backoff(format!("cannot start the worker: {error}")),
         }
     }
 
-    fn start(&mut self) -> Result<Running<Incoming<Reply>>, Error> {
+    /// Starts a worker; returns the `hello` still to send once it connects, if
+    /// its input does not hold messages until then.
+    fn start(&mut self) -> Result<(Worker, Option<Box<Request>>), Error> {
         let assets = self.config.assets.snapshot();
         self.assets_sent = assets.len();
         transport::init()?;
+        let live = matches!(self.config.host, Host::Bin(_));
         let channel = Channel::open(
             &self.config.socket_dir,
             Some(&gstreamer::Caps::new_empty_simple(transport::CAPS)),
             transport::QUEUE,
-            false,
+            live,
+            &self.config.host,
         )?;
-        // Waits in the socket until the worker connects.
-        channel.send(
-            &Request::Hello {
-                version: VERSION,
-                program: self.config.program.clone(),
-                runtime_id: self.config.runtime_id.clone(),
-                output: self.config.output,
-                assets,
-            },
-            None,
-        )?;
+        let hello = Request::Hello {
+            version: VERSION,
+            program: self.config.program.clone(),
+            runtime_id: self.config.runtime_id.clone(),
+            output: self.config.output,
+            assets,
+        };
+        let hello = if live {
+            Some(Box::new(hello))
+        } else {
+            // Waits in the socket until the worker connects.
+            channel.send(&hello, None)?;
+            None
+        };
         let mut command = Command::new(&self.config.executable);
         command.arg("worker");
-        Running::spawn(command, channel)
+        Ok((Running::spawn(command, channel)?, hello))
     }
 
     /// Kills the current worker, if any, and starts the backoff.
@@ -450,6 +563,12 @@ impl Supervisor {
         }
         // The worker is gone with its buffers, so every credit is free again.
         self.outstanding.clear();
+        for id in self.submitted.drain() {
+            self.completed.push(Completion {
+                id,
+                result: Err(Miss::Failed("the worker was replaced".into())),
+            });
+        }
     }
 
     fn backoff(&mut self, reason: String) {
@@ -565,6 +684,7 @@ mod tests {
             socket_dir: dir.join("sockets"),
             hang: Duration::from_millis(200),
             assets: Default::default(),
+            host: Host::Standalone,
         }
     }
 

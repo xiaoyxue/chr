@@ -10,6 +10,11 @@ capture card or calibration contract. The default daemon and the initial
 > `chr-sdi-sim`, which feeds frames only unless given `--send-cameras`. This
 > document was `tracking-simulation.md`.
 
+> **GStreamer core (#154):** the experimental `chr-server --pipeline gst` takes
+> its frames from `chr-sdi-in` over a unixfd socket instead of this ring: any
+> progressive clip at an integer rate (or a test pattern) at its own pace, no
+> manifest ([GStreamer core](gst-core.md)).
+
 `chr-sdi-sim` stands in for the SDI capture card: it decodes a calibrated clip
 in a loop and writes every frame into `chr-server`'s capture input ring. A real
 capture process (#80) will take its place. By default it feeds frames only, and

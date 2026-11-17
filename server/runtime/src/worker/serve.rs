@@ -28,6 +28,10 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Test-only: delays every reply by this many milliseconds.
 pub const DELAY_ENV: &str = "CHR_WORKER_TEST_DELAY_MS";
+/// Test-only: answers every request with a solid UYVY frame of this luma
+/// (0-255) instead of rendering, without a GPU device: a stand-in for fault and
+/// timing tests that must not need, or compete for, the GPU (#154).
+pub const SOLID_ENV: &str = "CHR_WORKER_TEST_SOLID";
 
 /// How long an exiting worker waits for its last replies, such as `fatal`, to
 /// reach the server.
@@ -43,6 +47,9 @@ pub fn serve(input: &Path, output: &Path) -> Result<(), Error> {
 }
 
 fn serve_on(requests: &Receiver, replies: &Sender) -> Result<(), Error> {
+    if let Ok(luma) = std::env::var(SOLID_ENV) {
+        return serve_solid(requests, replies, luma.parse()?);
+    }
     let mut worker = match start(requests) {
         Ok(worker) => worker,
         Err(error) => {
@@ -61,10 +68,7 @@ fn serve_on(requests: &Receiver, replies: &Sender) -> Result<(), Error> {
         },
         None,
     )?;
-    let delay = std::env::var(DELAY_ENV)
-        .ok()
-        .map(|ms| ms.parse().map(Duration::from_millis))
-        .transpose()?;
+    let delay = test_delay()?;
     while let Some(request) = requests.recv::<Request>()? {
         let (id, result) = worker.handle(&request)?;
         // The input image goes back to the server before the reply does.
@@ -82,6 +86,50 @@ fn serve_on(requests: &Receiver, replies: &Sender) -> Result<(), Error> {
                 None,
             )?,
         }
+    }
+    Ok(())
+}
+
+fn test_delay() -> Result<Option<Duration>, Error> {
+    Ok(std::env::var(DELAY_ENV)
+        .ok()
+        .map(|ms| ms.parse().map(Duration::from_millis))
+        .transpose()?)
+}
+
+/// [`SOLID_ENV`]: every request is done with the same solid frame.
+fn serve_solid(requests: &Receiver, replies: &Sender, luma: u8) -> Result<(), Error> {
+    let Some(Incoming {
+        message: Request::Hello {
+            version, output, ..
+        },
+        ..
+    }) = requests.recv()?
+    else {
+        return Err("the first message must be hello".into());
+    };
+    if version != VERSION {
+        return Err(format!("protocol version {version} is not {VERSION}").into());
+    }
+    let frame = [128, luma, 128, luma].repeat(output.width as usize * output.height as usize / 2);
+    replies.send(
+        &Reply::Ready {
+            adapter: format!("solid test frames of luma {luma}, no GPU"),
+        },
+        None,
+    )?;
+    let delay = test_delay()?;
+    while let Some(request) = requests.recv::<Request>()? {
+        let id = match request.message {
+            Request::Render { id, .. } | Request::Triangle { id, .. } => id,
+            Request::Hello { .. } => return Err("unexpected second hello".into()),
+        };
+        drop(request);
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
+        let uyvy = SharedPixels::copy_from(&frame)?;
+        replies.send(&Reply::Done { id }, Some(uyvy.memory()))?;
     }
     Ok(())
 }
