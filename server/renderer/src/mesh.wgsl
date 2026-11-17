@@ -599,7 +599,8 @@ fn fs_decal(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locati
 @fragment
 fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @location(0) vec4<f32> {
     if camera.options.w==2u {
-        // Inspect geometric normals, independent of normal maps, lights and sidedness.
+        // Inspect interpolated vertex normals (face normals when absent), before normal
+        // maps and independent of lights and sidedness.
         var n=surface.normal;
         if dot(n,n)<1e-12 {
             n=cross(dpdx(surface.position),dpdy(surface.position));
@@ -642,10 +643,15 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
         } else {
             let determinant=tx.x*ty.y-tx.y*ty.x;
             if abs(determinant)>1e-10 {
-                t=(px*ty.y-py*tx.y)/determinant;
-                b=(py*tx.x-px*ty.x)/determinant;
-                let scale=inverseSqrt(max(dot(t,t),dot(b,b)));
-                t*=scale; b*=scale;
+                // Same frame as imported tangents: t along +U, orthogonal to n, and the
+                // bitangent towards decreasing V, the texture's up (glTF normal-map +Y).
+                let dpdu=(px*ty.y-py*tx.y)/determinant;
+                let dpdv=(py*tx.x-px*ty.x)/determinant;
+                let along=dpdu-n*dot(n,dpdu);
+                if dot(along,along)>1e-20 {
+                    t=normalize(along);
+                    b=cross(n,t)*select(1.0,-1.0,dot(cross(n,t),dpdv)>0.0);
+                }
             }
         }
         if dot(t,t)>1e-12 && dot(b,b)>1e-12 {
