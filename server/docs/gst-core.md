@@ -339,7 +339,10 @@ formats, RP 188 timecode and captions on a card are not verified yet (#161).
   an interlaced input's fields, a progressive one deinterlaces it). Switching
   the card's mode on the fly (the sink to READY, a new mode, primed again) is
   left for a test with a card. `cc-line=9` and `timecode-format=rp188any`
-  output the slot's captions and timecode. Without a card `Core::start` fails
+  output the slot's captions and timecode, and `mapping-format=level-a` sends
+  the 3G-SDI modes (1080p50, 1080p59.94, 1080p60) in Level A: the driver's
+  default is Level B, which monitors and SDI-to-HDMI converters show as no
+  signal. Without a card `Core::start` fails
   with `no DeckLink device 0 (0 found): install Blackmagic Desktop Video …`.
   Three things a card needs that the simulated sink does not:
   - **Its caps.** The sink names `chroma-site=mpeg2` in every mode and
