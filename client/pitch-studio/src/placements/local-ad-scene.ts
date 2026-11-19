@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { simplifyForPreview } from './preview-simplify.ts';
 import { flagWave } from './flag.ts';
 import { adRoot, modelFit } from './local-ad-transform.ts';
 import type { GlbBounds } from '../render/render-description.ts';
@@ -98,7 +99,8 @@ async function loadTexture(file: File) {
   return texture;
 }
 
-async function createContent(ad: LocalAd, placeholders: boolean) {
+/** `shown`: the content goes into the preview, so a high-poly model is thinned for it. */
+async function createContent(ad: LocalAd, placeholders: boolean, shown = true) {
   const group = new THREE.Group();
   if (ad.type === 'flag') {
     const texture = ad.material && await loadTexture(ad.material);
@@ -116,6 +118,7 @@ async function createContent(ad: LocalAd, placeholders: boolean) {
         polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })));
   } else if (ad.material) {
     const { scene, bounds } = await parseGlb(ad.material), size = bounds.getSize(new THREE.Vector3()), centre = bounds.getCenter(new THREE.Vector3());
+    if (shown) await simplifyForPreview(scene);
     scene.position.set(-centre.x, -bounds.min.y, -centre.z);
     const model = new THREE.Group();
     model.add(scene);
@@ -131,7 +134,7 @@ async function createContent(ad: LocalAd, placeholders: boolean) {
 }
 
 export async function validateLocalAdMaterial(ad: LocalAd) {
-  const content = await createContent(ad, false);
+  const content = await createContent(ad, false, false);
   disposeLocalObject(content);
 }
 
