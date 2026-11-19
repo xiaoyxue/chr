@@ -248,8 +248,9 @@ renegotiates the socket's caps in the same session. The core then:
    (below).
 4. **Output.** With `follow` the program's caps change at the first frame of the
    new rate: `livesync` and the simulated output sink take the new rate (the
-   sink is an `appsink`; a DeckLink sink cannot follow, so a card output needs
-   `fixed`, phase 3), and the tap's slots carry it; `sdi.get_status` reports the new mode from
+   sink is an `appsink`; a DeckLink sink cannot change its mode while it plays,
+   so a card opens in the input's format at start and keeps it, phase 3), and
+   the tap's slots carry it; `sdi.get_status` reports the new mode from
    that slot on, D after the capture's change. With `fixed` nothing changes
    downstream.
 5. **chr-monitor follows** the tap without a restart: each slot carries its
@@ -344,17 +345,24 @@ formats, RP 188 timecode and captions on a card are not verified yet (#161).
   pattern's `--then` switch, so the core follows it (phase 2). The card is not
   paced by `clocksync` (it delivers in real time and timestamps on its own).
 - **Output** (`chr-server --output decklink [--device N]
-  --output-rate fixed:<rate>`): `decklinkvideosink` replaces the simulated
+  [--output-rate fixed:<rate>]`): `decklinkvideosink` replaces the simulated
   `appsink` after `livesync`, `decklinkaudiosink` the audio `appsink`. Its mode
-  is the fixed output format's (table below), for the whole run:
-  `decklinkvideosink` keeps its mode once it plays (new caps of the same size
-  are "nothing relevant", others "reconfiguration not supported"), so a card
-  output **requires `--output-rate fixed:<rate>`** (`fixed:50i` for 1080i50,
-  `fixed:59.94` for 1080p59.94) and refuses `follow` at start; the input's
-  other rates are converted (phase 2's grid; an interlaced fixed output keeps
-  an interlaced input's fields, a progressive one deinterlaces it). Switching
-  the card's mode on the fly (the sink to READY, a new mode, primed again) is
-  left for a test with a card. `cc-line=9` and `timecode-format=rp188any`
+  is fixed for the whole run (table below): `decklinkvideosink` keeps its mode
+  once it plays (new caps of the same size are "nothing relevant", others
+  "reconfiguration not supported"). **By default the card opens in the
+  input's format** (#195): with `follow`, chr-server first connects to the
+  capture socket (`capture::probe`, waiting and logging until `chr-sdi-in`
+  sends a frame), reads the input's rate and scan from its caps and runs the
+  core at that fixed rate; the program camera's nominal rate (`--fps`) becomes
+  the input's, and an input extent other than `--size` is refused at start.
+  `--output-rate fixed:<rate>` (`fixed:50i` for 1080i50, `fixed:59.94` for
+  1080p59.94) opens it in another mode on purpose. Input in any other format
+  than the card's, at start or after a change, is converted (phase 2's grid;
+  an interlaced fixed output keeps an interlaced input's fields, a progressive
+  one deinterlaces it) and logged as a warning that names both formats; a
+  restart of chr-server opens the card in the new one. Switching the card's
+  mode on the fly (the sink to READY, a new mode, primed again) is left for a
+  test with a card (#161). `cc-line=9` and `timecode-format=rp188any`
   output the slot's captions and timecode, and `mapping-format=level-a` sends
   the 3G-SDI modes (1080p50, 1080p59.94, 1080p60) in Level A: the driver's
   default is Level B, which monitors and SDI-to-HDMI converters show as no

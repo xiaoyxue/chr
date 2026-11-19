@@ -91,7 +91,7 @@ and the server with the card:
 
 ```sh
 chr-sdi-in --source decklink --device 1 --mode auto --connection sdi
-chr-server --description <json> --output decklink --device 3 --output-rate fixed:30 \
+chr-server --description <json> --output decklink --device 3 \
   --program-delay-ms 300 --input-loss black ...
 ```
 
@@ -106,8 +106,13 @@ chr-server --description <json> --output decklink --device 3 --output-rate fixed
   `LD_LIBRARY_PATH`: a link to just `/usr/lib/libDeckLinkAPI.so` (Debian,
   Ubuntu), not the host's whole `/usr/lib`.
 - **The source's format.** The card locks only on the mode the source sends;
-  `mode=auto` follows it, but the output keeps the mode of `--output-rate
-  fixed:<rate>` (HD and UHD; no SD) for the whole run. A PC through an
+  `mode=auto` follows it. chr-server opens the output card in the input's
+  format (HD and UHD; no SD): it waits for `chr-sdi-in`'s first frame, so the
+  output is exactly the input's rate and scan, for a real SDI input as for a
+  clip (`chr-sdi-in --video`). `--size` must be the input's extent. The card
+  keeps that mode for the whole run: after the source changes its format,
+  chr-server logs a warning and converts until it is restarted.
+  `--output-rate fixed:<rate>` converts to another mode on purpose. A PC through an
   HDMI-to-SDI converter may send 3G-SDI Level B at 50/60 Hz, which the card
   detects but does not lock: use 30 Hz or a Level A source. The output sends
   1080p50, 1080p59.94 and 1080p60 in Level A, which monitors and converters
