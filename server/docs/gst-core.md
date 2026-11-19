@@ -292,6 +292,22 @@ rendered: other_extent` in the core's log; CG returns with the camera's extent.
   period of latency (every slot late, or that period taken from the render
   budget). The fixed output is progressive: an interlaced input's clean feed
   is deinterlaced like its CG frames (phase 3).
+- **Drift and jitter** (#190). An input that is not genlocked to the output
+  drifts against the grid (about 55 ppm between a free-running DeckLink Duo 2
+  and its source: one frame every 10 minutes at 30 fps), and a card's capture
+  times jitter by a few ms. While the input's phase crosses a slot boundary
+  within that jitter, a frame due just before the boundary lands in a slot
+  already filled. Such a frame, whose window holds only filled slots but ends
+  less than half the shorter period before the first open slot, takes that
+  open slot instead of being dropped: it goes out up to half a period later
+  than the latest frame due would (the delay stays below D plus one and a half
+  output periods), never earlier, so its deadline and render budget are
+  unchanged. Jitter up to half a period peak to peak then never flips a frame
+  between two slots, and each period of drift costs one repeat (input
+  slower) or one drop (input faster), instead of the 20 s or so of
+  alternating repeats and drops seen on the card. A missing frame still
+  leaves its slot empty, and frames of a faster input that cover no slot at
+  all are dropped as before.
 
 ### vchao: a new stream costs a model load
 

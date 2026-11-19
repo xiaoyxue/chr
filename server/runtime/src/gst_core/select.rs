@@ -18,7 +18,11 @@
 //! latest one due (a sample and hold, as `videorate` does, but decided with the
 //! frame instead of when the next one arrives, which would cost an input period
 //! of latency). Faster input frames that cover no grid slot are dropped, slower
-//! ones repeat.
+//! ones repeat. A frame whose window holds only slots already filled but ends
+//! less than half a period before the first open slot takes that slot, a
+//! little after its due time, so a jittery input drifting against the grid (no
+//! genlock) loses or repeats one frame per period of drift instead of
+//! alternating drops and repeats while its phase crosses a slot boundary.
 //!
 //! A change of the input's format starts a transition: from the oldest slot
 //! still undecided to the first CG slot of the new format, every slot sent as
@@ -457,6 +461,15 @@ impl Grid {
     /// or a nanosecond more apart: a frame fills the slots from 2 ns before its
     /// due time to 1 ns before the next one at the soonest, which leaves no
     /// slot between two frames and never takes the next frame's own.
+    ///
+    /// A card's capture times also jitter by a few ms. A frame whose window
+    /// holds only slots already filled, and ends less than
+    /// [`Self::tolerance`] before the first open slot, takes that slot as if
+    /// it were due on it instead of being dropped: otherwise, while an input
+    /// that is not genlocked drifts across a slot boundary, the jitter would
+    /// drop a frame and leave the next slot empty again and again, instead of
+    /// losing or repeating one frame once. The frame only goes out later than
+    /// its due time, never earlier, so its deadline is unchanged.
     fn fill(&mut self, due: u64, period: u64) -> Vec<(u64, u64)> {
         let (start, end) = (due.saturating_sub(2), due + period - 1);
         let origin = *self.origin.get_or_insert(due);
@@ -468,6 +481,13 @@ impl Grid {
                 at + u64::from(rate.frame_ns(at) < offset)
             }
         };
+        let open = origin + rate.frame_ns(self.next);
+        let end = if first < self.next && end <= open && open - end < Self::tolerance(rate, period)
+        {
+            open + period - 1
+        } else {
+            end
+        };
         let mut slot = first.max(self.next);
         let mut filled = Vec::new();
         while origin + rate.frame_ns(slot) < end {
@@ -477,6 +497,13 @@ impl Grid {
         }
         self.next = self.next.max(slot);
         filled
+    }
+
+    /// How early a frame may end before the first open slot and still take
+    /// it: half the shorter period, so capture jitter up to that peak to peak
+    /// never flips a frame between two slots, on either side of the band.
+    fn tolerance(rate: Rate, period: u64) -> u64 {
+        period.min(rate.period_ns()) / 2
     }
 }
 
@@ -1095,5 +1122,59 @@ mod tests {
         );
         // A frame due before the slots already filled adds none.
         assert!(grid.fill(90_000_000, 20_000_000).is_empty());
+    }
+
+    /// Feeds an `fps` grid frames of the same nominal rate that start half a
+    /// period off the grid, drift by `drift` ns per frame for a period and a
+    /// quarter and jitter by up to ±`jitter` ns, as a card's capture without
+    /// genlock does. Returns the empty slots (repeats), the frames that got no
+    /// slot (drops) and the frames that got more than one.
+    fn drift_across_a_boundary(fps: u32, jitter: i64, drift: i64) -> (usize, usize, usize) {
+        let rate = Rate::fps(fps);
+        let period = rate.period_ns();
+        let mut grid = Grid::new(rate);
+        let mut seed = 0x2545_f491_u64;
+        let mut jitter = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) as i64 % (2 * jitter + 1) - jitter
+        };
+        let origin = 1_000_000_000_i64;
+        let mut slots = Vec::new();
+        let (mut drops, mut doubles) = (0, 0);
+        for n in 0..period as i64 * 5 / 4 / drift.abs() {
+            let due = if n == 0 {
+                origin
+            } else {
+                origin + n * period as i64 - period as i64 / 2 + n * drift + jitter()
+            };
+            let filled = grid.fill(due as u64, period);
+            // Never before the frame is due, so never before its deadline.
+            assert!(
+                filled.iter().all(|&(at, _)| {
+                    at + 2 >= due as u64 && at < due as u64 + period + period / 2
+                })
+            );
+            drops += usize::from(filled.is_empty());
+            doubles += usize::from(filled.len() > 1);
+            slots.extend(
+                filled
+                    .iter()
+                    .map(|&(at, _)| rate.frame_at(at - origin as u64)),
+            );
+        }
+        let span = slots.last().expect("slots") + 1 - slots[0];
+        (span as usize - slots.len(), drops, doubles)
+    }
+
+    #[test]
+    fn a_drifting_jittery_input_loses_or_repeats_one_frame_per_period_of_drift() {
+        // Input slower than the grid by 10 us a frame: one slot boundary
+        // crossed, one repeat and nothing else.
+        assert_eq!(drift_across_a_boundary(30, 2_000_000, 10_000), (1, 0, 0));
+        // Input faster: one drop and nothing else.
+        assert_eq!(drift_across_a_boundary(30, 2_000_000, -10_000), (0, 1, 0));
+        // Jitter wider than a quarter period at 50 fps.
+        assert_eq!(drift_across_a_boundary(50, 3_000_000, 10_000), (1, 0, 0));
+        assert_eq!(drift_across_a_boundary(50, 3_000_000, -10_000), (0, 1, 0));
     }
 }
