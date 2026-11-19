@@ -307,9 +307,20 @@ enum PipelineKind {
     Wire,
     Sky,
     ShadowCatcher,
+    /// A catcher's depth alone, which hides what lies below the ground.
+    Holdout,
     Decal,
     FlagSimple,
 }
+
+/// The holdout's depth bias (Depth32Float units of about 2^-24, and per unit of
+/// depth slope): the ground's depth moves slightly away, so geometry on it, such
+/// as a model's feet or a decal, and the catcher itself still pass the depth test.
+const HOLDOUT_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: 16,
+    slope_scale: 1.0,
+    clamp: 0.0,
+};
 
 /// One pipeline per hardware face culling. Single-sided parts cull their back,
 /// which is the rasterizer's front face when their model mirrors; double-sided
@@ -390,6 +401,7 @@ fn raster_pipeline(
     let wire = matches!(kind, PipelineKind::Wire);
     let catcher = matches!(kind, PipelineKind::ShadowCatcher);
     let decal = matches!(kind, PipelineKind::Decal);
+    let holdout = matches!(kind, PipelineKind::Holdout);
     let buffers = [Some(vertex_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("shared scene raster"),
@@ -414,6 +426,8 @@ fn raster_pipeline(
                 "fs_wire"
             } else if catcher {
                 "fs_shadow_catcher"
+            } else if holdout {
+                "fs_holdout"
             } else if decal {
                 "fs_decal"
             } else if matches!(kind, PipelineKind::FlagSimple) {
@@ -427,7 +441,11 @@ fn raster_pipeline(
                 // Premultiplied colour over the destination: a catcher's black
                 // multiplies it by 1 - alpha; a decal adds alpha * colour.
                 blend: (catcher || decal).then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask: if holdout {
+                    wgpu::ColorWrites::empty()
+                } else {
+                    wgpu::ColorWrites::ALL
+                },
             })],
         }),
         primitive: wgpu::PrimitiveState {
@@ -448,7 +466,11 @@ fn raster_pipeline(
                 wgpu::CompareFunction::Less
             }),
             stencil: Default::default(),
-            bias: Default::default(),
+            bias: if holdout {
+                HOLDOUT_BIAS
+            } else {
+                Default::default()
+            },
         }),
         multisample: wgpu::MultisampleState {
             count: samples,
@@ -473,6 +495,7 @@ pub struct MeshRenderer {
     pipeline: wgpu::RenderPipeline,
     pbr_pipeline: Culled,
     catcher_pipeline: Culled,
+    holdout_pipeline: Culled,
     decal_pipeline: Culled,
     sky_pipeline: wgpu::RenderPipeline,
     environment: EnvironmentGpu,
@@ -728,6 +751,7 @@ impl MeshRenderer {
         let pbr_pipeline = shaded_pipeline(device, &layout, &shader, 1, PipelineKind::Mesh);
         let catcher_pipeline =
             shaded_pipeline(device, &layout, &shader, 1, PipelineKind::ShadowCatcher);
+        let holdout_pipeline = shaded_pipeline(device, &layout, &shader, 1, PipelineKind::Holdout);
         let decal_pipeline = shaded_pipeline(device, &layout, &shader, 1, PipelineKind::Decal);
         let wire_pipeline = scene_pipeline(
             device,
@@ -799,6 +823,7 @@ impl MeshRenderer {
             draws: Vec::new(),
             pbr_pipeline,
             catcher_pipeline,
+            holdout_pipeline,
             decal_pipeline,
             sky_pipeline,
             environment,
@@ -870,6 +895,7 @@ impl MeshRenderer {
             self.pipeline = create(PipelineKind::Mesh);
             self.pbr_pipeline = shaded(PipelineKind::Mesh);
             self.catcher_pipeline = shaded(PipelineKind::ShadowCatcher);
+            self.holdout_pipeline = shaded(PipelineKind::Holdout);
             self.decal_pipeline = shaded(PipelineKind::Decal);
             self.wire_pipeline = create(PipelineKind::Wire);
             self.sky_pipeline = scene_pipeline(
@@ -1522,8 +1548,17 @@ impl MeshRenderer {
             .draws
             .iter()
             .filter(|draw| physical && draw.shadow_catcher);
-        let mut bound = None;
         let mut bindings = Bindings::default();
+        if physical {
+            // Catchers stand for the real ground: their depth comes first, so what
+            // lies below it is not drawn and the camera's picture shows there.
+            for draw in self.draws.iter().filter(|draw| draw.shadow_catcher) {
+                pass.set_pipeline(self.holdout_pipeline.get(draw.cull));
+                bindings.bind(&mut pass, self, draw, &self.meshes[&draw.mesh], false);
+                pass.draw_indexed(draw.indices.clone(), 0, draw.instances.clone());
+            }
+        }
+        let mut bound = None;
         for draw in opaque.chain(decals).chain(catchers) {
             let pipeline = match draw.flag {
                 Some((_, FlagShading::Simple)) if physical => &flags.simple,

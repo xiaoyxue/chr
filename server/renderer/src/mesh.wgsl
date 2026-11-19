@@ -689,6 +689,12 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     return vec4(clamp(radiance,vec3(0.0),vec3(65504.0)),1.0);
 }
 
+// Ground holdout: a catcher's depth only, drawn before opaque geometry.
+@fragment
+fn fs_holdout() -> @location(0) vec4<f32> {
+    return vec4(0.0);
+}
+
 // Shadow catcher: premultiplied black whose alpha is the luminance fraction of light
 // removed by shadows, so "over" blending multiplies what lies behind by
 // shadowed / unshadowed lights[li]. Computed in linear HDR before any tone mapping.
