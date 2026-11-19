@@ -18,7 +18,7 @@
 //!   (the card's, genlocked to its reference input) becomes the core's
 //!   pipeline clock; the core primes it ([`super::select::prime`]), hands
 //!   it each frame [`super::CARD_LEAD`] before air and copies memory of
-//!   other processes for it ([`own_memory`]).
+//!   other processes for it ([`own_memory`]). 3G-SDI modes go out in Level A.
 //!
 //! Only HD and UHD modes are mapped: SD's caps carry a non-square pixel aspect
 //! ratio and BT.601, which chr's 1:1, BT.709 frames do not negotiate with.
@@ -227,15 +227,24 @@ pub fn audio_source(device: u32, channels: u32) -> Result<gst::Element, Error> {
 /// `decklinkvideosink` on `device` in the mode of `format`, opened: its clock
 /// is the card's. Timecode goes out as RP 188 and captions on line 9.
 pub fn video_sink(device: u32, format: Format) -> Result<gst::Element, Error> {
-    let mode = Mode::of(format)?;
+    let sink = configured_sink(device, Mode::of(format)?)?;
+    open(&sink, device)?;
+    own_memory(&sink)?;
+    Ok(sink)
+}
+
+/// The sink's settings, before it opens the card. 3G-SDI modes (1080p50,
+/// 1080p59.94, 1080p60) go out in Level A: the driver's default is Level B,
+/// which monitors and SDI-to-HDMI converters show as no signal. 1.5G modes
+/// ignore the mapping.
+fn configured_sink(device: u32, mode: Mode) -> Result<gst::Element, Error> {
     let sink = element("decklinkvideosink")?;
     sink.set_property("device-number", device as i32);
     sink.set_property_from_str("mode", mode.nick);
+    sink.set_property_from_str("mapping-format", "level-a");
     sink.set_property_from_str("video-format", "8bit-yuv");
     sink.set_property_from_str("timecode-format", "rp188any");
     sink.set_property("cc-line", 9_i32);
-    open(&sink, device)?;
-    own_memory(&sink)?;
     Ok(sink)
 }
 
@@ -362,6 +371,28 @@ mod tests {
             Scan::Interlaced(FieldOrder::TopFirst),
         ));
         assert!(!sd.can_intersect(&template), "{sd}");
+    }
+
+    /// 1080p50 leaves in its own mode with Level A mapping (no card needed).
+    #[test]
+    fn three_gig_modes_go_out_in_level_a() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("decklinkvideosink").is_none() {
+            eprintln!("skipped: no decklink plugin");
+            return;
+        }
+        let p50 = Mode::of(format(1920, 1080, Rate::fps(50), Scan::Progressive)).unwrap();
+        let sink = configured_sink(3, p50).unwrap();
+        let nick = |name: &str| {
+            let value = sink.property_value(name);
+            gst::glib::EnumValue::from_value(&value)
+                .unwrap()
+                .1
+                .nick()
+                .to_owned()
+        };
+        assert_eq!(nick("mode"), "1080p50");
+        assert_eq!(nick("mapping-format"), "level-a");
     }
 
     /// A worker's frame (memfd memory) reaches the card as a copy in this
