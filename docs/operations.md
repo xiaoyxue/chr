@@ -116,8 +116,7 @@ chr-server --description <json> --output decklink --device 3 \
   HDMI-to-SDI converter may send 3G-SDI Level B at 50/60 Hz, which the card
   detects but does not lock: use 30 Hz or a Level A source. The output sends
   1080p50, 1080p59.94 and 1080p60 in Level A, which monitors and converters
-  expect; give it the input's own rate (`--output-rate fixed:50` for 1080p50)
-  to pass every frame through unconverted.
+  expect.
 - **Timing.** The output card's clock times the whole pipeline. Lock its
   reference input to house sync before going on air: a free-running card
   drifts from the source by parts per million, so the delay grows by up to a

@@ -761,8 +761,8 @@ target/linux/release/chr-server --fps 25 --size 1920x1080 ... \
 Both default to `$XDG_RUNTIME_DIR/chr/capture.sock` (`--socket`,
 `--capture-socket`); the audio socket is `<socket>.audio` (`--no-audio` on
 either side turns audio off). With a card: `chr-sdi-in --source decklink
---device 0` and `chr-server … --output decklink --device 1 --output-rate
-fixed:50i` (verified at 1080p30: [On a card](#on-a-card-decklink-duo-2-1080p30);
+--device 0` and `chr-server … --output decklink --device 1`, which opens
+the card in the input's format (verified at 1080p30: [On a card](#on-a-card-decklink-duo-2-1080p30);
 `docs/operations.md`). chr-server logs the output every 10 s: slots, CG,
 clean feed, repeats, duplicates (fixed rate), skipped frames, the interval at
 each rate and the capture-to-output delay (min/mean/max and standard
