@@ -7,7 +7,7 @@ use std::num::NonZeroU64;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu,
+    Gpu, mesh_renderer,
     scene::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag},
 };
 
@@ -48,7 +48,6 @@ pub(crate) struct FlagGpu {
     compute_layout: wgpu::BindGroupLayout,
     /// Group 1 of flag draws: the dynamic-offset object uniform and the surface.
     pub(crate) draw_layout: wgpu::BindGroupLayout,
-    object_bytes: u64,
     slots: Vec<Slot>,
     /// Draw groups of this frame's flags, in draw order.
     draws: Vec<wgpu::BindGroup>,
@@ -56,7 +55,7 @@ pub(crate) struct FlagGpu {
 }
 
 impl FlagGpu {
-    pub(crate) fn new(device: &wgpu::Device, object_bytes: u64) -> Self {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
         let storage = |binding, read_only, visibility| wgpu::BindGroupLayoutEntry {
             binding,
             visibility,
@@ -67,28 +66,26 @@ impl FlagGpu {
             },
             count: None,
         };
-        let uniform = |dynamic, size, visibility| wgpu::BindGroupLayoutEntry {
+        let uniform = wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility,
+            visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: dynamic,
-                min_binding_size: NonZeroU64::new(size),
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(32),
             },
             count: None,
         };
         let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("flag surface evaluation"),
-            entries: &[
-                uniform(false, 32, wgpu::ShaderStages::COMPUTE),
-                storage(1, false, wgpu::ShaderStages::COMPUTE),
-            ],
+            entries: &[uniform, storage(1, false, wgpu::ShaderStages::COMPUTE)],
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("flag object and surface"),
+            label: Some("flag object, surface and instances"),
             entries: &[
-                uniform(true, object_bytes, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                mesh_renderer::object_entry(),
                 storage(1, true, wgpu::ShaderStages::VERTEX),
+                mesh_renderer::instance_entry(2),
             ],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -114,7 +111,6 @@ impl FlagGpu {
             pipeline,
             compute_layout,
             draw_layout,
-            object_bytes,
             slots: Vec::new(),
             draws: Vec::new(),
             last: Vec::new(),
@@ -122,13 +118,14 @@ impl FlagGpu {
     }
 
     /// Uploads this frame's flags in draw order; slot `i` serves `flags[i]`. Draw
-    /// groups bind `objects`, which the caller may have reallocated. Returns whether
-    /// any surface differs from the previous frame's.
+    /// groups bind `objects` and `instances`, which the caller may have reallocated.
+    /// Returns whether any surface differs from the previous frame's.
     pub(crate) fn prepare(
         &mut self,
         gpu: &Gpu,
         flags: &[[f32; 8]],
         objects: &wgpu::Buffer,
+        instances: &wgpu::Buffer,
     ) -> bool {
         while self.slots.len() < flags.len() {
             let params = gpu
@@ -170,7 +167,7 @@ impl FlagGpu {
         }
         self.draws = self.slots[..flags.len()]
             .iter()
-            .map(|slot| self.draw_group(&gpu.device, objects, &slot.vertices))
+            .map(|slot| self.draw_group(&gpu.device, objects, &slot.vertices, instances))
             .collect();
         let moved = self.last != flags;
         self.last = flags.to_vec();
@@ -182,22 +179,23 @@ impl FlagGpu {
         device: &wgpu::Device,
         objects: &wgpu::Buffer,
         vertices: &wgpu::Buffer,
+        instances: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flag object and surface"),
+            label: Some("flag object, surface and instances"),
             layout: &self.draw_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: objects,
-                        offset: 0,
-                        size: NonZeroU64::new(self.object_bytes),
-                    }),
+                    resource: mesh_renderer::object_binding(objects),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: vertices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: instances.as_entire_binding(),
                 },
             ],
         })
@@ -244,15 +242,19 @@ mod tests {
         };
         // A day of media time: phases are reduced on the CPU before reaching f32.
         let seconds = 86_400.25;
-        let objects = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: 256,
-            usage: wgpu::BufferUsages::UNIFORM,
-            mapped_at_creation: false,
-        });
-        let mut flags = FlagGpu::new(&gpu.device, 176);
-        assert!(flags.prepare(&gpu, &[params(flag, seconds)], &objects));
-        assert!(!flags.prepare(&gpu, &[params(flag, seconds)], &objects));
+        let buffer = |usage| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 256,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let objects = buffer(wgpu::BufferUsages::UNIFORM);
+        let instances = buffer(wgpu::BufferUsages::STORAGE);
+        let mut flags = FlagGpu::new(&gpu.device);
+        assert!(flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances));
+        assert!(!flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances));
         let bytes = VERTEX_BYTES * u64::from(FLAG_VERTICES);
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
