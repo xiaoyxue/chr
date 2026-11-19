@@ -25,7 +25,7 @@ not frame-rate promises.
 | `radial-poly-native-px-v1` distortion + per-frame frame warp | Extension (renderer API) | `CameraModel::{Pinhole, Distorted}`; wire/calibration storage gated by #12/#36/#59 |
 | Rectangle/disk/sphere area lights | Extension, labelled approximation | `ltc-plausible-v1`: per-emitter error <= 0.02 Le + 30%, area-only Lambert x (1 - F0) diffuse |
 | Area-light shadows | Extension, labelled approximation | `area-shadow-pcss-v1`: centre cubemap + PCSS; penumbra ignores emitter outline and glossy weighting |
-| Shadow catcher | Extension | Luminance ratio of shadowed/unshadowed light over footage; no wire field |
+| Shadow catcher | Extension | Luminance ratio of shadowed/unshadowed light over footage; the catcher is the real ground and holds out geometry below it; no wire field |
 | Ground decal (#113) | Extension | Unlit, premultiplied-alpha blend over opaque CG in instance order, before shadow catchers so CG shadows darken it; no depth write, no cast shadow; exact in linear light before the scene tone map; no wire field |
 | Waving flag (#126) | Extension | SimpleWave closed-form surface on a shared 96x60-cell grid: centre line pinned, no pole or cloth solver; a compute pass evaluates it per frame from media time (phases reduced in f64) for the main and shadow passes; `simple` (fixed key light) or `pbr` look; optional wire `flag` on instances |
 | Point/spot PCSS source radius | Preview approximation | Soft-shadow source size, not finite-emitter shading |

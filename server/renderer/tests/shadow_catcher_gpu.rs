@@ -301,3 +301,71 @@ fn spot_shadows_survive_geometry_behind_the_light() {
         );
     }
 }
+
+/// The catcher is the real ground: the part of a plate below it is not drawn and the
+/// background shows there, while the part above stays CG. Without the catcher, the
+/// part below is drawn.
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn geometry_below_the_catcher_ground_is_held_out() {
+    let gpu = gpu();
+    let mut scene = Scene::new().unwrap();
+    let ground = scene.add_mesh(quad(10.0, 0.0)).unwrap();
+    let catcher = scene
+        .add_material(PbrMaterial {
+            shadow_catcher: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let ground = scene
+        .add_instance(ground, vec![catcher], ModelMatrix::IDENTITY)
+        .unwrap();
+    // A vertical plate in the XZ plane from 1 m above the ground to 1 m below it.
+    let plate = scene
+        .add_mesh(
+            MeshData::new(
+                vec![
+                    [-0.5, 0.0, -1.0],
+                    [0.5, 0.0, -1.0],
+                    [0.5, 0.0, 1.0],
+                    [-0.5, 0.0, 1.0],
+                ],
+                vec![0, 1, 2, 0, 2, 3],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let red = scene
+        .add_material(PbrMaterial {
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            unlit: true,
+            double_sided: true,
+            ..Default::default()
+        })
+        .unwrap();
+    scene
+        .add_instance(plate, vec![red], ModelMatrix::IDENTITY)
+        .unwrap();
+    let camera = Camera::look_at(
+        ImageExtent::new(SIZE, SIZE).unwrap(),
+        [0.0, 6.0, -4.0],
+        [0.0; 3],
+        [0.0, 0.0, -1.0],
+        0.6,
+        0.1,
+        100.0,
+    )
+    .unwrap();
+    let (above, below) = (
+        pixel(&camera, [0.0, 0.0, -0.5]),
+        pixel(&camera, [0.0, 0.0, 0.5]),
+    );
+    let red_at = |pixels: &[u8], index: usize| pixels[index] > 150 && pixels[index + 1] < 60;
+    let held = composite(&gpu, &scene, &camera, ShadowMode::Off);
+    assert!(red_at(&held, above), "{:?}", &held[above..above + 4]);
+    assert_eq!(held[below..below + 3], [188; 3]);
+    scene.set_visible(ground, false).unwrap();
+    let open = composite(&gpu, &scene, &camera, ShadowMode::Off);
+    assert!(red_at(&open, below), "{:?}", &open[below..below + 4]);
+}

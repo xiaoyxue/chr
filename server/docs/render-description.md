@@ -46,7 +46,9 @@ with which lens, independent of any client's own scene model. The schema lives i
   (`chr-renderer-cli render --description <json> --frame <n>`); the live server
   ignores it.
 - `scene` replaces the whole scene. `ground.pitch_m` sizes an invisible shadow
-  catcher 1.5 times larger than the pitch. `lighting` is described under
+  catcher 1.5 times larger than the pitch. The catcher is the real ground: whatever
+  lies below it is not drawn, so the camera's picture shows there (a model rising
+  from the ground appears only above it). `lighting` is described under
   [Lighting](#lighting). `shadow_mode: null` selects PCSS.
 - Coordinates follow [coordinates](coordinates.md): pitch-centred metres, X
   along the length, Y along the width, ground Z = 0, up is negative Z. `model`
@@ -82,7 +84,8 @@ T(-pivot) * model`:
 | `path.playback` | `"once"` holds the end, `"loop"` restarts at the start, `"ping_pong"` returns over another `duration` |
 
 Rotation and path run together: a finished `once` path keeps rotating. Nothing is
-clamped or refitted, so a model may leave its region or go below the ground. Time
+clamped or refitted, so a model may leave its region or go below the ground, where
+the ground hides it. Time
 zero is the first frame a render worker draws with the loaded scene, so each
 `description.load` plays from the start; a restarted worker starts again. A still
 render (`--frame <n>`) uses `t = n / fps`. The render worker evaluates the motion on

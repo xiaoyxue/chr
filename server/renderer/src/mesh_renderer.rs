@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     num::NonZeroU64,
     ops::Range,
 };
@@ -104,16 +104,28 @@ fn ltc_table(device: &wgpu::Device) -> wgpu::Buffer {
     })
 }
 
+/// What one draw's instances share: mesh.wgsl's `Object`, a dynamic-offset uniform,
+/// so fragment stages read it in uniform control flow.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct DrawUniform {
-    model: [[f32; 4]; 4],
-    normal: [[f32; 4]; 3],
     color: [f32; 4],
     emissive_cutoff: [f32; 4],
     factors: [f32; 4],
     flags: [u32; 4],
 }
+
+/// One instance's transform: mesh.wgsl's `Instance`, read by vertex stages at
+/// `instance_index` (which counts from the draw's first instance).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceUniform {
+    model: [[f32; 4]; 4],
+    normal: [[f32; 4]; 3],
+}
+
+const OBJECT_BYTES: u64 = size_of::<DrawUniform>() as u64;
+const INSTANCE_BYTES: u64 = size_of::<InstanceUniform>() as u64;
 
 struct MeshBuffers {
     /// Keeps the keyed data alive, so its addresses cannot be reused by other data.
@@ -127,15 +139,150 @@ struct MeshBuffers {
 /// for a new revision (for example a moved instance) reuses the uploaded mesh.
 type MeshKey = [usize; 3];
 
+/// One `draw_indexed`: every instance in `instances` shares the mesh part, the
+/// material and `offset`'s uniform.
 struct Draw {
     mesh: MeshKey,
     indices: Range<u32>,
     offset: u32,
+    instances: Range<u32>,
     material: MaterialId,
+    /// Faces the shaded and shadow pipelines cull: the back of single-sided parts.
+    cull: Option<wgpu::Face>,
     shadow_catcher: bool,
     decal: bool,
     /// Flag slot and look; the surface comes from the slot, not the mesh vertices.
     flag: Option<(usize, FlagShading)>,
+}
+
+/// One instance's mesh part, before batching.
+struct Part {
+    mesh: MeshKey,
+    indices: Range<u32>,
+    material: MaterialId,
+    mirrored: bool,
+    shadow_catcher: bool,
+    decal: bool,
+    flag: Option<(usize, FlagShading)>,
+    uniform: DrawUniform,
+}
+
+impl Part {
+    /// Parts with equal keys share their uniform: it follows from the material,
+    /// handedness and kind.
+    fn key(&self) -> (MeshKey, u32, u32, MaterialId, bool, bool, bool) {
+        (
+            self.mesh,
+            self.indices.start,
+            self.indices.end,
+            self.material,
+            self.mirrored,
+            self.shadow_catcher,
+            self.decal,
+        )
+    }
+}
+
+struct Batch {
+    part: Part,
+    instances: Vec<InstanceUniform>,
+}
+
+/// Orders the parts for drawing and merges those one instanced draw can cover.
+/// Opaque parts group by key in order of first appearance (depth testing makes
+/// their order irrelevant); flags keep one draw each (each has its own surface);
+/// decals, then catchers, keep scene order, since they blend, and merge only with
+/// a neighbour: instances of one draw rasterize in order.
+fn batch(parts: Vec<(Part, InstanceUniform)>) -> Vec<Batch> {
+    let mut opaque: Vec<Batch> = Vec::new();
+    let mut groups = HashMap::<_, usize>::new();
+    let mut flags = Vec::new();
+    let mut decals: Vec<Batch> = Vec::new();
+    let mut catchers: Vec<Batch> = Vec::new();
+    for (part, instance) in parts {
+        let single = |part: Part| Batch {
+            part,
+            instances: vec![instance],
+        };
+        if part.flag.is_some() {
+            flags.push(single(part));
+            continue;
+        }
+        if !part.shadow_catcher && !part.decal {
+            match groups.entry(part.key()) {
+                Entry::Occupied(entry) => opaque[*entry.get()].instances.push(instance),
+                Entry::Vacant(entry) => {
+                    entry.insert(opaque.len());
+                    opaque.push(single(part));
+                }
+            }
+            continue;
+        }
+        let ordered = if part.shadow_catcher {
+            &mut catchers
+        } else {
+            &mut decals
+        };
+        match ordered.last_mut() {
+            Some(last) if last.part.key() == part.key() => last.instances.push(instance),
+            _ => ordered.push(single(part)),
+        }
+    }
+    opaque
+        .into_iter()
+        .chain(flags)
+        .chain(decals)
+        .chain(catchers)
+        .collect()
+}
+
+/// What a pass has bound, so consecutive draws rebind only what changes.
+#[derive(Default)]
+struct Bindings {
+    object: Option<(Option<usize>, u32)>,
+    material: Option<MaterialId>,
+    vertices: Option<MeshKey>,
+    indices: Option<MeshKey>,
+}
+
+impl Bindings {
+    /// Binds `draw`'s object uniform, material and buffers; flags read their
+    /// surface through group 1 instead of mesh vertices.
+    fn bind(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        renderer: &MeshRenderer,
+        draw: &Draw,
+        mesh: &MeshBuffers,
+        wire: bool,
+    ) {
+        let object = (draw.flag.map(|(slot, _)| slot), draw.offset);
+        if self.object != Some(object) {
+            let group = match draw.flag {
+                Some((slot, _)) => renderer.flags.group(slot),
+                None => &renderer.object_group,
+            };
+            pass.set_bind_group(1, group, &[draw.offset]);
+            self.object = Some(object);
+        }
+        if self.material != Some(draw.material) {
+            pass.set_bind_group(2, renderer.maps.group(draw.material), &[]);
+            self.material = Some(draw.material);
+        }
+        if draw.flag.is_none() && self.vertices != Some(draw.mesh) {
+            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            self.vertices = Some(draw.mesh);
+        }
+        if self.indices != Some(draw.mesh) {
+            let indices = if wire {
+                mesh.lines.as_ref().expect("wireframe prepared")
+            } else {
+                &mesh.indices
+            };
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            self.indices = Some(draw.mesh);
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -160,8 +307,39 @@ enum PipelineKind {
     Wire,
     Sky,
     ShadowCatcher,
+    /// A catcher's depth alone, which hides what lies below the ground.
+    Holdout,
     Decal,
     FlagSimple,
+}
+
+/// The holdout's depth bias (Depth32Float units of about 2^-24, and per unit of
+/// depth slope): the ground's depth moves slightly away, so geometry on it, such
+/// as a model's feet or a decal, and the catcher itself still pass the depth test.
+const HOLDOUT_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: 16,
+    slope_scale: 1.0,
+    clamp: 0.0,
+};
+
+/// One pipeline per hardware face culling. Single-sided parts cull their back,
+/// which is the rasterizer's front face when their model mirrors; double-sided
+/// parts cull nothing. The shaders discard the same fragments (`front_facing`
+/// follows the same winding); culling skips them before rasterization.
+struct Culled([wgpu::RenderPipeline; 3]);
+
+impl Culled {
+    fn new(create: impl FnMut(Option<wgpu::Face>) -> wgpu::RenderPipeline) -> Self {
+        Self([None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)].map(create))
+    }
+
+    fn get(&self, cull: Option<wgpu::Face>) -> &wgpu::RenderPipeline {
+        &self.0[match cull {
+            None => 0,
+            Some(wgpu::Face::Back) => 1,
+            Some(wgpu::Face::Front) => 2,
+        }]
+    }
 }
 
 fn scene_pipeline(
@@ -171,11 +349,41 @@ fn scene_pipeline(
     format: wgpu::TextureFormat,
     samples: u32,
     kind: PipelineKind,
+    cull: Option<wgpu::Face>,
 ) -> wgpu::RenderPipeline {
-    raster_pipeline(device, layout, shader, format, samples, kind, false)
+    raster_pipeline(
+        device,
+        layout,
+        shader,
+        format,
+        samples,
+        kind,
+        Vertices::Mesh(cull),
+    )
 }
 
-/// `flag` pipelines read the flag surface by vertex index instead of mesh vertices.
+/// Where a pipeline's vertices come from: mesh buffers, with the faces to cull, or
+/// the flag surface by vertex index (flags are double-sided).
+#[derive(Clone, Copy)]
+enum Vertices {
+    Mesh(Option<wgpu::Face>),
+    Flag,
+}
+
+/// Physically shaded HDR pipelines, which cull the faces their shaders discard.
+fn shaded_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    samples: u32,
+    kind: PipelineKind,
+) -> Culled {
+    Culled::new(|cull| {
+        let format = wgpu::TextureFormat::Rgba16Float;
+        scene_pipeline(device, layout, shader, format, samples, kind, cull)
+    })
+}
+
 fn raster_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -183,12 +391,17 @@ fn raster_pipeline(
     format: wgpu::TextureFormat,
     samples: u32,
     kind: PipelineKind,
-    flag: bool,
+    vertices: Vertices,
 ) -> wgpu::RenderPipeline {
+    let (flag, cull) = match vertices {
+        Vertices::Mesh(cull) => (false, cull),
+        Vertices::Flag => (true, None),
+    };
     let sky = matches!(kind, PipelineKind::Sky);
     let wire = matches!(kind, PipelineKind::Wire);
     let catcher = matches!(kind, PipelineKind::ShadowCatcher);
     let decal = matches!(kind, PipelineKind::Decal);
+    let holdout = matches!(kind, PipelineKind::Holdout);
     let buffers = [Some(vertex_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("shared scene raster"),
@@ -213,6 +426,8 @@ fn raster_pipeline(
                 "fs_wire"
             } else if catcher {
                 "fs_shadow_catcher"
+            } else if holdout {
+                "fs_holdout"
             } else if decal {
                 "fs_decal"
             } else if matches!(kind, PipelineKind::FlagSimple) {
@@ -226,7 +441,11 @@ fn raster_pipeline(
                 // Premultiplied colour over the destination: a catcher's black
                 // multiplies it by 1 - alpha; a decal adds alpha * colour.
                 blend: (catcher || decal).then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
+                write_mask: if holdout {
+                    wgpu::ColorWrites::empty()
+                } else {
+                    wgpu::ColorWrites::ALL
+                },
             })],
         }),
         primitive: wgpu::PrimitiveState {
@@ -235,6 +454,7 @@ fn raster_pipeline(
             } else {
                 wgpu::PrimitiveTopology::TriangleList
             },
+            cull_mode: cull,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -246,7 +466,11 @@ fn raster_pipeline(
                 wgpu::CompareFunction::Less
             }),
             stencil: Default::default(),
-            bias: Default::default(),
+            bias: if holdout {
+                HOLDOUT_BIAS
+            } else {
+                Default::default()
+            },
         }),
         multisample: wgpu::MultisampleState {
             count: samples,
@@ -269,18 +493,21 @@ pub struct MeshRenderer {
     overlays: Overlays,
     msaa: Option<(ImageExtent, wgpu::TextureFormat, wgpu::TextureView)>,
     pipeline: wgpu::RenderPipeline,
-    pbr_pipeline: wgpu::RenderPipeline,
-    catcher_pipeline: wgpu::RenderPipeline,
-    decal_pipeline: wgpu::RenderPipeline,
+    pbr_pipeline: Culled,
+    catcher_pipeline: Culled,
+    holdout_pipeline: Culled,
+    decal_pipeline: Culled,
     sky_pipeline: wgpu::RenderPipeline,
     environment: EnvironmentGpu,
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     object_layout: wgpu::BindGroupLayout,
     objects: wgpu::Buffer,
+    instances: wgpu::Buffer,
     object_group: wgpu::BindGroup,
     stride: u64,
     capacity: u64,
+    instance_capacity: u64,
     depth: Option<(ImageExtent, wgpu::TextureView)>,
     meshes: HashMap<MeshKey, MeshBuffers>,
     draws: Vec<Draw>,
@@ -296,8 +523,8 @@ pub struct MeshRenderer {
     hdr: Option<(ImageExtent, wgpu::TextureView, wgpu::BindGroup)>,
     pbr_active: bool,
     camera_layout: wgpu::BindGroupLayout,
-    shadow_pipeline: wgpu::RenderPipeline,
-    point_shadow_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: Culled,
+    point_shadow_pipeline: Culled,
     shadow_atlas: ShadowAtlas,
     shadow_cameras: Vec<(usize, bool, wgpu::BindGroup)>,
     shadow_projections: Vec<Option<ShadowProjection>>,
@@ -331,16 +558,32 @@ impl FlagPipelines {
         format: wgpu::TextureFormat,
         samples: u32,
     ) -> Self {
-        let raster =
-            |format, kind| raster_pipeline(device, layout, shader, format, samples, kind, true);
+        let raster = |format, kind| {
+            raster_pipeline(
+                device,
+                layout,
+                shader,
+                format,
+                samples,
+                kind,
+                Vertices::Flag,
+            )
+        };
         let hdr = wgpu::TextureFormat::Rgba16Float;
         Self {
             mesh: raster(format, PipelineKind::Mesh),
             pbr: raster(hdr, PipelineKind::Mesh),
             simple: raster(hdr, PipelineKind::FlagSimple),
             wire: raster(format, PipelineKind::Wire),
-            shadow: depth_pipeline(device, shadow_layout, shader, true, "fs_shadow"),
-            point_shadow: depth_pipeline(device, shadow_layout, shader, true, "fs_shadow_point"),
+            shadow: depth_pipeline(device, shadow_layout, shader, true, "fs_shadow", None),
+            point_shadow: depth_pipeline(
+                device,
+                shadow_layout,
+                shader,
+                true,
+                "fs_shadow_point",
+                None,
+            ),
         }
     }
 }
@@ -349,7 +592,7 @@ impl MeshRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let light_size = std::mem::size_of::<LightUniform>() as u64;
         let camera_layout = uniform_layout(device, false, CAMERA_UNIFORM_SIZE);
-        let object_layout = uniform_layout(device, true, 176);
+        let object_layout = object_layout(device);
         let camera = uniform_buffer(device, CAMERA_UNIFORM_SIZE);
         let camera_group = uniform_group(device, &camera_layout, &camera, CAMERA_UNIFORM_SIZE);
         let maps = MaterialMapCache::new(device);
@@ -439,11 +682,12 @@ impl MeshRenderer {
         let tone_shader = device.create_shader_module(wgpu::include_wgsl!("tone_map.wgsl"));
         let tone_pipeline =
             fullscreen_pipeline(device, &tone_pipeline_layout, &tone_shader, format);
-        let stride = 176_u64.div_ceil(u64::from(
+        let stride = OBJECT_BYTES.div_ceil(u64::from(
             device.limits().min_uniform_buffer_offset_alignment,
         )) * u64::from(device.limits().min_uniform_buffer_offset_alignment);
         let objects = uniform_buffer(device, stride);
-        let object_group = uniform_group(device, &object_layout, &objects, 176);
+        let instances = instance_buffer(device, INSTANCE_BYTES);
+        let object_group = object_group(device, &object_layout, &objects, &instances);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh layout"),
             bind_group_layouts: &[
@@ -470,6 +714,7 @@ impl MeshRenderer {
             wgpu::TextureFormat::Rgba16Float,
             1,
             PipelineKind::Sky,
+            None,
         );
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow layout"),
@@ -480,31 +725,44 @@ impl MeshRenderer {
             ],
             immediate_size: 0,
         });
-        let shadow_pipeline = depth_pipeline(device, &shadow_layout, &shader, false, "fs_shadow");
-        let point_shadow_pipeline =
-            depth_pipeline(device, &shadow_layout, &shader, false, "fs_shadow_point");
-        let create_pipeline =
-            |format| scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Mesh);
-        let pipeline = create_pipeline(format);
-        let pbr_pipeline = create_pipeline(wgpu::TextureFormat::Rgba16Float);
-        let catcher_pipeline = scene_pipeline(
+        let shadow_pipeline = Culled::new(|cull| {
+            depth_pipeline(device, &shadow_layout, &shader, false, "fs_shadow", cull)
+        });
+        let point_shadow_pipeline = Culled::new(|cull| {
+            depth_pipeline(
+                device,
+                &shadow_layout,
+                &shader,
+                false,
+                "fs_shadow_point",
+                cull,
+            )
+        });
+        // Diagnostic and unlit views show back faces: only shaded pipelines cull.
+        let pipeline = scene_pipeline(
             device,
             &layout,
             &shader,
-            wgpu::TextureFormat::Rgba16Float,
+            format,
             1,
-            PipelineKind::ShadowCatcher,
+            PipelineKind::Mesh,
+            None,
         );
-        let decal_pipeline = scene_pipeline(
+        let pbr_pipeline = shaded_pipeline(device, &layout, &shader, 1, PipelineKind::Mesh);
+        let catcher_pipeline =
+            shaded_pipeline(device, &layout, &shader, 1, PipelineKind::ShadowCatcher);
+        let holdout_pipeline = shaded_pipeline(device, &layout, &shader, 1, PipelineKind::Holdout);
+        let decal_pipeline = shaded_pipeline(device, &layout, &shader, 1, PipelineKind::Decal);
+        let wire_pipeline = scene_pipeline(
             device,
             &layout,
             &shader,
-            wgpu::TextureFormat::Rgba16Float,
+            format,
             1,
-            PipelineKind::Decal,
+            PipelineKind::Wire,
+            None,
         );
-        let wire_pipeline = scene_pipeline(device, &layout, &shader, format, 1, PipelineKind::Wire);
-        let flags = FlagGpu::new(device, size_of::<DrawUniform>() as u64);
+        let flags = FlagGpu::new(device);
         let flag_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("flag shading"),
             source: environment::shader_source(&format!(
@@ -555,14 +813,17 @@ impl MeshRenderer {
             camera_group,
             object_layout,
             objects,
+            instances,
             object_group,
             stride,
             capacity: stride,
+            instance_capacity: INSTANCE_BYTES,
             depth: None,
             meshes: HashMap::new(),
             draws: Vec::new(),
             pbr_pipeline,
             catcher_pipeline,
+            holdout_pipeline,
             decal_pipeline,
             sky_pipeline,
             environment,
@@ -610,31 +871,41 @@ impl MeshRenderer {
     ) -> Result<(), BoxError> {
         settings.validate(gpu, self.format)?;
         if self.settings.sample_count != settings.sample_count {
-            let create = |format, kind| {
+            let samples = settings.sample_count;
+            let create = |kind| {
                 scene_pipeline(
                     &gpu.device,
                     &self.pipeline_layout,
                     &self.shader,
-                    format,
-                    settings.sample_count,
+                    self.format,
+                    samples,
+                    kind,
+                    None,
+                )
+            };
+            let shaded = |kind| {
+                shaded_pipeline(
+                    &gpu.device,
+                    &self.pipeline_layout,
+                    &self.shader,
+                    samples,
                     kind,
                 )
             };
-            self.pipeline = create(self.format, PipelineKind::Mesh);
-            self.pbr_pipeline = create(wgpu::TextureFormat::Rgba16Float, PipelineKind::Mesh);
-            self.catcher_pipeline = create(
-                wgpu::TextureFormat::Rgba16Float,
-                PipelineKind::ShadowCatcher,
-            );
-            self.decal_pipeline = create(wgpu::TextureFormat::Rgba16Float, PipelineKind::Decal);
-            self.wire_pipeline = create(self.format, PipelineKind::Wire);
+            self.pipeline = create(PipelineKind::Mesh);
+            self.pbr_pipeline = shaded(PipelineKind::Mesh);
+            self.catcher_pipeline = shaded(PipelineKind::ShadowCatcher);
+            self.holdout_pipeline = shaded(PipelineKind::Holdout);
+            self.decal_pipeline = shaded(PipelineKind::Decal);
+            self.wire_pipeline = create(PipelineKind::Wire);
             self.sky_pipeline = scene_pipeline(
                 &gpu.device,
                 &self.sky_layout,
                 &self.shader,
                 wgpu::TextureFormat::Rgba16Float,
-                settings.sample_count,
+                samples,
                 PipelineKind::Sky,
+                None,
             );
             self.flag_pipelines = FlagPipelines::new(
                 &gpu.device,
@@ -721,8 +992,7 @@ impl MeshRenderer {
         {
             return Err("mesh target exceeds texture limits".into());
         }
-        let mut uniforms = Vec::new();
-        let mut draws = Vec::new();
+        let mut parts = Vec::new();
         let mut used = HashSet::new();
         let mut used_materials = HashSet::new();
         let unlit_maps = MaterialMaps::default();
@@ -749,6 +1019,7 @@ impl MeshRenderer {
             {
                 return Err("model exceeds GPU float range".into());
             }
+            let mirrored = instance.model().is_mirrored();
             for (part, material) in mesh.parts().iter().zip(instance.materials()) {
                 let factors = scene.material(*material)?;
                 let maps = scene.material_maps(*material)?;
@@ -762,39 +1033,37 @@ impl MeshRenderer {
                     },
                 )?;
                 used_materials.insert(*material);
-                let offset = u32::try_from(self.stride * uniforms.len() as u64)?;
-                draws.push(Draw {
+                let part = Part {
                     mesh: id,
                     indices: part.clone(),
-                    offset,
                     material: *material,
+                    mirrored,
                     shadow_catcher: factors.shadow_catcher && flag.is_none(),
                     decal: factors.decal && flag.is_none(),
                     flag,
-                });
-                uniforms.push(DrawUniform {
-                    model,
-                    normal,
-                    color: factors.base_color,
-                    emissive_cutoff: [
-                        factors.emissive[0],
-                        factors.emissive[1],
-                        factors.emissive[2],
-                        factors.alpha_cutoff.unwrap_or(-1.0),
-                    ],
-                    factors: [
-                        factors.metallic,
-                        factors.roughness,
-                        factors.normal_scale,
-                        factors.occlusion_strength,
-                    ],
-                    flags: [
-                        u32::from(maps.normal.is_some()),
-                        u32::from(factors.unlit),
-                        u32::from(factors.double_sided || flag.is_some()),
-                        u32::from(instance.model().is_mirrored()),
-                    ],
-                });
+                    uniform: DrawUniform {
+                        color: factors.base_color,
+                        emissive_cutoff: [
+                            factors.emissive[0],
+                            factors.emissive[1],
+                            factors.emissive[2],
+                            factors.alpha_cutoff.unwrap_or(-1.0),
+                        ],
+                        factors: [
+                            factors.metallic,
+                            factors.roughness,
+                            factors.normal_scale,
+                            factors.occlusion_strength,
+                        ],
+                        flags: [
+                            u32::from(maps.normal.is_some()),
+                            u32::from(factors.unlit),
+                            u32::from(factors.double_sided || flag.is_some()),
+                            u32::from(mirrored),
+                        ],
+                    },
+                };
+                parts.push((part, InstanceUniform { model, normal }));
             }
             let indices = bytemuck::cast_slice(mesh.indices());
             if indices.len() as u64 > limits.max_buffer_size {
@@ -857,17 +1126,65 @@ impl MeshRenderer {
             }
             used.insert(id);
         }
-        let bytes = self.stride * uniforms.len().max(1) as u64;
-        if bytes > limits.max_buffer_size {
+        let batches = batch(parts);
+        let mut objects = vec![0_u8; (self.stride as usize) * batches.len().max(1)];
+        let mut instances = Vec::with_capacity(batches.iter().map(|b| b.instances.len()).sum());
+        let mut draws = Vec::with_capacity(batches.len());
+        for (
+            index,
+            Batch {
+                part,
+                instances: batch,
+            },
+        ) in batches.into_iter().enumerate()
+        {
+            let offset = index * self.stride as usize;
+            objects[offset..offset + OBJECT_BYTES as usize]
+                .copy_from_slice(bytemuck::bytes_of(&part.uniform));
+            let first = u32::try_from(instances.len())?;
+            instances.extend(batch);
+            draws.push(Draw {
+                mesh: part.mesh,
+                indices: part.indices,
+                offset: u32::try_from(offset)?,
+                instances: first..u32::try_from(instances.len())?,
+                material: part.material,
+                cull: (part.uniform.flags[2] == 0).then_some(if part.mirrored {
+                    wgpu::Face::Front
+                } else {
+                    wgpu::Face::Back
+                }),
+                shadow_catcher: part.shadow_catcher,
+                decal: part.decal,
+                flag: part.flag,
+            });
+        }
+        let bytes = objects.len() as u64;
+        let instance_bytes = INSTANCE_BYTES * instances.len().max(1) as u64;
+        if bytes > limits.max_buffer_size || instance_bytes > limits.max_storage_buffer_binding_size
+        {
             return Err("mesh draw uniforms exceed device buffer limit".into());
         }
-        if bytes > self.capacity {
-            self.objects = uniform_buffer(&gpu.device, bytes);
-            self.object_group = uniform_group(&gpu.device, &self.object_layout, &self.objects, 176);
-            self.capacity = bytes;
+        if bytes > self.capacity || instance_bytes > self.instance_capacity {
+            if bytes > self.capacity {
+                self.objects = uniform_buffer(&gpu.device, bytes);
+                self.capacity = bytes;
+            }
+            if instance_bytes > self.instance_capacity {
+                self.instances = instance_buffer(&gpu.device, instance_bytes);
+                self.instance_capacity = instance_bytes;
+            }
+            self.object_group = object_group(
+                &gpu.device,
+                &self.object_layout,
+                &self.objects,
+                &self.instances,
+            );
         }
         // Cached shadow maps stay valid for the scene, but not once a flag moves.
-        self.shadow_dirty |= self.flags.prepare(gpu, &flags, &self.objects);
+        self.shadow_dirty |= self
+            .flags
+            .prepare(gpu, &flags, &self.objects, &self.instances);
         if self.depth.as_ref().is_none_or(|(size, _)| *size != extent) {
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("mesh depth"),
@@ -1092,12 +1409,10 @@ impl MeshRenderer {
                 ]),
             );
         }
-        for (index, uniform) in uniforms.iter().enumerate() {
-            gpu.queue.write_buffer(
-                &self.objects,
-                index as u64 * self.stride,
-                bytemuck::bytes_of(uniform),
-            );
+        gpu.queue.write_buffer(&self.objects, 0, &objects);
+        if !instances.is_empty() {
+            gpu.queue
+                .write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
         }
         self.meshes.retain(|id, _| used.contains(id));
         self.maps.retain(&used_materials);
@@ -1154,11 +1469,12 @@ impl MeshRenderer {
                 });
                 pass.set_bind_group(0, camera_group, &[]);
                 let mut bound = None;
+                let mut bindings = Bindings::default();
                 // Decals lie on the ground they decorate and cast no shadow.
                 for draw in self.draws.iter().filter(|draw| !draw.decal) {
                     let pipeline = match (draw.flag, *point) {
-                        (None, false) => &self.shadow_pipeline,
-                        (None, true) => &self.point_shadow_pipeline,
+                        (None, false) => self.shadow_pipeline.get(draw.cull),
+                        (None, true) => self.point_shadow_pipeline.get(draw.cull),
                         (Some(_), false) => &self.flag_pipelines.shadow,
                         (Some(_), true) => &self.flag_pipelines.point_shadow,
                     };
@@ -1167,9 +1483,8 @@ impl MeshRenderer {
                         bound = Some(pipeline);
                     }
                     let mesh = &self.meshes[&draw.mesh];
-                    self.bind_draw(&mut pass, draw, mesh);
-                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(draw.indices.clone(), 0, 0..1);
+                    bindings.bind(&mut pass, self, draw, mesh, false);
+                    pass.draw_indexed(draw.indices.clone(), 0, draw.instances.clone());
                 }
             }
             self.shadow_dirty = false;
@@ -1214,12 +1529,12 @@ impl MeshRenderer {
         }
         let wire = self.settings.view == DiagnosticView::Wireframe;
         let flags = &self.flag_pipelines;
-        let (mesh_pipeline, flag_pipeline) = if wire {
-            (&self.wire_pipeline, &flags.wire)
+        let flag_pipeline = if wire {
+            &flags.wire
         } else if physical {
-            (&self.pbr_pipeline, &flags.pbr)
+            &flags.pbr
         } else {
-            (&self.pipeline, &flags.mesh)
+            &flags.mesh
         };
         pass.set_bind_group(0, &self.camera_group, &[]);
         pass.set_bind_group(3, &self.light_group, &[]);
@@ -1233,29 +1548,39 @@ impl MeshRenderer {
             .draws
             .iter()
             .filter(|draw| physical && draw.shadow_catcher);
+        let mut bindings = Bindings::default();
+        if physical {
+            // Catchers stand for the real ground: their depth comes first, so what
+            // lies below it is not drawn and the camera's picture shows there.
+            for draw in self.draws.iter().filter(|draw| draw.shadow_catcher) {
+                pass.set_pipeline(self.holdout_pipeline.get(draw.cull));
+                bindings.bind(&mut pass, self, draw, &self.meshes[&draw.mesh], false);
+                pass.draw_indexed(draw.indices.clone(), 0, draw.instances.clone());
+            }
+        }
         let mut bound = None;
         for draw in opaque.chain(decals).chain(catchers) {
             let pipeline = match draw.flag {
                 Some((_, FlagShading::Simple)) if physical => &flags.simple,
                 Some(_) => flag_pipeline,
-                None if physical && draw.shadow_catcher => &self.catcher_pipeline,
-                None if physical && draw.decal => &self.decal_pipeline,
-                None => mesh_pipeline,
+                None if wire => &self.wire_pipeline,
+                None if physical && draw.shadow_catcher => self.catcher_pipeline.get(draw.cull),
+                None if physical && draw.decal => self.decal_pipeline.get(draw.cull),
+                None if physical => self.pbr_pipeline.get(draw.cull),
+                None => &self.pipeline,
             };
             if !bound.is_some_and(|bound| std::ptr::eq(bound, pipeline)) {
                 pass.set_pipeline(pipeline);
                 bound = Some(pipeline);
             }
             let mesh = &self.meshes[&draw.mesh];
-            self.bind_draw(&mut pass, draw, mesh);
-            if wire {
-                let lines = mesh.lines.as_ref().expect("wireframe prepared");
-                pass.set_index_buffer(lines.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(draw.indices.start * 2..draw.indices.end * 2, 0, 0..1);
+            bindings.bind(&mut pass, self, draw, mesh, wire);
+            let indices = if wire {
+                draw.indices.start * 2..draw.indices.end * 2
             } else {
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(draw.indices.clone(), 0, 0..1);
-            }
+                draw.indices.clone()
+            };
+            pass.draw_indexed(indices, 0, draw.instances.clone());
         }
         drop(pass);
         if let Some((_, _, group)) = hdr.filter(|_| output_transform) {
@@ -1281,17 +1606,10 @@ impl MeshRenderer {
         }
     }
 
-    /// Object, material and vertex bindings of `draw`; flags read their surface
-    /// through group 1 instead of the mesh vertices.
-    fn bind_draw(&self, pass: &mut wgpu::RenderPass<'_>, draw: &Draw, mesh: &MeshBuffers) {
-        match draw.flag {
-            Some((slot, _)) => pass.set_bind_group(1, self.flags.group(slot), &[draw.offset]),
-            None => {
-                pass.set_bind_group(1, &self.object_group, &[draw.offset]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            }
-        }
-        pass.set_bind_group(2, self.maps.group(draw.material), &[]);
+    /// Number of draws in each scene pass of the last prepared frame: instances
+    /// that share a mesh part, material and handedness are drawn together.
+    pub fn draws_per_pass(&self) -> usize {
+        self.draws.len()
     }
 
     fn pack_light(light: Light) -> Result<LightUniform, BoxError> {
@@ -1551,6 +1869,7 @@ fn depth_pipeline(
     shader: &wgpu::ShaderModule,
     flag: bool,
     fragment: &str,
+    cull: Option<wgpu::Face>,
 ) -> wgpu::RenderPipeline {
     let buffers = [Some(vertex_layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1568,7 +1887,10 @@ fn depth_pipeline(
             compilation_options: Default::default(),
             targets: &[],
         }),
-        primitive: Default::default(),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: cull,
+            ..Default::default()
+        },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: Some(true),
@@ -1628,6 +1950,81 @@ fn light_group(
         label: Some("lights, visibility and environment"),
         layout,
         entries: &entries,
+    })
+}
+
+/// Group 1 of mesh draws: the draw's `Object` (dynamic offset) and every
+/// instance's transform at binding 2, after flags' surface at binding 1.
+fn object_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mesh objects and instances"),
+        entries: &[object_entry(), instance_entry(2)],
+    })
+}
+
+pub(crate) fn object_entry() -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: true,
+            min_binding_size: NonZeroU64::new(OBJECT_BYTES),
+        },
+        count: None,
+    }
+}
+
+pub(crate) fn instance_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: NonZeroU64::new(INSTANCE_BYTES),
+        },
+        count: None,
+    }
+}
+
+/// The dynamic-offset view of `objects` (one `Object`) for group 1's binding 0.
+pub(crate) fn object_binding(objects: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer: objects,
+        offset: 0,
+        size: NonZeroU64::new(OBJECT_BYTES),
+    })
+}
+
+fn object_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    objects: &wgpu::Buffer,
+    instances: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh objects and instances"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: object_binding(objects),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: instances.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+fn instance_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mesh instances"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     })
 }
 

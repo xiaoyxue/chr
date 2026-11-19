@@ -2,10 +2,12 @@ struct Camera {
     clip_from_world: mat4x4<f32>, eye: vec4<f32>, options: vec4<u32>,
     optical_depth: vec4<f32>
 };
+// What a draw's instances share; uniform, so fragment stages branch on it uniformly.
 struct Object {
-    model: mat4x4<f32>, normal: mat3x3<f32>, color: vec4<f32>,
-    emissive_cutoff: vec4<f32>, factors: vec4<f32>, flags: vec4<u32>
+    color: vec4<f32>, emissive_cutoff: vec4<f32>, factors: vec4<f32>, flags: vec4<u32>
 };
+// One instance's transform, at `instance_index` (counted from the draw's first instance).
+struct Instance { model: mat4x4<f32>, normal: mat3x3<f32> };
 struct Light {
     position_kind: vec4<f32>, direction_inner: vec4<f32>, emission_outer: vec4<f32>,
     shadow_matrix: array<mat4x4<f32>,4>, shadow_params: vec4<f32>,
@@ -14,6 +16,7 @@ struct Light {
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<uniform> object: Object;
+@group(1) @binding(2) var<storage,read> instances: array<Instance>;
 @group(2) @binding(0) var base_map: texture_2d<f32>;
 @group(2) @binding(1) var base_sampler: sampler;
 @group(2) @binding(2) var mr_map: texture_2d<f32>;
@@ -110,14 +113,15 @@ struct Surface {
 };
 
 @vertex
-fn vs_main(vertex: Vertex) -> Surface {
+fn vs_main(vertex: Vertex, @builtin(instance_index) index: u32) -> Surface {
     var out: Surface;
-    let world = object.model * vec4(vertex.position,1.0);
+    let model = instances[index].model;
+    let world = model * vec4(vertex.position,1.0);
     out.clip = camera.clip_from_world * world;
     out.position = world.xyz;
-    out.normal = object.normal * vertex.normal;
+    out.normal = instances[index].normal * vertex.normal;
     out.uv = vertex.uv;
-    out.tangent = vec4((object.model * vec4(vertex.tangent.xyz,0.0)).xyz,
+    out.tangent = vec4((model * vec4(vertex.tangent.xyz,0.0)).xyz,
         vertex.tangent.w * select(1.0,-1.0,object.flags.w!=0u));
     out.color = vertex.color;
     return out;
@@ -131,9 +135,9 @@ struct ShadowSurface {
 };
 
 @vertex
-fn vs_shadow(vertex:Vertex)->ShadowSurface {
+fn vs_shadow(vertex:Vertex,@builtin(instance_index) index:u32)->ShadowSurface {
     var out:ShadowSurface;
-    let world=object.model*vec4(vertex.position,1.0);
+    let world=instances[index].model*vec4(vertex.position,1.0);
     out.clip=camera.clip_from_world*world;
     out.uv=vertex.uv;
     out.alpha=vertex.color.a;
@@ -683,6 +687,12 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
         }
     }
     return vec4(clamp(radiance,vec3(0.0),vec3(65504.0)),1.0);
+}
+
+// Ground holdout: a catcher's depth only, drawn before opaque geometry.
+@fragment
+fn fs_holdout() -> @location(0) vec4<f32> {
+    return vec4(0.0);
 }
 
 // Shadow catcher: premultiplied black whose alpha is the luminance fraction of light

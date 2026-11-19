@@ -43,7 +43,15 @@ This does not add lens distortion or change the live input protocol.
 
 `MeshRenderer` supplies the shared indexed, opaque unlit/depth baseline.
 Meshes stay GPU-resident while referenced by the prepared view; instance/part
-uniforms and depth targets are reused. The M1 example renders a synthetic pitch
+uniforms and depth targets are reused. Parts that share a mesh part, material and
+handedness are one instanced draw in every pass (#192): their transforms sit in a
+storage buffer read at `instance_index`, the shared material values in one
+dynamic-offset uniform per draw, and a pass rebinds only what changes between
+draws. Shaded and shadow pipelines cull the back faces of single-sided parts in
+hardware (the front face of a mirrored model's); diagnostic, unlit and wireframe
+views keep showing them. A scene's shadow catchers are its real ground: in shaded
+frames their depth, slightly biased away, is drawn before opaque geometry, so what
+lies below the ground is not drawn and the footage shows there. The M1 example renders a synthetic pitch
 and grounded, face-coloured boxes to `output/renderer/milestone-m1.png`.
 Run `cargo run --locked -p chr-app --example mesh_milestone` from the repository
 root in its development environment. This image demonstrates camera projection,

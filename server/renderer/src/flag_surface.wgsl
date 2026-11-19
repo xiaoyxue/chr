@@ -1,5 +1,5 @@
 // Flag draws, appended to mesh.wgsl. Group 1 adds the compute pass's flag-local
-// surface (flag.wgsl) to the object uniform; the fragment stages are mesh.wgsl's,
+// surface (flag.wgsl) to the object uniform and instances; the fragment stages are mesh.wgsl's,
 // except the simple look below.
 
 struct FlagVertex { position: vec4<f32>, normal: vec4<f32>, tangent: vec4<f32> };
@@ -11,24 +11,25 @@ fn flag_uv(index:u32)->vec2<f32> {
 }
 
 @vertex
-fn vs_flag(@builtin(vertex_index) index:u32)->Surface {
+fn vs_flag(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u32)->Surface {
     let flag=flag_vertices[index];
     var out:Surface;
-    let world=object.model*vec4(flag.position.xyz,1.0);
+    let model=instances[instance].model;
+    let world=model*vec4(flag.position.xyz,1.0);
     out.clip=camera.clip_from_world*world;
     out.position=world.xyz;
-    out.normal=object.normal*flag.normal.xyz;
+    out.normal=instances[instance].normal*flag.normal.xyz;
     out.uv=flag_uv(index);
-    out.tangent=vec4((object.model*vec4(flag.tangent.xyz,0.0)).xyz,
+    out.tangent=vec4((model*vec4(flag.tangent.xyz,0.0)).xyz,
         flag.tangent.w*select(1.0,-1.0,object.flags.w!=0u));
     out.color=vec4(1.0);
     return out;
 }
 
 @vertex
-fn vs_flag_shadow(@builtin(vertex_index) index:u32)->ShadowSurface {
+fn vs_flag_shadow(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u32)->ShadowSurface {
     var out:ShadowSurface;
-    let world=object.model*vec4(flag_vertices[index].position.xyz,1.0);
+    let world=instances[instance].model*vec4(flag_vertices[index].position.xyz,1.0);
     out.clip=camera.clip_from_world*world;
     out.uv=flag_uv(index);
     out.alpha=1.0;
