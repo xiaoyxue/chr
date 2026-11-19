@@ -112,16 +112,20 @@ Options:
   --tracking-lens-support <min_x> <min_y> <max_x> <max_y> Its validated ideal-pixel
                           rectangle [default: none]
   --output-rate <follow|fixed:<rate>> The program output's rate (tracked program): the
-                          input's rate and scan, changing with them, or a fixed rate such
-                          as fixed:50 (progressive) or fixed:50i (1080i50: 25 interlaced
-                          frames), repeating or dropping input frames [default: follow]
+                          input's rate and scan, changing with them (a DeckLink output
+                          opens in the input's format at start and keeps it), or a fixed
+                          rate such as fixed:50 (progressive) or fixed:50i (1080i50: 25
+                          interlaced frames), repeating or dropping input frames
+                          [default: follow]
   --input-loss <hold|black|slate[:<png>]> What the output shows while the input delivers
                           no frames (tracked program): the last frame, black, colour bars
                           or a PNG scaled to the output [default: hold]
   --output <sim|decklink> The program output (tracked program): a simulated sink on the
-                          system clock, or a DeckLink card in the mode of the fixed output
-                          rate (needs --output-rate fixed:<rate>), whose clock (genlocked
-                          to its reference input) times the pipeline; HD and UHD modes
+                          system clock, or a DeckLink card, whose clock (genlocked to its
+                          reference input) times the pipeline; HD and UHD modes. The card
+                          opens in the input's format: chr-server waits for chr-sdi-in's
+                          first frame (the input must have the --size extent), unless
+                          --output-rate fixed:<rate> sets another
                           [default: sim]
   --device <n>            The DeckLink output device (--output decklink) [default: 0]
   --audio-channels <n>    Audio channels of the DeckLink output: 2, 8 or 16 [default: 2]
@@ -752,6 +756,31 @@ fn run_generated(args: Args) -> Result<()> {
     stopped.map_err(Into::into)
 }
 
+/// The fixed output rate a DeckLink output opens in to go out in the input's
+/// format `input`; the program renders at `width`x`height`, which the input
+/// must have.
+fn card_follows(
+    input: sdi::Format,
+    width: u32,
+    height: u32,
+) -> Result<chr_runtime::gst_core::OutputRate> {
+    if (input.mode.width, input.mode.height) != (width, height) {
+        return Err(format!(
+            "the input is {} but --size is {width}x{height}: a DeckLink output goes out in \
+             the input's format, so give --size {}x{} (or --output-rate fixed:<rate> to \
+             convert)",
+            input.name(),
+            input.mode.width,
+            input.mode.height
+        )
+        .into());
+    }
+    Ok(chr_runtime::gst_core::OutputRate::Fixed(
+        input.mode.fps,
+        input.scan,
+    ))
+}
+
 /// A tracked program on chr-server's GStreamer core (#154): one GStreamer
 /// pipeline ([`chr_runtime::gst_core`]) from chr-sdi-in's frames to the output
 /// and the program tap, timed by the pipeline clock.
@@ -761,6 +790,20 @@ fn run_core(args: Args) -> Result<()> {
         driver::{Driver, Program},
     };
     ImageExtent::new(args.width, args.height)?;
+    let mut output_rate = args.output_rate.unwrap_or(OutputRate::Follow);
+    if args.decklink.is_some() && output_rate == OutputRate::Follow {
+        // The card cannot change its mode while it plays: open it in the input's.
+        // The program's nominal rate (--fps, the description's) stays: frames
+        // carry their own rate, as with a following simulated output.
+        chr_runtime::gst_core::init()?;
+        let input = chr_runtime::gst_core::capture::probe(
+            args.capture_socket
+                .as_deref()
+                .expect("defaulted when parsing"),
+        )?;
+        output_rate = card_follows(input, args.width, args.height)?;
+        log::info!("DeckLink output in the input's format: {}", input.name());
+    }
     let mode = VideoMode {
         width: args.width,
         height: args.height,
@@ -777,7 +820,6 @@ fn run_core(args: Args) -> Result<()> {
     let delay = args
         .program_delay_ms
         .map_or(mode.frame_duration() * 3, Duration::from_millis);
-    let output_rate = args.output_rate.unwrap_or(OutputRate::Follow);
     let (output, scan) = match output_rate {
         OutputRate::Follow => (mode, chr_runtime::sdi::Scan::Progressive),
         OutputRate::Fixed(fps, scan) => (VideoMode { fps, ..mode }, scan),
@@ -1471,6 +1513,31 @@ mod tests {
         assert!(
             !external.tracking_worker,
             "cameras from tracking.frame on the core"
+        );
+    }
+
+    #[test]
+    fn a_card_opens_in_the_inputs_rate_and_scan_at_the_program_size() {
+        use chr_runtime::{
+            gst_core::OutputRate,
+            sdi::{FieldOrder, Format, Scan},
+        };
+        let i50 = Format {
+            mode: VideoMode {
+                width: 1920,
+                height: 1080,
+                fps: Rate::fps(25),
+            },
+            scan: Scan::Interlaced(FieldOrder::TopFirst),
+        };
+        assert_eq!(
+            card_follows(i50, 1920, 1080).unwrap(),
+            OutputRate::Fixed(Rate::fps(25), i50.scan)
+        );
+        let error = card_follows(i50, 1280, 720).unwrap_err().to_string();
+        assert!(
+            error.contains("1920x1080i50") && error.contains("--size 1920x1080"),
+            "{error}"
         );
     }
 }

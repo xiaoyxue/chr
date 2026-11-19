@@ -34,10 +34,12 @@
 
 use std::{
     collections::VecDeque,
+    path::Path,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use gstreamer::{self as gst, prelude::*};
@@ -240,6 +242,61 @@ pub struct Capture {
     bin: gst::Bin,
     parent: gst::Pipeline,
     failed: Arc<AtomicBool>,
+}
+
+/// How long one [`probe`] connection waits for the capture's caps.
+const PROBE_WAIT: Duration = Duration::from_secs(2);
+
+/// The format the capture process at `socket` sends now: connects, takes its
+/// caps and disconnects. Waits, connecting again every half a second, until
+/// a capture process listens there and sends a frame. A DeckLink output
+/// opens in this format: the card cannot change its mode once it plays.
+pub fn probe(socket: &Path) -> Result<Format, Error> {
+    let path = socket
+        .to_str()
+        .ok_or("the capture socket path is not UTF-8")?;
+    let mut waiting = false;
+    loop {
+        match probe_once(path) {
+            Ok(Some(format)) => return Ok(format),
+            Ok(None) | Err(_) if !waiting => {
+                log::info!("waiting for the input's format on {path}");
+                waiting = true;
+            }
+            _ => {}
+        }
+        std::thread::sleep(super::CAPTURE_RETRY);
+    }
+}
+
+/// One [`probe`] connection: `None` if no caps came within [`PROBE_WAIT`].
+fn probe_once(path: &str) -> Result<Option<Format>, Error> {
+    let pipeline = gst::Pipeline::with_name("chr-capture-probe");
+    let source = gst::ElementFactory::make("unixfdsrc")
+        .property("socket-path", path)
+        .build()?;
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()?;
+    pipeline.add_many([&source, &sink])?;
+    source.link(&sink)?;
+    let pad = sink
+        .static_pad("sink")
+        .ok_or("fakesink without a sink pad")?;
+    let played = pipeline.set_state(gst::State::Playing);
+    let until = Instant::now() + PROBE_WAIT;
+    let caps = loop {
+        if played.is_err() || Instant::now() >= until {
+            break None;
+        }
+        if let Some(caps) = pad.current_caps() {
+            break Some(caps);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let _ = pipeline.set_state(gst::State::Null);
+    caps.map(|caps| format_of(&caps)).transpose()
 }
 
 impl Capture {

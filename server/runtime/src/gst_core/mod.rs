@@ -201,7 +201,8 @@ pub enum OutputSink {
     Simulated,
     /// A DeckLink card's output, whose clock becomes the pipeline's. It
     /// needs a fixed output rate: a card does not change its mode while it
-    /// plays.
+    /// plays. chr-server opens it in the input's format ([`capture::probe`])
+    /// unless told another.
     DeckLink { device: u32 },
 }
 
@@ -274,12 +275,10 @@ impl Core {
         if matches!(config.sink, OutputSink::DeckLink { .. })
             && config.output_rate == OutputRate::Follow
         {
-            return Err(
-                "--output decklink needs --output-rate fixed:<rate> (fixed:50i, \
-                        fixed:59.94): decklinkvideosink does not change its mode while it \
-                        plays, so the card's format cannot follow the input"
-                    .into(),
-            );
+            return Err("a DeckLink output opens in one format: probe the input's \
+                        (capture::probe) and give it as OutputRate::Fixed; \
+                        decklinkvideosink does not change its mode while it plays"
+                .into());
         }
         let card = matches!(config.sink, OutputSink::DeckLink { .. });
         let lead = if card { CARD_LEAD } else { Duration::ZERO };
@@ -432,6 +431,7 @@ impl Core {
         let streams = Arc::new(capture::Streams::new(on_format(
             selector.clone(),
             config.recorder.clone(),
+            card.then_some(output_format),
         )));
         let (frames, captured) = tokio::sync::mpsc::channel(CAPTURED_QUEUE);
         log::info!(
@@ -653,8 +653,13 @@ impl Drop for Core {
 
 /// What the core does when the capture's format changes: a transition in the
 /// selector, counted in the status. The status's mode changes where the
-/// output's does, in the selector.
-fn on_format(selector: select::Selector, recorder: crate::sdi::SdiRecorder) -> capture::OnFormat {
+/// output's does, in the selector. A card keeps the mode it was opened in
+/// (`card`): an input in another format is converted, which is worth a warning.
+fn on_format(
+    selector: select::Selector,
+    recorder: crate::sdi::SdiRecorder,
+    card: Option<Format>,
+) -> capture::OnFormat {
     Box::new(move |first, format: Format, changed| {
         if changed {
             log::info!("capture format now {} from frame {first}", format.name());
@@ -662,6 +667,16 @@ fn on_format(selector: select::Selector, recorder: crate::sdi::SdiRecorder) -> c
             recorder.format_changed();
         } else {
             log::info!("capture format {} from frame {first}", format.name());
+        }
+        if let Some(card) = card
+            && card != format
+        {
+            log::warn!(
+                "the input is {} but the DeckLink output stays {}: its frames are converted \
+                 (repeated or dropped); restart chr-server to open the card in the input's format",
+                format.name(),
+                card.name()
+            );
         }
     })
 }

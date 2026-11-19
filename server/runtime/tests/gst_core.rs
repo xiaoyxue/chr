@@ -26,7 +26,7 @@ use chr_common::{
 use chr_runtime::{
     calibration::lens::CHECKS,
     gst_core::{
-        Core, CoreConfig, InputLoss, OutputRate, OutputSink,
+        Core, CoreConfig, InputLoss, OutputRate, OutputSink, capture,
         driver::{Driver, Program},
         input::{Input, Options, Source},
         output::Totals,
@@ -860,6 +860,48 @@ fn assert_lip_sync(core: &Core, run: &Run<'_>, period_ns: u64) {
         "audio - video {} µs: {audio:?}",
         audio.offset_us
     );
+}
+
+/// A DeckLink output opens in the input's format (#195): the probe waits for
+/// the capture process, reads its format and, connecting again, a new one.
+#[test]
+fn the_probe_waits_for_the_input_and_reads_its_format() {
+    chr_runtime::gst_core::init().unwrap();
+    let fixture = Fixture::new("probe", 0);
+    let socket = fixture.path("capture.sock");
+    let ntsc = VideoMode {
+        fps: Rate::new(30000, 1001).unwrap(),
+        ..MODE
+    };
+    let probing = std::thread::spawn({
+        let socket = socket.clone();
+        move || capture::probe(&socket).unwrap()
+    });
+    std::thread::sleep(Duration::from_millis(700));
+    let mut input = Input::start(
+        &Source::TestPattern(ntsc.into()),
+        &socket,
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(probing.join().unwrap(), ntsc.into());
+    let i50 = Format {
+        mode: VideoMode {
+            fps: Rate::fps(25),
+            ..MODE
+        },
+        scan: Scan::Interlaced(FieldOrder::TopFirst),
+    };
+    input.switch(i50).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let format = capture::probe(&socket).unwrap();
+        if format == i50 {
+            break;
+        }
+        assert!(Instant::now() < until, "still {format:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
