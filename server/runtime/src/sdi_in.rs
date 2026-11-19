@@ -54,8 +54,8 @@ Options:
                               stream and its timecode tag (nix develop .#media)
   --test-pattern <WxH> <rate> GStreamer's moving test pattern instead, with a tick each
                               second as audio
-  --source decklink           A DeckLink card's input and embedded audio (not verified on
-                              hardware): --device, --mode, --connection
+  --source decklink           A DeckLink card's input and embedded audio: --device, --mode,
+                              --connection
   --device <n>                DeckLink device [default: 0]
   --mode <auto|mode>          DeckLink mode: auto takes the format from the signal, or a
                               mode such as 1080i50, 1080p5994 [default: auto]
@@ -302,7 +302,7 @@ fn run(args: Args) -> Result<()> {
         input.watch_frames();
     }
     log::info!(
-        "simulated SDI input: {} into {}{}",
+        "SDI input: {} into {}{}",
         match &args.source {
             Source::File(path) => path.display().to_string(),
             Source::TestPattern(format) => format!("test pattern {}", format.name()),

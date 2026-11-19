@@ -78,29 +78,48 @@ Check every render host before it goes onsite:
 | SRT port reachable from viewers | `sudo ufw status` | The `srt` UDP port is allowed from the viewers' addresses |
 | DeckLink card and driver (`chr-sdi-in --source decklink`, `chr-server --output decklink`, #154) | `lspci \| grep -i blackmagic`, `ls /dev/blackmagic/`, `lsmod \| grep blackmagic` | The card on the bus, its device nodes, and the `blackmagic`/`blackmagic_io` modules of Desktop Video loaded |
 | DeckLink API and firmware | `ls /usr/lib/libDeckLinkAPI.so` (or the distribution's path) and `BlackmagicFirmwareUpdater status` | Desktop Video's `libDeckLinkAPI.so` installed in the version the firmware needs |
-| GStreamer sees the card | `nix develop .#media -c gst-device-monitor-1.0 Video` | A `DeckLink` source and sink per device; without them chr fails with "no DeckLink device" |
+| GStreamer sees the card | `nix develop -c gst-device-monitor-1.0 Video` | A `DeckLink` source and sink per sub-device (8 on a Duo 2); without them chr fails with "no DeckLink device" |
+| Nothing else holds the card | `ps -eo pid,args \| grep -E "MediaExpress\|gst-launch\|decklink"` | No Media Express or other DeckLink pipeline: sub-devices are exclusive |
 | Genlock reference | The card's reference input (Desktop Video Setup: "Reference": locked) | Black burst or tri-level from house sync, locked |
 
-**DeckLink (not verified on hardware).** The development host has no card, so
-the DeckLink code of the GStreamer core is built and tested only up to "no
-DeckLink device" ([GStreamer core](../server/docs/gst-core.md#phase-3-decklink-interlaced-input-loss)):
-install Blackmagic Desktop Video (its kernel modules and `libDeckLinkAPI.so`;
-on NixOS the `decklink` module and package), check the rows above, then run
-the input and the server with the card:
+**DeckLink.** Verified on a DeckLink Duo 2 at 1080p30 without a reference
+input ([GStreamer core](../server/docs/gst-core.md#on-a-card-decklink-duo-2-1080p30));
+genlock and the other modes are still to be verified on site (#161). Install
+Blackmagic Desktop Video (its kernel modules and `libDeckLinkAPI.so`; on NixOS
+the `decklink` module and package), check the rows above, then run the input
+and the server with the card:
 
 ```sh
-chr-sdi-in --source decklink --device 0 --mode auto --connection sdi
-chr-server --description <json> --output decklink --device 1 --output-rate fixed:50i \
-  --input-loss black ...
+chr-sdi-in --source decklink --device 1 --mode auto --connection sdi
+chr-server --description <json> --output decklink --device 3 --output-rate fixed:30 \
+  --program-delay-ms 300 --input-loss black ...
 ```
 
-The Nix shells' GStreamer has the `decklink` plugin (gst-plugins-bad); it
-loads `libDeckLinkAPI.so` from the host at run time. The output card's clock
-times the whole pipeline: lock its reference input to house sync before going
-on air, and verify capture, playout, the card's start (the core primes it
-with a black frame and silence), RP 188 timecode, captions (line 9) and
-embedded audio on site. The output card keeps the mode of `--output-rate
-fixed:<rate>` (HD and UHD; no SD) for the whole run.
+- **Sub-devices.** `--device` is the card's logical sub-device
+  (`device-number`), not the label of its connector, and the numbering can
+  change after re-cabling. Find the input with `mode=auto` (chr-sdi-in logs
+  the detected format) and the output with a test picture on the monitor.
+- **The API library.** The Nix shells' GStreamer has the `decklink` plugin
+  (gst-plugins-bad); it loads Desktop Video's `libDeckLinkAPI.so`, which Nix's
+  glibc does not look for in the host's `/usr/lib`. The shells and the
+  `chr-server` package programs put the flake's `chr-decklink-api` on
+  `LD_LIBRARY_PATH`: a link to just `/usr/lib/libDeckLinkAPI.so` (Debian,
+  Ubuntu), not the host's whole `/usr/lib`.
+- **The source's format.** The card locks only on the mode the source sends;
+  `mode=auto` follows it, but the output keeps the mode of `--output-rate
+  fixed:<rate>` (HD and UHD; no SD) for the whole run. A PC through an
+  HDMI-to-SDI converter may send 3G-SDI Level B at 50/60 Hz, which the card
+  detects but does not lock: use 30 Hz or a Level A source.
+- **Timing.** The output card's clock times the whole pipeline. Lock its
+  reference input to house sync before going on air: a free-running card
+  drifts from the source by parts per million, so the delay grows by up to a
+  frame before one is dropped. D must exceed 24 ms (the card gets each frame
+  20 ms before air).
+- **Audio.** Embedded audio passes by default; `--no-audio` on both
+  `chr-sdi-in` and `chr-server` leaves it out when the program needs none.
+- To verify on site: playout with genlock, the card's start (the core primes
+  it with a black frame and silence), RP 188 timecode, captions (line 9) and
+  lip sync.
 
 To enable Resizable BAR on an NVIDIA host (needs a reboot; stop the stack first):
 
@@ -284,6 +303,28 @@ vchao's `pitch-analysis` estimates every frame's `Ti` from a map of the venue
 The ledgers grow with every frame (about 90 bytes per frame plus about 3 KB
 per estimate) and a restarted worker starts a new pair; remove old ones from
 time to time.
+
+**The live N16ROT tracker.** vchao's `pitch-track-live` (in the pin since
+`209a97b`) speaks the same VchaoFrame contract and estimates frames as they
+come, one per batch, on the GPU; it needs an N16ROT map (an official-N16
+manifest is refused). It is the worker of the DeckLink run
+([GStreamer core](../server/docs/gst-core.md#on-a-card-decklink-duo-2-1080p30):
+18.7 fresh `Ti`/s at 1080p30, capture to estimate p95 82 ms, so D 300 ms):
+
+```sh
+nix build ./external/vchao#pitch-track-live --out-link output/vchao/pitch-track-live
+```
+
+```toml
+tracking_cli = "server/scripts/with-cuda-driver.sh"
+tracking_worker_args = [
+    "output/vchao/pitch-track-live/bin/pitch-track-live",
+    "--asset-manifest", "<asset-root>/map/manifest.json",
+    "--batch-frames", "1", "--estimate-every", "1", "--interpolation", "logh",
+    "--overload-ms", "200", "--ledger", "<asset-root>/runs/{stream_id}.arrow",
+]
+program_delay_ms = 300
+```
 
 ## Launch and operate
 

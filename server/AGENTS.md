@@ -50,7 +50,7 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   selector, the CG driver over both workers, and the workers' sockets as bins
   of that pipeline, the program's audio with the same delay, timecode and
   captions, its telemetry (`sdi.get_status.core`), and the DeckLink
-  input/output code paths (not verified on hardware); `src/gst_core/input.rs`
+  input/output (verified at 1080p30, not with genlock); `src/gst_core/input.rs`
   is `chr-sdi-in`'s side. A generated program (the triangle,
   `--synthetic-program`, `--pitch-demo`, `--software-video`) has no input to
   follow and runs on an internal clock instead: `src/pipeline.rs` paces its

@@ -85,7 +85,7 @@ time; nothing copies it on the way to the workers. The audio goes over
 numbering) are in [GStreamer core](gst-core.md#timing).
 
 A physical SDI input delivers UYVY; `chr-sdi-in --source decklink` converts it
-the same way (not verified on hardware).
+the same way (verified at 1080p30 on a DeckLink Duo 2).
 
 ### `tracking.frame`
 

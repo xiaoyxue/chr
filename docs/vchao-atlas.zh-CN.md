@@ -1,7 +1,8 @@
 # vchao 的 atlas、V、Ti 与 T_ref
 
 **状态：** `draft` — 面向 chr 读者解释 vchao 的几何关系。以 vchao 自己的文档为准；
-本页依据当前固定的子模块 `external/vchao`（`f209fc9`）。
+本页依据子模块 `external/vchao` 的 `f209fc9`。现在固定在 `209a97b`，它新增了 N16ROT
+实时跟踪器 `pitch-track-live` 和 SDI 输入输出，不改变下文的几何关系。
 
 **范围：** vchao 中「atlas」指什么、这个词被用于哪三种产物、配图的直观解释与单位、联系 $K$、$R$、$C$、
 $H$、$V$、$q$、$T_{\mathrm{ref}}$ 和 $T_i$（vchao 的 `Ti`）的符号与公式关系，以及离线（建图）和在线（逐帧）算法及其优化目标。证明和商空间的形式化表述放在附录。

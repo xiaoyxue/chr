@@ -1204,9 +1204,9 @@ async fn interlaced_fields_and_lip_sync_survive_the_core() {
     }
 }
 
-/// The development host has no DeckLink card: a DeckLink output fails to
-/// start with a clear error (the card's code paths are not verified on
-/// hardware).
+/// Without a card a DeckLink output fails to start with a clear error, and
+/// with or without one it refuses a rate it cannot keep or a program delay
+/// shorter than the card's lead.
 #[test]
 fn a_decklink_output_without_a_card_fails_clearly() {
     gst::init().unwrap();
@@ -1222,14 +1222,14 @@ fn a_decklink_output_without_a_card_fails_clearly() {
         height: 1080,
         fps: Rate::fps(25),
     };
-    let start = |output_rate| {
+    let start = |output_rate, program_delay| {
         let (_, recorder) = SdiStats::recorded(output);
         Core::start(CoreConfig {
             capture: output,
             output,
             output_rate,
             capture_socket: fixture.path("capture.sock"),
-            program_delay: DELAY,
+            program_delay,
             tap: None,
             recorder,
             sink: OutputSink::DeckLink { device: 0 },
@@ -1242,11 +1242,12 @@ fn a_decklink_output_without_a_card_fails_clearly() {
         .to_string()
     };
     // A card does not change its mode while it plays: it needs a fixed rate.
-    let error = start(OutputRate::Follow);
+    let i50 = OutputRate::Fixed(Rate::fps(25), Scan::Interlaced(FieldOrder::TopFirst));
+    let error = start(OutputRate::Follow, DELAY);
     assert!(error.contains("needs --output-rate fixed"), "{error}");
-    let error = start(OutputRate::Fixed(
-        Rate::fps(25),
-        Scan::Interlaced(FieldOrder::TopFirst),
-    ));
+    // The card gets each frame CARD_LEAD before air: D must leave room for it.
+    let error = start(i50, chr_runtime::gst_core::CARD_LEAD);
+    assert!(error.contains("needs a program delay above"), "{error}");
+    let error = start(i50, DELAY);
     assert!(error.contains("no DeckLink device 0"), "{error}");
 }

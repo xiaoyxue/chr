@@ -80,6 +80,13 @@ pub const PROGRAM_META: &str = "chr-program-frame";
 /// The selector decides a slot this long before it is due, leaving the time to
 /// hand the frame through `livesync` to the output.
 pub const DECISION_MARGIN: Duration = Duration::from_millis(4);
+/// How long before it goes on air a card gets its frame. `livesync` hands a
+/// slot over at its time, but `decklinkvideosink` schedules each frame about
+/// 10 ms before air and calls a frame handed over later late (the card may drop
+/// it). With a card, program frames therefore carry `due - CARD_LEAD` and the
+/// sink's `ts-offset` puts them back on air at `due`: capture + D as before,
+/// with D − `CARD_LEAD` left for the CG.
+pub const CARD_LEAD: Duration = Duration::from_millis(20);
 
 /// Registers the metas the core reads and writes; idempotent.
 pub fn init() -> Result<(), Error> {
@@ -274,6 +281,16 @@ impl Core {
                     .into(),
             );
         }
+        let card = matches!(config.sink, OutputSink::DeckLink { .. });
+        let lead = if card { CARD_LEAD } else { Duration::ZERO };
+        if card && config.program_delay <= lead + DECISION_MARGIN {
+            return Err(format!(
+                "a DeckLink output needs a program delay above {:?}: the card gets each \
+                 frame {lead:?} before air",
+                lead + DECISION_MARGIN
+            )
+            .into());
+        }
         let program = AppSrc::builder()
             .name("program")
             .caps(&uyvy_caps(output_format))
@@ -312,6 +329,7 @@ impl Core {
             }
             OutputSink::DeckLink { device } => {
                 let sink = decklink::video_sink(device, output_format)?;
+                sink.set_property("ts-offset", CARD_LEAD.as_nanos() as i64);
                 // The card's clock, locked to its reference input, times the program.
                 let clock = sink
                     .provide_clock()
@@ -356,7 +374,6 @@ impl Core {
             None => None,
         };
         let loss_fill = fill::frame(&config.input_loss, config.output)?;
-        let card = matches!(config.sink, OutputSink::DeckLink { .. });
         let audio = if config.audio {
             Some(audio::Chain::add(
                 &pipeline,
@@ -379,6 +396,7 @@ impl Core {
             timeline.clone(),
             tap,
             config.recorder.clone(),
+            lead,
         ));
         output::attach(&output, &output_sink, &tap_sink)?;
         if card {
@@ -401,7 +419,7 @@ impl Core {
                 loss_fill,
             },
             timeline.clone(),
-            select::Timing::new(config.program_delay),
+            select::Timing::new(config.program_delay - lead),
         )?;
         let audio = audio.map(|chain| {
             chain.start(
@@ -662,6 +680,9 @@ pub fn uyvy_caps(format: Format) -> gst::Caps {
         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .field("interlace-mode", interlace)
         .field("colorimetry", "bt709")
+        // SDI's 4:2:2 siting. `decklinkvideosink` names it in every mode, and its
+        // accept-caps needs the program's caps to be a subset of a mode's.
+        .field("chroma-site", "mpeg2")
         .build();
     if let Some(order) = order {
         caps.make_mut()

@@ -80,7 +80,7 @@ pub enum Source {
     File(PathBuf),
     /// GStreamer's moving test pattern and a tick each second, without FFmpeg.
     TestPattern(Format),
-    /// A DeckLink card's input and its embedded audio (not verified on hardware).
+    /// A DeckLink card's input and its embedded audio.
     DeckLink(decklink::Input),
 }
 

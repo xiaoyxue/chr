@@ -481,6 +481,15 @@ nix build ./external/vchao#pitch-analysis --out-link output/vchao/pitch-analysis
 
 `docs/operations.md` has the `stack.toml` keys for it.
 
+vchao's live N16ROT tracker `pitch-track-live` (`nix build
+./external/vchao#pitch-track-live`) is a drop-in replacement with the same
+contract, arguments and CUDA wrapper: it estimates every frame as it comes
+(`--batch-frames 1 --estimate-every 1`), releases a frame it holds after
+`--overload-ms` with its last causal pose and needs an N16ROT map. It ran as
+the worker of the DeckLink run (18.7 fresh `Ti`/s at 1080p30, capture to
+estimate p50 37 ms, p95 82 ms, max 226 ms;
+[GStreamer core](gst-core.md#on-a-card-decklink-duo-2-1080p30)).
+
 ### Measured
 
 SC1464 fixture (1212x654p30 clip; private, not in the repository), RTX 3090

@@ -8,8 +8,8 @@ workers talk to `chr-server` over GStreamer unixfd sockets instead of
 stdin/stdout lines and `chr-shm` rings. Since #154 every tracked program runs on
 one GStreamer pipeline in `chr-server` (the GStreamer core), its frames coming
 from `chr-sdi-in` as memfds; the program tap is the only `chr-shm` ring left.
-Windows is not verified; physical SDI (#80) is not implemented (the DeckLink code
-paths of #154 are not verified on hardware).
+Windows is not verified. The DeckLink input and output of #154 are verified on a
+card at 1080p30 without house sync; genlock (#80) and the other modes are not (#161).
 Implementation steps are in
 [Live process implementation plan](live-process-implementation.md).
 
@@ -176,7 +176,7 @@ its writer `chr-sdi-sim` and `--pipeline`). Design, status and measurements:
 
 - **Input:** a separate INPUT process, `chr-sdi-in`, plays a file at its own
   rate (or a test pattern) in real time, or captures a DeckLink card
-  (`decklinkvideosrc mode=auto`, not verified on hardware), and sends every
+  (`decklinkvideosrc mode=auto`, verified at 1080p30), and sends every
   frame over a unixfd socket as memfd memory stamped with its identity
   (VchaoFrame), timecode and captions, and its audio over a second socket.
 - **Timing:** each captured frame owns one output slot, due a fixed program

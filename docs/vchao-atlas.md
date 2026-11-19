@@ -1,8 +1,9 @@
 # vchao atlas, V, Ti and T_ref
 
 **Status:** `draft` — an explanation of vchao's geometry for chr readers. vchao's
-own documents are authoritative; this page follows the pinned submodule
-`external/vchao` (`f209fc9`).
+own documents are authoritative; this page follows `external/vchao` at
+`f209fc9`. The pin is now `209a97b`, which adds the N16ROT live tracker
+`pitch-track-live` and SDI I/O without changing the geometry below.
 
 **Scope:** what "atlas" means in vchao, the three products the word is used for,
 an intuitive picture with diagrams and units, the notation and the relations
