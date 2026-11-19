@@ -60,6 +60,15 @@
             pkgs.gst_all_1.gst-plugins-bad
             liveSync
           ];
+          # The decklink plugin dlopens the Desktop Video driver's libDeckLinkAPI.so by
+          # name, which Nix's glibc does not look for in the host's /usr/lib (where the
+          # Debian/Ubuntu packages install it). A link to just that file, on
+          # LD_LIBRARY_PATH, finds the card without putting the host's other libraries
+          # before Nix's; without Desktop Video it dangles and GStreamer sees no card.
+          deckLinkApi = pkgs.runCommand "chr-decklink-api" { } ''
+            mkdir -p $out/lib
+            ln -s /usr/lib/libDeckLinkAPI.so $out/lib/libDeckLinkAPI.so
+          '';
           mediaTools = [
             pkgs.ffmpeg
             (pkgs.python3.withPackages (ps: [ ps.pygobject3 ]))
@@ -162,11 +171,14 @@
               nativeBuildInputs = common.nativeBuildInputs ++ [ pkgs.makeWrapper ];
               postInstall = ''
                 for program in chr-server chr-renderer-cli; do
-                  wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtime} \
+                  wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${
+                    pkgs.lib.makeLibraryPath (runtime ++ [ deckLinkApi ])
+                  } \
                     --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
                 for program in chr-tracking-sim-cli chr-sdi-in; do
-                  wrapProgram $out/bin/$program --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
+                  wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${deckLinkApi}/lib \
+                    --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
               '';
             }
@@ -232,7 +244,7 @@
             ++ clientTools
             ++ runtime
             ++ gstreamer;
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtime;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtime ++ [ deckLinkApi ]);
             GST_PLUGIN_SYSTEM_PATH_1_0 = workerPlugins;
             shellHook = ''
               export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"

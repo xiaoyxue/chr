@@ -2,11 +2,9 @@
 //! elements (gst-plugins-bad, on the Desktop Video driver's
 //! `libDeckLinkAPI.so`).
 //!
-//! **Not verified on hardware.** The development host has no DeckLink card:
-//! the code below builds the elements, maps formats to the cards' modes and
-//! fails with a clear error without a card, and that much is tested; capture,
-//! playout, genlock, the card clock, timecode, captions and audio on a real
-//! card are not (`server/docs/gst-core.md`).
+//! Verified on a DeckLink Duo 2 at 1080p30 (capture, playout on the card's
+//! clock, its start, CG and audio); genlock, the other modes, timecode and
+//! captions on a card are not yet (`server/docs/gst-core.md`, #161).
 //!
 //! - **Input** (`chr-sdi-in --source decklink`): `decklinkvideosrc` with
 //!   `mode=auto` takes the format (extent, rate, scan) from the signal, and a
@@ -18,7 +16,9 @@
 //!   `decklinkvideosink` in the mode of the program's format, which does not
 //!   change while it plays (the sink refuses a reconfiguration), and its clock
 //!   (the card's, genlocked to its reference input) becomes the core's
-//!   pipeline clock; the core primes it ([`super::select::prime`]).
+//!   pipeline clock; the core primes it ([`super::select::prime`]), hands
+//!   it each frame [`super::CARD_LEAD`] before air and copies memory of
+//!   other processes for it ([`own_memory`]).
 //!
 //! Only HD and UHD modes are mapped: SD's caps carry a non-square pixel aspect
 //! ratio and BT.601, which chr's 1:1, BT.709 frames do not negotiate with.
@@ -235,6 +235,7 @@ pub fn video_sink(device: u32, format: Format) -> Result<gst::Element, Error> {
     sink.set_property_from_str("timecode-format", "rp188any");
     sink.set_property("cc-line", 9_i32);
     open(&sink, device)?;
+    own_memory(&sink)?;
     Ok(sink)
 }
 
@@ -242,7 +243,38 @@ pub fn video_sink(device: u32, format: Format) -> Result<gst::Element, Error> {
 pub fn audio_sink(device: u32) -> Result<gst::Element, Error> {
     let sink = element("decklinkaudiosink")?;
     sink.set_property("device-number", device as i32);
+    own_memory(&sink)?;
     Ok(sink)
+}
+
+/// Hands `sink` only memory of this process. The card's driver reads a
+/// buffer's memory itself (`decklinkvideosink` wraps a frame without copying)
+/// and refuses to schedule memory mapped read-only from another process's
+/// memfd (`Failed to schedule frame: 0x80000008`), which a render worker's
+/// frames and the input's audio are; the clean feed and the fills are the
+/// core's own. Such buffers are copied on their way in.
+fn own_memory(sink: &gst::Element) -> Result<(), Error> {
+    sink.static_pad("sink")
+        .ok_or("a DeckLink sink without a sink pad")?
+        .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+            if let Some(gst::PadProbeData::Buffer(buffer)) = &mut info.data
+                && let Some(copy) = copied(buffer)
+            {
+                *buffer = copy;
+            }
+            gst::PadProbeReturn::Ok
+        });
+    Ok(())
+}
+
+/// A deep copy of `buffer` (its memory is copied into system memory, its
+/// times and metas kept), if it has fd-backed memory.
+fn copied(buffer: &gst::BufferRef) -> Option<gst::Buffer> {
+    buffer
+        .iter_memories()
+        .any(|memory| memory.is_memory_type::<gstreamer_allocators::FdMemory>())
+        .then(|| buffer.copy_deep().ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -301,8 +333,10 @@ mod tests {
         assert!("dvi".parse::<Connection>().is_err());
     }
 
-    /// The program's caps in every mapped mode negotiate with
-    /// `decklinkvideosink`'s caps (its pad template, no card needed).
+    /// The program's caps in every mapped mode are accepted by
+    /// `decklinkvideosink` (its pad template, no card needed). Accepting caps
+    /// takes a subset of the sink's, not just an intersection: the sink names
+    /// `chroma-site` in every mode, so caps without it fail on a card.
     #[test]
     fn program_caps_negotiate_with_the_sink_in_every_mode() {
         gst::init().unwrap();
@@ -318,7 +352,7 @@ mod tests {
             .caps();
         for mode in modes() {
             let caps = super::super::uyvy_caps(mode.format);
-            assert!(caps.can_intersect(&template), "{}: {caps}", mode.nick);
+            assert!(caps.is_subset(&template), "{}: {caps}", mode.nick);
         }
         // SD would not: its pixels are not square.
         let sd = super::super::uyvy_caps(format(
@@ -328,6 +362,47 @@ mod tests {
             Scan::Interlaced(FieldOrder::TopFirst),
         ));
         assert!(!sd.can_intersect(&template), "{sd}");
+    }
+
+    /// A worker's frame (memfd memory) reaches the card as a copy in this
+    /// process's memory, with its time and video meta; the core's own frames
+    /// pass as they are.
+    #[test]
+    fn fd_memory_is_copied_for_the_card() {
+        use gstreamer_video::VideoMeta;
+        gst::init().unwrap();
+        let allocator = gstreamer_allocators::ShmAllocator::get().unwrap();
+        let mut memory = allocator.alloc(16, None).unwrap();
+        memory
+            .get_mut()
+            .unwrap()
+            .map_writable()
+            .unwrap()
+            .copy_from_slice(&[7; 16]);
+        let mut frame = gst::Buffer::new();
+        {
+            let frame = frame.get_mut().unwrap();
+            frame.append_memory(memory);
+            frame.set_pts(gst::ClockTime::from_mseconds(40));
+            VideoMeta::add(
+                frame,
+                gstreamer_video::VideoFrameFlags::empty(),
+                gstreamer_video::VideoFormat::Uyvy,
+                4,
+                2,
+            )
+            .unwrap();
+        }
+        let copy = copied(&frame).expect("fd memory is copied");
+        assert!(
+            !copy
+                .iter_memories()
+                .any(|memory| memory.is_memory_type::<gstreamer_allocators::FdMemory>())
+        );
+        assert_eq!(copy.map_readable().unwrap().as_slice(), &[7; 16]);
+        assert_eq!(copy.pts(), Some(gst::ClockTime::from_mseconds(40)));
+        assert!(copy.meta::<VideoMeta>().is_some());
+        assert!(copied(&gst::Buffer::from_mut_slice(vec![0_u8; 16])).is_none());
     }
 
     /// The development host has no DeckLink card: the elements exist, and

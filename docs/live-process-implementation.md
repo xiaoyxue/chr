@@ -373,7 +373,8 @@ measurement the input (1920x1080) differs from the output extent, so the frames
 without CG repeated the last frame instead of carrying clean feed. A rotating
 1.35M-triangle model rendered at 30 fps with 0 deadline misses after GPU mesh
 buffers were reused across scene revisions (#106). Scene edits during a restart
-were not measured separately. Physical SDI is not verified (#80). The live
+were not measured separately. Physical SDI is verified at 1080p30 on the GStreamer
+core without house sync (#161); genlock is not (#80). The live
 service is Linux-only; SRT preview from a Windows PC in VLC was checked against
 this stack (the Linux host must allow the SRT UDP port through its firewall).
 

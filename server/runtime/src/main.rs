@@ -121,8 +121,8 @@ Options:
   --output <sim|decklink> The program output (tracked program): a simulated sink on the
                           system clock, or a DeckLink card in the mode of the fixed output
                           rate (needs --output-rate fixed:<rate>), whose clock (genlocked
-                          to its reference input) times the pipeline; HD and UHD modes;
-                          not verified on hardware [default: sim]
+                          to its reference input) times the pipeline; HD and UHD modes
+                          [default: sim]
   --device <n>            The DeckLink output device (--output decklink) [default: 0]
   --audio-channels <n>    Audio channels of the DeckLink output: 2, 8 or 16 [default: 2]
   --no-audio              Do not pass the input's audio through (tracked program)

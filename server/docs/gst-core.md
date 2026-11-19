@@ -8,8 +8,10 @@ tracked program (`chr-server --tracked-scene` or `--description`). Done:
   changes, the `follow`/`fixed` output policy;
 - phase 3 (what needs no card): interlaced formats, input loss
   (hold/black/slate), and the DeckLink input/output code paths with the card's
-  clock as the pipeline clock, **built and tested without a card but not
-  verified on hardware** (the development host has none);
+  clock as the pipeline clock, **verified on a DeckLink Duo 2 at 1080p30**
+  (#161): a real SDI input with `mode=auto`, the output on the card's clock,
+  its start, CG from vchao's live tracker and embedded audio
+  ([on a card](#on-a-card-decklink-duo-2-1080p30));
 - phase 4 (simulated): audio with the same delay D, timecode and captions
   carried across the capture hop and output with their frame;
 - phase 5: the switch-over. The core is the default and only path of tracked
@@ -18,8 +20,9 @@ tracked program (`chr-server --tracked-scene` or `--description`). Done:
   process, `stack.py` starts it, and the core reports its telemetry
   ([Phase 5](#phase-5-switch-over)).
 
-Open: verification on a DeckLink card with house sync (#80), the 1-hour soak
-of the acceptance criteria, and a new vchao stream without a model reload.
+Open (#161): genlock to house sync (#80) and the other formats on a card
+(1080i50, 1080p50, 59.94), the 1-hour soak of the acceptance criteria, and a
+new vchao stream without a model reload.
 
 `chr-server` owns one GStreamer pipeline from the input to the output. Its time
 is the pipeline clock (the system clock in simulation; with `--output decklink`
@@ -303,16 +306,14 @@ request to vchao; until then a format change is a short CG outage.
 
 ## Phase 3: DeckLink, interlaced, input loss
 
-### DeckLink input and output (not verified on hardware)
+### DeckLink input and output
 
-The development host has no DeckLink card (`lspci` shows none). The code paths
-are built, construct the elements GStreamer 1.28.8's `decklink` plugin
-provides, map formats to the cards' modes and fail clearly without a card;
-tests cover argument parsing, the mode mapping, that the program's caps
-negotiate with the sink's pad template in every mapped mode, the priming of
-both sinks (with a simulated sink) and "no DeckLink device". Capture,
-playout, genlock, the card clock and its start, RP 188 timecode, captions and
-embedded audio on a real card are **not verified**.
+Verified on a Blackmagic DeckLink Duo 2 (Desktop Video 16.5) at 1080p30
+([below](#on-a-card-decklink-duo-2-1080p30)); unit tests cover argument
+parsing, the mode mapping, that the program's caps are a subset of the
+sink's in every mapped mode, the priming of both sinks (with a simulated
+sink), the copy of fd memory and "no DeckLink device". Genlock, the other
+formats, RP 188 timecode and captions on a card are not verified yet (#161).
 
 - **Input** (`chr-sdi-in --source decklink --device N [--mode auto|<mode>]
   [--connection sdi|hdmi|optical-sdi|auto]`, `gst_core::decklink`):
@@ -340,6 +341,22 @@ embedded audio on a real card are **not verified**.
   left for a test with a card. `cc-line=9` and `timecode-format=rp188any`
   output the slot's captions and timecode. Without a card `Core::start` fails
   with `no DeckLink device 0 (0 found): install Blackmagic Desktop Video …`.
+  Three things a card needs that the simulated sink does not:
+  - **Its caps.** The sink names `chroma-site=mpeg2` in every mode and
+    accepts only a subset of a mode's caps, so the program's UYVY caps carry
+    it (SDI's 4:2:2 siting); without it the program is not negotiated.
+  - **Its frames ahead of air.** `decklinkvideosink` schedules a frame about
+    10 ms before air and calls one handed over later late. `livesync` hands a
+    slot over at its time, so with a card program frames carry
+    `due - CARD_LEAD` (20 ms) and the sink's `ts-offset` puts them on air at
+    `due`: still capture + D, with D − 20 ms left for the CG. A card output
+    needs D above 24 ms.
+  - **Memory of this process.** The sink hands a frame's memory to the driver
+    without copying, and the driver refuses memory mapped read-only from
+    another process's memfd (`Failed to schedule frame: 0x80000008`): a render
+    worker's frames and the input's audio. Both card sinks copy such buffers
+    on their way in (`decklink::own_memory`, about 1 ms per 1080p frame); the
+    clean feed and the fills are the core's own and pass as they are.
 - **Start.** A DeckLink clock stands still until the card plays, and the card
   plays once its video sink, and with audio its audio sink, got caps; the
   video sink gets them with the first frame `livesync` passes on, and the
@@ -355,9 +372,15 @@ embedded audio on a real card are **not verified**.
   `source_ns` or an audio buffer's, is on the same-host system clock; the core
   maps it to its pipeline clock through the two clocks' current offset
   (`Timeline::of_system`; identical on the system clock). The two clocks drift
-  apart by parts per million: the offset is read at every frame, so D holds in
-  the card's time. The output's statistics count a card's slots as they are
-  handed to the sink, ahead of air.
+  apart by parts per million: the offset is read at every frame, so each
+  frame is due capture + D in the card's time. Without a reference input the
+  card's clock runs free of the source's (about 50 ppm on the Duo 2): the
+  output's slots slide against the input's frames, so the delay grows from D
+  by up to one frame period and then the fixed-rate grid drops a frame
+  (phase 2), like any unlocked output; locked to house sync with the source,
+  both run at one rate and D stays constant. The output's statistics count a
+  card's slots as they are handed to the sink and add `CARD_LEAD`: the time
+  they go on air.
 
 | Format | `Rate` (frames/s) | Name | DeckLink mode |
 | --- | --- | --- | --- |
@@ -372,6 +395,32 @@ mapped: its caps have non-square pixels (10/11, 12/11) and BT.601, which the
 core's square-pixel BT.709 frames do not negotiate with; an SD signal on a card
 in `mode=auto` does not negotiate either. Host setup and the
 checklist: `docs/operations.md`.
+
+### On a card (DeckLink Duo 2, 1080p30)
+
+A DeckLink Duo 2 (four sub-devices; Desktop Video 16.5, Ubuntu 24.04, RTX
+5070) with a 1080p30 SDI source (a PC through an HDMI-to-SDI converter), input
+on sub-device 1 and output on sub-device 3, run as in [Run](#run) with D 300 ms
+and `--output-rate fixed:30`, vchao's `pitch-track-live` as the tracking worker
+(the N16ROT map of the test shot, `--batch-frames 1 --estimate-every 1
+--interpolation logh --overload-ms 200`) and a 20 m × 6 m image ad at the
+centre circle:
+
+| What | Result |
+| --- | --- |
+| Input | `mode=auto` detects 1920x1080p30; frames and embedded audio at 30/s; while the signal is lost the output shows the input-loss fill, and the input's frames take over again when it is back |
+| Output | the card plays after priming and its clock times the pipeline; slots every 33.333 ms (sd 0.06–0.19 ms), none scheduled late or dropped after the first (black) frame once D's lead is in place |
+| CG | 292–300 of 300 slots CG per 10 s; the ad follows the camera on the SDI monitor; CG slack p50 215 ms (min 149 ms) |
+| Tracking | 26 estimates/s, 18.7 fresh `Ti`/s (the rest interpolated or reused), capture to estimate p50 37 ms, p95 82 ms, max 226 ms |
+| Delay | D + up to one frame: the card runs free (no reference) about 50 ppm from the source, one frame dropped per slip |
+| Audio | embedded audio scheduled on the card without errors (the source's was silent; lip sync not measured) |
+
+Found on the card and fixed: the program caps' missing `chroma-site` (not
+negotiated), frames handed over at air time (all late), and memfd memory
+refused by the driver (the first CG frame or audio buffer stopped the card:
+`Failed to schedule frame: 0x80000008`); see the output bullets above. Nix's
+GStreamer finds the host's `libDeckLinkAPI.so` through the flake's
+`chr-decklink-api` link (`docs/operations.md`).
 
 ### Interlaced formats
 
@@ -684,7 +733,8 @@ Both default to `$XDG_RUNTIME_DIR/chr/capture.sock` (`--socket`,
 `--capture-socket`); the audio socket is `<socket>.audio` (`--no-audio` on
 either side turns audio off). With a card: `chr-sdi-in --source decklink
 --device 0` and `chr-server … --output decklink --device 1 --output-rate
-fixed:50i` (not verified on hardware; `docs/operations.md`). chr-server logs the output every 10 s: slots, CG,
+fixed:50i` (verified at 1080p30: [On a card](#on-a-card-decklink-duo-2-1080p30);
+`docs/operations.md`). chr-server logs the output every 10 s: slots, CG,
 clean feed, repeats, duplicates (fixed rate), skipped frames, the interval at
 each rate and the capture-to-output delay (min/mean/max and standard
 deviation), the tap's slot − frame, the selector's decisions with format
@@ -920,9 +970,9 @@ decoders.
   them, and `render.get_worker_status` counts restarts but not clean feed.
   The core's log line and `sdi.get_status` (slots, repeats, last frame, and
   its `core` telemetry) report the output.
-- DeckLink input and output, the card clock and genlock, RP 188 timecode,
-  captions on line 9 and embedded audio on a card are built and tested
-  without a card only: not verified on hardware.
+- On a card only 1080p30 is verified, without a reference input. Genlock,
+  interlaced and 50/59.94 modes, RP 188 timecode, captions on line 9 and
+  lip sync of embedded audio are built and tested without a card only.
 - An interlaced program's CG slots show one picture per frame (the first
   field's, both fields from it); its clean slots keep both fields.
 - Audio is not in chr-monitor's SRT/WebRTC streams (the tap is video only).
@@ -941,5 +991,5 @@ decoders.
 - A DeckLink output keeps one mode: it needs a fixed output rate. SD modes
   are not mapped.
 
-Next (#154): verify phases 3 and 4 on a DeckLink card with house sync (#80);
-the 1-hour soak; a vchao stream without a model reload.
+Next (#161): the card with house sync (#80) and in the other modes; the
+1-hour soak; a vchao stream without a model reload.

@@ -7,7 +7,10 @@
 //! follows it; the tap's slots carry it to chr-monitor, which follows it.
 //! Neither can delay the other: the tap's queue drops.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Duration,
+};
 
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
@@ -264,6 +267,9 @@ pub struct Output {
     totals: Mutex<Totals>,
     tap: Mutex<Option<Tap>>,
     recorder: SdiRecorder,
+    /// How long before air a card gets its slots ([`super::CARD_LEAD`]); zero
+    /// for the simulated output, which takes them on air.
+    lead: Duration,
 }
 
 impl Output {
@@ -272,6 +278,7 @@ impl Output {
         timeline: Timeline,
         tap: Option<chr_shm::Writer>,
         recorder: SdiRecorder,
+        lead: Duration,
     ) -> Self {
         Self {
             mode,
@@ -285,6 +292,7 @@ impl Output {
                 delta_changes: 0,
             })),
             recorder,
+            lead,
         }
     }
 
@@ -405,7 +413,11 @@ pub fn attach(
                 .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
                     if let Some(buffer) = info.buffer() {
                         let at = rendering.timeline.clock.time();
-                        if let Some(slot) = Rendered::of(buffer, at, &rendering.timeline) {
+                        // Its slots go on air the lead after they are handed over.
+                        let lead = rendering.lead.as_nanos() as u64;
+                        let at = at + gst::ClockTime::from_nseconds(lead);
+                        if let Some(mut slot) = Rendered::of(buffer, at, &rendering.timeline) {
+                            slot.due_ns += lead;
                             let rate = pad
                                 .current_caps()
                                 .and_then(|caps| format_of(&caps).ok())
