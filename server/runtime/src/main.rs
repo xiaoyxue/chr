@@ -124,8 +124,8 @@ Options:
                           system clock, or a DeckLink card, whose clock (genlocked to its
                           reference input) times the pipeline; HD and UHD modes. The card
                           opens in the input's format: chr-server waits for chr-sdi-in's
-                          first frame (the input must have the --size extent; its rate
-                          replaces --fps), unless --output-rate fixed:<rate> sets another
+                          first frame (the input must have the --size extent), unless
+                          --output-rate fixed:<rate> sets another
                           [default: sim]
   --device <n>            The DeckLink output device (--output decklink) [default: 0]
   --audio-channels <n>    Audio channels of the DeckLink output: 2, 8 or 16 [default: 2]
@@ -791,9 +791,10 @@ fn run_core(args: Args) -> Result<()> {
     };
     ImageExtent::new(args.width, args.height)?;
     let mut output_rate = args.output_rate.unwrap_or(OutputRate::Follow);
-    let mut fps = args.fps;
     if args.decklink.is_some() && output_rate == OutputRate::Follow {
         // The card cannot change its mode while it plays: open it in the input's.
+        // The program's nominal rate (--fps, the description's) stays: frames
+        // carry their own rate, as with a following simulated output.
         chr_runtime::gst_core::init()?;
         let input = chr_runtime::gst_core::capture::probe(
             args.capture_socket
@@ -801,20 +802,12 @@ fn run_core(args: Args) -> Result<()> {
                 .expect("defaulted when parsing"),
         )?;
         output_rate = card_follows(input, args.width, args.height)?;
-        if input.mode.fps != args.fps {
-            log::info!(
-                "the program runs at the input's {} fps, not --fps {}",
-                input.mode.fps.label(),
-                args.fps.label()
-            );
-        }
         log::info!("DeckLink output in the input's format: {}", input.name());
-        fps = input.mode.fps;
     }
     let mode = VideoMode {
         width: args.width,
         height: args.height,
-        fps,
+        fps: args.fps,
     };
     let spec = match (&args.tracked_scene, &args.description) {
         (Some(path), _) => ProgramSpec::TrackedScene { path: path.clone() },

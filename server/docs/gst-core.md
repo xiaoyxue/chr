@@ -353,8 +353,10 @@ formats, RP 188 timecode and captions on a card are not verified yet (#161).
   input's format** (#195): with `follow`, chr-server first connects to the
   capture socket (`capture::probe`, waiting and logging until `chr-sdi-in`
   sends a frame), reads the input's rate and scan from its caps and runs the
-  core at that fixed rate; the program camera's nominal rate (`--fps`) becomes
-  the input's, and an input extent other than `--size` is refused at start.
+  core at that fixed rate; an input extent other than `--size` is refused at
+  start. The program's nominal rate (`--fps`, the description's camera rate)
+  stays as it is: frames carry their own rate, as with a following simulated
+  output.
   `--output-rate fixed:<rate>` (`fixed:50i` for 1080i50, `fixed:59.94` for
   1080p59.94) opens it in another mode on purpose. Input in any other format
   than the card's, at start or after a change, is converted (phase 2's grid;
