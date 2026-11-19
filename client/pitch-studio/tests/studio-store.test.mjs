@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { request as httpRequest, createServer as createHttpServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { strToU8, zipSync } from 'fflate';
 import { createServer } from 'vite';
 
 const vite = await createServer({ configFile: false, server: { middlewareMode: true } });
@@ -11,15 +13,18 @@ const { studioStoreMiddleware } = await vite.ssrLoadModule('/scripts/studio-stor
 const { planMigration } = await vite.ssrLoadModule('/src/app/browser-migration.ts');
 // Test data stays inside the package's ignored node_modules, not in a system temp folder.
 const root = await mkdtemp(join(process.cwd(), 'node_modules', 'studio-store-test-'));
+// Shared folders as LOCAL_FILES_ROOTS names them: never under a hidden folder, unlike a checkout may be.
+const shared = await mkdtemp(join(tmpdir(), 'studio-store-shared-'));
 const servers = [];
 after(async () => {
   await vite.close();
   for (const server of servers) server.close();
   await rm(root, { recursive: true, force: true });
+  await rm(shared, { recursive: true, force: true });
 });
 
 async function start(directory, limits) {
-  const middleware = studioStoreMiddleware(directory, limits);
+  const middleware = studioStoreMiddleware(directory, { limits, packageRoots: [shared] });
   const server = createHttpServer((req, res) => middleware(req, res, () => res.writeHead(404).end()));
   servers.push(server);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -150,4 +155,49 @@ test("migration moves only the browser's matches the server does not have", () =
 test('deleting a match removes its documents', async () => {
   assert.equal((await store.call('matches/M1', { method: 'DELETE' })).status, 200);
   assert.deepEqual((await store.call('docs/matches/M1/local-ads')).body, { revision: 0, data: null });
+});
+
+test('an offline ZIP on the server is verified and its materials stored there; the page gets only the manifest', async () => {
+  const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+  const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, materials: [{ name: 'glass', alphaMode: 'BLEND' }] }).padEnd(128, ' '));
+  const glb = Buffer.alloc(20 + json.length);
+  glb.write('glTF'); glb.writeUInt32LE(2, 4); glb.writeUInt32LE(glb.length, 8);
+  glb.writeUInt32LE(json.length, 12); glb.write('JSON', 16); json.copy(glb, 20);
+  const files = { 'assets/ASSET-image.png': png, 'assets/ASSET-model.glb': glb };
+  const manifest = (hashes) => ({ packageVersion: 1, sha256: hashes, match: { id: 'MATCH-server', assets: [
+    { id: 'ASSET-image', contentType: 'image/png', byteLength: png.length, contentPath: 'assets/ASSET-image.png' },
+    { id: 'ASSET-model', contentType: 'model/gltf-binary', byteLength: glb.length, contentPath: 'assets/ASSET-model.glb' }] } });
+  const hashes = Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, sha(bytes)]));
+  const write = async (name, document) => {
+    const path = join(shared, name);
+    await writeFile(path, zipSync({ ...Object.fromEntries(Object.entries(files).map(([k, v]) => [k, new Uint8Array(v)])),
+      'manifest.json': strToU8(JSON.stringify(document)) }));
+    return path;
+  };
+  const post = (path) => store.call('packages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+  const good = await post(await write('match.zip', manifest(hashes)));
+  assert.equal(good.status, 200, JSON.stringify(good.body));
+  assert.equal(good.body.source.id, 'MATCH-server');
+  assert.deepEqual(good.body.assets, [
+    { id: 'ASSET-image', path: join(dataDir, 'files', `${sha(png)}.png`) },
+    { id: 'ASSET-model', path: join(dataDir, 'files', `${sha(glb)}.glb`), blended: ['glass'] }]);
+  assert.deepEqual(await readFile(good.body.assets[1].path), glb);
+  // Importing again keeps the stored files.
+  assert.equal((await post(join(shared, 'match.zip'))).status, 200);
+  const tampered = await post(await write('bad.zip', manifest({ ...hashes, 'assets/ASSET-image.png': sha(Buffer.from('other')) })));
+  assert.equal(tampered.status, 400);
+  assert.match(tampered.body.error, /checksum failed: ASSET-image/);
+  assert.equal((await post('/etc/hostname.zip')).status, 404);
+  assert.equal((await post(join(shared, 'match.json'))).status, 400);
+  assert.equal((await post('relative/match.zip')).status, 400);
+  assert.equal((await store.call('packages', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+    body: JSON.stringify({ path: join(shared, 'match.zip') }) })).status, 403);
+});
+
+test('stored files may be cached by the browser; other files may not', async () => {
+  const bytes = Buffer.from('cache me');
+  const { body } = await store.call('files?name=cache.png', { method: 'POST', body: bytes });
+  const response = await fetch(`${store.base}/file?path=${encodeURIComponent(body.path)}`);
+  assert.match(response.headers.get('cache-control'), /immutable/);
 });

@@ -388,6 +388,9 @@ ssh -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
 
 **Before the match:** import the Fusion offline ZIP by its server path inside
 `<asset-root>`. Its planar ad placements can be prepared and adjusted in advance.
+Import by server path rather than picking the file: the onsite server then verifies
+and stores the package itself in about a second, while a picked ZIP crosses the SSH
+tunnel (a 70 MB package takes minutes over a slow one).
 
 **Onsite:**
 1. Import the point cloud and analysis result by server path.

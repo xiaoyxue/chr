@@ -1,5 +1,10 @@
 import type { IncomingMessage } from 'node:http';
 
+/** A refused request: its HTTP status and a message for the page. */
+export class Failure extends Error {
+  constructor(readonly status: number, message: string, readonly extra: Record<string, unknown> = {}) { super(message); }
+}
+
 // The page server answers loopback hosts only, but that does not stop another website open in
 // the operator's browser from sending to 127.0.0.1 itself (CSRF). A request that changes data
 // must therefore come from the studio page's own origin, and carry a body type a cross-site

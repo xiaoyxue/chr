@@ -104,7 +104,7 @@ export class FusionCreatives {
               if (/^(blob:|data:)/.test(url)) return url;
               throw new Error('Only embedded GLB resources are supported.');
             });
-            const response = await fetch(resource.url, { cache: 'no-store' });
+            const response = await fetch(resource.url, { cache: resource.cached ? 'default' : 'no-store' });
             if (!response.ok) throw new Error(`Model download failed (${response.status}).`);
             const gltf = await new GLTFLoader(manager).parseAsync(await response.arrayBuffer(), '');
             if (!this.active) { dispose(gltf.scene); return; }

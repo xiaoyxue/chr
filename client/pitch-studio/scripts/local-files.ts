@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, normalize, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { Connect, Plugin } from 'vite';
-import { writeProblem } from './request-guard.ts';
+import { Failure, writeProblem } from './request-guard.ts';
 
 // Lets the browser load files that already sit on the onsite server by absolute path, as if they
 // had been selected locally, or learn a file's SHA-256 without transferring it; and write the
@@ -22,10 +22,6 @@ const MAX_FOLDER_FILES = 20000;
 const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-class Failure extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
-}
-
 async function readBody(req: IncomingMessage) {
   if (Number(req.headers['content-length']) > MAX_EXPORT_BYTES) throw new Failure(413, `Exports are limited to ${MAX_EXPORT_BYTES / 1024 / 1024} MB.`);
   const chunks: Buffer[] = [];
@@ -38,6 +34,25 @@ async function readBody(req: IncomingMessage) {
 }
 
 const inside = (path: string, roots: string[]) => roots.some((root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep));
+
+/** The shared folders of LOCAL_FILES_ROOTS (separated like PATH), the home folder by default. */
+export const sharedRoots = (rootList: string) => (rootList || homedir()).split(delimiter).filter(Boolean);
+
+/** The real paths of `roots` that exist. */
+export const realRoots = (roots: string[]) => Promise.all(roots.map((root) => realpath(root).catch(() => {
+  console.warn(`[local-files] ignoring missing shared folder ${root}`);
+  return '';
+}))).then((paths) => paths.filter(Boolean));
+
+/** The real path of `raw`, an absolute path inside one of `roots` (real paths); never a hidden one. */
+export async function sharedPath(raw: string | null, roots: string[]) {
+  if (!raw || !isAbsolute(raw)) throw new Failure(400, 'Enter an absolute path on the onsite server, such as /home/user/match.zip.');
+  if (raw.split(/[\\/]/).some((part) => part.startsWith('.'))) throw new Failure(403, 'Hidden files and relative segments are not served.');
+  let path: string;
+  try { path = await realpath(raw); } catch { throw new Failure(404, `Not found on the onsite server: ${raw}`); }
+  if (!inside(path, roots) || path.split(sep).some((part) => part.startsWith('.'))) throw new Failure(403, `Outside the folders this server shares: ${raw}`);
+  return path;
+}
 
 /** Streams a file through SHA-256; lowercase hex. */
 export async function hashFile(path: string) {
@@ -64,18 +79,8 @@ export function localFilesMiddleware(roots: string[], { writeRoots = [], hash = 
     pending.catch(() => { if (hashes.get(path)?.sha256 === pending) hashes.delete(path); });
     return { sha256: await pending, size: Number(info.size) };
   };
-  const allowed = Promise.all(roots.map((root) => realpath(root).catch(() => {
-    console.warn(`[local-files] ignoring missing shared folder ${root}`);
-    return '';
-  }))).then((paths) => paths.filter(Boolean));
-  const resolve = async (raw: string | null) => {
-    if (!raw || !isAbsolute(raw)) throw new Failure(400, 'Enter an absolute path on the onsite server, such as /home/user/match.zip.');
-    if (raw.split(/[\\/]/).some((part) => part.startsWith('.'))) throw new Failure(403, 'Hidden files and relative segments are not served.');
-    let path: string;
-    try { path = await realpath(raw); } catch { throw new Failure(404, `Not found on the onsite server: ${raw}`); }
-    if (!inside(path, await allowed) || path.split(sep).some((part) => part.startsWith('.'))) throw new Failure(403, `Outside the folders this server shares: ${raw}`);
-    return path;
-  };
+  const allowed = realRoots(roots);
+  const resolve = async (raw: string | null) => sharedPath(raw, await allowed);
   /**
    * Writes a JSON export to an absolute `.json` path whose folder lies inside a writable root,
    * creating missing folders there. The file appears whole or not at all; an existing file is
@@ -184,7 +189,7 @@ export function localFilesMiddleware(roots: string[], { writeRoots = [], hash = 
 
 /** `dataDir`, the studio store, is writable for exports even when the shared roots do not include it. */
 export function localFiles(rootList: string, dataDir: string): Plugin {
-  const roots = (rootList || homedir()).split(delimiter).filter(Boolean);
+  const roots = sharedRoots(rootList);
   return {
     name: 'local-files',
     configureServer(server) { server.middlewares.use(localFilesMiddleware(roots, { writeRoots: [dataDir] })); },
