@@ -37,6 +37,7 @@ use chr_runtime::{
     sdi::{FieldOrder, Format, Scan, SdiStats, VideoMode},
     worker::{
         protocol::{Output, WorkerProgram},
+        recording::{Recording, RecordingConfig, Stream as RecordedStream},
         serve::{DELAY_ENV, SOLID_ENV},
         supervisor::{Supervisor, WorkerConfig, status_handle},
         tracking::supervisor::{Tracker, TrackerConfig, in_flight_limit},
@@ -138,6 +139,7 @@ struct Run<'a> {
     sdi: SdiStats,
     /// The tracking feed that `tracking.frame` fills.
     feed: TrackingFeed,
+    recording: Option<&'a Recording>,
 }
 
 /// What a run plays and how its output behaves.
@@ -149,6 +151,9 @@ struct Setup {
     /// No tracking worker: cameras come from `tracking.frame`.
     external: bool,
     program_delay: Duration,
+    /// Record both streams into the fixture's `recordings/` with
+    /// `chr-recorder-cli`, every frame (`Some(None)`) or at most N fps.
+    record: Option<Option<Rate>>,
 }
 
 impl Default for Setup {
@@ -160,6 +165,7 @@ impl Default for Setup {
             input_loss: InputLoss::Hold,
             external: false,
             program_delay: DELAY,
+            record: None,
         }
     }
 }
@@ -201,6 +207,21 @@ async fn with_setup<T>(
         OutputRate::Fixed(fps, _) => VideoMode { fps, ..MODE },
     };
     let (sdi, recorder) = SdiStats::recorded(output);
+    let recording = setup.record.map(|fps| {
+        Recording::start(RecordingConfig {
+            executable: env!("CARGO_BIN_EXE_chr-recorder-cli").into(),
+            dir: fixture.path("recordings"),
+            socket_dir: fixture.path("recording"),
+            streams: RecordedStream::ALL.to_vec(),
+            fps,
+        })
+        .unwrap()
+    });
+    let record_tap = |stream| {
+        recording
+            .as_ref()
+            .and_then(|recording| recording.tap(stream))
+    };
     let (core, frames) = Core::start(CoreConfig {
         capture: MODE,
         output,
@@ -213,6 +234,8 @@ async fn with_setup<T>(
         input_loss: setup.input_loss,
         audio: setup.options.audio,
         audio_channels: 2,
+        record_input: record_tap(RecordedStream::Input),
+        record_program: record_tap(RecordedStream::Program),
     })
     .unwrap();
     let workers = Workers {
@@ -280,6 +303,7 @@ async fn with_setup<T>(
         input: std::cell::RefCell::new(input),
         sdi,
         feed,
+        recording: recording.as_ref(),
     };
     let result = tokio::select! {
         result = driver.run(frames) => panic!("the driver stopped: {result:?}"),
@@ -290,6 +314,7 @@ async fn with_setup<T>(
     owner.await.unwrap();
     let input = run.input;
     drop((core, input));
+    drop(recording);
     result
 }
 
@@ -688,6 +713,206 @@ async fn the_output_follows_a_change_of_rate_with_a_new_tracking_stream() {
         );
     })
     .await;
+}
+
+/// The sidecar of a segment: its header and its frames' lines.
+fn sidecar(path: &Path) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines().map(|line| serde_json::from_str(line).unwrap());
+    let header = lines.next().expect("a header line");
+    (header, lines.collect())
+}
+
+/// The H.264 pictures of an MPEG-TS file, as a player decodes them.
+fn pictures(path: &Path) -> usize {
+    let pipeline = gst::parse::launch(&format!(
+        "filesrc location={} ! tsdemux ! h264parse ! appsink name=out sync=false",
+        path.display()
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+    let sink = pipeline
+        .by_name("out")
+        .unwrap()
+        .downcast::<gstreamer_app::AppSink>()
+        .unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let mut count = 0;
+    while sink
+        .try_pull_sample(gst::ClockTime::from_seconds(5))
+        .is_some()
+    {
+        count += 1;
+    }
+    let error = pipeline
+        .bus()
+        .unwrap()
+        .pop_filtered(&[gst::MessageType::Error]);
+    pipeline.set_state(gst::State::Null).unwrap();
+    assert!(
+        sink.is_eos() && error.is_none(),
+        "{} does not play: {error:?}",
+        path.display()
+    );
+    count
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recording_worker_records_input_and_program_in_a_segment_per_format() {
+    let fixture = Fixture::new("recording", 0);
+    let slower = VideoMode {
+        fps: Rate::fps(25),
+        ..MODE
+    };
+    let restarted = with_setup(
+        &fixture,
+        Setup {
+            record: Some(None),
+            ..Setup::default()
+        },
+        async |run| {
+            let core = run.core;
+            until(Duration::from_secs(10), || core.selector_counters().cg > 50).await;
+            switch(run, slower).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            // The killed worker's segments end; its successor starts new ones.
+            let pid = run
+                .recording
+                .unwrap()
+                .worker_pid()
+                .expect("the worker runs");
+            kill("KILL", pid);
+            let program = core.output_totals().slots;
+            until(Duration::from_secs(10), || {
+                ["input", "program"].iter().all(|stream| {
+                    std::fs::read_to_string(
+                        fixture.path(&format!("recordings/{stream}-0003.jsonl")),
+                    )
+                    .is_ok_and(|text| text.lines().count() > 30)
+                })
+            })
+            .await;
+            assert!(core.output_totals().slots > program, "the output went on");
+            assert_eq!(
+                core.output_totals().repeats,
+                0,
+                "{}",
+                core.output_totals().report()
+            );
+            pid
+        },
+    )
+    .await;
+    assert!(restarted > 0);
+    let dir = fixture.path("recordings");
+    for stream in ["input", "program"] {
+        for (segment, format, killed) in [
+            (1, "192x128p50", false),
+            (2, "192x128p25", true),
+            (3, "192x128p25", false),
+        ] {
+            let base = dir.join(format!("{stream}-{segment:04}"));
+            let (header, frames) = sidecar(&base.with_extension("jsonl"));
+            assert_eq!(header["format"], format, "{stream} {segment}: {header}");
+            assert_eq!(header["stream"], stream);
+            let decoded = pictures(&base.with_extension("ts"));
+            if killed {
+                // The encoder's queue died with the worker.
+                assert!(
+                    decoded > 10 && decoded <= frames.len(),
+                    "{stream} {segment}: {decoded} of {}",
+                    frames.len()
+                );
+            } else {
+                assert!(
+                    frames.len() > 20,
+                    "{stream} {segment}: {} frames",
+                    frames.len()
+                );
+                assert_eq!(
+                    decoded,
+                    frames.len(),
+                    "{stream} {segment}: every frame is in the video"
+                );
+            }
+            let sequences: Vec<u64> = frames
+                .iter()
+                .map(|line| line["sequence"].as_u64().unwrap())
+                .collect();
+            assert!(
+                sequences.windows(2).all(|pair| pair[0] < pair[1]),
+                "{stream} {segment}: in order"
+            );
+            assert_eq!(frames[0]["pts_ns"], 0, "a segment starts at 0");
+            for line in &frames {
+                match stream {
+                    "input" => assert!(
+                        line["frame_id"].is_u64() && line["stream_id"].is_string(),
+                        "{line}"
+                    ),
+                    _ => assert!(
+                        line["cg"].is_boolean() && line["source_ns"].is_u64(),
+                        "{line}"
+                    ),
+                }
+            }
+        }
+        assert!(!dir.join(format!("{stream}-0004.ts")).exists());
+    }
+    // The program shows the frames the input recorded, CG once the workers run.
+    let (_, input) = sidecar(&dir.join("input-0001.jsonl"));
+    let (_, program) = sidecar(&dir.join("program-0001.jsonl"));
+    assert!(program.iter().any(|line| line["cg"] == true));
+    let recorded: std::collections::HashSet<_> =
+        input.iter().map(|line| line["sequence"].clone()).collect();
+    assert!(
+        program
+            .iter()
+            .filter(|line| recorded.contains(&line["sequence"]))
+            .count()
+            > 20
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_rate_keeps_frames_on_its_cadence() {
+    let fixture = Fixture::new("recording-fps", 0);
+    with_setup(
+        &fixture,
+        Setup {
+            record: Some(Some(Rate::fps(10))),
+            ..Setup::default()
+        },
+        async |run| {
+            let core = run.core;
+            until(Duration::from_secs(10), || {
+                core.selector_counters().cg > 100
+            })
+            .await;
+        },
+    )
+    .await;
+    for stream in ["input", "program"] {
+        let base = fixture.path(&format!("recordings/{stream}-0001"));
+        let (header, frames) = sidecar(&base.with_extension("jsonl"));
+        assert_eq!(
+            (header["format"].as_str(), header["recorded_fps"].as_str()),
+            (Some("192x128p50"), Some("10"))
+        );
+        assert!(frames.len() > 10, "{stream}: {} frames", frames.len());
+        assert_eq!(pictures(&base.with_extension("ts")), frames.len());
+        let steps: Vec<u64> = frames
+            .windows(2)
+            .map(|pair| pair[1]["pts_ns"].as_u64().unwrap() - pair[0]["pts_ns"].as_u64().unwrap())
+            .collect();
+        assert!(
+            steps
+                .iter()
+                .all(|step| (90_000_000..=110_000_000).contains(step)),
+            "{stream}: one frame per 100 ms: {steps:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1279,6 +1504,8 @@ fn a_decklink_output_without_a_card_fails_clearly() {
             input_loss: InputLoss::Hold,
             audio: true,
             audio_channels: 2,
+            record_input: None,
+            record_program: None,
         })
         .err()
         .expect("no card")

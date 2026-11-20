@@ -38,6 +38,12 @@ class ConfigTests(unittest.TestCase):
             self.load('scene = "a"\nvideo = "b"\ntracking = "external"\ntracking_cli = "/opt/t"\n')
         with self.assertRaisesRegex(SystemExit, "tracking_worker_args need tracking_cli"):
             self.load('scene = "a"\nvideo = "b"\ntracking_worker_args = ["--x"]\n')
+        with self.assertRaisesRegex(SystemExit, "record_fps need record_dir"):
+            self.load('scene = "a"\nvideo = "b"\nrecord_fps = 10\n')
+        with self.assertRaisesRegex(SystemExit, "record_streams must be"):
+            self.load('scene = "a"\nvideo = "b"\nrecord_dir = "/r"\nrecord_streams = "output"\n')
+        with self.assertRaisesRegex(SystemExit, "record_fps must be"):
+            self.load('scene = "a"\nvideo = "b"\nrecord_dir = "/r"\nrecord_fps = 0\n')
         with self.assertRaisesRegex(SystemExit, "tracking_threads must be"):
             self.load('scene = "a"\nvideo = "b"\ntracking_threads = 0\n')
         with self.assertRaisesRegex(SystemExit, "tracking_centre must be"):
@@ -107,6 +113,12 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(render[render.index("--input-loss") + 1], "slate")
         self.assertEqual(render[render.index("--output-rate") + 1], "fixed:50")
         self.assertIn("--no-audio", render)
+        self.assertNotIn("--record", render)
+        recorded = stack.Config(scene="s.json", video="v.mp4", record_dir="/rec", record_fps="29.97")
+        render = next(c for c in stack.components(recorded) if c.name == "render").command
+        self.assertEqual(render[render.index("--record") + 1], "/rec")
+        self.assertEqual(render[render.index("--record-fps") + 1], "29.97")
+        self.assertNotIn("--record-streams", render, "both by default")
         self.assertNotIn("--tracking-lens", render, "auto and no CLI lens are chr-server's defaults")
         lens = stack.Config(scene="s.json", video="v.mp4", tracking_lens="pinhole", tracking_lens_k=[-0.05, 0, 0],
                             tracking_lens_centre=[960, 540], tracking_lens_scale=960,

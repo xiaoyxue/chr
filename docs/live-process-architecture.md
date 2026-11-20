@@ -89,7 +89,7 @@ worker runs ([tracked camera simulation](../server/docs/sdi-simulation.md)).
 | Path | Package | Contents |
 | --- | --- | --- |
 | `server/renderer/` | `chr-renderer` | GPU rendering library (unchanged) |
-| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli` and `chr-tracking-sim-cli`, and `chr-sdi-in`, the capture input of the GStreamer core (#154) |
+| `server/runtime/` | `chr-runtime` | Shared runtime library plus the `chr-server` executable, its workers `chr-renderer-cli`, `chr-tracking-sim-cli` and `chr-recorder-cli`, and `chr-sdi-in`, the capture input of the GStreamer core (#154) |
 | `server/viewer/` | `chr-app` | Native window and headless shell (unchanged) |
 | `common/` | `chr-common` | JSON-RPC messages and IPC transports (unchanged role) |
 | `common/shm/` | `chr-shm` | The shared-memory program tap; the only crate allowed to use `unsafe` |

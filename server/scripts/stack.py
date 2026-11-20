@@ -92,6 +92,13 @@ class Config:
     output_rate: str | None = None
     # Pass the clip's audio through with the same delay as its video.
     audio: bool = True
+    # Record the captured input and the program into a new folder <record_dir>/<UTC time>/
+    # (chr-server --record, the chr-recorder-cli worker); empty: no recording.
+    record_dir: str = ""
+    # What to record: "input", "program" or "input,program" [default: both].
+    record_streams: str | None = None
+    # Record at most this many frames per second (10, 25, "29.97"); default: every frame.
+    record_fps: int | str | None = None
     # Camera model of tracked frames: "auto" takes the tracking data's lens, else the
     # tracking_lens_* lens below, else none (pinhole); "pinhole" ignores every lens.
     tracking_lens: str = "auto"
@@ -165,6 +172,17 @@ def load_config(path: Path) -> Config:
         raise SystemExit(f"{path}: output_rate must be \"follow\" or \"fixed:<rate>\"")
     if not isinstance(values.get("audio", True), bool):
         raise SystemExit(f"{path}: audio must be true or false")
+    record_keys = [key for key in ("record_streams", "record_fps") if values.get(key) is not None]
+    if record_keys and not values.get("record_dir"):
+        raise SystemExit(f"{path}: {', '.join(record_keys)} need record_dir")
+    streams = values.get("record_streams")
+    if streams is not None and (not isinstance(streams, str) or not streams
+                                or not set(streams.replace(" ", "").split(",")) <= {"input", "program"}):
+        raise SystemExit(f"{path}: record_streams must be \"input\", \"program\" or \"input,program\"")
+    fps = values.get("record_fps")
+    if fps is not None and (isinstance(fps, bool) or not isinstance(fps, (int, str))
+                            or isinstance(fps, int) and fps < 1):
+        raise SystemExit(f"{path}: record_fps must be a positive rate such as 10, 25 or \"29.97\"")
     return Config(**values)
 
 
@@ -226,6 +244,12 @@ def components(config: Config) -> list[Component]:
         render += ["--output-rate", config.output_rate]
     if not config.audio:
         render += ["--no-audio"]
+    if config.record_dir:
+        render += ["--record", config.record_dir]
+        if config.record_streams is not None:
+            render += ["--record-streams", config.record_streams]
+        if config.record_fps is not None:
+            render += ["--record-fps", str(config.record_fps)]
     render += lens_args(config)
     if config.nixgl:
         render = NIXGL + render

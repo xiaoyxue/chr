@@ -49,6 +49,16 @@ tracking = "worker"
 # output_rate = "follow"
 # Pass the clip's audio through with the same delay as its video [default: true].
 # audio = true
+# Record the captured input (as chr-sdi-in delivered it) and the program (as it goes to
+# the output) into a new folder <record_dir>/<UTC time>/: H.264 MPEG-TS segments, one per
+# format, each with a JSONL sidecar of its frames (server/docs/gst-core.md#recording-202).
+# Recording never delays the output; it drops instead. Default: no recording.
+# record_dir = "/srv/chr/recording"
+# What to record: "input", "program" or "input,program" [default: both].
+# record_streams = "input,program"
+# Record at most this many frames per second, on a cadence of the frames' own times:
+# 10, 25 or a string such as "29.97" [default: every frame].
+# record_fps = 10
 # Camera model of tracked frames (server/docs/tracking-worker.md#lens): the lens the
 # tracking data carries, else the tracking_lens_* lens below, else none (pinhole).
 # "pinhole" ignores every lens; a description's or manifest's lens is never applied.

@@ -9,6 +9,7 @@
 //!   tee. ! queue leaky ! deinterlace (first field) ! appsink (CG)
 //!   tee. ! queue leaky ! [deinterlace, fixed rate] ! videoconvertscale
 //!        ! video/x-raw,format=UYVY,<output extent> ! appsink (clean)
+//!   tee. ! queue leaky ! appsink (recording, with --record)
 //! ```
 //!
 //! The capture's caps carry its format: any extent and rate, progressive or
@@ -398,6 +399,9 @@ impl Capture {
         }
         clean_branch.extend([&convert, &clean_caps, clean.upcast_ref()]);
         gst::Element::link_many(clean_branch)?;
+        if let Some(record) = &config.record_input {
+            record.branch(&bin, &tee)?;
+        }
 
         let failed = Arc::new(AtomicBool::new(false));
         let ended = |failed: &Arc<AtomicBool>| {

@@ -43,6 +43,8 @@ audio: ffmpeg | rawaudioparse,        │    (caps: the input's rate and scan, �
   ! S32LE 48 kHz ! clocksync ! [stamp]│    audio-<n>: unixfdsrc ! appsink ─► [capture + D] ─► appsrc ! audioconvert
   ! queue leaky ! unixfdsink ─unixfd──┘                                       ! appsink sync | decklinkaudiosink
   (<socket>.audio)                         hop-<n>: appsrc ! unixfdsink / unixfdsrc ! appsink, per worker session
+                                           with --record: a leaky branch on the capture tee and on the
+                                           program tee to chr-recorder-cli ([Recording](#recording-202))
 ```
 
 ## Elements and the Nix shells
@@ -993,6 +995,70 @@ slots, all CG, no repeat, fill or skipped frame, interval mean 40.0000 ms (sd
 MiB (78 MiB at the end, 45 descriptors), chr-sdi-in 29 % plus FFmpeg's two
 decoders.
 
+## Recording (#202)
+
+`chr-server --record <dir>` records what the core gets from `chr-sdi-in` (a
+file, the test pattern or a DeckLink card) and what it sends to the output,
+with a third supervised worker, `chr-recorder-cli`. Without `--record` nothing
+of it is built or started.
+
+```text
+capture-<n>: ... ! [number] ! tee ─ queue leaky ! appsink ─► tap "input"   ─┐ appsrc ! unixfdsink,
+program: ... ! livesync ! tee ─── queue leaky ! appsink ─► tap "program" ─┤ own pipeline, socket
+                                                                            │ $XDG_RUNTIME_DIR/chr/recording-<pid>/
+chr-recorder-cli ◄────────────────────────────── unixfd (memfd) ───────────┘
+  per stream: unixfdsrc ─► segment: appsrc ! videoconvert ! I420 ! openh264enc ! h264parse
+                                    ! mpegtsmux ! filesink    <dir>/<UTC time>/<stream>-NNNN.ts
+                         └► sidecar <stream>-NNNN.jsonl
+```
+
+- **Input** is every numbered captured frame before the CG and clean
+  branches: extent, rate and scan as captured, the capture process's memfd
+  (no copy). **Program** is every slot after `livesync`, beside the output
+  sink and the program tap: CG, clean feed, input-loss fills and repeats.
+  Program frames not already in a memfd (clean feed, fills) are copied once
+  into one; rendered frames go as they are.
+- **Never in the way.** Each tap is a standalone `appsrc ! unixfdsink`
+  pipeline on its own socket for the whole run, fed from a leaky queue: it
+  sends nothing while no recorder is connected and drops when its queue (4
+  frames) is full. The recorder keeps at most 4 frames it has not taken yet
+  (dropping older ones, uncounted) and drops when its encoder's queue (8
+  frames) is full. Both count their drops: the core's log line (`recording input: N
+  frames sent, M dropped`) and the recorder's segment log. Its errors stay in
+  its own pipeline.
+- **Supervised** like the other workers: started after the taps listen,
+  started again a second after it exits (a new segment follows), and stopped
+  by ending both taps' streams after the core stops, so that it drains its
+  encoders (it is killed after 5 s). It runs in a process group of its own,
+  so Ctrl-C, `stack.py stop` or a service manager's signal to chr-server's
+  group does not end it before chr-server's last frames; it also exits once
+  chr-server is no longer its parent (`--server-pid`).
+- **Segments.** Every segment has one format: new caps (a new input format,
+  the program following it), a lost stream and a restarted worker each start
+  the next number. MPEG-TS needs no index at its end, so a killed worker's
+  files play up to its last encoded frame. Timestamps start at 0 in every
+  segment.
+- **Sidecar.** The first line describes the segment (`stream`, `segment`,
+  `format` as captured, `recorded_fps`, `caps`, `started_unix_ms`). Each
+  further line is one frame of the video, in order: `pts_ns` (in the segment),
+  `sequence` (the program sequence, the same number on both streams), and on
+  the input `stream_id`, `frame_id`, `source_ns` and `timecode`, on the
+  program `cg`, `fill`, `source_ns` and `timecode`.
+- **Rate.** `--record-fps <rate>` records at most that many frames per
+  second: each segment keeps the first frame at or after every due time of an
+  N fps cadence of the frames' own timestamps (within half the shorter period),
+  starting again after a gap, and tells the encoder N. An input at or below N
+  keeps every frame.
+- **Encoder.** openh264 from gst-plugins-bad (the root shell has no x264 and
+  no MKV/MP4 muxers), 40 Mbit/s, 8 slices: about 100 fps of 1080p test pattern
+  and 39 fps of 1080p noise, its worst case, on the development host.
+  Interlaced frames are encoded woven, as one progressive picture.
+
+Flags: `--record <dir>`, `--record-streams input|program|input,program`
+(default both), `--record-fps <rate>` (default every frame), `--recorder-cli
+<path>` (default next to chr-server); a tracked program only. `stack.toml`:
+`record_dir`, `record_streams`, `record_fps`.
+
 ## Limitations
 
 - Frames of the core are not render submissions: `render.get` does not see
@@ -1004,7 +1070,8 @@ decoders.
   lip sync of embedded audio are built and tested without a card only.
 - An interlaced program's CG slots show one picture per frame (the first
   field's, both fields from it); its clean slots keep both fields.
-- Audio is not in chr-monitor's SRT/WebRTC streams (the tap is video only).
+- Audio is not in chr-monitor's SRT/WebRTC streams (the tap is video only),
+  nor in the recordings.
 - Timecode restarts with each new stream (a format change, a restarted input);
   files' A/53 captions do not pass FFmpeg's raw pipe.
 - The decision margin is a fixed 4 ms; the clean conversion costs CPU

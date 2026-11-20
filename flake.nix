@@ -176,7 +176,7 @@
                   } \
                     --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
-                for program in chr-tracking-sim-cli chr-sdi-in; do
+                for program in chr-tracking-sim-cli chr-sdi-in chr-recorder-cli; do
                   wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${deckLinkApi}/lib \
                     --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done

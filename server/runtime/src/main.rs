@@ -135,6 +135,16 @@ Options:
   --device <n>            The DeckLink output device (--output decklink) [default: 0]
   --audio-channels <n>    Audio channels of the DeckLink output: 2, 8 or 16 [default: 2]
   --no-audio              Do not pass the input's audio through (tracked program)
+  --record <dir>          Record the captured input (as chr-sdi-in delivered it) and the
+                          program (as it goes to the output) into a new folder
+                          <dir>/<UTC time>/ with the supervised chr-recorder-cli worker:
+                          H.264 MPEG-TS segments with a JSONL sidecar of their frames, a
+                          new segment for each format; never delays the output, drops
+                          instead (tracked program)
+  --record-streams <input|program|input,program> What --record records [default: both]
+  --record-fps <rate>     Record at most this many frames per second, on a cadence of the
+                          frames' own times (10, 25, 29.97, ...) [default: every frame]
+  --recorder-cli <path>   chr-recorder-cli executable [default: next to chr-server]
   --pitch-demo <json>     Opt in to owner-local pitch-demo-v1 manifest
   --pitch-controls <json> Write local harness metadata (requires --pitch-demo; owner-only)
   --monitor-tap <path>    Shared-memory program tap for chr-monitor; \"none\" disables it
@@ -186,6 +196,10 @@ struct Args {
     output_decklink: bool,
     no_audio: bool,
     audio_channels: Option<u32>,
+    record: Option<PathBuf>,
+    record_streams: Option<Vec<chr_runtime::worker::recording::Stream>>,
+    record_fps: Option<Rate>,
+    recorder_cli: Option<PathBuf>,
 }
 
 /// Reads `N` finite numbers that follow `flag`.
@@ -238,6 +252,10 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         output_decklink: false,
         no_audio: false,
         audio_channels: None,
+        record: None,
+        record_streams: None,
+        record_fps: None,
+        recorder_cli: None,
     };
     let mut lens_given = false;
     let (mut lens_k, mut lens_centre, mut lens_scale, mut lens_support) = (None, None, None, None);
@@ -339,6 +357,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
                 }
                 args.audio_channels = Some(channels);
             }
+            "--record" => args.record = Some(value()?.into()),
+            "--record-streams" => {
+                args.record_streams =
+                    Some(chr_runtime::worker::recording::parse_streams(&value()?)?)
+            }
+            "--record-fps" => args.record_fps = Some(value()?.parse()?),
+            "--recorder-cli" => args.recorder_cli = Some(value()?.into()),
             "--pitch-demo" => args.pitch_demo = Some(value()?.into()),
             "--pitch-controls" => args.pitch_controls = Some(value()?.into()),
             "--renderer-cli" => args.renderer_cli = Some(value()?.into()),
@@ -453,6 +478,18 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         return Err(
             "--capture-socket, --program-delay-ms, --output-rate, --input-loss, --output, \
              --device, --audio-channels and --no-audio require --tracked-scene or --description"
+                .into(),
+        );
+    }
+    if (args.record_streams.is_some() || args.record_fps.is_some() || args.recorder_cli.is_some())
+        && args.record.is_none()
+    {
+        return Err("--record-streams, --record-fps and --recorder-cli require --record".into());
+    }
+    if args.record.is_some() && !tracked {
+        return Err(
+            "--record records a tracked program's input and output: it requires \
+             --tracked-scene or --description"
                 .into(),
         );
     }
@@ -842,6 +879,33 @@ fn run_core(args: Args) -> Result<()> {
     };
     let (sdi_stats, recorder) =
         chr_runtime::sdi::SdiStats::recorded(chr_runtime::sdi::Format { mode: output, scan });
+    let recording = match &args.record {
+        Some(root) => {
+            use chr_runtime::worker::recording::{Recording, RecordingConfig, Stream, session_dir};
+            Some(Recording::start(RecordingConfig {
+                executable: match &args.recorder_cli {
+                    Some(path) => path.clone(),
+                    None => std::env::current_exe()?.with_file_name(format!(
+                        "chr-recorder-cli{}",
+                        std::env::consts::EXE_SUFFIX
+                    )),
+                },
+                dir: session_dir(root),
+                socket_dir: private_dir("recording"),
+                streams: args
+                    .record_streams
+                    .clone()
+                    .unwrap_or_else(|| Stream::ALL.to_vec()),
+                fps: args.record_fps,
+            })?)
+        }
+        None => None,
+    };
+    let record_tap = |stream| {
+        recording
+            .as_ref()
+            .and_then(|recording| recording.tap(stream))
+    };
     let (core, frames) = Core::start(CoreConfig {
         capture: VideoMode {
             width: native.width,
@@ -861,6 +925,8 @@ fn run_core(args: Args) -> Result<()> {
         input_loss: args.input_loss.clone().unwrap_or_default(),
         audio: !args.no_audio,
         audio_channels: args.audio_channels.unwrap_or(2),
+        record_input: record_tap(chr_runtime::worker::recording::Stream::Input),
+        record_program: record_tap(chr_runtime::worker::recording::Stream::Program),
     })?;
     if let Some(path) = &args.monitor_tap {
         log::info!("program tap for chr-monitor at {}", path.display());
@@ -1045,6 +1111,8 @@ fn run_core(args: Args) -> Result<()> {
     });
     runtime.shutdown_timeout(Duration::from_secs(2));
     drop(core);
+    // After the core: the worker records the last frames, then the streams end.
+    drop(recording);
     served
 }
 
@@ -1064,7 +1132,7 @@ async fn shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-/// Removes the worker and tracking socket directories of chr-servers that are gone:
+/// Removes the worker, tracking and recording socket directories of chr-servers that are gone:
 /// a server that was killed (SIGKILL, a crash) cannot remove its own, and they
 /// live in memory-backed `$XDG_RUNTIME_DIR`.
 fn remove_stale_private_dirs() {
@@ -1079,7 +1147,8 @@ fn remove_stale_private_dirs() {
     }
 }
 
-/// `<root>/worker-<pid>` and `<root>/tracking-<pid>` directories whose server is not running.
+/// `<root>/worker-<pid>`, `<root>/tracking-<pid>` and `<root>/recording-<pid>`
+/// directories whose server is not running.
 fn stale_private_dirs(root: &std::path::Path, running: impl Fn(u32) -> bool) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -1090,8 +1159,10 @@ fn stale_private_dirs(root: &std::path::Path, running: impl Fn(u32) -> bool) -> 
             let name = entry.file_name().into_string().ok()?;
             let (kind, pid) = name.split_once('-')?;
             let pid = pid.parse().ok()?;
-            (matches!(kind, "worker" | "tracking") && entry.path().is_dir() && !running(pid))
-                .then(|| entry.path())
+            (matches!(kind, "worker" | "tracking" | "recording")
+                && entry.path().is_dir()
+                && !running(pid))
+            .then(|| entry.path())
         })
         .collect();
     stale.sort();
@@ -1178,6 +1249,7 @@ mod tests {
         for dir in [
             "worker-1",
             "tracking-1",
+            "recording-1",
             "worker-2",
             "tracking-x",
             "other-3",
@@ -1187,10 +1259,37 @@ mod tests {
         std::fs::write(root.join("worker-4"), b"").unwrap();
         assert_eq!(
             stale_private_dirs(&root, |pid| pid == 2),
-            [root.join("tracking-1"), root.join("worker-1")]
+            [
+                root.join("recording-1"),
+                root.join("tracking-1"),
+                root.join("worker-1")
+            ]
         );
         assert!(stale_private_dirs(&root.join("missing"), |_| false).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn recording_needs_a_tracked_program_and_names_its_streams() {
+        use chr_runtime::worker::recording::Stream;
+        let tracked = ["--description", "/d.json", "--record", "/rec"];
+        let args = parse(&tracked).unwrap().unwrap();
+        assert_eq!(args.record, Some(PathBuf::from("/rec")));
+        assert_eq!(args.record_streams, None, "both, by default");
+        let args = parse(&[&tracked[..], &["--record-streams", "program"]].concat())
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.record_streams, Some(vec![Stream::Program]));
+        assert!(parse(&[&tracked[..], &["--record-streams", "output"]].concat()).is_err());
+        assert!(parse(&["--record", "/rec"]).is_err(), "a generated program");
+        assert!(parse(&["--description", "/d.json", "--record-streams", "input"]).is_err());
+        assert!(parse(&["--description", "/d.json", "--recorder-cli", "/r"]).is_err());
+        let args = parse(&[&tracked[..], &["--record-fps", "10"]].concat())
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.record_fps, Some(Rate::fps(10)));
+        assert!(parse(&[&tracked[..], &["--record-fps", "0"]].concat()).is_err());
+        assert!(parse(&["--description", "/d.json", "--record-fps", "10"]).is_err());
     }
 
     #[test]

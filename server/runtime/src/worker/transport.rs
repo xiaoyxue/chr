@@ -432,15 +432,28 @@ impl Receiver {
 
     /// [`Self::connect`] with the elements in `host`.
     pub fn connect_in(path: &Path, host: &Host) -> Result<Self, Error> {
+        Self::open(path, host, None)
+    }
+
+    /// [`Self::connect`] holding at most `buffers` unread buffers: an older one
+    /// is dropped, and with it the sender's memory, for a receiver that may
+    /// fall behind a live stream.
+    pub fn connect_dropping(path: &Path, buffers: u32) -> Result<Self, Error> {
+        Self::open(path, &Host::Standalone, Some(buffers))
+    }
+
+    fn open(path: &Path, host: &Host, bound: Option<u32>) -> Result<Self, Error> {
         check()?;
         let source = gst::ElementFactory::make("unixfdsrc")
             .property("socket-path", path_str(path)?)
             .build()?;
-        // Unbounded: the server's credits bound what a worker receives, and its
-        // requests bound the replies.
+        // Unbounded unless asked: the server's credits bound what a worker
+        // receives, and its requests bound the replies.
         let sink = AppSink::builder()
             .sync(false)
             .enable_last_sample(false)
+            .max_buffers(bound.unwrap_or(0))
+            .drop(bound.is_some())
             .build();
         let hosted = Hosted::new(host);
         if hosted.is_bin() {

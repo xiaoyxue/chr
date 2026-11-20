@@ -25,7 +25,8 @@ For the processes and their channels see the diagrams in the root
 | `<checkout>/asset/ibl/` (`ibl_dir`) | OpenEXR panoramas the studio's 场景灯光 (in 广告位预览) offers for image-based lighting | The `asset` submodule (`git submodule update --init asset` inside `nix develop`); with `asset_root` set, the stack lets chr-server read it too. |
 | `<asset-root>/studio` (`studio_data_dir`) | The studio store (layout below) | Inside the asset root, so uploaded files can be sent to the renderer. Back it up; do not edit it by hand while the studio runs. |
 | `dir` in `stack.toml` (default `$XDG_RUNTIME_DIR/chr-stack`) | chr-server's control socket `render.sock`, chr-sdi-in's capture sockets `capture.sock` and `capture.sock.audio` (frames and audio as memfds) and the program tap | Kept between runs; a RAM-backed runtime directory is fine. |
-| `$XDG_RUNTIME_DIR/chr/` | chr-server's worker sockets (`worker-<pid>/` and `tracking-<pid>/`, two GStreamer unixfd sockets each) and its verified copies of loaded assets | Managed by chr-server and removed on shutdown; a later chr-server removes those of a killed one. |
+| `$XDG_RUNTIME_DIR/chr/` | chr-server's worker sockets (`worker-<pid>/` and `tracking-<pid>/`, two GStreamer unixfd sockets each; `recording-<pid>/` with one per recorded stream) and its verified copies of loaded assets | Managed by chr-server and removed on shutdown; a later chr-server removes those of a killed one. |
+| `record_dir` in `stack.toml` (chr-server `--record`) | Recordings: a folder `<UTC time>/` per run with `input-NNNN.ts`/`.jsonl` and `program-NNNN.ts`/`.jsonl` ([Recording](#recording)) | Outside the repository, on a disk with room: 1080p at 40 Mbit/s is about 18 GB per stream and hour. Nothing removes old runs. |
 
 ### Studio store
 
@@ -268,6 +269,30 @@ before its deadline each frame's CG arrived; near 0 means D is too short), the
 render budget at submit and the capture-to-output delay, input-loss and
 format-change slots. It reports a `PROBLEM` when fewer than half the slots of
 the last 10 s had CG.
+
+### Recording
+
+`record_dir` records every run into a new folder `<record_dir>/<UTC time>/`
+with chr-server's recording worker, `chr-recorder-cli`
+([Recording](../server/docs/gst-core.md#recording-202)): the **input** as
+`chr-sdi-in` delivered it (the clip or the card, before any CG) and the
+**program** as it goes to the output. Without `record_dir` nothing is recorded
+and the worker does not run.
+
+- `record_streams`: `"input"`, `"program"` or `"input,program"` (default).
+- `record_fps`: at most this many frames per second, such as `10` or
+  `"29.97"`; default every frame.
+
+Each format (and each restart of the worker) starts a new segment: an H.264
+MPEG-TS file that any player opens, and a `.jsonl` sidecar whose first line
+describes it and whose further lines are its frames, in order (`sequence` is
+the same frame on both streams; the program's lines say `cg` or clean). Recording
+never delays the output: a slow disk or encoder drops recorded frames, which
+chr-server's log line (`recording input: N frames sent, M dropped`) and the
+worker's segment log count. Recordings have no audio.
+
+By hand, the same is chr-server's `--record <dir>`, `--record-streams` and
+`--record-fps`.
 
 ### Run with vchao tracking
 

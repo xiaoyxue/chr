@@ -11,7 +11,8 @@
 //!   └─ clean branch: videoconvertscale ! UYVY ! appsink ─────────────┤
 //!                                                    selector (per slot, deadline)
 //! program: appsrc ! livesync ! tee ─┬─ queue ! appsink sync=true | decklinkvideosink (OUTPUT)
-//!                                   └─ queue leaky ! appsink        (program tap)
+//!                                   ├─ queue leaky ! appsink        (program tap)
+//!                                   └─ queue leaky ! appsink        (recording, with --record)
 //! audio bin: unixfdsrc ! appsink ─► [+D] ─► appsrc ! audioconvert ! appsink | decklinkaudiosink
 //! hop bins: appsrc ! unixfdsink / unixfdsrc ! appsink per worker session
 //! ```
@@ -40,6 +41,9 @@
 //! - **Input loss** fills the program's slots on its cadence ([`InputLoss`]).
 //! - **Audio, timecode and captions** leave with their frame's delay D
 //!   ([`audio`], [`ancillary`]).
+//! - **Recording** (`--record`): leaky branches of the capture's and the
+//!   program's `tee` hand their frames to the recording worker's taps
+//!   ([`crate::worker::recording`]); they are only built when recording.
 //!
 //! `fallbackswitch` is not used: it switches streams after a timeout, so a
 //! single late CG frame costs output slots and never shows that slot's clean
@@ -69,7 +73,10 @@ use gstreamer_app::{AppSink, AppSrc};
 
 use crate::{
     sdi::{Format, Scan, SdiRecorder, VideoMode},
-    worker::transport::{self, Host},
+    worker::{
+        recording::Tap,
+        transport::{self, Host},
+    },
 };
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -230,6 +237,10 @@ pub struct CoreConfig {
     /// Audio channels of a DeckLink output (2, 8 or 16), whatever the input
     /// sends.
     pub audio_channels: u32,
+    /// Where every captured frame is recorded, after numbering.
+    pub record_input: Option<Arc<Tap>>,
+    /// Where every program slot is recorded, before the output.
+    pub record_program: Option<Arc<Tap>>,
 }
 
 /// The running pipeline: program output, selector and capture.
@@ -365,6 +376,9 @@ impl Core {
         gst::Element::link_many([program.upcast_ref(), &livesync, &tee])?;
         gst::Element::link_many([&tee, &output_queue, &output_sink])?;
         gst::Element::link_many([&tee, &tap_queue, tap_sink.upcast_ref()])?;
+        if let Some(record) = &config.record_program {
+            record.branch(pipeline.upcast_ref(), &tee)?;
+        }
         let tap = match &config.tap {
             Some(path) => Some(chr_shm::Writer::create(
                 path,
@@ -589,9 +603,21 @@ impl Core {
             || "audio: off".to_owned(),
             |audio| audio.report(video_delay),
         );
+        let recording = [
+            ("input", &self.config.record_input),
+            ("program", &self.config.record_program),
+        ]
+        .into_iter()
+        .filter_map(|(name, tap)| {
+            Some(format!(
+                "; recording {name}: {}",
+                tap.as_ref()?.counters().report()
+            ))
+        })
+        .collect::<String>();
         Report {
             text: format!(
-                "{output}; per-slot slack of CG slots {}; {audio}; {}",
+                "{output}; per-slot slack of CG slots {}; {audio}; {}{recording}",
                 slack.ms(),
                 self.selector.counters().report()
             ),

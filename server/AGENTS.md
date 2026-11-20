@@ -17,9 +17,9 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   (`chr-tracker`) is chr's tracking logic: the VchaoFrame contract and its
   validation (`protocol`), pose to camera (`pose`), camera-model selection
   (`lens`), the frame/camera join (`join`) and the replay stand-in's logic
-  (`replay`); `runtime/` (`chr-runtime`) builds the `chr-server` render server, its two workers (the
-  headless `chr-renderer-cli` and the `chr-tracking-sim-cli` tracking replay
-  stand-in) and `chr-sdi-in`, the capture input process of its GStreamer core;
+  (`replay`); `runtime/` (`chr-runtime`) builds the `chr-server` render server, its workers (the
+  headless `chr-renderer-cli`, the `chr-tracking-sim-cli` tracking replay
+  stand-in and the optional `chr-recorder-cli` recording worker) and `chr-sdi-in`, the capture input process of its GStreamer core;
   `viewer/` (`chr-app`) is the
   native window and headless shell. Further server crates sit
   beside them as `server/<name>/`, as members of the root Cargo workspace.
@@ -43,7 +43,10 @@ process. Repository-wide rules are in the root `AGENTS.md`.
   device, while `chr-server` holds none, and owns the GStreamer unixfd transport
   both workers use (`transport.rs`); `src/worker/tracking/` holds the
   tracking worker's supervisor and the VchaoFrame GStreamer buffer and caps
-  glue (`wire.rs`), with the contract itself in `chr-tracker`. `src/gst_core/`
+  glue (`wire.rs`), with the contract itself in `chr-tracker`;
+  `src/worker/recording/` holds the recording worker (#202, `chr-server --record`):
+  the core's taps (`tap.rs`), its supervisor and the worker's segment writer
+  (`writer.rs`). `src/gst_core/`
   is the GStreamer core (#154, `docs/gst-core.md`), the only live path of a
   tracked program (`--tracked-scene`, `--description`): one pipeline from
   `chr-sdi-in`'s frames to the output and the program tap, with the per-slot
