@@ -27,7 +27,7 @@ def png(width, height):
     return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height) + bytes(5)
 
 
-def package(model, image, pose=None):
+def package(model, image, pose=None, opacity=None):
     contents = {f"assets/{GLB_ID}.glb": model, f"assets/{PNG_ID}.png": image}
     placement = {"coordinateSpace": "pitch", "x": 1, "y": 2, "width": 10, "height": 4}
     match = {
@@ -38,7 +38,7 @@ def package(model, image, pose=None):
             {"id": "AD-3D", "type": "3D", "placements": [{**placement, "id": "PLC-model", "assetIds": [GLB_ID],
              "modelPose": pose or {"x": 0, "y": 0, "scale": 0.5, "yaw": 90}}]},
             {"id": "AD-2D", "type": "2D", "placements": [{**placement, "id": "PLC-image", "assetIds": [PNG_ID],
-             "assetRotation": 90}]},
+             "assetRotation": 90, **({} if opacity is None else {"assetOpacity": opacity})}]},
         ],
         "assets": [{"id": asset, "contentType": kind, "contentPath": entry, "byteLength": len(contents[entry])}
                    for asset, kind, entry in ((GLB_ID, "model/gltf-binary", f"assets/{GLB_ID}.glb"),
@@ -55,10 +55,10 @@ def package(model, image, pose=None):
 
 
 class DescribeSceneTests(unittest.TestCase):
-    def describe(self, model, pose=None, **options):
+    def describe(self, model, pose=None, opacity=None, **options):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "match.zip"
-            path.write_bytes(package(model, png(200, 100), pose))
+            path.write_bytes(package(model, png(200, 100), pose, opacity))
             return fusion_description.describe_scene(path, "/srv/match.zip", **options)
 
     def test_glb_bounds_follow_node_transforms_like_three(self):
@@ -83,6 +83,17 @@ class DescribeSceneTests(unittest.TestCase):
         self.assertAlmostEqual(quad[1][0], 4)
         self.assertAlmostEqual(quad[0][1], -2)
         self.assertTrue(math.isclose(quad[0][0], 0, abs_tol=1e-12))
+
+    def test_image_opacity_is_sent_as_it_is_and_invalid_values_are_refused(self):
+        model = glb([{"mesh": 0}], {"componentType": 5126, "min": [-1, 0, -1], "max": [1, 1, 1]})
+        scene = self.describe(model)
+        self.assertNotIn("opacity", scene["instances"][0])
+        self.assertEqual(scene["instances"][1]["opacity"], 1)
+        for opacity in (0, 0.35, 1):
+            self.assertEqual(self.describe(model, opacity=opacity)["instances"][1]["opacity"], opacity)
+        for opacity in (35, -0.1, "0.35", True):
+            with self.assertRaisesRegex(fusion_description.ConversionError, "PLC-image: assetOpacity"):
+                self.describe(model, opacity=opacity)
 
     def test_move_and_hide_apply_to_named_placements(self):
         model = glb([{"mesh": 0}], {"componentType": 5126, "min": [-1, 0, -1], "max": [1, 1, 1]})

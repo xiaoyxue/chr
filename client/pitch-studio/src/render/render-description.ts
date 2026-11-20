@@ -8,7 +8,7 @@ import { fitFusionModel } from '../placements/fusion-creatives.ts';
 import { flagModel } from '../placements/flag.ts';
 import { wireMotion, type WireMotion } from '../placements/model-motion.ts';
 import { adRoot, modelFit } from '../placements/local-ad-transform.ts';
-import type { LocalAd } from '../placements/local-ad.ts';
+import { imageOpacity, type LocalAd } from '../placements/local-ad.ts';
 import type { FieldDimensions, GroundPlacement, ModelPlacement, Placement } from '../shared/types.ts';
 import type { WireLighting } from '../lighting/lighting.ts';
 
@@ -44,7 +44,8 @@ export interface FlagParameters {
 export interface DescriptionScene {
   ground: { pitch_m: [number, number] };
   assets: { id: string; kind: DescribedAsset['kind'] | 'flag' | 'environment'; source: { package: string; entry: string } | { path: string }; sha256: string; blend_as?: 'mask' }[];
-  instances: { id: string; asset: string; model: Rows; visible: boolean; flag?: FlagParameters; motion?: WireMotion }[];
+  /** `opacity`: an image quad's, 0 to 1, multiplying its image's alpha. */
+  instances: { id: string; asset: string; model: Rows; visible: boolean; flag?: FlagParameters; motion?: WireMotion; opacity?: number }[];
   /** Absent: chr-server's default rig. */
   lighting?: WireLighting;
 }
@@ -146,16 +147,19 @@ export function describeScene(options: {
     const geometry = options.geometry.get(slot.id);
     const asset = slot.asset && options.assets.get(slot.asset.id);
     if (!slot.asset || !geometry || !asset) continue;
-    let model: Rows, motion: WireMotion | undefined;
+    let model: Rows, motion: WireMotion | undefined, opacity: number | undefined;
     if (slot.type === '3D' && geometry.kind === 'glb' && asset.kind === 'glb') {
       model = glbModel(slot, geometry.bounds);
       motion = glbMotion(slot, geometry.bounds);
-    } else if (slot.type === '2D' && geometry.kind === 'image' && asset.kind === 'image_quad') model = quadModel(slot, geometry);
-    else throw new Error(`Placement ${slot.id} does not match its material.`);
+    } else if (slot.type === '2D' && geometry.kind === 'image' && asset.kind === 'image_quad') {
+      model = quadModel(slot, geometry);
+      opacity = slot.assetOpacity;
+    } else throw new Error(`Placement ${slot.id} does not match its material.`);
     if (!scene.assets.some((listed) => listed.id === slot.asset!.id))
       scene.assets.push({ id: slot.asset.id, kind: asset.kind, source: { package: options.packagePath, entry: asset.entry },
         sha256: asset.sha256, ...(asset.blendAs ? { blend_as: asset.blendAs } : {}) });
-    scene.instances.push({ id: slot.id, asset: slot.asset.id, model, visible: !options.hidden.has(slot.id), ...(motion ? { motion } : {}) });
+    scene.instances.push({ id: slot.id, asset: slot.asset.id, model, visible: !options.hidden.has(slot.id),
+      ...(motion ? { motion } : {}), ...(opacity === undefined ? {} : { opacity }) });
   }
   for (const { ad, sha256, bounds, blendAs } of options.locals ?? []) {
     const asset = localAssetId(ad, sha256);
@@ -165,8 +169,10 @@ export function describeScene(options: {
       const { width, height } = ad.plane, { amplitude, frequency, speed, material } = ad.flag;
       scene.instances.push({ id: `flag-${ad.id}`, asset, model: flagModel(ad.plane, ad.offset), visible: ad.visible,
         flag: { width_m: width, height_m: height, amplitude_m: amplitude, frequency, speed, material } });
+    } else if (ad.type === '2D') {
+      scene.instances.push({ id: `local-${ad.id}`, asset, model: localQuadModel(ad), visible: ad.visible, opacity: imageOpacity(ad) });
     } else {
-      scene.instances.push({ id: `local-${ad.id}`, asset, model: ad.type === '2D' ? localQuadModel(ad) : localGlbModel(ad, bounds), visible: ad.visible });
+      scene.instances.push({ id: `local-${ad.id}`, asset, model: localGlbModel(ad, bounds), visible: ad.visible });
     }
   }
   if (options.lighting) {

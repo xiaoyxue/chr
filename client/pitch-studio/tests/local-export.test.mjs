@@ -10,7 +10,7 @@ const { exportLocalPlacements, importedAlignment, mergeLocalPlacements, parseLoc
 const cloudA = 'a'.repeat(64), cloudB = 'b'.repeat(64);
 const plane = { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], width: 2, height: 1 };
 const base = { normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true, plane };
-const pitch = { ...base, id: 'p1', name: '球场 2D', type: '2D', space: 'pitch', materialPath: '/srv/files/logo.png', materialName: 'logo.png' };
+const pitch = { ...base, id: 'p1', name: '球场 2D', type: '2D', space: 'pitch', materialPath: '/srv/files/logo.png', materialName: 'logo.png', opacity: 0.35 };
 const flag = { ...base, id: 'f1', name: '旗帜', type: 'flag', space: 'cloud', cloudId: cloudA, offset: -0.5, materialPath: '/srv/files/flag.png',
   flag: { amplitude: 0.5, frequency: 2, speed: 1.5, material: 'pbr' } };
 const model = { ...base, id: 'm1', name: '模型', type: '3D', space: 'cloud', cloudId: cloudB, scale: 1.2, yaw: 30 };
@@ -28,6 +28,8 @@ test('an export round-trips through JSON with its clouds, without loaded files o
 
 test("the store's own local-ads.json imports too; anything else is refused", () => {
   assert.deepEqual(parseLocalPlacements({ revision: 3, data: [pitch] }).placements, [pitch]);
+  // Opacity belongs to 2D images, from 0 to 1.
+  for (const ad of [{ ...pitch, opacity: 1.5 }, { ...pitch, opacity: '0.5' }, { ...model, opacity: 0.5 }]) assert.throws(() => parseLocalPlacements([ad]));
   assert.deepEqual(parseLocalPlacements([flag]).placements, [flag]);
   const file = exportLocalPlacements('M1', [pitch], {});
   for (const bad of [{ version: 1, records: [] }, { ...file, format: 'other' }, { ...file, assets: {} },

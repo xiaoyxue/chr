@@ -126,8 +126,9 @@ pub enum AssetKind {
     /// A static binary glTF, in its own Y-up basis; the importer turns it to -Z up.
     Glb,
     /// A PNG/JPEG image on the unit quad `[-0.5, 0.5]^2` at Z = 0: the image's top
-    /// edge at -Y, its left edge at -X, facing up (-Z). Unlit; texels with
-    /// alpha below 0.5 are cut out. Scale, rotation and position are the instance's.
+    /// edge at -Y, its left edge at -X, facing up (-Z). An unlit ground decal blended
+    /// by the image's alpha times the instance's `opacity`. Scale, rotation and
+    /// position are the instance's.
     ImageQuad,
     /// A PNG/JPEG image as the artwork of a waving flag. Its instances carry the
     /// flag's size and motion (`Instance::flag`); the image's top-left texel is at
@@ -182,6 +183,10 @@ pub struct Instance {
     /// Rigid animation of the whole instance about its `model` (#157).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion: Option<Motion>,
+    /// Opacity of an `image_quad` instance in `[0, 1]`: its alpha is the image's
+    /// alpha times this. Absent: 0.5 (#163). Rejected for other assets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
 }
 
 fn visible() -> bool {

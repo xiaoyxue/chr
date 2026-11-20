@@ -4,7 +4,7 @@ import { simplifyForPreview } from './preview-simplify.ts';
 import { flagWave } from './flag.ts';
 import { adRoot, modelFit } from './local-ad-transform.ts';
 import type { GlbBounds } from '../render/render-description.ts';
-import type { AdPlane, LocalAd, Vector3Tuple } from './local-ad.ts';
+import { imageOpacity, type AdPlane, type LocalAd, type Vector3Tuple } from './local-ad.ts';
 
 export function planeFromPoints(points: Vector3Tuple[]): AdPlane {
   if (points.length !== 3) throw new Error('请选择三个点确定广告平面。');
@@ -188,7 +188,9 @@ export class LocalAdScene {
           flag.position.set(-plane.width / 2, -plane.height / 2, -0.015 * ad.normalSign);
         }
       } else if (ad.type === '2D') {
-        entry.root.children[0]?.scale.set(plane.width, plane.height, 1);
+        const image = entry.root.children[0] as THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> | undefined;
+        image?.scale.set(plane.width, plane.height, 1);
+        if (image?.material.map) image.material.opacity = imageOpacity(ad);
       } else {
         const content = entry.root.children[0];
         if (content) {

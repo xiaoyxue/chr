@@ -163,7 +163,9 @@ export class FusionCreatives {
           const rotated = slot.assetRotation === 90 || slot.assetRotation === 270;
           const scale = Math.min(slot.sizeX / (rotated ? imageSize.height : imageSize.width),
             slot.sizeY / (rotated ? imageSize.width : imageSize.height));
-          plane.children[0].scale.setScalar(scale);
+          const image = plane.children[0] as THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+          image.scale.setScalar(scale);
+          image.material.opacity = slot.assetOpacity;
         } else {
           const width = slot.type === '2D' ? slot.sizeX : slot.region.width;
           const height = slot.type === '2D' ? slot.sizeY : slot.region.height;

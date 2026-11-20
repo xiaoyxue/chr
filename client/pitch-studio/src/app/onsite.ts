@@ -495,7 +495,12 @@ function renderInspector() {
       <p class="on-help">输入 16:9 或 1.78 后按 Enter：保持长 X 和锚点，按比例调整宽 Y。</p></div>
       <div class="on-inspector-group"><h3>缩放与旋转</h3>
       <div class="on-field-grid">${field('scale', '缩放 / ×', fusionScale(slot), 'min="0.01"')}${field('rz', '旋转 / °', slot.rz, 'min="-180" max="180"')}</div>
-      <p class="on-help">绕中心等比缩放（相对 Fusion 原尺寸）和旋转；旋转后的整个区域须在球场内。</p></div>`;
+      <p class="on-help">绕中心等比缩放（相对 Fusion 原尺寸）和旋转；旋转后的整个区域须在球场内。</p></div>
+      <div class="on-inspector-group"><h3>不透明度</h3>
+      <div class="on-slider-row"><label for="inspector-opacity">不透明度（0–1）</label>
+      <input id="inspector-opacity" name="assetOpacitySlider" type="range" min="0" max="1" step="0.01" value="${slot.assetOpacity}" />
+      <input name="assetOpacity" type="number" min="0" max="1" step="0.01" value="${slot.assetOpacity}" required aria-label="不透明度 数值" /></div>
+      <p class="on-help">图片自身的透明度再乘以此值：0 全透明，1 保持图片原样；Fusion 的 35% 即 0.35。预览和渲染器都按此值合成。</p></div>`;
   } else {
     $('#placement-fields').innerHTML = `<div class="on-inspector-group"><h3>位置（世界坐标）</h3>
       <div class="on-field-grid">${field('x', `${slot.region ? '区域' : ''}中心 X / m`, slot.x)}${field('y', `${slot.region ? '区域' : ''}中心 Y / m`, slot.y)}</div></div>
@@ -539,6 +544,7 @@ function editedSlot(slot: Placement, name: string, value: number): { next: Place
       return { next: { ...slot, sizeX: slot.sizeX * factor, sizeY: slot.sizeY * factor }, action: '缩放' };
     }
     if (name === 'aspect') return { next: withAspect(slot, anchor, value), action: '设置宽高比' };
+    if (name === 'assetOpacity' || name === 'assetOpacitySlider') return { next: { ...slot, assetOpacity: value }, action: '调整不透明度' };
     if (name === 'anchorX' || name === 'anchorY') {
       const point = anchorPoint(slot, anchor);
       return { next: moveAnchor(slot, anchor, name === 'anchorX' ? { ...point, x: value } : { ...point, y: value }), action: '移动' };
@@ -551,7 +557,7 @@ function editedSlot(slot: Placement, name: string, value: number): { next: Place
 
 function applyInspectorField(input: HTMLInputElement) {
   const slot = selected();
-  if (!slot || slot.id !== unlockedId || !['number', 'text'].includes(input.type) || !input.isConnected || input.value === input.defaultValue) return;
+  if (!slot || slot.id !== unlockedId || !['number', 'text', 'range'].includes(input.type) || !input.isConnected || input.value === input.defaultValue) return;
   const value = input.name === 'aspect' ? parseAspect(input.value) : input.valueAsNumber;
   if (value === undefined || !Number.isFinite(value)) {
     renderInspector();
@@ -1146,6 +1152,10 @@ $('#placement-fields').addEventListener('change', (event) => {
   else if (input.name === 'keepAspect') { keepAspect = input.checked; syncEngine(); }
   // After Tab moves focus on, so the re-rendered inspector can restore it there.
   else setTimeout(() => applyInspectorField(input));
+});
+$('#placement-fields').addEventListener('input', (event) => {
+  const input = event.target as HTMLInputElement;
+  if (input.name === 'assetOpacitySlider') $<HTMLInputElement>('#placement-fields [name="assetOpacity"]').value = input.value;
 });
 $<HTMLButtonElement>('#reset-placement').addEventListener('click', () => {
   const original = current().match.placements.find((slot) => slot.id === selectedId);

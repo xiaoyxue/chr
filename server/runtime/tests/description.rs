@@ -458,9 +458,12 @@ async fn gpu_described_image_quads_are_drawn_unlit_through_the_tracked_camera() 
     ));
     let fixture = Fixture::new("gpu");
     let mut frames = Vec::new();
-    for visible in [true, false] {
+    for (visible, opacity) in [(true, None), (false, None), (true, Some(0.0))] {
         let mut instance = Fixture::instance("ad", "ad", 0., 3.);
         instance["visible"] = json!(visible);
+        if let Some(opacity) = opacity {
+            instance["opacity"] = json!(opacity);
+        }
         let path = fixture.description(json!([instance]));
         let (mut program, adapter) = description::load(&path, MODE, runtime_id().unwrap()).unwrap();
         let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
@@ -495,6 +498,7 @@ async fn gpu_described_image_quads_are_drawn_unlit_through_the_tracked_camera() 
         .filter(|(a, b)| a != b)
         .count();
     assert!(changed > 100, "the red quad changes {changed} bytes");
+    assert!(frames[2] == frames[1], "a quad at opacity 0 is not seen");
 }
 
 #[tokio::test]
@@ -549,6 +553,111 @@ async fn described_motion_is_kept_and_invalid_motion_is_refused() {
         .unwrap_err();
     assert_eq!(error.code, w::RejectionKind::IncompatibleInput.code());
     assert!(error.message.contains("amplitude"), "{}", error.message);
+    drop((control, loader));
+    owner.await.unwrap();
+}
+
+#[tokio::test]
+async fn image_quad_instances_carry_their_own_opacity() {
+    let fixture = Fixture::new("opacity");
+    let path = fixture.description(json!([]));
+    let (program, adapter) = description::load(&path, MODE, runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let loader = Loader::new(
+        &program,
+        control.clone(),
+        vec![fixture.root()],
+        WorkerAssets::default(),
+        fixture.dir.join("store"),
+    )
+    .unwrap();
+    let ad = json!({"id": "ad", "kind": "image_quad", "source": {"path": fixture.dir.join("ad.png")},
+        "sha256": sha(&png([255, 0, 0, 255]))});
+    let quad = |id: &str, opacity: Option<f64>| {
+        let mut instance = Fixture::instance(id, "ad", 0., 1.);
+        if let Some(opacity) = opacity {
+            instance["opacity"] = json!(opacity);
+        }
+        instance
+    };
+    let alphas = || async {
+        let state = control
+            .call(
+                w::SCENE_GET,
+                Some(json!({"runtime_id": program.configuration.runtime_id, "scene_id": program.scene_id})),
+            )
+            .await
+            .unwrap();
+        state["state"]["instances"].as_array().unwrap()[1..]
+            .iter()
+            .map(
+                |i| match i["material_overrides"].as_array().unwrap().as_slice() {
+                    [] => None,
+                    [one] => {
+                        assert_eq!(one["part"], 0);
+                        assert_eq!(one["factors"]["unlit"], true);
+                        Some(one["factors"]["base_color"][3].as_f64().unwrap())
+                    }
+                    more => panic!("{more:?}"),
+                },
+            )
+            .collect::<Vec<_>>()
+    };
+
+    // Two placements of one image at their own opacity; without one, the asset's 0.5.
+    loader
+        .load(scene(
+            &fixture,
+            json!([ad.clone()]),
+            json!([
+                quad("a", Some(0.25)),
+                quad("b", Some(0.75)),
+                quad("c", None)
+            ]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(alphas().await, [Some(0.25), Some(0.75), None]);
+    // A registered image quad needs no listing; 0 is a valid opacity.
+    loader
+        .load(scene(&fixture, json!([]), json!([quad("a", Some(0.0))])))
+        .await
+        .unwrap();
+    assert_eq!(alphas().await, [Some(0.0)]);
+
+    for opacity in [1.5, -0.1] {
+        let error = loader
+            .load(scene(
+                &fixture,
+                json!([]),
+                json!([quad("a", Some(opacity))]),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, w::RejectionKind::IncompatibleInput.code());
+        assert!(error.message.contains("opacity"), "{}", error.message);
+    }
+    let artwork = json!({"id": "flag", "kind": "flag", "source": {"path": fixture.dir.join("ad.png")},
+        "sha256": sha(&png([255, 0, 0, 255]))});
+    let flag = json!({"id": "f", "asset": "flag", "opacity": 0.5,
+        "model": [[1, 0, 0, -1.6], [0, 0, -1, 0], [0, 1, 0, -4], [0, 0, 0, 1]],
+        "flag": {"width_m": 3.2, "height_m": 2.0, "amplitude_m": 0.32, "frequency": 1.35,
+            "speed": 1.0, "material": "pbr"}});
+    let error = loader
+        .load(scene(&fixture, json!([artwork]), json!([flag])))
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("image_quad"), "{}", error.message);
+    // The same ID and bytes as another kind is other content.
+    let mut retyped = ad.clone();
+    retyped["kind"] = json!("flag");
+    let error = loader
+        .load(scene(&fixture, json!([retyped]), json!([])))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, w::RejectionKind::Conflict.code());
+    assert_eq!(alphas().await, [Some(0.0)], "rejected loads change nothing");
     drop((control, loader));
     owner.await.unwrap();
 }

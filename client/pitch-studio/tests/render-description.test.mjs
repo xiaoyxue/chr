@@ -51,7 +51,8 @@ test("the studio's scale and rotation act about the neutral bottom centre withou
 
 test('placements share their asset and keep their visibility', () => {
   const ad = { id: 'A1', name: 'ad', contentType: 'image/png', url: '/x' };
-  const slots = ['p1', 'p2', 'p3'].map((id, i) => ({ ...pose, id, name: id, type: '2D', x: i, sizeX: 2, sizeY: 1, assetRotation: 0, asset: i < 2 ? ad : undefined }));
+  const slots = ['p1', 'p2', 'p3'].map((id, i) => ({ ...pose, id, name: id, type: '2D', x: i, sizeX: 2, sizeY: 1, assetRotation: 0,
+    assetOpacity: [0.25, 0.75, 1][i], asset: i < 2 ? ad : undefined }));
   const scene = describeScene({
     field: { length: 105, width: 68 }, slots, hidden: new Set(['p2']),
     geometry: new Map(slots.map((slot) => [slot.id, { kind: 'image', width: 2, height: 1 }])),
@@ -60,7 +61,7 @@ test('placements share their asset and keep their visibility', () => {
   });
   assert.deepEqual(scene.ground, { pitch_m: [105, 68] });
   assert.deepEqual(scene.assets, [{ id: 'A1', kind: 'image_quad', source: { package: '/srv/match.zip', entry: 'assets/A1.png' }, sha256: 'ab' }]);
-  assert.deepEqual(scene.instances.map(({ id, asset, visible }) => [id, asset, visible]), [['p1', 'A1', true], ['p2', 'A1', false]]);
+  assert.deepEqual(scene.instances.map(({ id, asset, visible, opacity }) => [id, asset, visible, opacity]), [['p1', 'A1', true, 0.25], ['p2', 'A1', false, 0.75]]);
 });
 
 test('alpha-blended GLB materials are found and opted into masks', () => {
@@ -186,7 +187,7 @@ test('local materials become one asset per kind and content, read from their ser
   const flag = { ...local, ...onCloud, id: 'f1', type: 'flag', plane, flag: flagSettings, materialPath: '/srv/a.png' };
   const sha = 'cd'.repeat(32), glb = 'ef'.repeat(32), bounds = { min: [-1, 0, -1], max: [1, 1, 1] };
   const scene = describeScene({ ...options, locals: [
-    { ad: image, sha256: sha }, { ad: { ...image, id: 'i2', materialPath: '/srv/copy-of-a.png' }, sha256: sha },
+    { ad: { ...image, opacity: 0 }, sha256: sha }, { ad: { ...image, id: 'i2', materialPath: '/srv/copy-of-a.png' }, sha256: sha },
     { ad: model, sha256: glb, bounds, blendAs: 'mask' }, { ad: flag, sha256: sha },
   ] });
   assert.deepEqual(scene.assets, [
@@ -194,8 +195,10 @@ test('local materials become one asset per kind and content, read from their ser
     { id: 'LOCAL-efefefefefefefef', kind: 'glb', source: { path: '/srv/car.glb' }, sha256: glb, blend_as: 'mask' },
     { id: 'FLAG-cdcdcdcdcdcdcdcd', kind: 'flag', source: { path: '/srv/a.png' }, sha256: sha },
   ]);
-  assert.deepEqual(scene.instances.map(({ id, asset }) => [id, asset]), [
-    ['local-i1', 'LOCAL-cdcdcdcdcdcdcdcd'], ['local-i2', 'LOCAL-cdcdcdcdcdcdcdcd'], ['local-m1', 'LOCAL-efefefefefefefef'], ['flag-f1', 'FLAG-cdcdcdcdcdcdcdcd'],
+  // Images carry their own opacity, 0.5 (#163) when they have none; models and flags none.
+  assert.deepEqual(scene.instances.map(({ id, asset, opacity }) => [id, asset, opacity]), [
+    ['local-i1', 'LOCAL-cdcdcdcdcdcdcdcd', 0], ['local-i2', 'LOCAL-cdcdcdcdcdcdcdcd', 0.5],
+    ['local-m1', 'LOCAL-efefefefefefefef', undefined], ['flag-f1', 'FLAG-cdcdcdcdcdcdcdcd', undefined],
   ]);
 });
 

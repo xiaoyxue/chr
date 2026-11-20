@@ -39,7 +39,11 @@ export function validatePlacement(slot: unknown, field: FieldDimensions): Placem
     assetRotation: typeof slot.assetRotation === 'number' ? slot.assetRotation : undefined };
   if (type === '2D') {
     if (!hasNumbers(slot, ['sizeX', 'sizeY']) || slot.z !== 0 || slot.rx !== 0 || slot.ry !== 0 || slot.sizeX < 0.1 || slot.sizeY < 0.1 || !isPlacementInside(slot, field)) throw new Error('2D 广告必须贴地，尺寸至少 0.1 m，旋转后的完整区域也必须位于球场内。');
-    return { ...pose, id, name, type, sizeX: slot.sizeX, sizeY: slot.sizeY };
+    // Records stored before #188 have no opacity: Fusion's default is 1.
+    const assetOpacity = slot.assetOpacity === undefined ? 1 : slot.assetOpacity;
+    if (typeof assetOpacity !== 'number' || !(assetOpacity >= 0 && assetOpacity <= 1))
+      throw new Error('不透明度必须是 0 到 1 之间的数（35% 即 0.35）。');
+    return { ...pose, id, name, type, sizeX: slot.sizeX, sizeY: slot.sizeY, assetOpacity };
   }
   const { assetRole } = slot;
   if (!hasNumbers(slot, ['scaleX', 'scaleY', 'scaleZ'])

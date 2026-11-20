@@ -127,7 +127,7 @@ pub fn prepare(
     registrations
         .register_model(id(GROUND)?, ground())
         .map_err(|e| e.to_string())?;
-    let mut digests = HashMap::new();
+    let mut described_assets = HashMap::new();
     for ((asset_id, asset), described) in imported.into_iter().zip(&description.scene.assets) {
         match asset {
             Imported::Model(model) => {
@@ -151,16 +151,21 @@ pub fn prepare(
             }
         }
         .map_err(|e| e.to_string())?;
-        digests.insert(asset_id, assets::identity(described));
+        described_assets.insert(asset_id, described.clone());
     }
-    let state = scene_state(&config.configuration_id, &world, &description.scene)?;
+    let state = scene_state(
+        &config.configuration_id,
+        &world,
+        &description.scene,
+        &described_assets,
+    )?;
     let (mut program, adapter) = Synthetic::install_registered(config, registrations, state)?;
     program.tracking = Some(Tracked {
         world,
         extent,
         replay,
     });
-    program.described = Some(digests);
+    program.described = Some(described_assets);
     Ok((program, adapter))
 }
 
@@ -200,11 +205,13 @@ fn ground() -> GlbAsset {
 }
 
 /// The program scene of `scene`: its instances behind the ground catcher, with the
-/// tracked camera and the described or default lighting.
+/// tracked camera and the described or default lighting. Instances may also draw
+/// `registered` assets that `scene` does not list.
 fn scene_state(
     configuration_id: &w::Id,
     world: &w::Version,
     scene: &d::Scene,
+    registered: &HashMap<w::Id, d::Asset>,
 ) -> Result<w::SceneState, Error> {
     let [length, width] = scene.ground.pitch_m;
     if ![length, width]
@@ -225,7 +232,14 @@ fn scene_state(
     {
         return Err(format!("{GROUND} is reserved for the ground").into());
     }
-    let kind = |id: &w::Id| scene.assets.iter().find(|a| a.id == *id).map(|a| a.kind);
+    let kind = |id: &w::Id| {
+        scene
+            .assets
+            .iter()
+            .find(|a| a.id == *id)
+            .or_else(|| registered.get(id))
+            .map(|a| a.kind)
+    };
     if let Some(instance) = scene
         .instances
         .iter()
@@ -243,6 +257,17 @@ fn scene_state(
         return Err(format!(
             "lighting.environment {} must be an environment asset of the description",
             sky.asset_ref.as_str()
+        )
+        .into());
+    }
+    if let Some(instance) = scene.instances.iter().find(|i| {
+        i.opacity.is_some_and(|opacity| {
+            !(0.0..=1.0).contains(&opacity) || kind(&i.asset) != Some(d::AssetKind::ImageQuad)
+        })
+    }) {
+        return Err(format!(
+            "instance {}: opacity must be a number from 0 to 1 on an image_quad asset",
+            instance.id.as_str()
         )
         .into());
     }
@@ -265,6 +290,9 @@ fn scene_state(
         if let Some(motion) = &instance.motion {
             native["motion"] = json!(motion);
         }
+        if let Some(opacity) = instance.opacity {
+            native["material_overrides"] = image_opacity(opacity);
+        }
         native
     }));
     Ok(serde_json::from_value(json!({
@@ -273,6 +301,18 @@ fn scene_state(
         "instances": instances, "lighting": lighting,
         "shadow_mode": scene.shadow_mode.unwrap_or(w::ShadowMode::Pcss),
     }))?)
+}
+
+/// The material override of an image quad instance drawn at `opacity`.
+fn image_opacity(opacity: f64) -> Value {
+    let m = assets::image_quad_material(1.0);
+    json!([{"part": 0, "factors": {
+        "base_color": [m.base_color[0], m.base_color[1], m.base_color[2], opacity],
+        "metallic": m.metallic, "roughness": m.roughness, "emissive": m.emissive,
+        "alpha_cutoff": m.alpha_cutoff, "double_sided": m.double_sided,
+        "normal_scale": m.normal_scale, "occlusion_strength": m.occlusion_strength,
+        "unlit": m.unlit,
+    }}])
 }
 
 /// Four 35 m corner spots on the pitch centre and a sun.
@@ -304,8 +344,8 @@ pub struct Loader {
 }
 
 struct Registered {
-    /// [`assets::identity`] of every registered asset.
-    identities: HashMap<w::Id, String>,
+    /// Every registered asset as it was described.
+    assets: HashMap<w::Id, d::Asset>,
     /// Bytes of the runtime assets in the store.
     stored: u64,
 }
@@ -339,7 +379,7 @@ impl Loader {
             worker,
             store,
             registered: tokio::sync::Mutex::new(Registered {
-                identities: program
+                assets: program
                     .described
                     .clone()
                     .ok_or("not a description program")?,
@@ -356,19 +396,19 @@ impl Loader {
             ));
         }
         let scene = params.scene;
-        let state =
-            scene_state(&self.configuration_id, &self.world, &scene).map_err(incompatible)?;
         let mut guard = self.registered.lock().await;
         let Registered {
-            identities: registered,
+            assets: registered,
             stored,
         } = &mut *guard;
+        let state = scene_state(&self.configuration_id, &self.world, &scene, registered)
+            .map_err(incompatible)?;
         let mut fresh = Vec::new();
         let mut reused = 0;
         for asset in &scene.assets {
             let digest = assets::identity(asset);
             match registered.get(&asset.id) {
-                Some(known) if *known == digest => reused += 1,
+                Some(known) if assets::identity(known) == digest => reused += 1,
                 Some(_) => {
                     return Err(reject(
                         w::RejectionKind::Conflict,
@@ -438,7 +478,7 @@ impl Loader {
                         .await?
                 }
             }
-            registered.insert(asset.id.clone(), assets::identity(&asset));
+            registered.insert(asset.id.clone(), asset.clone());
             self.worker.push(asset);
         }
         let applied = self.replace(state).await?;

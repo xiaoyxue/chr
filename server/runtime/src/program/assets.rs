@@ -104,10 +104,10 @@ fn environment(asset: &Asset, bytes: &[u8]) -> Result<EnvironmentMap, Error> {
     Ok(map)
 }
 
-/// What makes two registrations of one asset ID the same: its bytes and its
+/// What makes two registrations of one asset ID the same: its kind, bytes and
 /// import options.
 pub fn identity(asset: &Asset) -> String {
-    let digest = asset.sha256.to_ascii_lowercase();
+    let digest = format!("{:?}:{}", asset.kind, asset.sha256.to_ascii_lowercase());
     match asset.blend_as {
         Some(BlendAs::Mask) => format!("{digest}+blend-as-mask"),
         None => digest,
@@ -165,12 +165,26 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Opacity every image quad's alpha is multiplied by, so the pitch shows through ads.
-const IMAGE_QUAD_OPACITY: f32 = 0.5;
+/// Opacity of an image quad instance without its own (#163), so the pitch shows
+/// through ads.
+pub const DEFAULT_IMAGE_OPACITY: f32 = 0.5;
+
+/// The material of an image quad: an unlit, double-sided ground decal blended by the
+/// image's alpha times `opacity`.
+pub fn image_quad_material(opacity: f32) -> PbrMaterial {
+    PbrMaterial {
+        base_color: [1.0, 1.0, 1.0, opacity],
+        unlit: true,
+        double_sided: true,
+        decal: true,
+        ..Default::default()
+    }
+}
 
 /// The unit image quad of `AssetKind::ImageQuad`: UV (0, 0) is the image's top-left
-/// texel at (-0.5, -0.5), so the image reads upright in a top view with +Y down. It is
-/// an unlit ground decal blended by the image's alpha times `IMAGE_QUAD_OPACITY`.
+/// texel at (-0.5, -0.5), so the image reads upright in a top view with +Y down. Its
+/// one part has [`image_quad_material`] at [`DEFAULT_IMAGE_OPACITY`]; an instance's
+/// `opacity` overrides it.
 fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
     let texture = image_texture(bytes)?;
     let mesh = MeshData::new(
@@ -191,13 +205,7 @@ fn image_quad(bytes: &[u8]) -> Result<GlbAsset, Error> {
     Ok(GlbAsset {
         mesh,
         materials: vec![ImportedMaterial {
-            factors: PbrMaterial {
-                base_color: [1.0, 1.0, 1.0, IMAGE_QUAD_OPACITY],
-                unlit: true,
-                double_sided: true,
-                decal: true,
-                ..Default::default()
-            },
+            factors: image_quad_material(DEFAULT_IMAGE_OPACITY),
             maps: MaterialMaps {
                 base_color: Some(Arc::new(texture)),
                 ..Default::default()

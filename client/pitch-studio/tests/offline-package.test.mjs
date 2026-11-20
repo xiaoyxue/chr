@@ -8,6 +8,7 @@ globalThis.crypto ??= webcrypto;
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
 const { parseOfflinePackage } = await server.ssrLoadModule('/src/matches/offline-package.ts');
+const { validateMatch } = await server.ssrLoadModule('/src/matches/match-domain.ts');
 const image = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64'));
 function glb(uri) {
   const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, ...(uri ? { images: [{ uri }] } : {}) }).padEnd(128, ' '));
@@ -46,6 +47,24 @@ test('whole-match ZIP preserves transforms, shared original materials and unassi
   assert.equal(result.match.placements[2].asset, undefined);
   assert.equal(result.match.placements[0].asset.url, `/fusion-offline/packages/${result.id}/assets/ASSET-image`);
   assert.deepEqual(new Uint8Array(await result.assets.get('ASSET-image').arrayBuffer()), image);
+});
+test("each 2D placement keeps its own assetOpacity (#188); an older manifest's default is 1, invalid values are refused", async () => {
+  const package_ = fixture(), [one, two] = package_.manifest.match.ads[0].placements;
+  one.assetOpacity = 0.25;
+  two.assetOpacity = 0.75;
+  const { match } = await parseOfflinePackage(archive(package_));
+  assert.deepEqual(match.placements.map((slot) => slot.assetOpacity), [0.25, 0.75, 1, undefined]);
+  // Stored and read back, as the match library does; records from before #188 read as 1.
+  assert.deepEqual(validateMatch(JSON.parse(JSON.stringify(match))).placements.map((slot) => slot.assetOpacity), [0.25, 0.75, 1, undefined]);
+  const { assetOpacity, ...older } = match.placements[0];
+  assert.equal(validateMatch({ ...match, placements: [older] }).placements[0].assetOpacity, 1);
+  assert.throws(() => validateMatch({ ...match, placements: [{ ...older, assetOpacity: 1.2 }] }), /不透明度/);
+  one.assetOpacity = 0;
+  assert.equal((await parseOfflinePackage(archive(package_))).match.placements[0].assetOpacity, 0);
+  for (const value of [35, -0.01, '0.35', null]) {
+    one.assetOpacity = value;
+    await assert.rejects(parseOfflinePackage(archive(package_)), /PLC-one: assetOpacity must be a number from 0 to 1/);
+  }
 });
 test("a ZIP's model animation (#157) survives import unchanged, and an invalid one names its field", async () => {
   const animated = { x: 0, y: 0, scale: 0.7, yaw: 30, swingAxis: 'z', swingAmplitude: 45, swingPeriod: 2, rotationMode: 'continuous',

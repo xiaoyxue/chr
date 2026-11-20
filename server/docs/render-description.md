@@ -30,7 +30,8 @@ with which lens, independent of any client's own scene model. The schema lives i
     ],
     "instances": [
       {"id": "PLC-1", "asset": "ASSET-car", "model": [[...], [...], [...], [0, 0, 0, 1]]},
-      {"id": "PLC-2", "asset": "ASSET-ad", "model": [[...], [...], [...], [0, 0, 0, 1]], "visible": true},
+      {"id": "PLC-2", "asset": "ASSET-ad", "model": [[...], [...], [...], [0, 0, 0, 1]], "visible": true,
+       "opacity": 0.35},
       {"id": "FLAG-1", "asset": "ASSET-flag", "model": [[...], [...], [...], [0, 0, 0, 1]],
        "flag": {"width_m": 3.2, "height_m": 2.0, "amplitude_m": 0.32, "frequency": 1.35,
                 "speed": 1.0, "material": "simple"}}
@@ -103,7 +104,18 @@ are shared.
 | `glb` | The importer's basis: glTF +Y-up turned to -Z-up, `(x, y, z) -> (x, z, -y)`, node transforms baked | As authored. `alphaMode: BLEND` is rejected unless `blend_as: "mask"`, which imports it as an alpha mask (cutoff 0.5) and logs a warning. The renderer has no translucent pass. |
 | `flag` (PNG, JPEG) | Flag-local metres: X along the width from the left edge, Y down from the top edge, Z = X × Y. The image's top-left texel is at the origin and reads upright from the -Z side, mirrored from the other. Size comes from the instance's `flag` | Double-sided artwork; texels with alpha below 0.5 are cut out. `material: "simple"` lights it like SimpleWave under a fixed key light above the viewer; `"pbr"` uses the scene's lights, environment and shadows. It casts shadows that follow the wave |
 | `environment` (OpenEXR) | A latitude-longitude panorama, 2:1: +X at the image centre, +Y a quarter further right, up (-Z) along the top row | Not drawn: only `lighting.environment.asset_ref` may name it, never an instance. Linear sRGB/D65 RGB(A), HALF or FLOAT, NONE/RLE/ZIP/ZIPS/PIZ; finite negative texels become zero (see `chr_renderer::exr::import_exr`) |
-| `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended over the opaque CG by the image's alpha times a fixed opacity of 0.5 (`alpha = 0.5 * image alpha`, `alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
+| `image_quad` (PNG, JPEG) | Unit quad `[-0.5, 0.5]^2` at Z = 0, facing up. The image's top edge is at -Y and its left edge at -X, so it reads upright in a top view with +Y down | Unlit ground decal: blended over the opaque CG by the image's alpha times the instance's [`opacity`](#image-opacity) (`alpha = opacity * image alpha`, `alpha * colour + (1 - alpha) * behind`), in instance order, after opaque geometry and before the ground catcher, so CG shadows darken it; it casts no shadow and writes no depth |
+
+### Image opacity
+
+An `image_quad` instance may carry `opacity`, a number from 0 to 1 inclusive: its
+alpha is the image's own alpha times this, exactly once, so an opaque texel at 0.35
+covers 35 % of what lies behind and a texel of alpha 0.5 covers 17.5 %. Transparent
+texels stay transparent and 0 hides the quad. Without `opacity` an image quad is
+drawn at 0.5 (#163). Instances of one image keep their own opacity; the asset and
+its image are unchanged. Other values, or `opacity` on another asset kind, reject
+the load with the instance named. chr-server applies it as the override of the
+quad's material (`material_overrides`, part 0, `base_color` alpha).
 
 ## Lighting
 
@@ -191,8 +203,8 @@ paths resolve against the file's directory. Asset ID `chr-ground` is reserved.
 | Runtime | `description.load {"scene": …}` over the control WebSocket or NativeSocket | Absolute, inside a `--asset-root <dir>` folder (repeatable); without one the method is rejected with `unsupported_profile` |
 
 `description.load` answers `{scene_id, scene_revision, assets_imported,
-assets_reused}`. An asset whose ID was already registered with the same SHA-256
-and options is reused; the same ID with other content is a `conflict`.
+assets_reused}`. An asset whose ID was already registered with the same kind,
+SHA-256 and options is reused; the same ID with other content is a `conflict`.
 Registrations are never removed: a server holds at most 64 assets and 1 GiB of
 runtime asset bytes, and a restart clears them. A description places at most 63
 instances.
@@ -236,14 +248,20 @@ newer package keeps them:
 - **Fusion 2D placements:** the preview's contain fit of the image in its area,
   rotated by `rz + assetRotation`, at Z −0.02. The studio scales the area (relative
   to Fusion's size) and rotates it about its centre; the rotated area must stay on
-  the pitch.
+  the pitch. Fusion's per-placement `assetOpacity` (#188; 0 to 1, 1 when an older
+  manifest lacks it; anything else fails the import naming the placement) is kept
+  in the draft, editable as 不透明度 in the inspector once unlocked, drawn by the
+  preview and sent as the instance's [`opacity`](#image-opacity), never multiplied
+  by another 0.5.
 - **Local placements:** drawn in the studio on the pitch (2D, 3D) or on a
   point-cloud plane (2D, 3D, flags). Each lies on a rectangle with unit axes `u`
   (image right) and `v` (image down) and normal `u × v`; the preview and the
   description share one transform (`local-ad-transform.ts`), lifted 15 mm off
   the surface towards the side it was drawn from, plus the normal offset.
   - **2D** → `image_quad` with `model` `[u · width, v · height, u × v, centre]`,
-    so the quad's top-left texel lands on the rectangle's top-left corner.
+    so the quad's top-left texel lands on the rectangle's top-left corner, and
+    the placement's 不透明度 (0 to 1, 0.5 until set) as its
+    [`opacity`](#image-opacity).
   - **3D** → `glb`: the glTF scene centred on its footprint, stood up out of the
     plane, turned by its yaw and fitted to the rectangle, then expressed in chr's
     GLB basis.

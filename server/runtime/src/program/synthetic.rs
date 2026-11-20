@@ -52,8 +52,8 @@ pub struct Synthetic {
     pub video_lens: Option<Arc<crate::calibration::replay::VideoLens>>,
     /// Startup lens and world of a tracked program; its frames carry their camera.
     pub tracking: Option<chr_tracker::pose::Tracked>,
-    /// SHA-256 of each asset a render description registered at startup.
-    pub described: Option<std::collections::HashMap<w::Id, String>>,
+    /// Each asset a render description registered at startup, as described.
+    pub described: Option<std::collections::HashMap<w::Id, chr_common::description::Asset>>,
     /// Made on first use: a described or tracked program never injects it.
     pixels: std::sync::OnceLock<Vec<u8>>,
     next: u64,

@@ -21,7 +21,11 @@ export interface FusionModelPose {
   motion?: FusionModelMotion;
 }
 interface SlotBase extends Pose { id: string; name: string; adId?: string; adName?: string; asset?: FusionAsset; assetRotation?: number }
-export interface GroundPlacement extends SlotBase { type: '2D'; sizeX: number; sizeY: number; assetRole?: never }
+export interface GroundPlacement extends SlotBase {
+  type: '2D'; sizeX: number; sizeY: number; assetRole?: never;
+  /** Fusion's `assetOpacity` (#188): the image's alpha is multiplied by this, 0 to 1. */
+  assetOpacity: number;
+}
 export interface ModelPlacement extends SlotBase {
   type: '3D';
   assetRole?: AssetRole;

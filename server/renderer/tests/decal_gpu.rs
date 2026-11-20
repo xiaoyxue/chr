@@ -1,6 +1,8 @@
 //! Ground decals blended over a display background: alpha, instance order, occlusion,
 //! received catcher shadows and no cast shadows. World metres, ground Z=0, upwards -Z.
 
+use std::sync::Arc;
+
 use chr_renderer::{
     Gpu, OffscreenTarget, ShadowMode, ShadowSettings,
     camera::Camera,
@@ -8,7 +10,10 @@ use chr_renderer::{
         AlphaMode, CompositionOutput, FrameCompositor, ImageLayer, ImageStage, ImageView, Transfer,
     },
     coordinates::ImageExtent,
-    scene::{Light, Lighting, MaterialId, MeshData, ModelMatrix, PbrMaterial, Scene},
+    scene::{
+        Filter, Light, Lighting, MaterialId, MaterialMaps, MeshAttributes, MeshData, ModelMatrix,
+        PbrMaterial, Scene, TextureData, TextureSampler, Wrap,
+    },
 };
 
 const SIZE: u32 = 128;
@@ -75,6 +80,46 @@ impl Builder {
                 unlit: true,
                 double_sided: true,
                 decal: true,
+                ..Default::default()
+            })
+            .unwrap();
+        self.add(mesh, material);
+    }
+
+    /// A red decal of `quad(0, 1.5, 0.02)` whose three texels along X have alpha
+    /// 1, 0.5 and 0, drawn at `opacity`.
+    fn textured_decal(&mut self, opacity: f32) {
+        let texture = TextureData::new(
+            ImageExtent::new(3, 1).unwrap(),
+            vec![255, 0, 0, 255, 255, 0, 0, 128, 255, 0, 0, 0],
+        )
+        .unwrap()
+        .with_sampler(TextureSampler {
+            wrap_u: Wrap::Clamp,
+            wrap_v: Wrap::Clamp,
+            mag: Filter::Nearest,
+            min: Filter::Nearest,
+            mip: None,
+        });
+        let material = self
+            .scene
+            .add_material_with_maps(
+                PbrMaterial {
+                    base_color: [1.0, 1.0, 1.0, opacity],
+                    unlit: true,
+                    double_sided: true,
+                    decal: true,
+                    ..Default::default()
+                },
+                MaterialMaps {
+                    base_color: Some(Arc::new(texture)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mesh = quad(0.0, 1.5, 0.02)
+            .with_attributes(MeshAttributes {
+                tex_coords: vec![[0., 0.], [1., 0.], [1., 1.], [0., 1.]],
                 ..Default::default()
             })
             .unwrap();
@@ -225,6 +270,37 @@ fn decals_blend_by_alpha_in_instance_order_under_occluders() {
         (at(&hidden) - at(&occluder)).abs() < 0.005,
         "an occluder hides decals"
     );
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn a_decal_alpha_is_its_texel_alpha_times_its_opacity() {
+    let gpu = gpu();
+    let camera = top_camera();
+    let texels = |opacity: f32| {
+        let mut builder = Builder::new();
+        builder.textured_decal(opacity);
+        let pixels = composite(&gpu, &builder.scene, &camera);
+        [-1.0, 0.0, 1.0].map(|x| red(&pixels, &camera, [x, 0.0, 0.0]))
+    };
+    let plate = red(
+        &composite(&gpu, &Builder::new().scene, &camera),
+        &camera,
+        [0.0; 3],
+    );
+    let [opaque, _, clear] = texels(1.0);
+    assert!(
+        (clear - plate).abs() < 0.005,
+        "alpha 0 stays clear: {clear}"
+    );
+    let [full, half, clear] = texels(0.35);
+    for (got, alpha) in [(full, 0.35), (half, 0.35 * 128.0 / 255.0), (clear, 0.0)] {
+        let expected = plate + alpha * (opaque - plate);
+        assert!(
+            (got - expected).abs() < 0.01,
+            "alpha {alpha}: {got} vs {expected} (plate {plate}, opaque {opaque})"
+        );
+    }
 }
 
 #[test]

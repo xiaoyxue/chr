@@ -47,7 +47,13 @@ export interface LocalAd {
   materialBlended?: string[];
   /** Present exactly for flags. */
   flag?: FlagSettings;
+  /** A 2D ad's opacity, 0 to 1: the image's alpha is multiplied by this. Absent: `LOCAL_IMAGE_OPACITY`. */
+  opacity?: number;
 }
+
+/** Opacity of a local 2D ad that has none of its own, as chr-server has drawn image quads since #163. */
+export const LOCAL_IMAGE_OPACITY = 0.5;
+export const imageOpacity = (ad: LocalAd) => ad.opacity ?? LOCAL_IMAGE_OPACITY;
 
 const validPath = (path: unknown) => path === undefined || (typeof path === 'string' && path.startsWith('/'));
 
@@ -76,6 +82,7 @@ export function validLocalAd(value: unknown): value is LocalAd {
   return typeof ad.id === 'string' && typeof ad.name === 'string'
     && (ad.space === 'pitch' ? ad.cloudId === undefined : (ad.space === undefined || ad.space === 'cloud') && typeof ad.cloudId === 'string')
     && ['2D', '3D', 'flag'].includes(ad.type) && (ad.type === 'flag' ? validFlag(ad.flag) : ad.flag === undefined)
+    && (ad.opacity === undefined || (ad.type === '2D' && typeof ad.opacity === 'number' && ad.opacity >= 0 && ad.opacity <= 1))
     && typeof ad.visible === 'boolean' && Boolean(ad.plane)
     && vector(ad.plane.origin) && vector(ad.plane.u) && vector(ad.plane.v)
     && [ad.plane.u, ad.plane.v].every((axis) => Math.abs(axis.reduce((sum, x) => sum + x * x, 0) - 1) < 1e-5)

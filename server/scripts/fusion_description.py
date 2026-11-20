@@ -105,7 +105,12 @@ def placements(match, assets):
             if ad["type"] == "2D":
                 rotation = number(source["assetRotation"])
                 require(rotation in (0, 90, 180, 270), "Invalid image rotation.")
-                slot.update(sizeX=width, sizeY=height, assetRotation=rotation)
+                # #188: absent in older manifests, where the image is drawn as it is.
+                opacity = source.get("assetOpacity", 1)
+                require(isinstance(opacity, (int, float)) and not isinstance(opacity, bool) and 0 <= opacity <= 1,
+                        f"Placement {source['id']}: assetOpacity must be a number from 0 to 1 (35% is 0.35), "
+                        f"not {json.dumps(opacity)}.")
+                slot.update(sizeX=width, sizeY=height, assetRotation=rotation, assetOpacity=opacity)
             else:
                 pose = {key: number(source["modelPose"][key]) for key in ("x", "y", "scale", "yaw")}
                 require(abs(pose["x"]) <= 1 and abs(pose["y"]) <= 1 and 0.01 <= pose["scale"] <= 1
@@ -325,7 +330,8 @@ def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), 
             scene["assets"].append({key: described[key] for key in ("id", "kind", "source", "sha256", "blend_as")
                                     if key in described})
         scene["instances"].append({"id": slot["id"], "asset": slot["asset"], "model": model,
-                                   "visible": slot["id"] not in hidden, **({"motion": motion} if motion else {})})
+                                   "visible": slot["id"] not in hidden, **({"motion": motion} if motion else {}),
+                                   **({"opacity": slot["assetOpacity"]} if slot["type"] == "2D" else {})})
     require(len(scene["instances"]) <= MAX_INSTANCES,
             f"chr-server places at most {MAX_INSTANCES} instances; this match has {len(scene['instances'])}.")
     return scene

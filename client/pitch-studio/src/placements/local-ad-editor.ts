@@ -2,7 +2,7 @@
 // pitch; images, models and flags on point-cloud planes. Both spaces share the inspector: position, size and
 // material are protected by the lock and saved as soon as a field changes; a
 // flag's wave is editable while locked and saved explicitly.
-import { withoutPitchFlags } from './local-ad.ts';
+import { imageOpacity, withoutPitchFlags } from './local-ad.ts';
 import { localAdStore } from './local-ad-store.ts';
 import { serverSha256, uploadFile } from '../shared/studio-store.ts';
 import { materialFacts } from '../render/send-materials.ts';
@@ -58,6 +58,11 @@ function editorMarkup(space: AdSpace, prefix: string) {
       <div data-model-group class="on-inspector-group"><h3>模型</h3>
         <div class="on-field-grid">${field('scale', '整体缩放 / ×', 'min="0.01" max="1000"')}${field('yaw', '朝向 / °', 'min="-360" max="360"')}</div>
         ${pitch ? '' : '<label class="on-check"><input name="flip" type="checkbox" /> 反转模型立起方向（平面法线）</label>'}</div>
+      <div data-image-group class="on-inspector-group"><h3>不透明度</h3>
+        <div class="on-slider-row"><label for="${prefix}local-ad-opacity">不透明度（0–1）</label>
+        <input ${id('local-ad-opacity')} name="opacitySlider" type="range" min="0" max="1" step="0.01" />
+        <input name="opacity" type="number" min="0" max="1" step="0.01" aria-label="不透明度 数值" required /></div>
+        <p class="on-help">图片自身的透明度再乘以此值：0 全透明，1 保持图片原样；未设置时为 0.5。</p></div>
       <p ${id('local-ad-readonly')} class="on-readonly"></p>
     </fieldset>
     <fieldset ${id('local-flag-controls')} class="on-inspector-group"><h3>旗帜飘动</h3>${wave}
@@ -149,7 +154,10 @@ export class LocalAdEditor {
     form.addEventListener('input', (event) => {
       const input = event.target as HTMLInputElement;
       if (FLAG_INPUTS.has(input.name)) this.readFlagDraft(input);
-      else this.renderSaveState();
+      else {
+        if (input.name === 'opacitySlider') (this.form.elements.namedItem('opacity') as HTMLInputElement).value = input.value;
+        this.renderSaveState();
+      }
     });
     this.element('local-flag-controls').addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement)) return;
@@ -485,6 +493,7 @@ export class LocalAdEditor {
       case 'scale': return { next: { ...selected, scale: scalar('scale') }, action: '缩放' };
       case 'yaw': return { next: { ...selected, yaw: scalar('yaw') }, action: '转向' };
       case 'flip': return { next: { ...selected, normalSign: input.checked ? -1 : 1 }, action: '反转' };
+      case 'opacity': case 'opacitySlider': return { next: { ...selected, opacity: input.valueAsNumber }, action: '调整不透明度' };
       case 'aspect': return { next: { ...selected, plane: planeWithAspect(plane, this.anchor, parseAspect(input.value)) }, action: '设置宽高比' };
       case 'width': case 'height':
         return { next: { ...selected, plane: resizePlane(plane, this.anchor, input.name, input.valueAsNumber, this.keepAspect) }, action: '调整尺寸' };
@@ -669,6 +678,8 @@ export class LocalAdEditor {
       set('anchorZ', point[2]); set('offset', selected.offset);
     }
     show('[data-model-group]', selected.type === '3D');
+    show('[data-image-group]', selected.type === '2D');
+    set('opacity', imageOpacity(selected)); set('opacitySlider', imageOpacity(selected));
     set('scale', selected.scale); set('yaw', selected.yaw);
     const flip = form.elements.namedItem('flip') as HTMLInputElement | null;
     if (flip) flip.checked = flip.defaultChecked = selected.normalSign === -1;

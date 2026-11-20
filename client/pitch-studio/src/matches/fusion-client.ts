@@ -19,6 +19,16 @@ function number(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error('Invalid Fusion coordinate.');
   return value;
 }
+/**
+ * A 2D placement's `assetOpacity` (#188): a number from 0 to 1, 1 when an older manifest
+ * lacks it. Percentages such as 35 are refused, not clamped.
+ */
+export function assetOpacity(value: unknown, placementId: string): number {
+  if (value === undefined) return 1;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1)
+    throw new Error(`Placement ${placementId}: assetOpacity must be a number from 0 to 1 (35% is 0.35), not ${JSON.stringify(value)}.`);
+  return value;
+}
 function array(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error('Invalid Fusion response list.');
   return value;
@@ -65,7 +75,8 @@ export function mapFusionMatch(value: unknown, requestedId: string, offlinePacka
       if (ad.type === '2D') {
         const rotation = number(source.assetRotation);
         if (![0, 90, 180, 270].includes(rotation)) throw new Error('Invalid image rotation.');
-        placements.push({ ...common, type: '2D', sizeX: width, sizeY: height, assetRotation: rotation });
+        placements.push({ ...common, type: '2D', sizeX: width, sizeY: height, assetRotation: rotation,
+          assetOpacity: assetOpacity(source.assetOpacity, sourceId) });
       } else {
         let modelPose;
         try { modelPose = validateModelPose(source.modelPose); }
