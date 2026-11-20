@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import type { Placement, ModelPlacement } from '../shared/types.ts';
 import { resolveFusionAsset } from '../matches/offline-package.ts';
+import { simplifyForPreview } from './preview-simplify.ts';
 import type { GlbBounds, SlotGeometry } from '../render/render-description.ts';
 import { motionRows, wireMotion, type WireMotion } from './model-motion.ts';
 
@@ -104,7 +105,7 @@ export class FusionCreatives {
               if (/^(blob:|data:)/.test(url)) return url;
               throw new Error('Only embedded GLB resources are supported.');
             });
-            const response = await fetch(resource.url, { cache: 'no-store' });
+            const response = await fetch(resource.url, { cache: resource.cached ? 'default' : 'no-store' });
             if (!response.ok) throw new Error(`Model download failed (${response.status}).`);
             const gltf = await new GLTFLoader(manager).parseAsync(await response.arrayBuffer(), '');
             if (!this.active) { dispose(gltf.scene); return; }
@@ -114,6 +115,10 @@ export class FusionCreatives {
               dispose(gltf.scene);
               throw new Error('The model has no finite ground footprint.');
             }
+            const thinned = await simplifyForPreview(gltf.scene);
+            if (thinned.after < thinned.before)
+              console.info(`[preview] ${slot.asset.name}: ${thinned.before} → ${thinned.after} triangles (chr-server renders the full model)`);
+            if (!this.active) { dispose(gltf.scene); return; }
             const centered = new THREE.Group();
             centered.add(gltf.scene);
             centered.position.set(-center.x, -bounds.min.y, -center.z);

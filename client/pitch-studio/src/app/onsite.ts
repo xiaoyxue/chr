@@ -1,6 +1,6 @@
 import { FusionGateway, validatePlacement, validateScanFile } from '../matches/match-domain.ts';
 import { HttpFusionAdapter } from '../matches/fusion-client.ts';
-import { parseOfflinePackage, setOfflineAssetFiles, storeOfflineAssets } from '../matches/offline-package.ts';
+import { importServerPackage, parseOfflinePackage, setOfflineAssetFiles, storeOfflineAssets, type StoredPackage } from '../matches/offline-package.ts';
 import { importPlyFile } from '../analysis/ply-import.ts';
 import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
@@ -1036,27 +1036,31 @@ async function importOfflinePackage(source: File | string) {
   clearError();
   const startingRoute = location.hash;
   try {
-    let file = source;
-    if (typeof file === 'string') {
-      $('#offline-package-status').textContent = 'Reading the offline package from the onsite server...';
-      file = await fetchServerFile(file);
+    let packageData: StoredPackage, zipPath: string;
+    if (typeof source === 'string') {
+      // The page server reads, verifies and stores it: no material crosses the network.
+      $('#offline-package-status').textContent = 'Verifying the package and storing its materials on the onsite server...';
+      zipPath = serverPath(source);
+      packageData = await importServerPackage(zipPath);
+    } else {
+      $('#offline-package-status').textContent = 'Verifying the complete match package and material checksums...';
+      const parsed = await parseOfflinePackage(source);
+      $('#offline-package-status').textContent = 'Storing the materials on the onsite server...';
+      packageData = { id: parsed.id, match: parsed.match, ...await storeOfflineAssets(parsed) };
+      // A ZIP chosen on this computer is stored too, so chr-server can read its materials.
+      zipPath = await uploadFile(source, `${parsed.id}.zip`);
     }
-    $('#offline-package-status').textContent = 'Verifying the complete match package and material checksums...';
-    const packageData = await parseOfflinePackage(file);
     const previous = records.find((item) => item.match.id === packageData.match.id);
     if (previous && !window.confirm('用导入的离线包替换该场次的 Fusion 配置和草稿调整？\n\n现场创建的球场本地 / 点云广告位、旗帜和会话单独保存，保留不变。')) {
       $('#offline-package-status').textContent = 'Import cancelled. Previous configuration and materials were retained.';
       return;
     }
-    $('#offline-package-status').textContent = 'Storing the materials on the onsite server...';
-    const { assetFiles, assetBlended } = await storeOfflineAssets(packageData);
-    // A ZIP chosen on this computer is stored too, so chr-server can read its materials.
-    const zipPath = typeof source === 'string' ? serverPath(source) : await uploadFile(file, `${packageData.id}.zip`);
+    const { assetFiles, assetBlended } = packageData;
     await saveLibrary([...records.filter((item) => item.match.id !== packageData.match.id),
       { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [], assetFiles, assetBlended }]);
     rememberPackagePath(packageData.id, zipPath);
     renderMatches();
-    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${packageData.assets.size} materials. Saved on the onsite server (${zipPath}); no Fusion API is used.`;
+    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${Object.keys(assetFiles).length} materials. Saved on the onsite server (${zipPath}); no Fusion API is used.`;
     if (location.hash === startingRoute || currentId === packageData.match.id) {
       const route = `#match/${encodeURIComponent(packageData.match.id)}/preview`;
       if (location.hash !== route) history.pushState(null, '', route);

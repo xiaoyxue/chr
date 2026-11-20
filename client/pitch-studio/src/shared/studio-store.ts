@@ -79,6 +79,22 @@ export async function uploadFile(file: Blob, name: string): Promise<string> {
   return ((await response.json()) as { path: string }).path;
 }
 
+/** A stored file's address for the browser, which may cache it: a stored file never changes. */
+export const storedFileUrl = (path: string) => `/studio-store/file?path=${encodeURIComponent(serverPath(path))}`;
+
+/** What the page server read from a Fusion ZIP on the onsite server, its materials now in the store. */
+export interface StoredPackageImport {
+  source: Record<string, unknown>;
+  assets: { id: string; path: string; blended?: string[] }[];
+}
+
+/** Has the page server read, verify and store an offline ZIP by its server path (see scripts/studio-store.ts). */
+export async function importStoredPackage(path: string): Promise<StoredPackageImport> {
+  const response = await request('/studio-store/packages', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: serverPath(path) }) });
+  return await response.json() as StoredPackageImport;
+}
+
 /** Removes a match's local placements and session; its stored files stay, as other matches may share them. */
 export async function removeMatchDocuments(matchId: string) {
   await request(`/studio-store/matches/${encodeURIComponent(matchId)}`, { method: 'DELETE' });

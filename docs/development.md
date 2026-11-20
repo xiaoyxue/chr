@@ -419,7 +419,16 @@ library and Fusion drafts), `package-paths.json` (offline ZIP paths),
 the operator's session, kept apart from the Fusion package),
 `matches/<matchId>/exports/` (the default folder for exports), and
 `files/<sha256>.<ext>` (uploaded materials up to 64 MB and offline ZIPs up to 1
-GB). Each document carries a revision; a write based on an older one is refused
+GB). An offline ZIP given by server path (inside `LOCAL_FILES_ROOTS` or the store) is
+imported there: `POST /studio-store/packages` reads and verifies it by the page's
+rules (`src/matches/offline-reader.ts`, shared by both), stores its materials and
+answers only the manifest's match, so no material crosses the network; a ZIP picked
+on the operator's computer is still verified in the browser and uploaded. Stored
+files are named by their content, so the page server lets the browser cache them:
+a preview downloads each model once. The 3D preview thins a model above 150k
+triangles to about that many (meshoptimizer's edge collapse, within 1 % of its extent,
+after measuring its bounds, so its fit is unchanged; `src/placements/preview-simplify.ts`);
+chr-server always renders the original GLB. Each document carries a revision; a write based on an older one is refused
 with 409, so two pages cannot overwrite each other. Every change to the store or an
 export write must come from the studio page itself (same-site `Origin`, or
 `Sec-Fetch-Site: same-origin`/`same-site`) with an `application/json` body

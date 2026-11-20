@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv, type ConfigEnv, type Connect, type Plugin, type UserConfig } from 'vite';
 import { fusionApi } from './scripts/fusion-api.ts';
-import { localFiles } from './scripts/local-files.ts';
+import { localFiles, sharedRoots } from './scripts/local-files.ts';
 import { studioStore } from './scripts/studio-store.ts';
 
 // Without STUDIO_DATA_DIR the studio keeps its data in the repository's ignored output/.
@@ -54,7 +54,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
       fusionApi(env.FUSION_API_URL ?? '', env.FUSION_API_KEY ?? ''),
       localFiles(env.LOCAL_FILES_ROOTS ?? '', env.STUDIO_DATA_DIR || DEFAULT_STUDIO_DATA_DIR),
-      studioStore(env.STUDIO_DATA_DIR || DEFAULT_STUDIO_DATA_DIR),
+      studioStore(env.STUDIO_DATA_DIR || DEFAULT_STUDIO_DATA_DIR, sharedRoots(env.LOCAL_FILES_ROOTS ?? '')),
       renderTarget(env.CHR_RENDER_URL),
       studioConfig(env.STUDIO_IBL_DIR || DEFAULT_IBL_DIR),
       {

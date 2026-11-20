@@ -6,7 +6,9 @@ import { extname, join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Connect, Plugin } from 'vite';
-import { writeProblem } from './request-guard.ts';
+import { Failure, writeProblem } from './request-guard.ts';
+import { realRoots, sharedPath } from './local-files.ts';
+import { EXTENSIONS, blendedMaterials, readOfflinePackage } from '../src/matches/offline-reader.ts';
 import { FILE_LIMITS, MATCH_ID, documentValidator } from '../src/shared/store-documents.ts';
 
 // The studio's data on the onsite server, in one directory (STUDIO_DATA_DIR):
@@ -15,7 +17,8 @@ import { FILE_LIMITS, MATCH_ID, documentValidator } from '../src/shared/store-do
 //   matches/<matchId>/local-ads.json  local placements and flags
 //   matches/<matchId>/session.json    the operator's session
 //   matches/<matchId>/exports/        the default folder for the studio's exports (written via /local-files/write)
-//   files/<sha256>.<ext>              uploaded materials and offline ZIPs
+//   files/<sha256>.<ext>              uploaded materials and offline ZIPs, and the materials of
+//                                     offline ZIPs imported by server path (POST /studio-store/packages)
 // Documents hold `{ revision, data }`; a write names the revision it was based on
 // and is refused (409) if another page saved in between. Loopback hosts only; changes only
 // from the studio page itself (see request-guard.ts).
@@ -26,10 +29,6 @@ const TYPES: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.glb': 'model/gltf-binary', '.zip': 'application/zip',
   '.json': 'application/json',
 };
-
-class Failure extends Error {
-  constructor(readonly status: number, message: string, readonly extra: Record<string, unknown> = {}) { super(message); }
-}
 
 /** Writes through a temporary file renamed into place, so a crash never leaves half a file. */
 async function writeAtomically(file: string, text: string) {
@@ -51,8 +50,15 @@ async function readBody(req: IncomingMessage, limit: number) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export function studioStoreMiddleware(directory: string, limits: Readonly<Record<string, number>> = FILE_LIMITS): Connect.NextHandleFunction {
+export interface StudioStoreOptions {
+  limits?: Readonly<Record<string, number>>;
+  /** Folders offline ZIPs may be imported from by server path (LOCAL_FILES_ROOTS). */
+  packageRoots?: string[];
+}
+
+export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS, packageRoots = [] }: StudioStoreOptions = {}): Connect.NextHandleFunction {
   const ready = mkdir(join(directory, 'files'), { recursive: true, mode: 0o700 }).then(() => realpath(directory));
+  const readableRoots = realRoots(packageRoots);
   // An unusable directory is reported by every request rather than ending the page server.
   ready.catch((error: unknown) => console.error(`[studio-store] cannot use ${directory}:`, error));
   const locks = new Map<string, Promise<unknown>>();
@@ -118,6 +124,44 @@ export function studioStoreMiddleware(directory: string, limits: Readonly<Record
     } finally { await rm(temporary, { force: true }); }
   };
 
+  /** Keeps `bytes` under their SHA-256 (already verified), unless the store has them. */
+  const keep = async (bytes: Uint8Array, sha256: string, extension: string) => {
+    const files = join(await ready, 'files'), path = join(files, `${sha256}${extension}`);
+    if (await stat(path).then((info) => info.size === bytes.length, () => false)) return path;
+    const temporary = join(files, `import-${randomUUID()}.part`);
+    try {
+      await writeFile(temporary, bytes, { mode: 0o600 });
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
+    return path;
+  };
+
+  /**
+   * Reads an offline ZIP by its server path, verifies it as the page does
+   * (readOfflinePackage) and stores its materials, so none crosses the network.
+   * Answers with the manifest's match, which the page maps and checks.
+   */
+  const importPackage = async (req: IncomingMessage) => {
+    let body: { path?: unknown };
+    try { body = JSON.parse(await readBody(req, MAX_DOCUMENT_BYTES)) as typeof body; }
+    catch (error) { throw error instanceof Failure ? error : new Failure(400, '请求不是有效的 JSON。'); }
+    if (typeof body?.path !== 'string' || extname(body.path).toLowerCase() !== '.zip')
+      throw new Failure(400, '请给出现场服务器上离线 ZIP 的绝对路径。');
+    const path = await sharedPath(body.path, [...await readableRoots, await ready]);
+    const info = await stat(path);
+    if (!info.isFile() || info.size > FILE_LIMITS['.zip']) throw new Failure(400, `不是可导入的离线 ZIP：${body.path}`);
+    let read: Awaited<ReturnType<typeof readOfflinePackage>>;
+    try { read = await readOfflinePackage(new Uint8Array(await readFile(path))); }
+    catch (error) { throw new Failure(400, error instanceof Error ? error.message : String(error)); }
+    const assets = [];
+    for (const asset of read.assets) {
+      const stored = await keep(asset.bytes, asset.sha256, EXTENSIONS[asset.contentType]);
+      assets.push({ id: asset.id, path: stored,
+        ...(asset.contentType === 'model/gltf-binary' ? { blended: blendedMaterials(asset.bytes) } : {}) });
+    }
+    return { source: read.source, assets };
+  };
+
   /** Any regular file inside the data directory, by absolute path; never a hidden one. */
   const readStored = async (raw: string | null) => {
     const root = await ready;
@@ -155,9 +199,13 @@ export function studioStoreMiddleware(directory: string, limits: Readonly<Record
         return reply(200, {});
       }
       if (route === 'files' && req.method === 'POST') return reply(200, await upload(req, url.searchParams.get('name')));
+      if (route === 'packages' && req.method === 'POST') return reply(200, await importPackage(req));
       if (route === 'file' && req.method === 'GET') {
         const { path, size } = await readStored(url.searchParams.get('path'));
-        res.writeHead(200, { ...headers, 'Content-Type': TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream', 'Content-Length': size });
+        // Stored files are named by their content and never change: the browser may keep them.
+        const cache = /\/files\/[0-9a-f]{64}\.[a-z]+$/.test(path) ? 'private, max-age=31536000, immutable' : headers['Cache-Control'];
+        res.writeHead(200, { ...headers, 'Cache-Control': cache,
+          'Content-Type': TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream', 'Content-Length': size });
         return pipeline(createReadStream(path), res);
       }
       throw new Failure(404, 'Unknown studio store request.');
@@ -169,10 +217,10 @@ export function studioStoreMiddleware(directory: string, limits: Readonly<Record
   };
 }
 
-export function studioStore(directory: string): Plugin {
+export function studioStore(directory: string, packageRoots: string[]): Plugin {
   return {
     name: 'studio-store',
-    configureServer(server) { server.middlewares.use(studioStoreMiddleware(directory)); },
-    configurePreviewServer(server) { server.middlewares.use(studioStoreMiddleware(directory)); },
+    configureServer(server) { server.middlewares.use(studioStoreMiddleware(directory, { packageRoots })); },
+    configurePreviewServer(server) { server.middlewares.use(studioStoreMiddleware(directory, { packageRoots })); },
   };
 }

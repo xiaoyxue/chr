@@ -84,13 +84,7 @@ export function localGlbModel(ad: LocalAd, bounds: GlbBounds): Rows {
     .multiply(toGltf));
 }
 
-/** Names of a GLB's materials with `alphaMode: BLEND`. */
-export function blendedMaterials(glb: Uint8Array): string[] {
-  const view = new DataView(glb.buffer, glb.byteOffset, glb.byteLength);
-  const json = JSON.parse(new TextDecoder().decode(glb.subarray(20, 20 + view.getUint32(12, true)))) as
-    { materials?: { name?: string; alphaMode?: string }[] };
-  return (json.materials ?? []).filter((material) => material.alphaMode === 'BLEND').map((material) => material.name ?? 'unnamed');
-}
+export { blendedMaterials } from '../matches/offline-reader.ts';
 
 const radians = (degrees: number) => degrees * Math.PI / 180;
 
