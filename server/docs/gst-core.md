@@ -31,7 +31,7 @@ the output card's), not a software timer:
 ```text
 chr-sdi-in (INPUT)                         chr-server (CORE, one pipeline "chr-core")
 file: ffmpeg | fdsrc ! rawvideoparse ─┐
-  ! videoconvert                      │    capture-<n>: unixfdsrc ! RGBA,<any extent, rate, scan> ! [number] ! tee
+  ! videoconvert ! queue (lookahead)  │    capture-<n>: unixfdsrc ! RGBA,<any extent, rate, scan> ! [number] ! tee
 pattern: videotestsrc ────────────────┤      ├─ queue leaky ! deinterlace (first field) ! appsink ──► driver:
 DeckLink: decklinkvideosrc            │      │     tracking hop ─► camera (Ti + C + #150 lens) ─► render hop ─┐
   mode=auto ! videoconvert ───────────┤      └─ queue leaky ! videoconvertscale ! UYVY,<output extent> ! appsink ┤
@@ -99,6 +99,8 @@ only when no frame came at all (input loss).
   same-host system clock. `unixfdsink` sends the PTS as that absolute clock
   time and the core's `unixfdsrc` turns it back into the core's running time
   `t`, so both processes agree on the instant without a common pipeline.
+  A file is decoded up to 300 ms ahead of `clocksync`, so that a short stall
+  of FFmpeg or the converter on a busy host does not drop frames as stale.
 - **Program delay D** (`--program-delay-ms`, default 3 frame periods, at most
   1500 ms; it replaced `--tracking-wait-ms`, which now fails). Frame `t`'s slot is
   due at `t + D`. The selector decides it at `t + D - 4 ms`: the rendered frame

@@ -6,8 +6,8 @@
 //! file:     ffmpeg (decode, loop, UYVY) | fdsrc ! rawvideoparse ! videoconvert ─┐
 //! pattern:  videotestsrc ──────────────────────────────────────────────────────┤
 //! DeckLink: decklinkvideosrc mode=auto|<mode> ! videoconvert ──────────────────┤
-//!   ! video/x-raw,format=RGBA,<format> ! clocksync ! [stamp]
-//!   ! queue leaky=downstream ! unixfdsink <socket>
+//!   ! video/x-raw,format=RGBA,<format> [! queue (file: 300 ms lookahead)]
+//!   ! clocksync ! [stamp] ! queue leaky=downstream ! unixfdsink <socket>
 //! file:     ffmpeg (decode, loop, S32LE) | fdsrc ! rawaudioparse ─┐
 //! pattern:  audiotestsrc wave=ticks ──────────────────────────────┤
 //! DeckLink: decklinkaudiosrc ! audioconvert ──────────────────────┤
@@ -18,6 +18,9 @@
 //! - **Pace.** A file and the test pattern play in real time on the system
 //!   clock (`clocksync`), at their own rates; a DeckLink card delivers at the
 //!   signal's rate and timestamps on its own (`clocksync` passes through).
+//!   A file's frames are decoded up to 300 ms ahead of `clocksync`, so that a
+//!   short stall of FFmpeg or the converter (a busy host) does not make them
+//!   stale and skip the picture.
 //! - **Memory.** `unixfdsink` offers `GstShmAllocator`, so frames are converted
 //!   straight into memfds and cross the socket without a copy; it refuses
 //!   anything else. The converter's pool has no upper bound and never stalls
@@ -112,6 +115,9 @@ impl Default for Options {
 pub const AUDIO_RATE: u32 = 48_000;
 /// Audio that may wait for the core before the oldest is dropped.
 const AUDIO_QUEUE: Duration = Duration::from_millis(200);
+/// How far a file's decoder may run ahead of `clocksync`, so that a stall of
+/// FFmpeg or the converter shorter than this does not make frames stale.
+const FILE_LOOKAHEAD: Duration = Duration::from_millis(300);
 
 /// The audio socket beside the capture socket `capture`: `<capture>.audio`.
 pub fn audio_socket(capture: &Path) -> PathBuf {
@@ -289,8 +295,13 @@ impl Input {
             .build()?;
         let queue = leaky_queue(options.queue, None)?;
         let send = unixfdsink(socket_path, true)?;
-        pipeline.add_many([front.upcast_ref(), &caps, &pace, &queue, &send])?;
-        gst::Element::link_many([front.upcast_ref(), &caps, &pace, &queue, &send])?;
+        let mut chain = vec![front.upcast_ref::<gst::Element>().clone(), caps];
+        if matches!(source, Source::File(_)) {
+            chain.push(lookahead_queue(FILE_LOOKAHEAD)?);
+        }
+        chain.extend([pace.clone(), queue, send.clone()]);
+        pipeline.add_many(&chain)?;
+        gst::Element::link_many(&chain)?;
 
         let shared = Arc::new(Shared::default());
         stamp(
@@ -458,6 +469,15 @@ fn leaky_queue(buffers: u32, time: Option<Duration>) -> Result<gst::Element, Err
         .build()?;
     queue.set_property_from_str("leaky", "downstream");
     Ok(queue)
+}
+
+/// A queue that holds back its upstream beyond `time` of frames, dropping none.
+fn lookahead_queue(time: Duration) -> Result<gst::Element, Error> {
+    Ok(gst::ElementFactory::make("queue")
+        .property("max-size-buffers", 0_u32)
+        .property("max-size-bytes", 0_u32)
+        .property("max-size-time", time.as_nanos() as u64)
+        .build()?)
 }
 
 /// The listening side of a capture-hop socket; `fd_only` refuses memory that
