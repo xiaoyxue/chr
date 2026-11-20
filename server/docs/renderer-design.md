@@ -70,7 +70,9 @@ variance within it: a screen-space kernel from the shading normal's derivatives
 (Tokuyoshi and Kaplanyan; Filament's variance 0.15 and threshold 0.2) for
 curvature and bumps across pixels, and Toksvig's term from a minified normal
 map's shortened mip average (beyond 8-bit quantisation) for bumps inside a
-texel. Sub-pixel detail therefore cannot reflect a single bright panorama texel
+texel. A normal map's texels are rescaled to unit length before its mips are
+built, so texels that a lossy encoding left short (a JPEG with chroma
+subsampling, #198) are not read as variance. Sub-pixel detail therefore cannot reflect a single bright panorama texel
 or light at mirror strength; glossy surfaces seen up close are unchanged. Trilinear samplers also filter anisotropically (16x), so ground ads seen at
 a broadcast camera's grazing angle keep their detail across the view. Occlusion maps are retained for indirect lighting and do not darken
 punctual direct light. No implicit ambient fill or fixed light rig is added.

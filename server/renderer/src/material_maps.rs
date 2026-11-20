@@ -9,7 +9,15 @@ use std::{
     sync::Arc,
 };
 
-type TextureKey = (usize, bool);
+/// How a material slot reads its texels; one source bound to slots of different
+/// encodings is uploaded once per encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Encoding {
+    Srgb,
+    Linear,
+    Normal,
+}
+type TextureKey = (usize, Encoding);
 struct BoundTexture {
     _source: Arc<TextureData>,
     view: wgpu::TextureView,
@@ -109,7 +117,11 @@ impl MaterialMapCache {
         let keys = std::array::from_fn(|i| {
             (
                 Arc::as_ptr(sources[i].as_ref().unwrap_or(&self.white)) as usize,
-                i == 0 || i == 3,
+                match i {
+                    0 | 3 => Encoding::Srgb,
+                    2 => Encoding::Normal,
+                    _ => Encoding::Linear,
+                },
             )
         });
         if self
@@ -163,8 +175,9 @@ impl MaterialMapCache {
         &self,
         gpu: &Gpu,
         source: Arc<TextureData>,
-        srgb: bool,
+        encoding: Encoding,
     ) -> Result<BoundTexture, BoxError> {
+        let srgb = encoding == Encoding::Srgb;
         let extent = source.extent();
         if extent.width() > gpu.device.limits().max_texture_dimension_2d
             || extent.height() > gpu.device.limits().max_texture_dimension_2d
@@ -193,9 +206,15 @@ impl MaterialMapCache {
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
+        let unit;
         gpu.queue.write_texture(
             texture.as_image_copy(),
-            source.pixels(),
+            if encoding == Encoding::Normal {
+                unit = unit_normals(source.pixels());
+                &unit
+            } else {
+                source.pixels()
+            },
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(extent.width() * 4),
@@ -296,6 +315,24 @@ impl MaterialMapCache {
 /// Largest anisotropy wgpu supports; trilinear material samplers use it.
 const MAX_ANISOTROPY: u16 = 16;
 
+/// Rescales tangent-space normal texels (`n = 2 * v / 255 - 1`) to unit length,
+/// keeping their directions and alpha. Lossy encodings shorten them: a JPEG with
+/// chroma subsampling clips a flat normal's blue channel at 255 and decodes it a
+/// few code values low. The shader's Toksvig term reads a short normal as variance
+/// (#198), so only the mip chain built from these texels may shorten them.
+fn unit_normals(pixels: &[u8]) -> Vec<u8> {
+    let mut unit = pixels.to_vec();
+    for texel in unit.as_chunks_mut::<4>().0 {
+        // 2 * v - 255 is odd, so no component is zero and no texel has zero length.
+        let n = [0, 1, 2].map(|i| f32::from(texel[i]) * 2.0 - 255.0);
+        let scale = 127.5 / n.iter().map(|v| v * v).sum::<f32>().sqrt();
+        for (value, component) in texel.iter_mut().zip(n) {
+            *value = (component * scale + 127.5).round() as u8;
+        }
+    }
+    unit
+}
+
 pub(crate) fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -336,4 +373,38 @@ pub(crate) fn fullscreen_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unit_normals;
+
+    fn length(texel: &[u8]) -> f32 {
+        texel[..3]
+            .iter()
+            .map(|&v| (f32::from(v) / 127.5 - 1.0).powi(2))
+            .sum::<f32>()
+            .sqrt()
+    }
+
+    #[test]
+    fn short_normal_texels_become_unit_length_in_their_own_direction() {
+        let short = [127, 126, 251, 200, 204, 128, 200, 7];
+        let unit = unit_normals(&short);
+        for (before, after) in short.chunks(4).zip(unit.chunks(4)) {
+            // Within 8-bit quantisation of a unit vector, as the shader allows.
+            assert!(
+                (length(after) - 1.0).abs() < 3f32.sqrt() / 255.0,
+                "{after:?}"
+            );
+            assert_eq!(after[3], before[3]);
+            let cosine: f32 = (0..3)
+                .map(|i| (f32::from(before[i]) / 127.5 - 1.0) * (f32::from(after[i]) / 127.5 - 1.0))
+                .sum::<f32>()
+                / length(before)
+                / length(after);
+            assert!(cosine > 0.9999, "{before:?} -> {after:?}");
+        }
+        assert_eq!(unit_normals(&[128, 128, 255, 255]), [128, 128, 255, 255]);
+    }
 }
