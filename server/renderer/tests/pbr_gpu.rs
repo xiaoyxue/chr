@@ -434,10 +434,17 @@ fn minified_normal_map_bumps_widen_the_specular_lobe() {
     let flat = highlight(Some(vec![128, 128, 255, 255, 128, 128, 255, 255]));
     // Texels tilted +-37 degrees about Y average to (0, 0, 0.8): flat, but no mirror.
     let bumpy = highlight(Some(vec![204, 128, 230, 255, 51, 128, 230, 255]));
+    // Nearly flat texels 1.6-3 % short, as a JPEG with chroma subsampling decodes them
+    // (#198): no variance, so no wider lobe.
+    let short = highlight(Some(vec![127, 126, 251, 255, 128, 129, 253, 255]));
     assert!(bare > 100, "mirror highlight {bare}");
     assert!(
         flat.abs_diff(bare) <= 2,
         "8-bit flat texels {flat} vs {bare}"
+    );
+    assert!(
+        short.abs_diff(bare) <= 2,
+        "short flat texels {short} vs {bare}"
     );
     assert!(
         u32::from(bumpy) * 4 < u32::from(bare),
