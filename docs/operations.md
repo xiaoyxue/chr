@@ -26,7 +26,7 @@ For the processes and their channels see the diagrams in the root
 | `<asset-root>/studio` (`studio_data_dir`) | The studio store (layout below) | Inside the asset root, so uploaded files can be sent to the renderer. Back it up; do not edit it by hand while the studio runs. |
 | `dir` in `stack.toml` (default `$XDG_RUNTIME_DIR/chr-stack`) | chr-server's control socket `render.sock`, chr-sdi-in's capture sockets `capture.sock` and `capture.sock.audio` (frames and audio as memfds) and the program tap | Kept between runs; a RAM-backed runtime directory is fine. |
 | `$XDG_RUNTIME_DIR/chr/` | chr-server's worker sockets (`worker-<pid>/` and `tracking-<pid>/`, two GStreamer unixfd sockets each; `recording-<pid>/` with one per recorded stream) and its verified copies of loaded assets | Managed by chr-server and removed on shutdown; a later chr-server removes those of a killed one. |
-| `record_dir` in `stack.toml` (chr-server `--record`) | Recordings: a folder `<UTC time>/` per run with `input-NNNN.ts`/`.jsonl` and `program-NNNN.ts`/`.jsonl` ([Recording](#recording)) | Outside the repository, on a disk with room: 1080p at 40 Mbit/s is about 18 GB per stream and hour. Nothing removes old runs. |
+| `record_dir` in `stack.toml` (chr-server `--record`) | Recordings: a folder `<UTC time>/` per run with `input-NNNN.mp4`/`.jsonl` and `program-NNNN.mp4`/`.jsonl` ([Recording](#recording)) | Outside the repository, on a disk with room: 1080p at 40 Mbit/s is about 18 GB per stream and hour. Nothing removes old runs. |
 
 ### Studio store
 
@@ -284,7 +284,8 @@ and the worker does not run.
   `"29.97"`; default every frame.
 
 Each format (and each restart of the worker) starts a new segment: an H.264
-MPEG-TS file that any player opens, and a `.jsonl` sidecar whose first line
+MP4 that any player opens (a killed worker's plays up to its last second),
+and a `.jsonl` sidecar whose first line
 describes it and whose further lines are its frames, in order (`sequence` is
 the same frame on both streams; the program's lines say `cg` or clean). Recording
 never delays the output: a slow disk or encoder drops recorded frames, which

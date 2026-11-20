@@ -50,7 +50,7 @@ tracking = "worker"
 # Pass the clip's audio through with the same delay as its video [default: true].
 # audio = true
 # Record the captured input (as chr-sdi-in delivered it) and the program (as it goes to
-# the output) into a new folder <record_dir>/<UTC time>/: H.264 MPEG-TS segments, one per
+# the output) into a new folder <record_dir>/<UTC time>/: H.264 MP4 segments, one per
 # format, each with a JSONL sidecar of its frames (server/docs/gst-core.md#recording-202).
 # Recording never delays the output; it drops instead. Default: no recording.
 # record_dir = "/srv/chr/recording"

@@ -3,16 +3,19 @@
 //!
 //! ```text
 //! unixfdsrc ! appsink ─► segment: appsrc ! videoconvert ! I420 ! openh264enc ! h264parse
-//!                                 ! mpegtsmux ! filesink   <dir>/<stream>-NNNN.ts
+//!                                 ! mp4mux ! filesink      <dir>/<stream>-NNNN.mp4
 //!                        sidecar: <dir>/<stream>-NNNN.jsonl, one line per frame
 //! ```
 //!
 //! A segment ends when the frames' caps change (a new input format, the
 //! program following it), when the stream ends and when the worker stops; the
-//! next one takes the next number, also across worker restarts. MPEG-TS needs
-//! no index at the end and the file is written unbuffered, so a killed worker
-//! leaves every frame it encoded playable. Timestamps start at 0 in every segment; the sidecar keeps each
-//! frame's own. Interlaced frames are encoded as they are, both fields woven in
+//! next one takes the next number, also across worker restarts. The MP4 is
+//! written as it records, fragment by fragment (one a second) after an index
+//! at its start, and unbuffered: a killed worker leaves a playable file up to
+//! its last complete fragment. A segment that ends normally is finalised into
+//! a plain MP4 (`fragment-mode=first-moov-then-finalise`). Every frame carries
+//! its duration, the recorded rate's period, so that the last one has one.
+//! Timestamps start at 0 in every segment; the sidecar keeps each frame's own. Interlaced frames are encoded as they are, both fields woven in
 //! one progressive picture; the sidecar's header names their scan.
 //!
 //! At a recording rate N (`--fps`), a segment keeps frames on an N fps
@@ -48,7 +51,7 @@ use crate::{
 };
 
 /// The encoder: H.264 from gst-plugins-bad's openh264 (the root Nix shell has
-/// no x264 or MKV/MP4 muxers), high-rate and sliced for its threads.
+/// no x264), high-rate and sliced for its threads.
 pub const ENCODER: &str = "openh264enc complexity=low rate-control=bitrate bitrate=40000000 \
                            max-bitrate=80000000 gop-size=50 multi-thread=8 slice-mode=n-slices \
                            num-slices=8";
@@ -174,7 +177,7 @@ impl Drop for Recorder {
     }
 }
 
-/// The number after the highest `<stream>-NNNN.ts` in `dir`, from 1.
+/// The number after the highest `<stream>-NNNN.mp4` in `dir`, from 1.
 fn next_index(dir: &Path, stream: Stream) -> u32 {
     let prefix = format!("{}-", stream.name());
     std::fs::read_dir(dir)
@@ -186,7 +189,7 @@ fn next_index(dir: &Path, stream: Stream) -> u32 {
                 .file_name()
                 .to_str()?
                 .strip_prefix(&prefix)?
-                .strip_suffix(".ts")?
+                .strip_suffix(".mp4")?
                 .parse::<u32>()
                 .ok()
         })
@@ -198,7 +201,7 @@ fn next_index(dir: &Path, stream: Stream) -> u32 {
 pub fn segment_paths(dir: &Path, stream: Stream, index: u32) -> (PathBuf, PathBuf) {
     let base = format!("{}-{index:04}", stream.name());
     (
-        dir.join(format!("{base}.ts")),
+        dir.join(format!("{base}.mp4")),
         dir.join(format!("{base}.jsonl")),
     )
 }
@@ -211,6 +214,8 @@ struct Segment {
     video: PathBuf,
     sidecar: BufWriter<File>,
     first: Option<gst::ClockTime>,
+    /// Every frame's duration: the recorded rate's period.
+    period: gst::ClockTime,
     /// Its pipeline reported an error: it will not drain.
     failed: bool,
     /// Keeps frames on the recording rate's cadence; `None` keeps every frame.
@@ -237,7 +242,8 @@ impl Segment {
         let (video, sidecar) = segment_paths(dir, stream, index);
         let pipeline = gst::parse::launch(&format!(
             "appsrc name=frames format=time ! videoconvert n-threads=4 \
-             ! video/x-raw,format=I420 ! {ENCODER} ! h264parse ! mpegtsmux \
+             ! video/x-raw,format=I420 ! {ENCODER} ! h264parse \
+             ! mp4mux fragment-duration=1000 fragment-mode=first-moov-then-finalise \
              ! filesink name=file sync=false buffer-mode=unbuffered"
         ))?
         .downcast::<gst::Pipeline>()
@@ -300,6 +306,7 @@ impl Segment {
             sidecar,
             first: None,
             failed: false,
+            period: gst::ClockTime::from_nseconds(recorded.unwrap_or(input).period_ns()),
             cadence: recorded.map(|fps| Cadence::new(fps, input)),
             frames: 0,
             skipped: 0,
@@ -336,6 +343,7 @@ impl Segment {
             let buffer = buffer.make_mut();
             buffer.set_pts(at);
             buffer.set_dts(gst::ClockTime::NONE);
+            buffer.set_duration(self.period);
         }
         if let Err(error) = self.source.push_buffer(buffer) {
             self.failed = true;
@@ -499,10 +507,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(next_index(&dir, Stream::Input), 1);
         for name in [
-            "input-0001.ts",
-            "input-0007.ts",
-            "program-0009.ts",
-            "input-x.ts",
+            "input-0001.mp4",
+            "input-0007.mp4",
+            "program-0009.mp4",
+            "input-x.mp4",
         ] {
             std::fs::write(dir.join(name), b"").unwrap();
         }
@@ -510,7 +518,7 @@ mod tests {
         assert_eq!(next_index(&dir, Stream::Program), 10);
         assert_eq!(
             segment_paths(&dir, Stream::Program, 10),
-            (dir.join("program-0010.ts"), dir.join("program-0010.jsonl"))
+            (dir.join("program-0010.mp4"), dir.join("program-0010.jsonl"))
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

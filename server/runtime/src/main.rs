@@ -138,7 +138,7 @@ Options:
   --record <dir>          Record the captured input (as chr-sdi-in delivered it) and the
                           program (as it goes to the output) into a new folder
                           <dir>/<UTC time>/ with the supervised chr-recorder-cli worker:
-                          H.264 MPEG-TS segments with a JSONL sidecar of their frames, a
+                          H.264 MP4 segments with a JSONL sidecar of their frames, a
                           new segment for each format; never delays the output, drops
                           instead (tracked program)
   --record-streams <input|program|input,program> What --record records [default: both]

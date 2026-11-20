@@ -723,10 +723,10 @@ fn sidecar(path: &Path) -> (serde_json::Value, Vec<serde_json::Value>) {
     (header, lines.collect())
 }
 
-/// The H.264 pictures of an MPEG-TS file, as a player decodes them.
+/// The H.264 pictures of an MP4 file, as a player decodes them.
 fn pictures(path: &Path) -> usize {
     let pipeline = gst::parse::launch(&format!(
-        "filesrc location={} ! tsdemux ! h264parse ! appsink name=out sync=false",
+        "filesrc location={} ! qtdemux ! h264parse ! appsink name=out sync=false",
         path.display()
     ))
     .unwrap()
@@ -775,7 +775,8 @@ async fn the_recording_worker_records_input_and_program_in_a_segment_per_format(
             let core = run.core;
             until(Duration::from_secs(10), || core.selector_counters().cg > 50).await;
             switch(run, slower).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // A few of the MP4's one-second fragments complete before the kill.
+            tokio::time::sleep(Duration::from_secs(3)).await;
             // The killed worker's segments end; its successor starts new ones.
             let pid = run
                 .recording
@@ -816,9 +817,10 @@ async fn the_recording_worker_records_input_and_program_in_a_segment_per_format(
             let (header, frames) = sidecar(&base.with_extension("jsonl"));
             assert_eq!(header["format"], format, "{stream} {segment}: {header}");
             assert_eq!(header["stream"], stream);
-            let decoded = pictures(&base.with_extension("ts"));
+            let decoded = pictures(&base.with_extension("mp4"));
             if killed {
-                // The encoder's queue died with the worker.
+                // The fragment being written died with the worker; the
+                // complete ones play.
                 assert!(
                     decoded > 10 && decoded <= frames.len(),
                     "{stream} {segment}: {decoded} of {}",
@@ -858,7 +860,7 @@ async fn the_recording_worker_records_input_and_program_in_a_segment_per_format(
                 }
             }
         }
-        assert!(!dir.join(format!("{stream}-0004.ts")).exists());
+        assert!(!dir.join(format!("{stream}-0004.mp4")).exists());
     }
     // The program shows the frames the input recorded, CG once the workers run.
     let (_, input) = sidecar(&dir.join("input-0001.jsonl"));
@@ -901,7 +903,7 @@ async fn a_recording_rate_keeps_frames_on_its_cadence() {
             (Some("192x128p50"), Some("10"))
         );
         assert!(frames.len() > 10, "{stream}: {} frames", frames.len());
-        assert_eq!(pictures(&base.with_extension("ts")), frames.len());
+        assert_eq!(pictures(&base.with_extension("mp4")), frames.len());
         let steps: Vec<u64> = frames
             .windows(2)
             .map(|pair| pair[1]["pts_ns"].as_u64().unwrap() - pair[0]["pts_ns"].as_u64().unwrap())

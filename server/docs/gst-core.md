@@ -1008,7 +1008,7 @@ program: ... ! livesync ! tee ─── queue leaky ! appsink ─► tap "progra
                                                                             │ $XDG_RUNTIME_DIR/chr/recording-<pid>/
 chr-recorder-cli ◄────────────────────────────── unixfd (memfd) ───────────┘
   per stream: unixfdsrc ─► segment: appsrc ! videoconvert ! I420 ! openh264enc ! h264parse
-                                    ! mpegtsmux ! filesink    <dir>/<UTC time>/<stream>-NNNN.ts
+                                    ! mp4mux ! filesink       <dir>/<UTC time>/<stream>-NNNN.mp4
                          └► sidecar <stream>-NNNN.jsonl
 ```
 
@@ -1035,8 +1035,12 @@ chr-recorder-cli ◄────────────────────
   chr-server is no longer its parent (`--server-pid`).
 - **Segments.** Every segment has one format: new caps (a new input format,
   the program following it), a lost stream and a restarted worker each start
-  the next number. MPEG-TS needs no index at its end, so a killed worker's
-  files play up to its last encoded frame. Timestamps start at 0 in every
+  the next number. The MP4 is written unbuffered as it records, in
+  one-second fragments after an index at its start (`mp4mux
+  fragment-mode=first-moov-then-finalise`): a killed worker's file plays up to
+  its last complete fragment, and a segment that ends normally is finalised
+  into a plain MP4. Every frame carries the recorded rate's period as its
+  duration, so that players keep the last one. Timestamps start at 0 in every
   segment.
 - **Sidecar.** The first line describes the segment (`stream`, `segment`,
   `format` as captured, `recorded_fps`, `caps`, `started_unix_ms`). Each
@@ -1049,16 +1053,16 @@ chr-recorder-cli ◄────────────────────
   N fps cadence of the frames' own timestamps (within half the shorter period),
   starting again after a gap, and tells the encoder N. An input at or below N
   keeps every frame.
-- **Encoder.** openh264 from gst-plugins-bad (the root shell has no x264 and
-  no MKV/MP4 muxers), 40 Mbit/s, 8 slices: about 100 fps of 1080p test pattern
+- **Encoder.** openh264 from gst-plugins-bad (the root shell has no x264;
+  the flake adds gst-plugins-good's `isomp4` for `mp4mux`), 40 Mbit/s, 8 slices: about 100 fps of 1080p test pattern
   and 39 fps of 1080p noise, its worst case, on the development host.
   Interlaced frames are encoded woven, as one progressive picture.
 
 Measured on the development host (debug build, simulated output) with a real
 SDI input, a DeckLink Duo 2 sub-device at 1080p30 through `chr-sdi-in --source
 decklink --mode auto`: 30 s recorded 875 input and 872 program frames, none
-dropped, no gap in their sequences, every 33.33 ms; `ffprobe` decodes exactly
-as many pictures as the sidecars list. With `--record-fps 10` every third frame
+dropped, no gap in their sequences, every 33.33 ms; `ffprobe` decoded exactly
+as many pictures as the sidecars list (then MPEG-TS, before the switch to MP4). With `--record-fps 10` every third frame
 was kept, 100 ms apart. The 1080p50 test pattern recorded every frame of both
 streams at 40 Mbit/s each.
 

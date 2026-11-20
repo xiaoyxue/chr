@@ -5,8 +5,8 @@
 //!
 //! ```text
 //! chr-server core                                     chr-recorder-cli
-//!   capture tee ─ queue leaky ! appsink ─► Tap "input"   ─unixfd─► input-NNNN.ts + .jsonl
-//!   program tee ─ queue leaky ! appsink ─► Tap "program" ─unixfd─► program-NNNN.ts + .jsonl
+//!   capture tee ─ queue leaky ! appsink ─► Tap "input"   ─unixfd─► input-NNNN.mp4 + .jsonl
+//!   program tee ─ queue leaky ! appsink ─► Tap "program" ─unixfd─► program-NNNN.mp4 + .jsonl
 //! ```
 //!
 //! Each [`Tap`] is a standalone `appsrc ! unixfdsink` pipeline that listens on

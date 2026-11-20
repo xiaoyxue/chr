@@ -3,7 +3,7 @@
 //! against a running chr-server's recording sockets.
 //!
 //! Each recorded stream (the captured input, the program) arrives on a unixfd
-//! socket of chr-server's and is written as H.264 MPEG-TS segments, each with a
+//! socket of chr-server's and is written as H.264 MP4 segments, each with a
 //! JSONL sidecar of its frames ([`chr_runtime::worker::recording::writer`]).
 
 use std::{
@@ -26,7 +26,7 @@ Usage: chr-recorder-cli [--input-socket <path>] [--program-socket <path>] --dir 
                         [--fps <rate>] [--server-pid <pid>]
 
 Records chr-server's captured input and/or its program from the recording sockets
-of chr-server --record (one per stream) into <dir>: <stream>-NNNN.ts (H.264, MPEG-TS)
+of chr-server --record (one per stream) into <dir>: <stream>-NNNN.mp4 (H.264)
 and <stream>-NNNN.jsonl (a header line, then one line per frame), a new segment for
 each format. It exits when chr-server ends the streams, on Ctrl-C or SIGTERM, and once
 its parent is no longer --server-pid (chr-server starts it in a process group of its

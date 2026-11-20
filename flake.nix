@@ -46,13 +46,17 @@
           # (#154), copied out of gst-plugins-rs: the whole package (~55 plugins) would put
           # gtk4, whisper and more on every registry scan; these two need only GStreamer.
           # deinterlace (gst-plugins-good) gives the core's CG branch progressive frames
-          # of an interlaced input; it, too, needs only GStreamer and ORC.
+          # of an interlaced input; it, too, needs only GStreamer and ORC. isomp4
+          # (gst-plugins-good's mp4mux) writes the recording worker's MP4 segments
+          # (#202); it needs only GStreamer and zlib.
           liveSync = pkgs.runCommand "chr-gst-livesync" { } ''
             mkdir -p $out/lib/gstreamer-1.0
             for plugin in livesync fallbackswitch; do
               cp ${pkgs.gst_all_1.gst-plugins-rs}/lib/gstreamer-1.0/libgst$plugin.so $out/lib/gstreamer-1.0/
             done
-            cp ${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0/libgstdeinterlace.so $out/lib/gstreamer-1.0/
+            for plugin in deinterlace isomp4; do
+              cp ${pkgs.gst_all_1.gst-plugins-good}/lib/gstreamer-1.0/libgst$plugin.so $out/lib/gstreamer-1.0/
+            done
           '';
           workerPlugins = pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
             (pkgs.lib.getLib pkgs.gst_all_1.gstreamer)
