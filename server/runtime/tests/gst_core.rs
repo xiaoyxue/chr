@@ -227,6 +227,7 @@ async fn with_setup<T>(
                     "--manifest".into(),
                     fixture.path("manifest.json").display().to_string(),
                 ],
+                threads: None,
                 width: MODE.width,
                 height: MODE.height,
                 fps: MODE.fps,

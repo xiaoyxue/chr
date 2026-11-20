@@ -36,7 +36,8 @@
 #   --tracking-cli <path>  Tracking worker executable instead of the stand-in, for
 #                     example pitch-analysis (implies --tracking-worker). Give its own
 #                     arguments as chr-server options --tracking-worker-arg <arg>, and
-#                     --tracking-centre <x> <y> <z>
+#                     --tracking-centre <x> <y> <z>; --tracking-threads <n> caps its
+#                     CPU threads (OMP_NUM_THREADS)
 #
 # Other chr-server options pass through: --program-delay-ms <n> (the program delay D),
 # --input-loss, --output-rate, the lens options --tracking-lens <auto|pinhole>,

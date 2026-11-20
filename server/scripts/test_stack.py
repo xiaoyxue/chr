@@ -38,6 +38,8 @@ class ConfigTests(unittest.TestCase):
             self.load('scene = "a"\nvideo = "b"\ntracking = "external"\ntracking_cli = "/opt/t"\n')
         with self.assertRaisesRegex(SystemExit, "tracking_worker_args need tracking_cli"):
             self.load('scene = "a"\nvideo = "b"\ntracking_worker_args = ["--x"]\n')
+        with self.assertRaisesRegex(SystemExit, "tracking_threads must be"):
+            self.load('scene = "a"\nvideo = "b"\ntracking_threads = 0\n')
         with self.assertRaisesRegex(SystemExit, "tracking_centre must be"):
             self.load('scene = "a"\nvideo = "b"\ntracking_centre = [1, 2]\n')
         with self.assertRaisesRegex(SystemExit, "tracking_lens must be"):
@@ -91,13 +93,14 @@ class ComponentTests(unittest.TestCase):
         self.assertNotIn("--tracking-worker", render)
         analysis = stack.Config(scene="s.json", video="v.mp4", tracking_cli="/opt/pitch-analysis",
                                 tracking_worker_args=["--ledger", "/runs/{stream_id}.arrow"],
-                                tracking_centre=[14.5, 60.6, -9.9], program_delay_ms=800,
+                                tracking_threads=4, tracking_centre=[14.5, 60.6, -9.9], program_delay_ms=800,
                                 input_loss="slate", output_rate="fixed:50", audio=False)
         render = next(c for c in stack.components(analysis) if c.name == "render").command
         self.assertEqual(render[render.index("--tracking-cli") + 1], "/opt/pitch-analysis")
         self.assertNotIn("--tracking-worker", render, "--tracking-cli implies it in run-tracked.sh")
         args = [render[i + 1] for i, arg in enumerate(render) if arg == "--tracking-worker-arg"]
         self.assertEqual(args, ["--ledger", "/runs/{stream_id}.arrow"])
+        self.assertEqual(render[render.index("--tracking-threads") + 1], "4")
         centre = render.index("--tracking-centre")
         self.assertEqual(render[centre + 1:centre + 4], ["14.5", "60.6", "-9.9"])
         self.assertEqual(render[render.index("--program-delay-ms") + 1], "800")

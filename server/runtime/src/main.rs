@@ -25,7 +25,9 @@
 //! The renderer's only product is the SDI program output. Viewers watch it through the
 //! separate `chr-monitor` process, which reads the program tap and never feeds back.
 
-use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    error::Error, net::SocketAddr, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration,
+};
 
 use chr_common::{
     rate::Rate,
@@ -98,6 +100,9 @@ Options:
                           [default: chr-tracking-sim-cli next to chr-server, a replay]
   --tracking-worker-arg <arg> Pass one argument to the tracking worker (repeatable);
                           {stream_id} in it is replaced by each worker session's stream ID
+  --tracking-threads <n>  Set OMP_NUM_THREADS=<n> for the tracking worker alone, capping
+                          the OpenMP/PyTorch CPU threads of a tracker such as vchao's
+                          [default: inherited]
   --tracking-centre <x> <y> <z> Station optical centre of every tracked camera, world
                           metres with negative Z up [default: the reference camera of
                           the manifest or description]
@@ -166,6 +171,7 @@ struct Args {
     tracking_worker: bool,
     tracking_cli: Option<PathBuf>,
     tracking_worker_args: Vec<String>,
+    tracking_threads: Option<NonZeroU32>,
     tracking_centre: Option<[f64; 3]>,
     /// `--tracking-lens pinhole`.
     tracking_pinhole: bool,
@@ -220,6 +226,7 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
         tracking_worker: false,
         tracking_cli: None,
         tracking_worker_args: Vec::new(),
+        tracking_threads: None,
         tracking_centre: None,
         tracking_pinhole: false,
         tracking_lens: None,
@@ -280,6 +287,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
             "--tracking-worker" => args.tracking_worker = true,
             "--tracking-cli" => args.tracking_cli = Some(value()?.into()),
             "--tracking-worker-arg" => args.tracking_worker_args.push(value()?),
+            "--tracking-threads" => {
+                args.tracking_threads = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "--tracking-threads must be a positive integer")?,
+                )
+            }
             "--tracking-centre" => args.tracking_centre = Some(numbers(&flag, &mut raw)?),
             "--tracking-lens" => {
                 lens_given = true;
@@ -361,11 +375,13 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Option<Args>> {
     }
     if (args.tracking_cli.is_some()
         || !args.tracking_worker_args.is_empty()
+        || args.tracking_threads.is_some()
         || args.tracking_centre.is_some())
         && !args.tracking_worker
     {
         return Err(
-            "--tracking-cli, --tracking-worker-arg and --tracking-centre require --tracking-worker"
+            "--tracking-cli, --tracking-worker-arg, --tracking-threads and \
+                    --tracking-centre require --tracking-worker"
                 .into(),
         );
     }
@@ -890,6 +906,7 @@ fn run_core(args: Args) -> Result<()> {
             TrackerConfig {
                 executable,
                 args: args.tracking_worker_args.clone(),
+                threads: args.tracking_threads,
                 width: native.width,
                 height: native.height,
                 fps: mode.fps,
@@ -1250,6 +1267,8 @@ mod tests {
             "--ledger",
             "--tracking-worker-arg",
             "/runs/{stream_id}.arrow",
+            "--tracking-threads",
+            "4",
             "--tracking-centre",
             "14.5",
             "60.6",
@@ -1264,6 +1283,7 @@ mod tests {
                 worker.tracking_worker,
                 worker.tracking_cli,
                 worker.tracking_worker_args,
+                worker.tracking_threads,
                 worker.tracking_centre,
                 worker.tracking_pinhole,
             ),
@@ -1271,10 +1291,23 @@ mod tests {
                 true,
                 Some(PathBuf::from("/opt/tracker")),
                 vec!["--ledger".to_owned(), "/runs/{stream_id}.arrow".to_owned()],
+                NonZeroU32::new(4),
                 Some([14.5, 60.6, -9.9]),
                 true,
             )
         );
+        let threads = |n| {
+            parse(&[
+                "--description",
+                "d.json",
+                "--tracking-worker",
+                "--tracking-threads",
+                n,
+            ])
+        };
+        assert!(threads("0").is_err());
+        assert!(threads("-1").is_err());
+        assert!(parse(&["--description", "d.json", "--tracking-threads", "4"]).is_err());
         let tracked = ["--tracked-scene", "s.json"];
         let lens_args = [
             "--tracking-lens-k",

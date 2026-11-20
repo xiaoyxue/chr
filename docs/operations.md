@@ -159,7 +159,7 @@ Edit `output/stack/stack.toml`; the example documents every key.
 | `srt` | An interface address, to let players on the LAN receive SRT directly |
 | `server_ws`, `monitor_ws`, `webrtc_tcp`, ports | Free local ports; set a page or relay port to 0 to leave it out |
 | `size` | The camera's own size, such as `1920x1080`; see [Video size](#video-size) |
-| `tracking`, `tracking_cli`, `tracking_worker_args`, `tracking_centre` | The tracking worker; see [Tracking worker](#tracking-worker) |
+| `tracking`, `tracking_cli`, `tracking_worker_args`, `tracking_threads`, `tracking_centre` | The tracking worker; see [Tracking worker](#tracking-worker) |
 | `program_delay_ms` | The program delay D: every frame leaves this long after its capture; see [Program delay and output](#program-delay-and-output) |
 | `input_loss`, `output_rate`, `audio` | What fills the output while the input is lost, the output's rate, and the clip's audio; see [Program delay and output](#program-delay-and-output) |
 
@@ -216,6 +216,9 @@ to its tracking worker and renders each frame with the `Ti` it returns
   such as vchao's `pitch-analysis`. Its `tracking_worker_args` give its map and
   settings; `{stream_id}` in them becomes each session's stream ID, for example
   in `--ledger`. It sends no lens, so its `Ti` is rendered with the pinhole camera.
+- `tracking_threads` sets `OMP_NUM_THREADS` for the worker alone. vchao's
+  trackers otherwise start about 100 OpenMP/PyTorch threads; 4 halves their CPU
+  use at the same `Ti` rate and leaves the CPU to chr-sdi-in and chr-server.
 - `tracking_centre` is the station's optical centre `[x, y, z]`. Without it,
   the description's or manifest's reference camera is used.
 - The lens follows the tracking data
@@ -330,6 +333,7 @@ tracking_worker_args = [
     "--batch-frames", "1", "--estimate-every", "1", "--interpolation", "logh",
     "--overload-ms", "200", "--ledger", "<asset-root>/runs/{stream_id}.arrow",
 ]
+tracking_threads = 4
 program_delay_ms = 300
 ```
 

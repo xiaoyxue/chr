@@ -29,6 +29,10 @@ tracking = "worker"
 #     "--asset-manifest", "/path/to/map/manifest.json",
 #     "--batch-frames", "8", "--estimate-every", "4", "--interpolation", "logh",
 #     "--overload-ms", "500", "--ledger", "/path/to/runs/{stream_id}.arrow"]
+# OMP_NUM_THREADS of the tracking worker alone. vchao's pitch-analysis otherwise starts
+# about 100 OpenMP/PyTorch threads; 4 roughly halves its CPU use at the same Ti rate and
+# leaves the CPU to chr-sdi-in, chr-server and the renderer [default: inherited].
+# tracking_threads = 4
 # Station optical centre of every camera: world metres, negative Z up. Default: the
 # reference camera of the description or manifest.
 # tracking_centre = [14.52857216404143, 60.620266710663365, -9.91514362632655]

@@ -76,6 +76,9 @@ class Config:
     tracking_cli: str = ""
     # Arguments of tracking_cli; "{stream_id}" is replaced by each worker session's stream ID.
     tracking_worker_args: list[str] = field(default_factory=list)
+    # OMP_NUM_THREADS of the tracking worker alone (its OpenMP/PyTorch CPU threads);
+    # default: inherited.
+    tracking_threads: int | None = None
     # Station optical centre [x, y, z] (world metres, negative Z up); default: the
     # reference camera of the description or manifest.
     tracking_centre: list[float] | None = None
@@ -126,7 +129,8 @@ def load_config(path: Path) -> Config:
         raise SystemExit(f"{path}: missing {', '.join(missing)}")
     if values.get("tracking", "worker") not in ("worker", "external"):
         raise SystemExit(f"{path}: tracking must be \"worker\" or \"external\"")
-    worker_keys = [key for key in ("tracking_cli", "tracking_worker_args", "tracking_centre") if values.get(key)]
+    worker_keys = [key for key in ("tracking_cli", "tracking_worker_args", "tracking_threads", "tracking_centre")
+                   if values.get(key)]
     if worker_keys and values.get("tracking", "worker") != "worker":
         raise SystemExit(f"{path}: {', '.join(worker_keys)} need tracking = \"worker\"")
     if values.get("tracking_worker_args") and not values.get("tracking_cli"):
@@ -138,6 +142,9 @@ def load_config(path: Path) -> Config:
             raise SystemExit(f"{path}: {key} must be {count} numbers")
         return value is not None
     numbers("tracking_centre", 3)
+    threads = values.get("tracking_threads")
+    if threads is not None and (not isinstance(threads, int) or isinstance(threads, bool) or threads < 1):
+        raise SystemExit(f"{path}: tracking_threads must be a positive integer")
     if values.get("tracking_lens", "auto") not in ("auto", "pinhole"):
         raise SystemExit(f"{path}: tracking_lens must be \"auto\" or \"pinhole\"")
     scale = values.get("tracking_lens_scale")
@@ -207,6 +214,8 @@ def components(config: Config) -> list[Component]:
         render += ["--tracking-cli", config.tracking_cli] if config.tracking_cli else ["--tracking-worker"]
         for arg in config.tracking_worker_args:
             render += ["--tracking-worker-arg", arg]
+        if config.tracking_threads is not None:
+            render += ["--tracking-threads", str(config.tracking_threads)]
         if config.tracking_centre:
             render += ["--tracking-centre", *(repr(float(v)) for v in config.tracking_centre)]
     if config.program_delay_ms is not None:

@@ -21,6 +21,7 @@
 
 use std::{
     collections::VecDeque,
+    num::NonZeroU32,
     path::PathBuf,
     process::Command,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -76,6 +77,9 @@ pub struct TrackerConfig {
     pub executable: PathBuf,
     /// Worker arguments; [`STREAM_ID_PLACEHOLDER`] is replaced in each.
     pub args: Vec<String>,
+    /// `OMP_NUM_THREADS` of the worker alone: caps the OpenMP/PyTorch CPU threads of a
+    /// tracker such as vchao's, leaving the CPU to chr-server and its other workers.
+    pub threads: Option<NonZeroU32>,
     pub width: u32,
     pub height: u32,
     pub fps: Rate,
@@ -508,6 +512,9 @@ impl Tracker {
             )
             .arg("--stream-id")
             .arg(&wire.stream_id);
+        if let Some(threads) = self.config.threads {
+            command.env("OMP_NUM_THREADS", threads.to_string());
+        }
         Running::spawn(command, channel)
     }
 

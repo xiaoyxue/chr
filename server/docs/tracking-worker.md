@@ -69,6 +69,14 @@ chr-server runs the worker as:
 - `--tracking-worker-arg <arg>` (repeatable) adds its own arguments. In each one,
   `{stream_id}` is replaced by the session's stream ID, so per-session files
   such as `pitch-analysis --ledger` get new paths after a restart.
+- `--tracking-threads <n>` sets `OMP_NUM_THREADS=<n>` for the worker alone,
+  capping the OpenMP/PyTorch CPU threads of a tracker such as `pitch-track-live`.
+  Unset, the worker inherits chr-server's environment and starts about 100
+  threads. Measured on the 1080p50 sim50 clip (RTX 6000 Ada), 4 threads cut the
+  tracker from about 740% to 380% CPU at the same `Ti` rate (32.4 → 33.1 per
+  second), leaving the CPU to chr-sdi-in, chr-server and the renderer. Do not
+  pin the tracker to the performance cores (`taskset -c 0-15`): that lowered the
+  rate to 26.9 per second.
 - There is no `worker` subcommand, `hello`, `ready` or `fatal` message:
   startup configuration is on the command line, and failures are the exit status
   and the log.
@@ -443,7 +451,7 @@ server/scripts/run-tracked.sh --scene clip-manifest.json --video clip.mp4 --trac
   `--tracking-worker-arg <arg>`, and set `--tracking-centre` and
   `--program-delay-ms`.
 - `stack.py` does this from `stack.toml`: `tracking = "worker"`, `tracking_cli`,
-  `tracking_worker_args`, `tracking_centre` and `program_delay_ms`, and the
+  `tracking_worker_args`, `tracking_threads`, `tracking_centre` and `program_delay_ms`, and the
   `tracking_lens*` keys (`server/scripts/stack.example.toml`).
 - `run-tracked.sh` passes the `--tracking-lens*` options to chr-server.
 - `tracking = "external"` runs no tracking worker: `chr-sdi-in --send-cameras`

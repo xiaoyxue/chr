@@ -278,6 +278,8 @@ camera only and chr-server's tracking worker supplies the cameras
 default. The tracking worker's options are:
 - `--tracking-cli <path>` and `--tracking-worker-arg <arg>`: the worker and its
   arguments. The default is the stand-in, which takes `--manifest <json>`.
+- `--tracking-threads <n>`: `OMP_NUM_THREADS` of the worker alone, capping the
+  CPU threads of vchao's tracker ([tracking worker](docs/tracking-worker.md)).
 - `--tracking-centre <x> <y> <z>`: the station centre of every camera. The
   default is the reference camera's.
 - `--tracking-lens auto|pinhole` and `--tracking-lens-k <k1> <k2> <k3>

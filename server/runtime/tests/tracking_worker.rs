@@ -3,6 +3,7 @@
 //! returns.
 
 use std::{
+    num::NonZeroU32,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -46,13 +47,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(name: &str, args: &[&str], hang: Duration) -> Self {
-        Self::with(name, None, args, hang, 16)
+        Self::with(name, None, None, args, hang, 16)
     }
 
     /// A tracker of `executable` (default: the stand-in replaying a manifest).
     fn with(
         name: &str,
         executable: Option<PathBuf>,
+        threads: Option<NonZeroU32>,
         args: &[&str],
         hang: Duration,
         in_flight: usize,
@@ -76,6 +78,7 @@ impl Fixture {
                 executable: executable
                     .unwrap_or_else(|| env!("CARGO_BIN_EXE_chr-tracking-sim-cli").into()),
                 args: worker_args,
+                threads,
                 width: WIDTH,
                 height: HEIGHT,
                 fps: chr_common::rate::Rate::fps(50),
@@ -236,6 +239,7 @@ fn a_worker_holding_too_many_frames_is_replaced_not_skipped() {
     let mut fixture = Fixture::with(
         "full",
         None,
+        None,
         &["--hang-after", "1"],
         Duration::from_secs(10),
         2,
@@ -298,6 +302,34 @@ fn an_unreadable_manifest_exits_the_worker_and_backs_off() {
     assert!(!fixture.tracker().is_ready());
 }
 
+#[test]
+fn tracking_threads_set_the_workers_omp_num_threads() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("chr-tracking-threads-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let seen = dir.join("omp");
+    let worker = dir.join("worker.sh");
+    std::fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\nprintf %s \"$OMP_NUM_THREADS\" > {0}.tmp && mv {0}.tmp {0}\nexec sleep 30\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut fixture = Fixture::with(
+        "threads",
+        Some(worker),
+        NonZeroU32::new(3),
+        &[],
+        Duration::from_secs(5),
+        8,
+    );
+    fixture.until(|_, _| seen.exists());
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), "3");
+}
+
 /// The test plays the worker: it returns frame 0 with a fresh, overdue pose,
 /// changed by `corrupt`. Returns the answers and the status once the tracker
 /// took the frame or failed the worker.
@@ -323,7 +355,7 @@ fn return_frames(
     let idle = dir.join("idle.sh");
     std::fs::write(&idle, "#!/bin/sh\nexec sleep 30\n").unwrap();
     std::fs::set_permissions(&idle, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut fixture = Fixture::with(name, Some(idle), &[], Duration::from_secs(5), 8);
+    let mut fixture = Fixture::with(name, Some(idle), None, &[], Duration::from_secs(5), 8);
     fixture.tracker().poll();
     let sockets = fixture.dir.join("sockets");
     let output = Sender::listen_live(&sockets.join("output.sock"), None, 4).unwrap();
