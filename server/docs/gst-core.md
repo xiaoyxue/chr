@@ -1054,6 +1054,14 @@ chr-recorder-cli ◄────────────────────
   and 39 fps of 1080p noise, its worst case, on the development host.
   Interlaced frames are encoded woven, as one progressive picture.
 
+Measured on the development host (debug build, simulated output) with a real
+SDI input, a DeckLink Duo 2 sub-device at 1080p30 through `chr-sdi-in --source
+decklink --mode auto`: 30 s recorded 875 input and 872 program frames, none
+dropped, no gap in their sequences, every 33.33 ms; `ffprobe` decodes exactly
+as many pictures as the sidecars list. With `--record-fps 10` every third frame
+was kept, 100 ms apart. The 1080p50 test pattern recorded every frame of both
+streams at 40 Mbit/s each.
+
 Flags: `--record <dir>`, `--record-streams input|program|input,program`
 (default both), `--record-fps <rate>` (default every frame), `--recorder-cli
 <path>` (default next to chr-server); a tracked program only. `stack.toml`:
