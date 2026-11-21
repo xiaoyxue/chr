@@ -151,6 +151,7 @@ struct Draw {
     cull: Option<wgpu::Face>,
     shadow_catcher: bool,
     decal: bool,
+    holdout: bool,
     /// Flag slot and look; the surface comes from the slot, not the mesh vertices.
     flag: Option<(usize, FlagShading)>,
 }
@@ -163,6 +164,7 @@ struct Part {
     mirrored: bool,
     shadow_catcher: bool,
     decal: bool,
+    holdout: bool,
     flag: Option<(usize, FlagShading)>,
     uniform: DrawUniform,
 }
@@ -189,10 +191,10 @@ struct Batch {
 }
 
 /// Orders the parts for drawing and merges those one instanced draw can cover.
-/// Opaque parts group by key in order of first appearance (depth testing makes
-/// their order irrelevant); flags keep one draw each (each has its own surface);
-/// decals, then catchers, keep scene order, since they blend, and merge only with
-/// a neighbour: instances of one draw rasterize in order.
+/// Opaque parts and holdouts group by key in order of first appearance (depth
+/// testing makes their order irrelevant); flags keep one draw each (each has its
+/// own surface); decals, then catchers, keep scene order, since they blend, and
+/// merge only with a neighbour: instances of one draw rasterize in order.
 fn batch(parts: Vec<(Part, InstanceUniform)>) -> Vec<Batch> {
     let mut opaque: Vec<Batch> = Vec::new();
     let mut groups = HashMap::<_, usize>::new();
@@ -1040,6 +1042,7 @@ impl MeshRenderer {
                     mirrored,
                     shadow_catcher: factors.shadow_catcher && flag.is_none(),
                     decal: factors.decal && flag.is_none(),
+                    holdout: factors.holdout && flag.is_none(),
                     flag,
                     uniform: DrawUniform {
                         color: factors.base_color,
@@ -1156,6 +1159,7 @@ impl MeshRenderer {
                 }),
                 shadow_catcher: part.shadow_catcher,
                 decal: part.decal,
+                holdout: part.holdout,
                 flag: part.flag,
             });
         }
@@ -1470,8 +1474,12 @@ impl MeshRenderer {
                 pass.set_bind_group(0, camera_group, &[]);
                 let mut bound = None;
                 let mut bindings = Bindings::default();
-                // Decals lie on the ground they decorate and cast no shadow.
-                for draw in self.draws.iter().filter(|draw| !draw.decal) {
+                // Decals lie on the ground they decorate and cast no shadow; nor do holdouts.
+                for draw in self
+                    .draws
+                    .iter()
+                    .filter(|draw| !draw.decal && !draw.holdout)
+                {
                     let pipeline = match (draw.flag, *point) {
                         (None, false) => self.shadow_pipeline.get(draw.cull),
                         (None, true) => self.point_shadow_pipeline.get(draw.cull),
@@ -1542,7 +1550,11 @@ impl MeshRenderer {
         // opaque geometry; catchers come last so their shadows also darken decals.
         // Depth testing hides both behind real objects.
         let deferred = |draw: &&Draw| physical && (draw.shadow_catcher || draw.decal);
-        let opaque = self.draws.iter().filter(|draw| !deferred(draw));
+        // Holdouts draw only their depth, below.
+        let opaque = self
+            .draws
+            .iter()
+            .filter(|draw| !deferred(draw) && !draw.holdout);
         let decals = self.draws.iter().filter(|draw| physical && draw.decal);
         let catchers = self
             .draws
@@ -1550,9 +1562,13 @@ impl MeshRenderer {
             .filter(|draw| physical && draw.shadow_catcher);
         let mut bindings = Bindings::default();
         if physical {
-            // Catchers stand for the real ground: their depth comes first, so what
-            // lies below it is not drawn and the camera's picture shows there.
-            for draw in self.draws.iter().filter(|draw| draw.shadow_catcher) {
+            // Catchers and holdouts stand for the real ground: their depth comes first,
+            // so what lies below it is not drawn and the camera's picture shows there.
+            for draw in self
+                .draws
+                .iter()
+                .filter(|draw| draw.shadow_catcher || draw.holdout)
+            {
                 pass.set_pipeline(self.holdout_pipeline.get(draw.cull));
                 bindings.bind(&mut pass, self, draw, &self.meshes[&draw.mesh], false);
                 pass.draw_indexed(draw.indices.clone(), 0, draw.instances.clone());

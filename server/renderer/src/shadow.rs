@@ -211,10 +211,19 @@ impl ShadowAtlas {
     }
 }
 
+/// World bounds of what casts or receives shadows: visible instances, without those
+/// made only of holdouts.
 pub(crate) fn scene_bounds(scene: &SceneView) -> Option<Aabb> {
     let mut bounds = scene
         .instances()
-        .filter(|(_, i)| i.visible())
+        .filter(|(_, i)| {
+            i.visible()
+                && (i.flag().is_some()
+                    || !i
+                        .materials()
+                        .iter()
+                        .all(|&m| scene.material(m).is_ok_and(|m| m.holdout)))
+        })
         .map(|(_, i)| i.bounds());
     let first = bounds.next()?;
     let mut lo = first.min();
@@ -857,5 +866,44 @@ mod tests {
                 assert!((0.0..1.0).contains(&clip[2]));
             }
         }
+    }
+
+    #[test]
+    fn holdouts_do_not_widen_shadow_fitting() {
+        use crate::scene::{MeshData, ModelMatrix, PbrMaterial, Scene};
+        let quad = |half: f32, z: f32| {
+            MeshData::new(
+                vec![
+                    [-half, -half, z],
+                    [half, -half, z],
+                    [half, half, z],
+                    [-half, half, z],
+                ],
+                vec![0, 2, 1, 0, 3, 2],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap()
+        };
+        let mut scene = Scene::new().unwrap();
+        let plate = scene.add_mesh(quad(1.0, -1.0)).unwrap();
+        let ground = scene.add_mesh(quad(10_000.0, 0.0)).unwrap();
+        let grey = scene.add_material(PbrMaterial::default()).unwrap();
+        let holdout = scene
+            .add_material(PbrMaterial {
+                holdout: true,
+                ..Default::default()
+            })
+            .unwrap();
+        scene
+            .add_instance(plate, vec![grey], ModelMatrix::IDENTITY)
+            .unwrap();
+        scene
+            .add_instance(ground, vec![holdout], ModelMatrix::IDENTITY)
+            .unwrap();
+        let bounds = scene_bounds(&scene.snapshot()).unwrap();
+        assert_eq!(
+            (bounds.min(), bounds.max()),
+            ([-1.0, -1.0, -1.0], [1.0, 1.0, -1.0])
+        );
     }
 }

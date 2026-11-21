@@ -547,6 +547,8 @@ fn factors(v: &w::PbrFactors) -> Result<scene::PbrMaterial, ErrorObject> {
         shadow_catcher: false,
         // Decals are an asset's role, kept by the caller across factor overrides.
         decal: false,
+        // Holdouts are grounds the runtime builds, never wire materials.
+        holdout: false,
     })
 }
 fn shadow(mode: w::ShadowMode) -> ShadowMode {

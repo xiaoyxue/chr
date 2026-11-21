@@ -18,7 +18,7 @@ use chr_common::{
 };
 use chr_renderer::{
     glb::{GlbAsset, ImportedMaterial},
-    scene::{MeshData, PbrMaterial},
+    scene::{MeshData, ModelMatrix, PbrMaterial},
 };
 use chr_tracker::{pose::Tracked, replay::TrackingReplay};
 use serde_json::{Value, json};
@@ -37,7 +37,9 @@ use crate::{
 
 /// Asset and instance ID of the ground shadow catcher; descriptions cannot reuse it.
 pub const GROUND: &str = "chr-ground";
-/// Most instances a description may place, besides the ground.
+/// Asset and instance ID of the ground holdout; descriptions cannot reuse it.
+pub const GROUND_HOLDOUT: &str = "chr-ground-holdout";
+/// Most instances a description may place, besides the two grounds.
 pub const MAX_INSTANCES: usize = 63;
 /// Most assets a running server registers over its lifetime.
 pub const MAX_ASSETS: usize = 64;
@@ -110,7 +112,7 @@ pub fn prepare(
     config.native_extent = extent;
     config.sample_count = 4;
     config.limits.lights_per_scene = 8;
-    config.limits.instances_per_scene = (MAX_INSTANCES + 1) as u32;
+    config.limits.instances_per_scene = (MAX_INSTANCES + 2) as u32;
     config.shadows.resolution = 2048;
     config.shadows.max_bytes = (128_u64 * 1024 * 1024).into();
     config.environment.resolution = 256;
@@ -126,6 +128,9 @@ pub fn prepare(
         .map_err(|e| e.to_string())?;
     registrations
         .register_model(id(GROUND)?, ground())
+        .map_err(|e| e.to_string())?;
+    registrations
+        .register_model(id(GROUND_HOLDOUT)?, holdout_ground())
         .map_err(|e| e.to_string())?;
     let mut described_assets = HashMap::new();
     for ((asset_id, asset), described) in imported.into_iter().zip(&description.scene.assets) {
@@ -180,24 +185,51 @@ fn radial(radial: &d::Radial) -> Radial {
 
 /// The unit ground quad, scaled to the pitch by its instance: an invisible shadow catcher.
 fn ground() -> GlbAsset {
+    ground_quad(
+        0.5,
+        PbrMaterial {
+            shadow_catcher: true,
+            double_sided: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// Half-size in metres of the holdout ground: it reaches cameras up to about 1 km from
+/// the pitch centre. A quad reaching past the far plane is clipped by the GPU, whose
+/// imprecise depth then hides the catcher (and its shadows) where the two overlap.
+const HOLDOUT_HALF_M: f32 = 1000.0;
+
+/// The ground beyond the catcher: a holdout that hides what lies below the ground
+/// wherever the camera stands, at no cost to shadow maps. Without it, a camera
+/// outside the catcher sees below the ground past its edge.
+pub(super) fn holdout_ground() -> GlbAsset {
+    ground_quad(
+        HOLDOUT_HALF_M,
+        PbrMaterial {
+            holdout: true,
+            double_sided: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// A square of half-size `half` metres at Z = 0, centred on the pitch.
+fn ground_quad(half: f32, factors: PbrMaterial) -> GlbAsset {
     GlbAsset {
         mesh: MeshData::new(
             vec![
-                [-0.5, -0.5, 0.],
-                [0.5, -0.5, 0.],
-                [0.5, 0.5, 0.],
-                [-0.5, 0.5, 0.],
+                [-half, -half, 0.],
+                [half, -half, 0.],
+                [half, half, 0.],
+                [-half, half, 0.],
             ],
             vec![0, 2, 1, 0, 3, 2],
             std::iter::once(0..6).collect(),
         )
         .expect("static quad"),
         materials: vec![ImportedMaterial {
-            factors: PbrMaterial {
-                shadow_catcher: true,
-                double_sided: true,
-                ..Default::default()
-            },
+            factors,
             maps: Default::default(),
         }],
         warnings: Vec::new(),
@@ -223,14 +255,14 @@ fn scene_state(
     if scene.instances.len() > MAX_INSTANCES {
         return Err(format!("a description places at most {MAX_INSTANCES} instances").into());
     }
-    if scene
+    if let Some(id) = scene
         .assets
         .iter()
         .map(|a| &a.id)
         .chain(scene.instances.iter().map(|i| &i.id))
-        .any(|id| id.as_str() == GROUND)
+        .find(|id| [GROUND, GROUND_HOLDOUT].contains(&id.as_str()))
     {
-        return Err(format!("{GROUND} is reserved for the ground").into());
+        return Err(format!("{} is reserved for the ground", id.as_str()).into());
     }
     let kind = |id: &w::Id| {
         scene
@@ -275,10 +307,16 @@ fn scene_state(
         Some(lighting) => serde_json::to_value(lighting)?,
         None => default_lighting(scene.ground.pitch_m)?,
     };
-    let mut instances = vec![json!({
-        "instance_id": GROUND, "asset_ref": GROUND, "visible": true, "material_overrides": [],
-        "model": [[length * 1.5, 0, 0, 0], [0, width * 1.5, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-    })];
+    let mut instances = vec![
+        json!({
+            "instance_id": GROUND, "asset_ref": GROUND, "visible": true, "material_overrides": [],
+            "model": [[length * 1.5, 0, 0, 0], [0, width * 1.5, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        }),
+        json!({
+            "instance_id": GROUND_HOLDOUT, "asset_ref": GROUND_HOLDOUT, "visible": true,
+            "material_overrides": [], "model": ModelMatrix::IDENTITY.rows(),
+        }),
+    ];
     instances.extend(scene.instances.iter().map(|instance| {
         let mut native = json!({
             "instance_id": instance.id, "asset_ref": instance.asset, "model": instance.model,

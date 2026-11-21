@@ -47,10 +47,13 @@ with which lens, independent of any client's own scene model. The schema lives i
   (`chr-renderer-cli render --description <json> --frame <n>`); the live server
   ignores it.
 - `scene` replaces the whole scene. `ground.pitch_m` sizes an invisible shadow
-  catcher 1.5 times larger than the pitch. The catcher is the real ground: whatever
-  lies below it is not drawn, so the camera's picture shows there (a model rising
-  from the ground appears only above it). `lighting` is described under
-  [Lighting](#lighting). `shadow_mode: null` selects PCSS.
+  catcher 1.5 times larger than the pitch. Beyond it, an invisible holdout ground
+  2 km across, which receives no shadows, reaches cameras up to about 1 km from the
+  pitch centre. Together they are the real ground: whatever lies below them is not
+  drawn, so the camera's picture shows there (a model rising from the ground
+  appears only above it), even from a camera standing outside the catcher.
+  `lighting` is described under [Lighting](#lighting). `shadow_mode: null` selects
+  PCSS.
 - Coordinates follow [coordinates](coordinates.md): pitch-centred metres, X
   along the length, Y along the width, ground Z = 0, up is negative Z. `model`
   is forward row-major and maps asset coordinates to the world.
@@ -193,7 +196,8 @@ not in the matrix. The wave's time is each frame's media time, so a still render
 `source` is either `{"path": …}` or `{"package": <zip>, "entry": <name>}`, such
 as a Fusion offline package. `sha256` (lowercase hex of the source bytes) is
 verified before import. Assets are at most 256 MiB. In a startup file, relative
-paths resolve against the file's directory. Asset ID `chr-ground` is reserved.
+paths resolve against the file's directory. Asset IDs `chr-ground` and
+`chr-ground-holdout` are reserved.
 
 ## Loading
 

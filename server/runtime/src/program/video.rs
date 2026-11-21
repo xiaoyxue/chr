@@ -1,6 +1,7 @@
 //! Startup-only calibrated clip replay. No private paths or lens data enter RPC.
 use super::{
     Error,
+    description::holdout_ground,
     synthetic::{Synthetic, id},
 };
 use crate::{
@@ -204,6 +205,9 @@ pub fn prepare_with(
             },
         )
         .map_err(|e| e.to_string())?;
+    registrations
+        .register_model(id("video-holdout")?, holdout_ground())
+        .map_err(|e| e.to_string())?;
     let mut lighting = super::pitch::lighting(manifest.pitch_m, 35., "spots", true, [anchor; 4])?;
     for light in lighting["lights"].as_array_mut().expect("native lighting") {
         if light["kind"] == "spot" {
@@ -235,7 +239,8 @@ pub fn prepare_with(
         "camera":scene_camera,
         "instances":[
             {"instance_id":"mesh","asset_ref":"video-model","model":model.rows(),"visible":true,"material_overrides":[]},
-            {"instance_id":"ground","asset_ref":"video-receiver","model":ModelMatrix::IDENTITY.rows(),"visible":true,"material_overrides":[]}
+            {"instance_id":"ground","asset_ref":"video-receiver","model":ModelMatrix::IDENTITY.rows(),"visible":true,"material_overrides":[]},
+            {"instance_id":"ground-holdout","asset_ref":"video-holdout","model":ModelMatrix::IDENTITY.rows(),"visible":true,"material_overrides":[]}
         ],
         "lighting":lighting,"shadow_mode":"pcss"
     }))?;

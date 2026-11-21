@@ -659,7 +659,10 @@ on the GPU. "Over" blending therefore multiplies whatever lies behind it, the cl
 colour or a display background, by that ratio; it occludes and casts shadows like
 real ground and is drawn after opaque geometry. Ratios are luminance-weighted, so
 coloured light gives grey shadows; virtual light never brightens the plate. The
-shared wire material has no catcher field yet.
+shared wire material has no catcher field yet. `PbrMaterial::holdout` marks ground
+that only hides what lies below it: no colour, no shadows, and no part in shadow-map
+fitting, so it can extend far past the catcher; keep it inside the camera's far plane,
+where the GPU would clip it and lose the depth precision it shares with the catcher.
 
 This synthetic offscreen example verifies that changing CG exposure leaves its
 display plate and overlay unchanged. GPU regressions cover colour domains,

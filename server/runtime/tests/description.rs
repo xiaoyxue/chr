@@ -139,6 +139,10 @@ async fn a_startup_description_shares_one_asset_between_instances() {
                 description::GROUND.to_owned(),
                 description::GROUND.to_owned()
             ),
+            (
+                description::GROUND_HOLDOUT.to_owned(),
+                description::GROUND_HOLDOUT.to_owned()
+            ),
             ("left".to_owned(), "ad".to_owned()),
             ("right".to_owned(), "ad".to_owned())
         ]
@@ -146,13 +150,10 @@ async fn a_startup_description_shares_one_asset_between_instances() {
     drop(control);
     owner.await.unwrap();
 
-    let reserved = fixture.description(json!([Fixture::instance(
-        description::GROUND,
-        "ad",
-        0.,
-        1.
-    )]));
-    assert!(description::load(&reserved, MODE, runtime_id().unwrap()).is_err());
+    for reserved in [description::GROUND, description::GROUND_HOLDOUT] {
+        let reserved = fixture.description(json!([Fixture::instance(reserved, "ad", 0., 1.)]));
+        assert!(description::load(&reserved, MODE, runtime_id().unwrap()).is_err());
+    }
     let mut tampered: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     tampered["scene"]["assets"][0]["sha256"] = json!("0".repeat(64));
     std::fs::write(&path, tampered.to_string()).unwrap();
@@ -249,7 +250,7 @@ async fn description_load_replaces_the_scene_with_reused_and_packaged_assets() {
         .unwrap();
     assert_eq!((loaded.assets_imported, loaded.assets_reused), (1, 1));
     assert_eq!(
-        instances(&control, &program).await[1..],
+        instances(&control, &program).await[2..],
         [
             ("a".to_owned(), "ad2".to_owned()),
             ("b".to_owned(), "ad2".to_owned())
@@ -296,7 +297,7 @@ async fn description_load_replaces_the_scene_with_reused_and_packaged_assets() {
     );
     assert_eq!(
         instances(&control, &program).await.len(),
-        3,
+        4,
         "failed loads leave the last scene in place"
     );
 
@@ -361,7 +362,7 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
         )
         .await
         .unwrap();
-    assert_eq!(state["state"]["instances"][1]["flag"], motion);
+    assert_eq!(state["state"]["instances"][2]["flag"], motion);
 
     let mut flat = motion.clone();
     flat["width_m"] = json!(0);
@@ -383,7 +384,7 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
             "{case}"
         );
     }
-    assert_eq!(instances(&control, &program).await[1].1, "flag");
+    assert_eq!(instances(&control, &program).await[2].1, "flag");
     drop((control, loader));
     owner.await.unwrap();
 }
@@ -543,7 +544,7 @@ async fn described_motion_is_kept_and_invalid_motion_is_refused() {
         )
         .await
         .unwrap();
-    assert_eq!(state["state"]["instances"][1]["motion"], motion);
+    assert_eq!(state["state"]["instances"][2]["motion"], motion);
 
     let mut flat = motion.clone();
     flat["rotation"]["amplitude"] = json!(0.0);
@@ -589,7 +590,7 @@ async fn image_quad_instances_carry_their_own_opacity() {
             )
             .await
             .unwrap();
-        state["state"]["instances"].as_array().unwrap()[1..]
+        state["state"]["instances"].as_array().unwrap()[2..]
             .iter()
             .map(
                 |i| match i["material_overrides"].as_array().unwrap().as_slice() {
