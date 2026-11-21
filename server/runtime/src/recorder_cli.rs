@@ -26,7 +26,8 @@ Usage: chr-recorder-cli [--input-socket <path>] [--program-socket <path>] --dir 
                         [--fps <rate>] [--server-pid <pid>]
 
 Records chr-server's captured input and/or its program from the recording sockets
-of chr-server --record (one per stream) into <dir>: <stream>-NNNN.mp4 (H.264)
+of chr-server --record (one per stream) into <dir>: <stream>-NNNN.mp4 (H.264, from
+the Intel iGPU through VA-API when it encodes, else openh264 on the CPU)
 and <stream>-NNNN.jsonl (a header line, then one line per frame), a new segment for
 each format. It exits when chr-server ends the streams, on Ctrl-C or SIGTERM, and once
 its parent is no longer --server-pid (chr-server starts it in a process group of its
@@ -101,6 +102,8 @@ fn run(args: Args) -> Result<()> {
     std::fs::create_dir_all(&args.dir)?;
     let stop = Arc::new(AtomicBool::new(false));
     on_signal(Arc::clone(&stop))?;
+    let encoder = writer::Encoder::pick();
+    log::info!("encoding H.264 with {}", encoder.name());
     let recorders = args
         .sockets
         .into_iter()
@@ -116,7 +119,7 @@ fn run(args: Args) -> Result<()> {
                 .spawn(move || {
                     let alive =
                         || server_pid.is_none_or(|pid| std::os::unix::process::parent_id() == pid);
-                    let result = writer::record(stream, &socket, &dir, fps, &stop, alive);
+                    let result = writer::record(stream, &socket, &dir, fps, encoder, &stop, alive);
                     stop.store(true, Ordering::Release);
                     result
                 })

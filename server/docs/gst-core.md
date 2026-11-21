@@ -1007,7 +1007,7 @@ capture-<n>: ... ! [number] ! tee ─ queue leaky ! appsink ─► tap "input"  
 program: ... ! livesync ! tee ─── queue leaky ! appsink ─► tap "program" ─┤ own pipeline, socket
                                                                             │ $XDG_RUNTIME_DIR/chr/recording-<pid>/
 chr-recorder-cli ◄────────────────────────────── unixfd (memfd) ───────────┘
-  per stream: unixfdsrc ─► segment: appsrc ! videoconvert ! I420 ! openh264enc ! h264parse
+  per stream: unixfdsrc ─► segment: appsrc ! vapostproc ! NV12 ! vah264lpenc ! h264parse
                                     ! mp4mux ! filesink       <dir>/<UTC time>/<stream>-NNNN.mp4
                          └► sidecar <stream>-NNNN.jsonl
 ```
@@ -1041,9 +1041,12 @@ chr-recorder-cli ◄────────────────────
   its last complete fragment, and a segment that ends normally is finalised
   into a plain MP4. Every frame carries the recorded rate's period as its
   duration, so that players keep the last one. Timestamps start at 0 in every
-  segment.
+  segment, and a frame whose time does not advance past the last written one
+  is left out (counted in the segment's log line): with a DeckLink output the
+  core gives the frames captured before the card's clock started the same
+  time, 0.
 - **Sidecar.** The first line describes the segment (`stream`, `segment`,
-  `format` as captured, `recorded_fps`, `caps`, `started_unix_ms`). Each
+  `format` as captured, `recorded_fps`, `encoder`, `caps`, `started_unix_ms`). Each
   further line is one frame of the video, in order: `pts_ns` (in the segment),
   `sequence` (the program sequence, the same number on both streams), and on
   the input `stream_id`, `frame_id`, `source_ns` and `timecode`, on the
@@ -1053,10 +1056,20 @@ chr-recorder-cli ◄────────────────────
   N fps cadence of the frames' own timestamps (within half the shorter period),
   starting again after a gap, and tells the encoder N. An input at or below N
   keeps every frame.
-- **Encoder.** openh264 from gst-plugins-bad (the root shell has no x264;
-  the flake adds gst-plugins-good's `isomp4` for `mp4mux`), 40 Mbit/s, 8 slices: about 100 fps of 1080p test pattern
-  and 39 fps of 1080p noise, its worst case, on the development host.
-  Interlaced frames are encoded woven, as one progressive picture.
+- **Encoder.** Picked once per worker and named in its log and every
+  sidecar header: the Intel iGPU's low-power H.264 encoder through VA-API
+  (`vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! vah264lpenc`, VBR
+  at most 40 Mbit/s, the driver's `bitrate` being its ceiling, a key frame
+  every 50 frames, no B-frames) when it
+  encodes a probe frame at start, else openh264 from gst-plugins-bad on the CPU
+  (`videoconvert ! I420 ! openh264enc`, 40 Mbit/s, 8 slices; the root shell
+  has no x264). On the iGPU both the RGBA to NV12 conversion and the encoding
+  run on the GPU: 1080p50 RGBA costs about 0.3 ms of CPU per frame there,
+  against about 10 ms (half a core per stream) for `videoconvert` and openh264
+  on the development host's i9-14900K. The flake adds gst-plugins-good's
+  `isomp4` for `mp4mux` and sets `LIBVA_DRIVERS_PATH` to its pinned
+  `intel-media-driver`, since Nix's libva does not look in the host's
+  `/usr/lib`. Interlaced frames are encoded woven, as one progressive picture.
 
 Measured on the development host (debug build, simulated output) with a real
 SDI input, a DeckLink Duo 2 sub-device at 1080p30 through `chr-sdi-in --source

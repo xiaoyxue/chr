@@ -2,10 +2,14 @@
 //! and writes what arrives as segments, one per format.
 //!
 //! ```text
-//! unixfdsrc ! appsink ─► segment: appsrc ! videoconvert ! I420 ! openh264enc ! h264parse
+//! unixfdsrc ! appsink ─► segment: appsrc ! <encoder> ! h264parse
 //!                                 ! mp4mux ! filesink      <dir>/<stream>-NNNN.mp4
 //!                        sidecar: <dir>/<stream>-NNNN.jsonl, one line per frame
 //! ```
+//!
+//! The [`Encoder`] is picked once per worker: the Intel iGPU's (VA-API
+//! `vapostproc ! vah264lpenc`, colour conversion and encoding both on the
+//! iGPU) when it encodes a probe frame, else openh264 on the CPU.
 //!
 //! A segment ends when the frames' caps change (a new input format, the
 //! program following it), when the stream ends and when the worker stops; the
@@ -50,11 +54,91 @@ use crate::{
     },
 };
 
-/// The encoder: H.264 from gst-plugins-bad's openh264 (the root Nix shell has
-/// no x264), high-rate and sliced for its threads.
-pub const ENCODER: &str = "openh264enc complexity=low rate-control=bitrate bitrate=40000000 \
-                           max-bitrate=80000000 gop-size=50 multi-thread=8 slice-mode=n-slices \
-                           num-slices=8";
+/// The H.264 encoder of every segment of a worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoder {
+    /// The Intel iGPU's fixed-function (low-power) encoder through VA-API:
+    /// `vapostproc` converts the frames to NV12 on the iGPU, so the CPU only
+    /// hands them over.
+    Va,
+    /// gst-plugins-bad's openh264 on the CPU (the root Nix shell has no x264),
+    /// sliced for its threads: where VA-API has no Intel GPU.
+    OpenH264,
+}
+
+impl Encoder {
+    /// The iGPU's encoder when it encodes a probe frame, else openh264.
+    pub fn pick() -> Self {
+        match probe(Self::Va) {
+            Ok(()) => Self::Va,
+            Err(error) => {
+                log::warn!(
+                    "the iGPU's H.264 encoder is unavailable ({error}); encoding with openh264 \
+                     on the CPU"
+                );
+                Self::OpenH264
+            }
+        }
+    }
+
+    /// Its name in logs and sidecars.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Va => "vah264lpenc",
+            Self::OpenH264 => "openh264enc",
+        }
+    }
+
+    /// From raw frames in any format to H.264, in `gst-launch` syntax: 40 Mbit/s
+    /// (VA-API's VBR: at most that, less for simple pictures; openh264's
+    /// average) and a key frame every 50 frames.
+    fn pipeline(self) -> &'static str {
+        match self {
+            Self::Va => {
+                "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! vah264lpenc \
+                 rate-control=vbr bitrate=40000 key-int-max=50 b-frames=0"
+            }
+            Self::OpenH264 => {
+                "videoconvert n-threads=4 ! video/x-raw,format=I420 ! openh264enc complexity=low \
+                 rate-control=bitrate bitrate=40000000 max-bitrate=80000000 gop-size=50 \
+                 multi-thread=8 slice-mode=n-slices num-slices=8"
+            }
+        }
+    }
+}
+
+/// Checks that `encoder` encodes a frame of RGBA.
+fn probe(encoder: Encoder) -> Result<(), Error> {
+    gst_core::init()?;
+    if gst::ElementFactory::find(encoder.name()).is_none() {
+        return Err(format!(
+            "GStreamer has no {}; VA-API needs an Intel GPU and its driver on \
+             LIBVA_DRIVERS_PATH",
+            encoder.name()
+        )
+        .into());
+    }
+    let pipeline = gst::parse::launch(&format!(
+        "videotestsrc num-buffers=1 ! video/x-raw,format=RGBA,width=192,height=128,framerate=50/1 \
+         ! {} ! fakesink",
+        encoder.pipeline()
+    ))?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| "the encoder probe is not a pipeline")?;
+    pipeline.set_state(gst::State::Playing)?;
+    let message = pipeline.bus().and_then(|bus| {
+        bus.timed_pop_filtered(
+            gst::ClockTime::from_seconds(5),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        )
+    });
+    let _ = pipeline.set_state(gst::State::Null);
+    match message.as_ref().map(|message| message.view()) {
+        Some(gst::MessageView::Eos(_)) => Ok(()),
+        Some(gst::MessageView::Error(error)) => Err(error.error().to_string().into()),
+        _ => Err(format!("{} did not encode a probe frame within 5 s", encoder.name()).into()),
+    }
+}
 /// Frames waiting for the encoder before frames are dropped.
 const QUEUE: u64 = 8;
 /// How long a segment's encoder may take to drain at its end.
@@ -67,14 +151,15 @@ const POLL: Duration = Duration::from_millis(200);
 /// a slow disk) drops older ones and releases chr-server's memory.
 const RECEIVED: u32 = 4;
 
-/// Records `stream` from `socket` into `dir`, at most `fps` frames per second
-/// if given, until the stream ends (chr-server closed the tap or went away),
-/// `stop` is set or `alive` turns false.
+/// Records `stream` from `socket` into `dir` with `encoder`, at most `fps`
+/// frames per second if given, until the stream ends (chr-server closed the tap
+/// or went away), `stop` is set or `alive` turns false.
 pub fn record(
     stream: Stream,
     socket: &Path,
     dir: &Path,
     fps: Option<Rate>,
+    encoder: Encoder,
     stop: &AtomicBool,
     alive: impl Fn() -> bool,
 ) -> Result<(), Error> {
@@ -82,7 +167,7 @@ pub fn record(
     let receiver = connect(socket, stop)?;
     let reader = receiver.reader();
     log::info!("recording {} from {}", stream.name(), socket.display());
-    let mut recorder = Recorder::new(stream, dir, fps);
+    let mut recorder = Recorder::new(stream, dir, fps, encoder);
     let ended = loop {
         if stop.load(Ordering::Acquire) {
             break "stopped";
@@ -126,15 +211,17 @@ pub struct Recorder {
     stream: Stream,
     dir: PathBuf,
     fps: Option<Rate>,
+    encoder: Encoder,
     segment: Option<Segment>,
 }
 
 impl Recorder {
-    pub fn new(stream: Stream, dir: &Path, fps: Option<Rate>) -> Self {
+    pub fn new(stream: Stream, dir: &Path, fps: Option<Rate>, encoder: Encoder) -> Self {
         Self {
             stream,
             dir: dir.to_owned(),
             fps,
+            encoder,
             segment: None,
         }
     }
@@ -158,6 +245,7 @@ impl Recorder {
                 next_index(&self.dir, self.stream),
                 caps,
                 self.fps,
+                self.encoder,
             )?),
         };
         segment.push(buffer)
@@ -214,6 +302,10 @@ struct Segment {
     video: PathBuf,
     sidecar: BufWriter<File>,
     first: Option<gst::ClockTime>,
+    /// The last written frame's timestamp.
+    last: Option<gst::ClockTime>,
+    /// Frames whose timestamp did not advance past the last one's.
+    untimed: u64,
     /// Every frame's duration: the recorded rate's period.
     period: gst::ClockTime,
     /// Its pipeline reported an error: it will not drain.
@@ -234,6 +326,7 @@ impl Segment {
         index: u32,
         caps: &gst::CapsRef,
         fps: Option<Rate>,
+        encoder: Encoder,
     ) -> Result<Self, Error> {
         let format = format_of(caps)?;
         let input = format.mode.fps;
@@ -241,10 +334,10 @@ impl Segment {
         let recorded = fps.filter(|fps| fps.as_f64() < input.as_f64());
         let (video, sidecar) = segment_paths(dir, stream, index);
         let pipeline = gst::parse::launch(&format!(
-            "appsrc name=frames format=time ! videoconvert n-threads=4 \
-             ! video/x-raw,format=I420 ! {ENCODER} ! h264parse \
+            "appsrc name=frames format=time ! {} ! h264parse \
              ! mp4mux fragment-duration=1000 fragment-mode=first-moov-then-finalise \
-             ! filesink name=file sync=false buffer-mode=unbuffered"
+             ! filesink name=file sync=false buffer-mode=unbuffered",
+            encoder.pipeline()
         ))?
         .downcast::<gst::Pipeline>()
         .map_err(|_| "the segment is not a pipeline")?;
@@ -284,6 +377,7 @@ impl Segment {
                 "segment": index,
                 "format": format.name(),
                 "recorded_fps": recorded.unwrap_or(input).to_string(),
+                "encoder": encoder.name(),
                 "caps": caps.to_string(),
                 "started_unix_ms": SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -291,11 +385,12 @@ impl Segment {
             })
         )?;
         log::info!(
-            "recording {} into {} ({}{})",
+            "recording {} into {} ({}{}, {})",
             stream.name(),
             video.display(),
             format.name(),
-            recorded.map_or_else(String::new, |fps| format!(", recorded at {fps} fps"))
+            recorded.map_or_else(String::new, |fps| format!(", recorded at {fps} fps")),
+            encoder.name()
         );
         Ok(Self {
             stream,
@@ -305,6 +400,8 @@ impl Segment {
             video,
             sidecar,
             first: None,
+            last: None,
+            untimed: 0,
             failed: false,
             period: gst::ClockTime::from_nseconds(recorded.unwrap_or(input).period_ns()),
             cadence: recorded.map(|fps| Cadence::new(fps, input)),
@@ -330,6 +427,13 @@ impl Segment {
             return Ok(());
         }
         let pts = frame.pts().ok_or("a frame without a timestamp")?;
+        // An MP4 cannot hold two frames at one time. With a DeckLink output the
+        // core clamps capture times from before the card's clock started to 0,
+        // so the first frames can share one.
+        if self.last.is_some_and(|last| pts <= last) {
+            self.untimed += 1;
+            return Ok(());
+        }
         if let Some(cadence) = &mut self.cadence
             && !cadence.keep(pts.nseconds())
         {
@@ -349,6 +453,7 @@ impl Segment {
             self.failed = true;
             return Err(error.into());
         }
+        self.last = Some(pts);
         // A line per write: a killed worker's sidecar ends where its video does.
         writeln!(self.sidecar, "{}", frame_line(self.stream, frame, at))?;
         self.sidecar.flush()?;
@@ -382,11 +487,13 @@ impl Segment {
             log::warn!("{}: {error}", self.video.display());
         }
         log::info!(
-            "recorded {}: {} frames, {} left out for the recording rate, {} dropped",
+            "recorded {}: {} frames, {} left out for the recording rate, {} dropped, {} left \
+             out as their time did not advance",
             self.video.display(),
             self.frames,
             self.skipped,
-            self.dropped
+            self.dropped,
+            self.untimed
         );
     }
 }

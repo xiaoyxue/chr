@@ -817,6 +817,10 @@ async fn the_recording_worker_records_input_and_program_in_a_segment_per_format(
             let (header, frames) = sidecar(&base.with_extension("jsonl"));
             assert_eq!(header["format"], format, "{stream} {segment}: {header}");
             assert_eq!(header["stream"], stream);
+            assert!(
+                ["vah264lpenc", "openh264enc"].contains(&header["encoder"].as_str().unwrap()),
+                "{header}"
+            );
             let decoded = pictures(&base.with_extension("mp4"));
             if killed {
                 // The fragment being written died with the worker; the

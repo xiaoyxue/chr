@@ -169,6 +169,7 @@ The root development shell provides:
 | Renderer runtime | Vulkan loader, OpenGL, X11, Wayland, and keyboard/window libraries |
 | Worker transport | GStreamer core and base libraries and the bad plugins (`unixfdsink`/`unixfdsrc`, 1.28 or later), with `GST_PLUGIN_SYSTEM_PATH_1_0` set; `chr-runtime` links GStreamer and needs them to build, test and run |
 | GStreamer core (#154) | `livesync` and `fallbackswitch` copied out of the pinned gst-plugins-rs and `deinterlace` out of gst-plugins-good (the `chr-gst-livesync` derivation, on the same plugin path); the `decklink` elements come with the bad plugins and need Blackmagic Desktop Video on the host to open a card ([operations](operations.md#host-checklist)) |
+| Recording worker (#202) | `isomp4` (`mp4mux`) out of gst-plugins-good in the same derivation; the bad plugins' VA-API encoder on the Intel iGPU, with `LIBVA_DRIVERS_PATH` set to the pinned `intel-media-driver` (x86 only; without an Intel GPU the worker encodes with openh264) |
 
 The optional `nix develop .#media` shell inherits these tools and adds FFmpeg,
 the GStreamer ugly plugins, and Python GObject bindings. It runs the video-only

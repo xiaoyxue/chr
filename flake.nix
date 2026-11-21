@@ -73,6 +73,11 @@
             mkdir -p $out/lib
             ln -s /usr/lib/libDeckLinkAPI.so $out/lib/libDeckLinkAPI.so
           '';
+          # The recording worker encodes on the Intel iGPU through gst-plugins-bad's VA-API
+          # plugin (#202). Nix's libva looks for its driver only on LIBVA_DRIVERS_PATH, not
+          # in the host's /usr/lib; Intel GPUs are x86 only. Without one the worker uses
+          # openh264.
+          vaDrivers = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isx86_64 "${pkgs.intel-media-driver}/lib/dri";
           mediaTools = [
             pkgs.ffmpeg
             (pkgs.python3.withPackages (ps: [ ps.pygobject3 ]))
@@ -180,10 +185,13 @@
                   } \
                     --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
-                for program in chr-tracking-sim-cli chr-sdi-in chr-recorder-cli; do
+                for program in chr-tracking-sim-cli chr-sdi-in; do
                   wrapProgram $out/bin/$program --prefix LD_LIBRARY_PATH : ${deckLinkApi}/lib \
                     --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins}
                 done
+                wrapProgram $out/bin/chr-recorder-cli --prefix LD_LIBRARY_PATH : ${deckLinkApi}/lib \
+                  --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : ${workerPlugins} \
+                  --set-default LIBVA_DRIVERS_PATH "${vaDrivers}"
               '';
             }
           );
@@ -249,6 +257,7 @@
             ++ runtime
             ++ gstreamer;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtime ++ [ deckLinkApi ]);
+            LIBVA_DRIVERS_PATH = vaDrivers;
             GST_PLUGIN_SYSTEM_PATH_1_0 = workerPlugins;
             shellHook = ''
               export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target/linux"
@@ -311,7 +320,7 @@
             mediaEnvironment
             // {
               inputsFrom = [ shell ];
-              inherit (shell) LD_LIBRARY_PATH;
+              inherit (shell) LD_LIBRARY_PATH LIBVA_DRIVERS_PATH;
               packages = mediaTools;
             }
           );
