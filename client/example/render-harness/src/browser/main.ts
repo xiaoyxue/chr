@@ -278,6 +278,7 @@ function showTracking(status: TrackingStatus | null): void {
     count("poses interpolated", "tracking.interpolated", status.poses_interpolated),
     count("poses reused", "tracking.reused", status.poses_reused, true),
     count("poses unavailable", "tracking.unavailable", status.poses_unavailable, true),
+    count("poses smoothed", "tracking.smoothed", status.poses_smoothed),
     count("poses overdue", "tracking.overdue", status.poses_overdue, true),
     [
       "camera model",

@@ -37,6 +37,8 @@ pub struct Answer {
     /// The frame's capture sequence.
     pub sequence: u64,
     pub pose: PoseStatus,
+    /// The pose was vchao's `smoothed` selection; `pose` is its raw selection's.
+    pub smoothed: bool,
     pub overdue: bool,
     /// `None` for an `unavailable` pose.
     pub camera: Option<TrackingFrame>,

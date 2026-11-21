@@ -145,7 +145,8 @@ missing camera, and the capture-to-output delay stays D
 | `frames_joined` | Frames submitted for rendering with their camera |
 | `frames_without_tracking` | Frames whose camera did not arrive in time, including frames a tracking worker returned `unavailable` or never received |
 | `frames_clean_feed` | Frames sent as clean feed because they had no camera |
-| `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable` | Frames a tracking worker returned, by pose; 0 in external mode |
+| `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable` | Frames a tracking worker returned, by pose (a `smoothed` pose by its raw selection); 0 in external mode |
+| `poses_smoothed` | Frames a tracking worker returned with vchao's `smoothed` pose |
 | `poses_overdue` | Frames a tracking worker released by its overload rule |
 | `camera_model` | `{model, source}` of the last frame rendered with its camera: `pinhole`, `radial` or `radial+warp`, from `worker` (the tracking data), `cli`, `none` or `forced-pinhole` |
 

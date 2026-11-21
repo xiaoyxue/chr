@@ -484,7 +484,8 @@ def health(first: dict[str, object], second: dict[str, object], seconds: float) 
         if isinstance(tracker, dict) and "error" not in tracker and "poses_fresh" in join:
             lines.append(f"  poses             {join['poses_fresh']} fresh, {join['poses_interpolated']} interpolated, "
                          f"{join['poses_reused']} reused, {join['poses_unavailable']} unavailable, "
-                         f"{join['poses_overdue']} overdue")
+                         f"{join['poses_overdue']} overdue"
+                         + (f"; {join['poses_smoothed']} smoothed" if join.get("poses_smoothed") else ""))
         if joined == 0:
             problems.append("no frame was paired with a camera in the last second (is the camera running?)")
     lines += [f"  PROBLEM: {problem}" for problem in problems]

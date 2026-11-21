@@ -23,7 +23,8 @@
 //! chr's mirror accepts two optional extensions that vchao never sends, for a
 //! worker whose `t` maps to the ideal (undistorted) image, such as the
 //! `chr-tracking-sim-cli` replay: the session's `lens` ([`FrameMeta::lens`]) and
-//! each pose's `frame_warp`. Every other unknown field is still an error.
+//! each pose's `frame_warp`. Every other unknown field is still an error. It
+//! also accepts vchao's `smoothed` pose ([`Pose::Smoothed`], vchao PR #232).
 
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +82,16 @@ pub enum Pose {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frame_warp: Option<[f64; 9]>,
     },
+    /// vchao's temporal smoothing (vchao PR #232): `t` is the symmetric Gaussian
+    /// matrix-log average of the neighbouring estimates around `raw`, the
+    /// `fresh`, `reused` or `interpolated` selection it replaces. `raw` carries
+    /// no frame warp: the warp would belong to the unsmoothed `t`.
+    Smoothed {
+        t: [f64; 9],
+        raw: Box<Pose>,
+        sigma_frames: f64,
+        strength: f64,
+    },
 }
 
 /// What [`Pose`] a frame got, for counters.
@@ -93,22 +104,30 @@ pub enum PoseStatus {
 }
 
 impl Pose {
+    /// The selection the pose stands for; a smoothed pose counts as its `raw`.
     pub fn status(&self) -> PoseStatus {
         match self {
             Self::Unavailable {} => PoseStatus::Unavailable,
             Self::Fresh { .. } => PoseStatus::Fresh,
             Self::Reused { .. } => PoseStatus::Reused,
             Self::Interpolated { .. } => PoseStatus::Interpolated,
+            Self::Smoothed { raw, .. } => raw.status(),
         }
     }
 
-    /// The selected forward row-major ground-to-SNC matrix, if any.
+    pub fn smoothed(&self) -> bool {
+        matches!(self, Self::Smoothed { .. })
+    }
+
+    /// The selected forward row-major ground-to-SNC matrix, if any: for a
+    /// smoothed pose the smoothed one.
     pub fn t(&self) -> Option<[f64; 9]> {
         match self {
             Self::Unavailable {} => None,
-            Self::Fresh { t, .. } | Self::Reused { t, .. } | Self::Interpolated { t, .. } => {
-                Some(*t)
-            }
+            Self::Fresh { t, .. }
+            | Self::Reused { t, .. }
+            | Self::Interpolated { t, .. }
+            | Self::Smoothed { t, .. } => Some(*t),
         }
     }
 
@@ -116,7 +135,7 @@ impl Pose {
     /// reference native pixel to frame SNC. Only with a session lens.
     pub fn frame_warp(&self) -> Option<[f64; 9]> {
         match self {
-            Self::Unavailable {} => None,
+            Self::Unavailable {} | Self::Smoothed { .. } => None,
             Self::Fresh { frame_warp, .. }
             | Self::Reused { frame_warp, .. }
             | Self::Interpolated { frame_warp, .. } => *frame_warp,
@@ -186,12 +205,18 @@ pub fn parse(json: &str) -> Result<FrameMeta, String> {
 }
 
 /// Checks a selection as vchao does: its matrices are finite and, for
-/// `fresh`/`reused`, bit-equal to their endpoint's.
+/// `fresh`/`reused`, bit-equal to their endpoint's; a smoothed pose wraps a
+/// valid `fresh`, `reused` or `interpolated` selection with `sigma_frames > 0`
+/// and `0 < strength <= 1`.
 pub fn check_selection(meta: &FrameMeta) -> Result<(), String> {
-    let Some(selection) = &meta.selection else {
-        return Ok(());
-    };
-    let (t, endpoints) = match &selection.pose {
+    match &meta.selection {
+        Some(selection) => check_pose(&selection.pose),
+        None => Ok(()),
+    }
+}
+
+fn check_pose(pose: &Pose) -> Result<(), String> {
+    let (t, endpoints) = match pose {
         Pose::Unavailable {} => return Ok(()),
         Pose::Fresh { t, left, .. } | Pose::Reused { t, left, .. } => {
             if t.map(f64::to_bits) != left.t.map(f64::to_bits) {
@@ -200,6 +225,24 @@ pub fn check_selection(meta: &FrameMeta) -> Result<(), String> {
             (t, vec![left])
         }
         Pose::Interpolated { t, left, right, .. } => (t, vec![left, right]),
+        Pose::Smoothed {
+            t,
+            raw,
+            sigma_frames,
+            strength,
+        } => {
+            if matches!(**raw, Pose::Unavailable {} | Pose::Smoothed { .. }) {
+                return Err("smoothing must wrap a raw estimated selection".into());
+            }
+            if raw.frame_warp().is_some() {
+                return Err("a smoothed pose's raw selection has a frame warp".into());
+            }
+            if !(*sigma_frames > 0.0 && *strength > 0.0 && *strength <= 1.0) {
+                return Err("invalid smoothing parameters".into());
+            }
+            check_pose(raw)?;
+            (t, vec![])
+        }
     };
     if !t
         .iter()
@@ -353,5 +396,54 @@ mod tests {
         let mut meta = request;
         meta.selection = Some(serde_json::from_str(VCHAO_SELECTION).unwrap());
         check_selection(&parse(&json(&meta)).unwrap()).unwrap();
+    }
+
+    /// vchao PR #232's `smoothed_geometry_wraps_a_checked_raw_selection`.
+    #[test]
+    fn a_smoothed_pose_wraps_a_checked_raw_selection() {
+        let left =
+            r#"{"frame_id":1,"sequence":1,"source_ns":1,"observed_ns":2,"t":[1,0,0,0,1,0,0,0,1]}"#;
+        let check = |raw: &str, sigma: f64, strength: f64| {
+            let pose = format!(
+                r#"{{"status":"smoothed","t":[1,0,0.5,0,1,0,0,0,1],"raw":{raw},"sigma_frames":{sigma},"strength":{strength}}}"#
+            );
+            let mut meta = FrameMeta::request("chr-test", 5, 100, 20_000_000);
+            meta.selection = Some(Selection {
+                selected_ns: 7,
+                overdue: false,
+                pose: serde_json::from_str(&pose).unwrap(),
+            });
+            check_selection(&parse(&json(&meta)).unwrap()).map(|()| meta)
+        };
+        let fresh = format!(r#"{{"status":"fresh","t":[1,0,0,0,1,0,0,0,1],"left":{left}}}"#);
+        let pose = check(&fresh, 1.0, 0.5).unwrap().selection.unwrap().pose;
+        assert!(pose.smoothed());
+        assert_eq!(pose.status(), PoseStatus::Fresh, "counted as its raw");
+        assert_eq!(pose.t().unwrap()[2], 0.5, "the smoothed t");
+        assert_eq!(pose.frame_warp(), None);
+        assert!(
+            !serde_json::from_str::<Selection>(VCHAO_SELECTION)
+                .unwrap()
+                .pose
+                .smoothed()
+        );
+
+        let altered = format!(r#"{{"status":"fresh","t":[2,0,0,0,1,0,0,0,1],"left":{left}}}"#);
+        assert!(check(&altered, 1.0, 0.5).is_err(), "an invalid raw");
+        assert!(check(&fresh, 1.0, 0.0).is_err(), "strength 0");
+        assert!(check(&fresh, 1.0, 1.5).is_err(), "strength above 1");
+        assert!(check(&fresh, 0.0, 1.0).is_err(), "sigma 0");
+        assert!(check(r#"{"status":"unavailable"}"#, 1.0, 1.0).is_err());
+        let warped = format!(
+            r#"{{"status":"fresh","t":[1,0,0,0,1,0,0,0,1],"left":{left},"frame_warp":[1,0,0,0,1,0,0,0,1]}}"#
+        );
+        assert!(check(&warped, 1.0, 1.0).is_err(), "a raw frame warp");
+        let nested = format!(
+            r#"{{"status":"smoothed","t":[1,0,0,0,1,0,0,0,1],"raw":{fresh},"sigma_frames":1,"strength":1}}"#
+        );
+        assert!(
+            check(&nested, 1.0, 1.0).is_err(),
+            "smoothing a smoothed pose"
+        );
     }
 }

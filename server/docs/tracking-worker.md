@@ -188,7 +188,15 @@ string field `json`. Both sides register the meta before receiving, or
 | `fresh` | `t`, `left` (the frame's own estimate; `t` bit-equal to `left.t`) | `ti = t` |
 | `interpolated` | `t`, `left`, `right`, `alpha` | `ti = t` |
 | `reused` | `t`, `left` (`t` bit-equal to `left.t`), nullable `interpolation_failure` | `ti = t` |
+| `smoothed` | `t`, `raw` (a `fresh`, `interpolated` or `reused` pose), `sigma_frames`, `strength` | `ti = t`, the smoothed matrix |
 | `unavailable` | none; never an identity matrix | none: the frame is skipped |
+
+`smoothed` is vchao's optional temporal smoothing (vchao PR #232, `pitch-track-live
+--smoothing-sigma-frames <σ> --smoothing-strength <s>`): `t` is a symmetric
+Gaussian matrix-log average of the estimates within ±3σ frames around the raw
+selection `raw`, blended by `strength`. The worker holds every frame ⌈3σ⌉ frames
+longer, so its `--overload-ms` and chr-server's program delay need that much
+more room. chr counts the frame by `raw` and in `poses_smoothed`.
 
 Endpoints are `{frame_id, sequence, source_ns, observed_ns, t}` and keep their
 own estimate's keys. Unknown fields are errors (`deny_unknown_fields`), except
@@ -309,6 +317,8 @@ a camera. The checks are:
 - the frame size is unchanged;
 - `selection` is set;
 - every matrix is finite, and `fresh`/`reused` `t` is bit-equal to `left.t`;
+- a `smoothed` pose wraps a valid `fresh`, `interpolated` or `reused` `raw`
+  without a `frame_warp`, with `sigma_frames > 0` and `0 < strength <= 1`;
 - the [lens extensions](#chr-lens-extensions) are valid and the session's
   `lens` does not change.
 
@@ -428,7 +438,8 @@ convention of integer sample centres ([coordinates](coordinates.md)).
 the program delay, CG / clean / empty slots, the CG ratio, the per-slot slack
 and the render budget, see [GStreamer core](gst-core.md#telemetry)):
 - `poses_fresh`, `poses_interpolated`, `poses_reused`, `poses_unavailable`:
-  every returned frame, by pose;
+  every returned frame, by pose (a `smoothed` pose by its `raw`);
+- `poses_smoothed`: frames returned with a `smoothed` pose;
 - `poses_overdue`: frames released by the worker's overload rule, whatever
   their pose;
 - `frames_clean_feed`: frames sent as clean feed for want of a camera;
