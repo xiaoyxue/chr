@@ -186,6 +186,10 @@ pub mod tracking {
         /// Frames a tracking worker returned without a camera (`unavailable`).
         #[serde(default)]
         pub poses_unavailable: u64,
+        /// Frames returned with vchao's temporally `smoothed` pose, also counted
+        /// above by the selection it smooths.
+        #[serde(default)]
+        pub poses_smoothed: u64,
         /// Frames a tracking worker released by its overload rule (`overdue`),
         /// whatever their pose.
         #[serde(default)]

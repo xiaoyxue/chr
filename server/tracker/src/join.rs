@@ -119,7 +119,7 @@ impl TrackingFeed {
     /// which counts late ones.
     pub fn accept(&self, answers: Vec<Answer>) {
         for answer in answers {
-            self.count_pose(answer.pose, answer.overdue);
+            self.count_pose(answer.pose, answer.smoothed, answer.overdue);
             if let Some(camera) = answer.camera
                 && let Err(error) = self.insert(camera)
             {
@@ -150,7 +150,7 @@ impl TrackingFeed {
     }
 
     /// Counts the pose a tracking worker returned for one frame.
-    pub fn count_pose(&self, pose: PoseStatus, overdue: bool) {
+    pub fn count_pose(&self, pose: PoseStatus, smoothed: bool, overdue: bool) {
         self.count(|status| {
             *match pose {
                 PoseStatus::Fresh => &mut status.poses_fresh,
@@ -158,6 +158,7 @@ impl TrackingFeed {
                 PoseStatus::Reused => &mut status.poses_reused,
                 PoseStatus::Unavailable => &mut status.poses_unavailable,
             } += 1;
+            status.poses_smoothed += u64::from(smoothed);
             status.poses_overdue += u64::from(overdue);
         });
     }
@@ -389,6 +390,7 @@ mod tests {
                 PoseStatus::Unavailable
             },
             overdue: false,
+            smoothed: false,
             camera: camera.then(|| replay().frame(sequence)),
         }
     }

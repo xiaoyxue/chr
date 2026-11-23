@@ -444,6 +444,7 @@ impl Tracker {
         self.answered.push(Answer {
             sequence: pending.sequence,
             pose: selection.pose.status(),
+            smoothed: selection.pose.smoothed(),
             overdue: selection.overdue,
             camera,
         });

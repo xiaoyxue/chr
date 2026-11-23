@@ -234,6 +234,8 @@ export interface TrackingStatus {
   poses_reused: number;
   /** Frames returned without a camera (`unavailable`). */
   poses_unavailable: number;
+  /** Frames returned with vchao's temporally `smoothed` pose, also counted above by the selection it smooths. */
+  poses_smoothed: number;
   /** Frames the worker released by its overload rule, whatever their pose. */
   poses_overdue: number;
   /** Camera model and lens source of the last frame rendered with its camera; `null` before the first. */
