@@ -1,5 +1,5 @@
-//! Shadow catchers composited over a display background, and spot shadows whose scene
-//! bounds extend behind the light. World metres, ground Z=0, upwards -Z.
+//! Shadow catchers composited over a display background, holdout grounds, and spot
+//! shadows whose scene bounds extend behind the light. World metres, ground Z=0, upwards -Z.
 
 use chr_renderer::{
     Gpu, MeshRenderer, OffscreenTarget, PbrSettings, ShadowMode, ShadowSettings, ToneMap,
@@ -368,4 +368,95 @@ fn geometry_below_the_catcher_ground_is_held_out() {
     scene.set_visible(ground, false).unwrap();
     let open = composite(&gpu, &scene, &camera, ShadowMode::Off);
     assert!(red_at(&open, below), "{:?}", &open[below..below + 4]);
+}
+
+/// Adds a 2 km holdout ground at Z = 0.
+fn add_holdout(scene: &mut Scene) {
+    let ground = scene.add_mesh(quad(1000.0, 0.0)).unwrap();
+    let holdout = scene
+        .add_material(PbrMaterial {
+            holdout: true,
+            double_sided: true,
+            ..Default::default()
+        })
+        .unwrap();
+    scene
+        .add_instance(ground, vec![holdout], ModelMatrix::IDENTITY)
+        .unwrap();
+}
+
+/// A camera outside the catcher sees deep geometry below the ground through the
+/// ground past the catcher's edge (#204); a holdout ground hides it there too, and
+/// leaves the catcher's shadows unchanged.
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn a_holdout_ground_hides_what_lies_below_it_past_the_catcher() {
+    let gpu = gpu();
+    let mut scene = Scene::new().unwrap();
+    let ground = scene.add_mesh(quad(10.0, 0.0)).unwrap();
+    let catcher = scene
+        .add_material(PbrMaterial {
+            shadow_catcher: true,
+            ..Default::default()
+        })
+        .unwrap();
+    scene
+        .add_instance(ground, vec![catcher], ModelMatrix::IDENTITY)
+        .unwrap();
+    // A vertical plate in the XZ plane from 1 m above the ground to 8 m below it.
+    let plate = scene
+        .add_mesh(
+            MeshData::new(
+                vec![
+                    [-0.5, 0.0, -1.0],
+                    [0.5, 0.0, -1.0],
+                    [0.5, 0.0, 8.0],
+                    [-0.5, 0.0, 8.0],
+                ],
+                vec![0, 1, 2, 0, 2, 3],
+                std::iter::once(0..6).collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let red = scene
+        .add_material(PbrMaterial {
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            unlit: true,
+            double_sided: true,
+            ..Default::default()
+        })
+        .unwrap();
+    scene
+        .add_instance(plate, vec![red], ModelMatrix::IDENTITY)
+        .unwrap();
+    // 6 m above the ground and 30 m out: the ray to the plate 6 m below the ground
+    // crosses Z = 0 at Y = 15 m, past the catcher's 10 m edge.
+    let camera = Camera::look_at(
+        ImageExtent::new(SIZE, SIZE).unwrap(),
+        [0.0, 30.0, -6.0],
+        [0.0; 3],
+        [0.0, 0.0, -1.0],
+        0.6,
+        0.1,
+        10000.0,
+    )
+    .unwrap();
+    let (above, deep) = (
+        pixel(&camera, [0.0, 0.0, -0.5]),
+        pixel(&camera, [0.0, 0.0, 6.0]),
+    );
+    let red_at = |pixels: &[u8], index: usize| pixels[index] > 150 && pixels[index + 1] < 60;
+    let open = composite(&gpu, &scene, &camera, ShadowMode::Off);
+    assert!(red_at(&open, deep), "{:?}", &open[deep..deep + 4]);
+    add_holdout(&mut scene);
+    let held = composite(&gpu, &scene, &camera, ShadowMode::Off);
+    assert!(red_at(&held, above), "{:?}", &held[above..above + 4]);
+    assert_eq!(held[deep..deep + 3], [188; 3]);
+
+    let camera = top_camera();
+    let mut scene = catcher_scene(&[[1.0, 0.0, 1.0]]);
+    let shadowed = composite(&gpu, &scene, &camera, ShadowMode::Pcf);
+    add_holdout(&mut scene);
+    assert!(shadowed == composite(&gpu, &scene, &camera, ShadowMode::Pcf));
 }

@@ -27,6 +27,14 @@ pub struct PbrMaterial {
     /// before shadow catchers, in instance order. It writes no depth and casts no
     /// shadow, so shadow catchers drawn over it darken it like the ground beneath.
     pub decal: bool,
+    /// Invisible ground that only hides what lies below it: in shaded PBR views it
+    /// writes its depth before all other geometry, like a shadow catcher, and draws
+    /// nothing else; other views skip it. It casts and receives no shadow and does
+    /// not widen shadow-map fitting, so it can extend far past the shadow catcher
+    /// without costing shadow resolution. Keep it inside the camera's far plane: the
+    /// GPU clips geometry beyond it, and the clipped depth is too imprecise to share
+    /// with an overlapping catcher.
+    pub holdout: bool,
 }
 
 impl Default for PbrMaterial {
@@ -43,6 +51,7 @@ impl Default for PbrMaterial {
             unlit: false,
             shadow_catcher: false,
             decal: false,
+            holdout: false,
         }
     }
 }
@@ -57,7 +66,7 @@ impl PbrMaterial {
             .all(|v| (0.0..=1.0).contains(&v))
             || !nonnegative(self.emissive)
             || !self.normal_scale.is_finite()
-            || (self.decal && self.shadow_catcher)
+            || u8::from(self.decal) + u8::from(self.shadow_catcher) + u8::from(self.holdout) > 1
         {
             return Err(SceneError::InvalidMaterial);
         }

@@ -51,7 +51,11 @@ draws. Shaded and shadow pipelines cull the back faces of single-sided parts in
 hardware (the front face of a mirrored model's); diagnostic, unlit and wireframe
 views keep showing them. A scene's shadow catchers are its real ground: in shaded
 frames their depth, slightly biased away, is drawn before opaque geometry, so what
-lies below the ground is not drawn and the footage shows there. The M1 example renders a synthetic pitch
+lies below the ground is not drawn and the footage shows there. `PbrMaterial::holdout`
+marks ground that does only that: its biased depth joins the catchers' and it draws
+nothing else, casts and receives no shadow and stays out of shadow-map fitting, so it
+can reach far past a pitch-sized catcher (#204), as long as it stays inside the
+camera's far plane: a clipped quad's depth is too imprecise to share with the catcher. The M1 example renders a synthetic pitch
 and grounded, face-coloured boxes to `output/renderer/milestone-m1.png`.
 Run `cargo run --locked -p chr-app --example mesh_milestone` from the repository
 root in its development environment. This image demonstrates camera projection,
