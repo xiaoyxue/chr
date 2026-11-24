@@ -41,7 +41,7 @@ fn vs_flag_shadow(@builtin(vertex_index) index:u32,@builtin(instance_index) inst
 // highlight under a key light above the viewer. Scene lights and shadows do not apply.
 @fragment
 fn fs_flag_simple(surface:Surface,@builtin(front_facing) front_facing:bool)->@location(0) vec4<f32> {
-    let base=textureSample(base_map,base_sampler,surface.uv)*object.color;
+    let base=textureSample(base_map,base_sampler,map_uv(SLOT_BASE,surface.uv))*object.color;
     if object.emissive_cutoff.w>=0.0 && base.a<object.emissive_cutoff.w {discard;}
     let front=select(front_facing,!front_facing,object.flags.w!=0u);
     var v=-camera.optical_depth.xyz;

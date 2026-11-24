@@ -17,6 +17,7 @@ not frame-rate promises.
 | Retained scene, per-instance model matrices, static GLB with material parts | Initial contract | Nonuniform scale, mirroring and node transforms applied once; no animation or skinning |
 | Pinhole camera from FOV, K + pose, or Ti + C (`S^-1 Ti A(C)`) | Initial contract | The only camera in the initial wire profile |
 | PBR (GGX/Burley), unlit, emissive, alpha mask, double-sided | Initial contract | One material path for all lights |
+| glTF material extensions (clearcoat, sheen, specular, IOR, anisotropy, iridescence, texture transform) | Extension (#208) | Khronos definitions over the same path; area lights shade the base layer only. [glTF support](gltf-support.md); golden images in `server/renderer/tests/golden/` |
 | Directional, point, spot lights | Initial contract | Radiometric units; no hidden key/fill/rim rig |
 | Hard / PCF / PCSS shadows, directional cascades, point cubemaps | Initial contract | Per-light modes; shared sample and memory budgets with explicit errors |
 | OpenEXR image-based lighting and visible sky | Initial contract | Unoccluded IBL (no sky visibility) |

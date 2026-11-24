@@ -26,7 +26,7 @@ pub async fn request() -> Result<(Gpu, Option<Timer>)> {
             } else {
                 wgpu::Features::empty()
             },
-            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            required_limits: Gpu::required_limits(&adapter),
             ..Default::default()
         })
         .await?;

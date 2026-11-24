@@ -14,7 +14,9 @@ use crate::{
     flag::{self, FlagGpu},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
-    scene::{AreaShape, FlagShading, Light, MaterialId, MaterialMaps, MeshData, SceneView},
+    scene::{
+        AreaShape, FlagShading, Light, MapSlot, MaterialId, MaterialMaps, MeshData, SceneView,
+    },
     shadow::{self, CascadeSettings, ShadowAtlas, ShadowMode, ShadowProjection, ShadowSettings},
 };
 
@@ -113,6 +115,20 @@ struct DrawUniform {
     emissive_cutoff: [f32; 4],
     factors: [f32; 4],
     flags: [u32; 4],
+    /// Specular colour RGB and strength (`KHR_materials_specular`).
+    specular: [f32; 4],
+    /// IOR, clearcoat intensity, clearcoat roughness and clearcoat normal scale.
+    coat: [f32; 4],
+    /// Sheen colour RGB and roughness.
+    sheen: [f32; 4],
+    /// Iridescence intensity, film IOR and film thickness in nm at texture values 0 and 1.
+    iridescence: [f32; 4],
+    /// Anisotropy strength and the cosine and sine of its rotation; w unused.
+    anisotropy: [f32; 4],
+    /// x: bit `MapSlot as u32` set when that slot has a texture; yzw unused.
+    maps: [u32; 4],
+    /// Two rows per [`MapSlot`] of its texture-coordinate transform (`UvTransform::rows`).
+    uv: [[f32; 4]; 2 * MapSlot::COUNT],
 }
 
 /// One instance's transform: mesh.wgsl's `Instance`, read by vertex stages at
@@ -124,7 +140,7 @@ struct InstanceUniform {
     normal: [[f32; 4]; 3],
 }
 
-const OBJECT_BYTES: u64 = size_of::<DrawUniform>() as u64;
+pub(crate) const OBJECT_BYTES: u64 = size_of::<DrawUniform>() as u64;
 const INSTANCE_BYTES: u64 = size_of::<InstanceUniform>() as u64;
 
 struct MeshBuffers {
@@ -1025,15 +1041,21 @@ impl MeshRenderer {
             for (part, material) in mesh.parts().iter().zip(instance.materials()) {
                 let factors = scene.material(*material)?;
                 let maps = scene.material_maps(*material)?;
-                self.maps.prepare(
-                    gpu,
-                    *material,
-                    if settings.is_some() {
-                        maps
-                    } else {
-                        &unlit_maps
-                    },
-                )?;
+                let bound = if settings.is_some() {
+                    maps
+                } else {
+                    &unlit_maps
+                };
+                self.maps.prepare(gpu, *material, bound)?;
+                let layers = factors.layers;
+                let (sin, cos) = layers.anisotropy_rotation.sin_cos();
+                let mut uv = [[0.0; 4]; 2 * MapSlot::COUNT];
+                for slot in MapSlot::ALL {
+                    let rows = bound.transform(slot).rows();
+                    for (r, row) in rows.into_iter().enumerate() {
+                        uv[2 * slot as usize + r] = [row[0], row[1], row[2], 0.0];
+                    }
+                }
                 used_materials.insert(*material);
                 let part = Part {
                     mesh: id,
@@ -1064,6 +1086,41 @@ impl MeshRenderer {
                             u32::from(factors.double_sided || flag.is_some()),
                             u32::from(mirrored),
                         ],
+                        specular: [
+                            layers.specular_color[0],
+                            layers.specular_color[1],
+                            layers.specular_color[2],
+                            layers.specular,
+                        ],
+                        coat: [
+                            layers.ior,
+                            layers.clearcoat,
+                            layers.clearcoat_roughness,
+                            layers.clearcoat_normal_scale,
+                        ],
+                        sheen: [
+                            layers.sheen_color[0],
+                            layers.sheen_color[1],
+                            layers.sheen_color[2],
+                            layers.sheen_roughness,
+                        ],
+                        iridescence: [
+                            layers.iridescence,
+                            layers.iridescence_ior,
+                            layers.iridescence_thickness[0],
+                            layers.iridescence_thickness[1],
+                        ],
+                        anisotropy: [layers.anisotropy_strength, cos, sin, 0.0],
+                        maps: [
+                            MapSlot::ALL
+                                .into_iter()
+                                .filter(|&slot| bound.get(slot).is_some())
+                                .fold(0, |bits, slot| bits | 1 << slot as u32),
+                            0,
+                            0,
+                            0,
+                        ],
+                        uv,
                     },
                 };
                 parts.push((part, InstanceUniform { model, normal }));

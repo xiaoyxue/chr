@@ -35,6 +35,90 @@ pub struct PbrMaterial {
     /// GPU clips geometry beyond it, and the clipped depth is too imprecise to share
     /// with an overlapping catcher.
     pub holdout: bool,
+    /// glTF material extensions layered on this metallic-roughness base.
+    pub layers: MaterialLayers,
+}
+
+/// Factors of the glTF material extensions, following their Khronos definitions;
+/// the matching textures are in [`super::MaterialMaps`], multiplied by these factors.
+/// The default changes nothing: dielectrics reflect 4 % at normal incidence (IOR 1.5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialLayers {
+    /// `KHR_materials_ior`: the dielectric's index of refraction, at least 1. Zero is the
+    /// specular-glossiness compatibility mode: the dielectric Fresnel term is 1 at every
+    /// angle, so `specular_color` is the reflectance itself.
+    pub ior: f32,
+    /// `KHR_materials_specular`: dielectric specular strength in `[0, 1]`, also its
+    /// reflectance at grazing incidence.
+    pub specular: f32,
+    /// `KHR_materials_specular`: linear RGB multiplier of the dielectric's normal-incidence
+    /// reflectance, at least 0; their product is clamped to 1.
+    pub specular_color: [f32; 3],
+    /// `KHR_materials_clearcoat`: coat intensity in `[0, 1]`; zero disables the coat.
+    pub clearcoat: f32,
+    /// `KHR_materials_clearcoat`: perceptual coat roughness in `[0, 1]`.
+    pub clearcoat_roughness: f32,
+    /// `KHR_materials_clearcoat`: scale of the coat's normal map, like `normal_scale`.
+    pub clearcoat_normal_scale: f32,
+    /// `KHR_materials_sheen`: linear RGB sheen colour in `[0, 1]`; black disables sheen.
+    pub sheen_color: [f32; 3],
+    /// `KHR_materials_sheen`: perceptual sheen roughness in `[0, 1]`.
+    pub sheen_roughness: f32,
+    /// `KHR_materials_anisotropy`: strength in `[0, 1]`; zero is isotropic.
+    pub anisotropy_strength: f32,
+    /// `KHR_materials_anisotropy`: radians counter-clockwise from the tangent, in the
+    /// tangent-bitangent plane, of the direction whose roughness increases.
+    pub anisotropy_rotation: f32,
+    /// `KHR_materials_iridescence`: thin-film intensity in `[0, 1]`; zero disables it.
+    pub iridescence: f32,
+    /// `KHR_materials_iridescence`: thin-film index of refraction, at least 1.
+    pub iridescence_ior: f32,
+    /// `KHR_materials_iridescence`: film thickness in nanometres at thickness-texture
+    /// values 0 and 1; either may be the larger.
+    pub iridescence_thickness: [f32; 2],
+}
+
+impl Default for MaterialLayers {
+    fn default() -> Self {
+        Self {
+            ior: 1.5,
+            specular: 1.0,
+            specular_color: [1.0; 3],
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.0,
+            clearcoat_normal_scale: 1.0,
+            sheen_color: [0.0; 3],
+            sheen_roughness: 0.0,
+            anisotropy_strength: 0.0,
+            anisotropy_rotation: 0.0,
+            iridescence: 0.0,
+            iridescence_ior: 1.3,
+            iridescence_thickness: [100.0, 400.0],
+        }
+    }
+}
+
+impl MaterialLayers {
+    fn valid(self) -> bool {
+        let unit = |v: f32| (0.0..=1.0).contains(&v);
+        (self.ior == 0.0 || (self.ior.is_finite() && self.ior >= 1.0))
+            && unit(self.specular)
+            && nonnegative(self.specular_color)
+            && unit(self.clearcoat)
+            && unit(self.clearcoat_roughness)
+            && self.clearcoat_normal_scale.is_finite()
+            && self.sheen_color.into_iter().all(unit)
+            && unit(self.sheen_roughness)
+            && unit(self.anisotropy_strength)
+            && self.anisotropy_rotation.is_finite()
+            && unit(self.iridescence)
+            && self.iridescence_ior.is_finite()
+            && self.iridescence_ior >= 1.0
+            && self
+                .iridescence_thickness
+                .into_iter()
+                .all(|v| v.is_finite() && v >= 0.0)
+    }
 }
 
 impl Default for PbrMaterial {
@@ -52,6 +136,7 @@ impl Default for PbrMaterial {
             shadow_catcher: false,
             decal: false,
             holdout: false,
+            layers: MaterialLayers::default(),
         }
     }
 }
@@ -66,6 +151,7 @@ impl PbrMaterial {
             .all(|v| (0.0..=1.0).contains(&v))
             || !nonnegative(self.emissive)
             || !self.normal_scale.is_finite()
+            || !self.layers.valid()
             || u8::from(self.decal) + u8::from(self.shadow_catcher) + u8::from(self.holdout) > 1
         {
             return Err(SceneError::InvalidMaterial);

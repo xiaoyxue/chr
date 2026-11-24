@@ -218,7 +218,8 @@ impl EnvironmentGpu {
         self.visible = sky.is_some_and(|sky| sky.visible);
         let mut data = EnvironmentUniform::zeroed();
         data.constant = [constant[0], constant[1], constant[2], 0.0];
-        let mut changed = (sky.is_some() || constant != [0.0; 3]) && self.ensure_lut(gpu);
+        // Sheen's albedo scaling reads the table under direct lights too.
+        let mut changed = self.ensure_lut(gpu);
         if let Some(sky) = sky {
             let extent = sky.environment.extent();
             if !(64..=1024).contains(&settings.resolution)
@@ -396,13 +397,21 @@ impl EnvironmentGpu {
         });
     }
 
-    /// Builds the split-sum BRDF table once; a sky and a constant fill both need it.
+    /// Builds the BRDF table once: the split-sum GGX terms in RG and the Charlie sheen
+    /// albedo in B (`environment_bake.wgsl`).
     /// Returns whether its view changed.
     fn ensure_lut(&mut self, gpu: &Gpu) -> bool {
         if self.lut_ready {
             return false;
         }
-        let lut = texture(&gpu.device, LUT_SIZE, LUT_SIZE, 1, 1, "GGX split-sum BRDF");
+        let lut = texture(
+            &gpu.device,
+            LUT_SIZE,
+            LUT_SIZE,
+            1,
+            1,
+            "GGX split-sum and sheen BRDF",
+        );
         self.lut = lut.create_view(&Default::default());
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         self.bake(

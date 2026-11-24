@@ -335,8 +335,17 @@ an alternative control channel.
 `chr_renderer::glb::import_glb` reads caller-owned GLB bytes into static mesh
 parts, PBR factors and shared embedded textures. It preserves default node
 transforms and converts glTF +Y-up to chr -Z-up once. Supported textures are
-embedded PNG/JPEG decoded to RGBA8. No animation, skinning, morph evaluation,
-alpha blending or external resource loading is performed.
+embedded PNG/JPEG (and WebP with `EXT_texture_webp`) decoded to RGBA8. No
+animation, skinning, morph evaluation, alpha blending or external resource loading
+is performed.
+
+The material extensions clearcoat, sheen, specular, IOR, anisotropy and
+iridescence are shaded by their Khronos definitions; `KHR_texture_transform`,
+`KHR_materials_pbrSpecularGlossiness`, `KHR_mesh_quantization` and
+`KHR_materials_variants` (default material) are handled at import. An
+unimplemented extension is ignored with a warning unless `extensionsRequired` lists
+it. [docs/gltf-support.md](docs/gltf-support.md) lists what is supported and what
+is not, and how the golden tests verify it.
 
 Inspect a locally supplied model without adding it to the repository:
 

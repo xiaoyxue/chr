@@ -32,6 +32,25 @@ fn sample_level(uv:vec2<f32>,level:f32)->vec3<f32> {
     return mix(sample_mip(uv,i32(a)),sample_mip(uv,i32(min(a+1.0,top))),l-a);
 }
 
+// Directional albedo of the Charlie sheen lobe (KHR_materials_sheen, Conty and Kulla 2017)
+// with its fitted visibility: the integral of BRDF times N.L over the hemisphere, by
+// deterministic uniform sampling. Roughness below 0.07 shades as 0.07, as in mesh.wgsl.
+fn sheen_albedo(nv:f32,roughness:f32)->f32 {
+    let alpha=max(roughness,0.07)*max(roughness,0.07);
+    let v=vec3(sqrt(1.0-nv*nv),0.0,nv);
+    let count=4096u;
+    var sum=0.0;
+    for(var i=0u;i<count;i++) {
+        let z=(f32(i)+0.5)/f32(count);
+        let phi=2.0*ENV_PI*f32(reverseBits(i))*2.3283064365386963e-10;
+        let r=sqrt(1.0-z*z);
+        let l=vec3(r*cos(phi),r*sin(phi),z);
+        let h=normalize(v+l);
+        sum+=charlie_distribution(alpha,h.z)*charlie_visibility(alpha,nv,z)*z;
+    }
+    return sum*2.0*ENV_PI/f32(count);
+}
+
 @compute @workgroup_size(8,8)
 fn main(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(output);
@@ -55,7 +74,7 @@ fn main(@builtin(global_invocation_id) id:vec3<u32>) {
                 result+=vec2(1.0-fc,fc)*weight;
             }
         }
-        textureStore(output,vec2<i32>(id.xy),vec4(result/f32(params.samples),0.0,1.0));
+        textureStore(output,vec2<i32>(id.xy),vec4(result/f32(params.samples),sheen_albedo(nv,uv.y),1.0));
         return;
     }
     let n=panorama_direction(uv);

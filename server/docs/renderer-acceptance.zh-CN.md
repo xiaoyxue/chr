@@ -15,6 +15,7 @@
 | 保留场景、逐实例模型矩阵、带材质分组的静态 GLB | 首期合同 | 非均匀缩放、镜像与节点变换只应用一次；不支持动画或蒙皮 |
 | 由 FOV、K + 位姿或 Ti + C（`S^-1 Ti A(C)`）构建的针孔相机 | 首期合同 | 首期线协议中唯一的相机 |
 | PBR（GGX/Burley）、无光照、自发光、alpha 镂空、双面 | 首期合同 | 所有光源共用一条材质路径 |
+| glTF 材质扩展（clearcoat、sheen、specular、IOR、anisotropy、iridescence、贴图变换） | 扩展（#208） | 在同一路径上按 Khronos 定义实现；面光源只着色基础层。见 [glTF 支持](gltf-support.md)；黄金图像位于 `server/renderer/tests/golden/` |
 | 平行光、点光源、聚光灯 | 首期合同 | 使用辐射度量单位；没有隐藏的主/辅/轮廓光组 |
 | 硬阴影 / PCF / PCSS、平行光级联、点光源立方体贴图 | 首期合同 | 逐光源模式；共享采样与内存预算，超出时明确报错 |
 | OpenEXR 环境光照与可见天空 | 首期合同 | IBL 不考虑遮挡（无天空可见性） |

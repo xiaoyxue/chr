@@ -1,6 +1,6 @@
 use chr_renderer::{
     glb::{GlbError, ImportOptions, import_glb, import_glb_with},
-    scene::{ModelMatrix, Scene},
+    scene::{MapSlot, ModelMatrix, Scene, UvTransform},
 };
 use std::{io::Cursor, sync::Arc};
 
@@ -218,4 +218,263 @@ fn normal_mapped_primitives_without_tangents_get_gltf_handed_tangents() {
     assert!(close(downward[0], [1.0, 0.0, 0.0, 1.0]), "{downward:?}");
     // Without a UV gradient the tangent stays zero for the shader to derive.
     assert_eq!(tangents([0.5; 6])[0], [0.0, 0.0, 0.0, 1.0]);
+}
+
+const MATERIAL_ZERO: &str = r#""materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}},"normalTexture":{"index":0,"scale":0.5}},"#;
+
+/// The fixture with material 0 replaced and `extensions` declared on the asset.
+fn with_material(material: &str, extensions: &str) -> Vec<u8> {
+    let (json, bin) = fixture();
+    assert!(json.contains(MATERIAL_ZERO));
+    let json = json
+        .replace(MATERIAL_ZERO, &format!("\"materials\":[{material},"))
+        .replace(
+            "\"asset\":{\"version\":\"2.0\"}",
+            &format!("\"asset\":{{\"version\":\"2.0\"}},{extensions}"),
+        );
+    pack(&json, &bin)
+}
+
+#[test]
+fn material_extensions_import_factors_maps_and_texture_transforms() {
+    let glb = with_material(
+        r#"{"pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":
+              {"offset":[0.5,0.25],"rotation":1.5707964,"scale":[2,3]}}}},
+            "extensions":{
+              "KHR_materials_ior":{"ior":1.8},
+              "KHR_materials_specular":{"specularFactor":0.8,"specularColorFactor":[1.2,1,0.5],
+                                        "specularTexture":{"index":0},"specularColorTexture":{"index":0}},
+              "KHR_materials_clearcoat":{"clearcoatFactor":0.5,"clearcoatRoughnessFactor":0.2,
+                                         "clearcoatTexture":{"index":0},"clearcoatRoughnessTexture":{"index":0},
+                                         "clearcoatNormalTexture":{"index":0,"scale":0.7}},
+              "KHR_materials_sheen":{"sheenColorFactor":[0.2,0.3,0.4],"sheenRoughnessFactor":0.6,
+                                     "sheenColorTexture":{"index":0},"sheenRoughnessTexture":{"index":0}},
+              "KHR_materials_anisotropy":{"anisotropyStrength":0.4,"anisotropyRotation":1.0,
+                                          "anisotropyTexture":{"index":0}},
+              "KHR_materials_iridescence":{"iridescenceFactor":0.9,"iridescenceIor":1.4,
+                                           "iridescenceThicknessMinimum":200,"iridescenceThicknessMaximum":600,
+                                           "iridescenceTexture":{"index":0},"iridescenceThicknessTexture":{"index":0}}}}"#,
+        r#""extensionsUsed":["KHR_texture_transform","KHR_materials_ior","KHR_materials_specular",
+            "KHR_materials_clearcoat","KHR_materials_sheen","KHR_materials_anisotropy","KHR_materials_iridescence"]"#,
+    );
+    let asset = import_glb(&glb).unwrap();
+    // Only the animation warning: every extension used is implemented.
+    assert_eq!(asset.warnings.len(), 1, "{:?}", asset.warnings);
+    let material = &asset.materials[0];
+    let layers = material.factors.layers;
+    assert_eq!(layers.ior, 1.8);
+    assert_eq!(
+        (layers.specular, layers.specular_color),
+        (0.8, [1.2, 1.0, 0.5])
+    );
+    assert_eq!(
+        (
+            layers.clearcoat,
+            layers.clearcoat_roughness,
+            layers.clearcoat_normal_scale
+        ),
+        (0.5, 0.2, 0.7)
+    );
+    assert_eq!(
+        (layers.sheen_color, layers.sheen_roughness),
+        ([0.2, 0.3, 0.4], 0.6)
+    );
+    assert_eq!(
+        (layers.anisotropy_strength, layers.anisotropy_rotation),
+        (0.4, 1.0)
+    );
+    assert_eq!(
+        (
+            layers.iridescence,
+            layers.iridescence_ior,
+            layers.iridescence_thickness
+        ),
+        (0.9, 1.4, [200.0, 600.0])
+    );
+    // The core normal map is gone with the replaced material; every extension slot is bound.
+    assert!(material.maps.normal.is_none());
+    for slot in MapSlot::ALL {
+        let expected = !matches!(
+            slot,
+            MapSlot::MetallicRoughness | MapSlot::Normal | MapSlot::Emissive | MapSlot::Occlusion
+        );
+        assert_eq!(material.maps.get(slot).is_some(), expected, "{slot:?}");
+    }
+    // offset + rotation * scale: a quarter turn maps (u, v) to (3 v, -2 u) before the offset.
+    let rows = material.maps.transform(MapSlot::BaseColor).rows();
+    let apply = |u: f32, v: f32| rows.map(|r| r[0] * u + r[1] * v + r[2]);
+    let close = |a: [f32; 2], b: [f32; 2]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+    assert!(close(apply(0.0, 0.0), [0.5, 0.25]));
+    assert!(
+        close(apply(1.0, 0.0), [0.5, -1.75]),
+        "{:?}",
+        apply(1.0, 0.0)
+    );
+    assert!(close(apply(0.0, 1.0), [3.5, 0.25]), "{:?}", apply(0.0, 1.0));
+    assert_eq!(
+        material.maps.transform(MapSlot::Clearcoat),
+        UvTransform::default()
+    );
+    // Anisotropy needs a tangent frame: tangents are derived without a core normal map.
+    assert_ne!(asset.mesh.attributes().tangents[0][..3], [0.0; 3]);
+    assert_eq!(asset.mesh.attributes().tangents[3], [0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn unimplemented_extensions_warn_unless_required() {
+    let optional = with_material(
+        r#"{"extensions":{"KHR_materials_transmission":{"transmissionFactor":1}}}"#,
+        r#""extensionsUsed":["KHR_materials_transmission","KHR_mesh_quantization"],"extensionsRequired":["KHR_mesh_quantization"]"#,
+    );
+    let asset = import_glb(&optional).unwrap();
+    assert!(
+        asset
+            .warnings
+            .iter()
+            .any(|w| w.contains("KHR_materials_transmission") && w.contains("not implemented")),
+        "{:?}",
+        asset.warnings
+    );
+    let required = with_material(
+        "{}",
+        r#""extensionsUsed":["KHR_materials_transmission"],"extensionsRequired":["KHR_materials_transmission"]"#,
+    );
+    assert!(matches!(
+        import_glb(&required),
+        Err(GlbError::Unsupported(feature)) if feature.contains("KHR_materials_transmission")
+    ));
+    let variants = with_material(
+        "{}",
+        r#""extensionsUsed":["KHR_materials_variants"],"extensions":{"KHR_materials_variants":{"variants":[{"name":"alt"}]}}"#,
+    );
+    assert_eq!(import_glb(&variants).unwrap().warnings.len(), 1);
+}
+
+#[test]
+fn specular_glossiness_becomes_specular_colour_with_ior_zero() {
+    let glb = with_material(
+        r#"{"extensions":{"KHR_materials_pbrSpecularGlossiness":{"diffuseFactor":[0.5,0.6,0.7,1],
+            "diffuseTexture":{"index":0},"specularFactor":[0.5,0.4,0.3],"glossinessFactor":0.8,
+            "specularGlossinessTexture":{"index":0}}}}"#,
+        r#""extensionsUsed":["KHR_materials_pbrSpecularGlossiness"]"#,
+    );
+    let material = &import_glb(&glb).unwrap().materials[0];
+    let factors = material.factors;
+    assert_eq!(factors.base_color, [0.5, 0.6, 0.7, 1.0]);
+    assert_eq!((factors.metallic, factors.roughness), (0.0, 1.0));
+    assert_eq!(factors.layers.ior, 0.0);
+    assert_eq!(factors.layers.specular_color, [0.5, 0.4, 0.3]);
+    assert!(material.maps.base_color.is_some() && material.maps.specular_color.is_some());
+    // Opaque texels have glossiness 1: roughness 1 - 0.8 in G, metallic 0 in B.
+    let rough = material.maps.metallic_roughness.as_ref().unwrap();
+    assert_eq!(rough.pixels(), &[0, 51, 0, 255, 0, 51, 0, 255]);
+}
+
+#[test]
+fn invalid_extension_values_are_rejected() {
+    for (material, check) in [
+        (
+            r#"{"extensions":{"KHR_materials_ior":{"ior":0.5}}}"#,
+            (|e: &GlbError| matches!(e, GlbError::Geometry(_))) as fn(&GlbError) -> bool,
+        ),
+        (
+            r#"{"extensions":{"KHR_materials_specular":{"specularFactor":"high"}}}"#,
+            |e| matches!(e, GlbError::InvalidProperty(_)),
+        ),
+        (
+            r#"{"extensions":{"KHR_materials_sheen":{"sheenColorFactor":[1,1]}}}"#,
+            |e| matches!(e, GlbError::InvalidProperty(_)),
+        ),
+        (
+            r#"{"pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{"KHR_texture_transform":{"texCoord":1}}}}}"#,
+            |e| matches!(e, GlbError::Unsupported(_)),
+        ),
+        (
+            r#"{"extensions":{"KHR_materials_clearcoat":{"clearcoatFactor":1,"clearcoatTexture":{"index":7}}}}"#,
+            |e| matches!(e, GlbError::InvalidData),
+        ),
+    ] {
+        let error = import_glb(&with_material(material, r#""extensionsUsed":[]"#)).unwrap_err();
+        assert!(check(&error), "{material}: {error}");
+    }
+}
+
+/// One triangle whose attributes use `KHR_mesh_quantization` types: unnormalized
+/// `u16` positions, normalized `i8` normals and normalized `u16` texture coordinates.
+#[test]
+fn quantized_attributes_are_dequantized() {
+    let mut bin = Vec::new();
+    for p in [[0_u16, 0, 0], [4, 0, 0], [0, 2, 0]] {
+        for c in p {
+            bin.extend(c.to_le_bytes());
+        }
+        bin.extend([0, 0]);
+    }
+    for _ in 0..3 {
+        bin.extend([0_i8, 127, 0, 0].map(|v| v as u8));
+    }
+    for uv in [[0_u16, 0], [65535, 0], [0, 32768]] {
+        for c in uv {
+            bin.extend(c.to_le_bytes());
+        }
+    }
+    let json = r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_mesh_quantization"],
+      "extensionsRequired":["KHR_mesh_quantization"],
+      "buffers":[{"byteLength":48}],
+      "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":24,"byteStride":8},
+                     {"buffer":0,"byteOffset":24,"byteLength":12,"byteStride":4},
+                     {"buffer":0,"byteOffset":36,"byteLength":12,"byteStride":4}],
+      "accessors":[{"bufferView":0,"componentType":5123,"count":3,"type":"VEC3","min":[0,0,0],"max":[4,2,0]},
+                   {"bufferView":1,"componentType":5120,"normalized":true,"count":3,"type":"VEC3"},
+                   {"bufferView":2,"componentType":5123,"normalized":true,"count":3,"type":"VEC2"}],
+      "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}}]}],
+      "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0}"#;
+    let asset = import_glb(&pack(json, &bin)).unwrap();
+    assert!(asset.warnings.is_empty(), "{:?}", asset.warnings);
+    // glTF (x, y, z) becomes chr (x, z, -y).
+    assert_eq!(
+        asset.mesh.positions(),
+        &[[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, -2.0]]
+    );
+    assert_eq!(asset.mesh.attributes().normals[0], [0.0, 0.0, -1.0]);
+    let uvs = &asset.mesh.attributes().tex_coords;
+    assert_eq!(uvs[1], [1.0, 0.0]);
+    assert!((uvs[2][1] - 0.5).abs() < 1e-4, "{uvs:?}");
+}
+
+#[test]
+fn webp_textures_decode() {
+    let mut webp = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+        .encode(
+            &[10, 20, 30, 255, 200, 100, 50, 128],
+            2,
+            1,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    let (json, mut bin) = fixture();
+    let offset = bin.len();
+    bin.extend(&webp);
+    let mut root: serde_json::Value = serde_json::from_str(&json).unwrap();
+    root["buffers"][0]["byteLength"] = bin.len().into();
+    root["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"buffer": 0, "byteOffset": offset, "byteLength": webp.len()}));
+    root["images"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"bufferView": 6, "mimeType": "image/webp"}));
+    // A WebP-only texture: no core source, as the extension allows when required.
+    root["textures"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"extensions": {"EXT_texture_webp": {"source": 1}}}));
+    root["materials"][1]["pbrMetallicRoughness"]["baseColorTexture"]["index"] = 1.into();
+    root["extensionsUsed"] = serde_json::json!(["EXT_texture_webp"]);
+    root["extensionsRequired"] = serde_json::json!(["EXT_texture_webp"]);
+    let asset = import_glb(&pack(&root.to_string(), &bin)).unwrap();
+    let texture = asset.materials[1].maps.base_color.as_ref().unwrap();
+    assert_eq!(texture.pixels(), &[10, 20, 30, 255, 200, 100, 50, 128]);
 }

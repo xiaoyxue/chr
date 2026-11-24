@@ -2,7 +2,7 @@ use crate::{
     Gpu,
     coordinates::ImageExtent,
     offscreen::BoxError,
-    scene::{Filter, MaterialId, MaterialMaps, TextureData, Wrap},
+    scene::{Filter, MapSlot, MaterialId, MaterialMaps, TextureData, Wrap},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -24,7 +24,7 @@ struct BoundTexture {
     sampler: wgpu::Sampler,
 }
 struct BoundMaterial {
-    keys: [TextureKey; 5],
+    keys: [TextureKey; MapSlot::COUNT],
     group: wgpu::BindGroup,
 }
 
@@ -41,7 +41,7 @@ pub(crate) struct MaterialMapCache {
 
 impl MaterialMapCache {
     pub fn new(device: &wgpu::Device) -> Self {
-        let entries: Vec<_> = (0..5)
+        let entries: Vec<_> = (0..MapSlot::COUNT as u32)
             .flat_map(|i| {
                 [
                     texture_entry(i * 2),
@@ -107,19 +107,16 @@ impl MaterialMapCache {
         id: MaterialId,
         maps: &MaterialMaps,
     ) -> Result<(), BoxError> {
-        let sources = [
-            &maps.base_color,
-            &maps.metallic_roughness,
-            &maps.normal,
-            &maps.emissive,
-            &maps.occlusion,
-        ];
+        let sources = MapSlot::ALL.map(|slot| maps.get(slot));
         let keys = std::array::from_fn(|i| {
             (
                 Arc::as_ptr(sources[i].as_ref().unwrap_or(&self.white)) as usize,
-                match i {
-                    0 | 3 => Encoding::Srgb,
-                    2 => Encoding::Normal,
+                match MapSlot::ALL[i] {
+                    MapSlot::BaseColor
+                    | MapSlot::Emissive
+                    | MapSlot::SheenColor
+                    | MapSlot::SpecularColor => Encoding::Srgb,
+                    MapSlot::Normal | MapSlot::ClearcoatNormal => Encoding::Normal,
                     _ => Encoding::Linear,
                 },
             )

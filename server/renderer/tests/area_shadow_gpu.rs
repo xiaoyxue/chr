@@ -670,7 +670,7 @@ fn timed_gpu() -> (Gpu, wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer) {
     );
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_features: features,
-        required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+        required_limits: Gpu::required_limits(&adapter),
         ..Default::default()
     }))
     .unwrap();
