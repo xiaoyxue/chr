@@ -242,16 +242,16 @@ mod tests {
         };
         // A day of media time: phases are reduced on the CPU before reaching f32.
         let seconds = 86_400.25;
-        let buffer = |usage| {
+        let buffer = |size, usage| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
-                size: 256,
+                size,
                 usage,
                 mapped_at_creation: false,
             })
         };
-        let objects = buffer(wgpu::BufferUsages::UNIFORM);
-        let instances = buffer(wgpu::BufferUsages::STORAGE);
+        let objects = buffer(mesh_renderer::OBJECT_BYTES, wgpu::BufferUsages::UNIFORM);
+        let instances = buffer(256, wgpu::BufferUsages::STORAGE);
         let mut flags = FlagGpu::new(&gpu.device);
         assert!(flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances));
         assert!(!flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances));

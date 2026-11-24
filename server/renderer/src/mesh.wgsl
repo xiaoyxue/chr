@@ -3,8 +3,11 @@ struct Camera {
     optical_depth: vec4<f32>
 };
 // What a draw's instances share; uniform, so fragment stages branch on it uniformly.
+// `specular` .. `uv` carry the glTF material extensions (mesh_renderer.rs `DrawUniform`).
 struct Object {
-    color: vec4<f32>, emissive_cutoff: vec4<f32>, factors: vec4<f32>, flags: vec4<u32>
+    color: vec4<f32>, emissive_cutoff: vec4<f32>, factors: vec4<f32>, flags: vec4<u32>,
+    specular: vec4<f32>, coat: vec4<f32>, sheen: vec4<f32>, iridescence: vec4<f32>,
+    anisotropy: vec4<f32>, maps: vec4<u32>, uv: array<vec4<f32>,30>
 };
 // One instance's transform, at `instance_index` (counted from the draw's first instance).
 struct Instance { model: mat4x4<f32>, normal: mat3x3<f32> };
@@ -27,6 +30,64 @@ struct Light {
 @group(2) @binding(7) var emissive_sampler: sampler;
 @group(2) @binding(8) var ao_map: texture_2d<f32>;
 @group(2) @binding(9) var ao_sampler: sampler;
+@group(2) @binding(10) var clearcoat_map: texture_2d<f32>;
+@group(2) @binding(11) var clearcoat_sampler: sampler;
+@group(2) @binding(12) var clearcoat_roughness_map: texture_2d<f32>;
+@group(2) @binding(13) var clearcoat_roughness_sampler: sampler;
+@group(2) @binding(14) var clearcoat_normal_map: texture_2d<f32>;
+@group(2) @binding(15) var clearcoat_normal_sampler: sampler;
+@group(2) @binding(16) var sheen_color_map: texture_2d<f32>;
+@group(2) @binding(17) var sheen_color_sampler: sampler;
+@group(2) @binding(18) var sheen_roughness_map: texture_2d<f32>;
+@group(2) @binding(19) var sheen_roughness_sampler: sampler;
+@group(2) @binding(20) var specular_map: texture_2d<f32>;
+@group(2) @binding(21) var specular_sampler: sampler;
+@group(2) @binding(22) var specular_color_map: texture_2d<f32>;
+@group(2) @binding(23) var specular_color_sampler: sampler;
+@group(2) @binding(24) var iridescence_map: texture_2d<f32>;
+@group(2) @binding(25) var iridescence_sampler: sampler;
+@group(2) @binding(26) var thickness_map: texture_2d<f32>;
+@group(2) @binding(27) var thickness_sampler: sampler;
+@group(2) @binding(28) var anisotropy_map: texture_2d<f32>;
+@group(2) @binding(29) var anisotropy_sampler: sampler;
+// Material map slots (scene `MapSlot`): bindings 2*slot and 2*slot+1, bit `slot` of
+// `object.maps.x` and rows 2*slot, 2*slot+1 of `object.uv`.
+const SLOT_BASE:u32=0u;
+const SLOT_METAL_ROUGH:u32=1u;
+const SLOT_NORMAL:u32=2u;
+const SLOT_EMISSIVE:u32=3u;
+const SLOT_OCCLUSION:u32=4u;
+const SLOT_CLEARCOAT:u32=5u;
+const SLOT_CLEARCOAT_ROUGH:u32=6u;
+const SLOT_CLEARCOAT_NORMAL:u32=7u;
+const SLOT_SHEEN_COLOR:u32=8u;
+const SLOT_SHEEN_ROUGH:u32=9u;
+const SLOT_SPECULAR:u32=10u;
+const SLOT_SPECULAR_COLOR:u32=11u;
+const SLOT_IRIDESCENCE:u32=12u;
+const SLOT_THICKNESS:u32=13u;
+const SLOT_ANISOTROPY:u32=14u;
+
+// KHR_texture_transform of a slot: its affine rows applied to the texture coordinates.
+fn map_uv(slot:u32,uv:vec2<f32>)->vec2<f32> {
+    let p=vec3(uv,1.0);
+    return vec2(dot(object.uv[2u*slot].xyz,p),dot(object.uv[2u*slot+1u].xyz,p));
+}
+
+fn has_map(slot:u32)->bool {
+    return ((object.maps.x>>slot)&1u)!=0u;
+}
+
+// A tangent-space direction read from a transformed slot (normal-map XY, anisotropy
+// direction) back in the untransformed texture frame the tangents follow. The texel's
+// X runs along transformed +U and its Y against transformed V; the transform's
+// rotation and mirroring are undone, its scale does not change directions.
+fn map_direction(slot:u32,xy:vec2<f32>)->vec2<f32> {
+    let u=normalize(vec2(object.uv[2u*slot].x,object.uv[2u*slot+1u].x));
+    let v=normalize(vec2(object.uv[2u*slot].y,object.uv[2u*slot+1u].y));
+    let d=vec2(xy.x,-xy.y);
+    return vec2(dot(u,d),-dot(v,d));
+}
 // Lighting functions take a light index and read fields from `lights` directly. A
 // by-value Light copy indexed by a runtime cascade spills the whole struct to local
 // memory in every fragment; that made shaded frames about three times slower.
@@ -146,7 +207,7 @@ fn vs_shadow(vertex:Vertex,@builtin(instance_index) index:u32)->ShadowSurface {
 }
 
 fn shadow_alpha_test(surface:ShadowSurface,front_facing:bool) {
-    let alpha=textureSample(base_map,base_sampler,surface.uv).a*object.color.a*surface.alpha;
+    let alpha=textureSample(base_map,base_sampler,map_uv(SLOT_BASE,surface.uv)).a*object.color.a*surface.alpha;
     let front=select(front_facing,!front_facing,object.flags.w!=0u);
     if !front && object.flags.z==0u {discard;}
     if object.emissive_cutoff.w>=0.0 && alpha<object.emissive_cutoff.w {discard;}
@@ -538,28 +599,36 @@ fn area_lighting(li:u32,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal
         +base*(1.0-metal)*(vec3(1.0)-f0)*lambert);
 }
 
-// Unoccluded direct contribution of one light; visibility is applied by the caller.
-fn direct_light(li:u32,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
-    if lights[li].position_kind.w>2.5 {return area_lighting(li,x,n,v,base,metal,rough);}
+// Direction towards a punctual light and the radiance arriving from it (zero outside a
+// spot cone or at a point light's exact centre); not for area lights.
+struct Incident { l:vec3<f32>, radiance:vec3<f32> };
+fn punctual_incident(li:u32,x:vec3<f32>)->Incident {
     var l=-lights[li].direction_inner.xyz;
     var attenuation=1.0;
     if lights[li].position_kind.w>0.5 {
         let delta=lights[li].position_kind.xyz-x;
         let distance2=dot(delta,delta);
         // An ideal point source has no defined direction at its exact centre.
-        if distance2==0.0 {return vec3(0.0);}
+        if distance2==0.0 {return Incident(l,vec3(0.0));}
         l=delta*inverseSqrt(distance2);
         attenuation=1.0/distance2;
         if lights[li].position_kind.w>1.5 {
             let cosine=dot(-l,lights[li].direction_inner.xyz);
-            if cosine<=lights[li].emission_outer.w {return vec3(0.0);}
+            if cosine<=lights[li].emission_outer.w {return Incident(l,vec3(0.0));}
             if cosine<lights[li].direction_inner.w {
                 attenuation*=smoothstep(lights[li].emission_outer.w,lights[li].direction_inner.w,cosine);
             }
         }
     }
-    if dot(n,l)<=0.0 {return vec3(0.0);}
-    return lights[li].emission_outer.rgb*attenuation*brdf(n,v,l,base,metal,rough);
+    return Incident(l,lights[li].emission_outer.rgb*attenuation);
+}
+
+// Unoccluded direct contribution of one light; visibility is applied by the caller.
+fn direct_light(li:u32,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)->vec3<f32> {
+    if lights[li].position_kind.w>2.5 {return area_lighting(li,x,n,v,base,metal,rough);}
+    let incident=punctual_incident(li,x);
+    if dot(n,incident.l)<=0.0 {return vec3(0.0);}
+    return incident.radiance*brdf(n,v,incident.l,base,metal,rough);
 }
 
 // GGX with height-correlated Smith visibility and Burley diffuse.
@@ -582,6 +651,240 @@ fn brdf(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32)-
     return nl * (base*(1.0-metal)*(vec3(1.0)-fresnel)*diffuse + fresnel*distribution*visibility);
 }
 
+// glTF material extensions of one fragment (Khronos definitions), evaluated once and
+// shared by every light and the environment. Defaults reproduce the plain base material.
+struct Layers {
+    // Dielectric reflectance at normal and grazing incidence (KHR_materials_ior and
+    // KHR_materials_specular); 0.04 and 1 by default.
+    f0:vec3<f32>, f90:vec3<f32>,
+    // KHR_materials_iridescence: strength and thin-film Fresnel of the dielectric and the
+    // metal at N.V (applied for every light, as the Khronos sample viewer does).
+    iridescence:f32, iridescent:vec3<f32>, iridescent_metal:vec3<f32>,
+    // KHR_materials_anisotropy: strength and the unit directions of increased (t) and
+    // base (b) roughness, perpendicular to the shading normal.
+    anisotropy:f32, at:vec3<f32>, ab:vec3<f32>,
+    // KHR_materials_sheen: colour, roughness (at least 0.07) and directional albedo at N.V.
+    sheen:vec3<f32>, sheen_rough:f32, sheen_albedo:f32,
+    // KHR_materials_clearcoat: intensity, normal, perceptual roughness and the
+    // fraction 1 - clearcoat * Fresnel(N.V) of light passing the coat.
+    coat:f32, coat_n:vec3<f32>, coat_rough:f32, coat_pass:f32,
+};
+
+fn max3(c:vec3<f32>)->f32 { return max(c.x,max(c.y,c.z)); }
+
+fn schlick(f0:vec3<f32>,f90:vec3<f32>,cosine:f32)->vec3<f32> {
+    return f0+(f90-f0)*pow5(1.0-cosine);
+}
+
+// Thin-film interference Fresnel (Belcour and Barla 2017) in the approximation of
+// KHR_materials_iridescence: Schlick reflectances at both interfaces and the analytic
+// spectral integration of the first two orders, in linear BT.709. `thickness` is in nm.
+fn iridescence_fresnel(film_ior:f32,cosine:f32,thickness:f32,base_f0:vec3<f32>)->vec3<f32> {
+    let eta=film_ior;
+    let sin2=(1.0-cosine*cosine)/(eta*eta);
+    if sin2>=1.0 {return vec3(1.0);}
+    let cos2=sqrt(1.0-sin2);
+    let q0=(eta-1.0)/(eta+1.0);
+    let r0=q0*q0;
+    let r12=r0+(1.0-r0)*pow5(1.0-cosine);
+    let t121=1.0-r12;
+    let phi12=select(0.0,3.14159265,eta<1.0);
+    let root=sqrt(clamp(base_f0,vec3(0.0),vec3(0.9999)));
+    let base_ior=(vec3(1.0)+root)/(vec3(1.0)-root);
+    let q1=(base_ior-vec3(eta))/(base_ior+vec3(eta));
+    let r1=q1*q1;
+    let r23=r1+(vec3(1.0)-r1)*pow5(1.0-cos2);
+    let phi23=select(vec3(0.0),vec3(3.14159265),base_ior<vec3(eta));
+    let opd=2.0*eta*thickness*cos2;
+    let phi=vec3(3.14159265-phi12)+phi23;
+    let r123=clamp(r12*r23,vec3(1e-5),vec3(0.9999));
+    let r123_root=sqrt(r123);
+    let rs=t121*t121*r23/(vec3(1.0)-r123);
+    var result=r12+rs;
+    var cm=rs-vec3(t121);
+    for (var m=1;m<=2;m++) {
+        cm*=r123_root;
+        result+=cm*2.0*film_sensitivity(f32(m)*opd,f32(m)*phi);
+    }
+    return max(result,vec3(0.0));
+}
+
+// Fourier transform of the CIE XYZ matching functions as Gaussians, at optical path
+// difference `opd` (nm) and phase `shift`, converted to linear BT.709.
+fn film_sensitivity(opd:f32,shift:vec3<f32>)->vec3<f32> {
+    let phase=2.0*3.14159265*opd*1.0e-9;
+    let value=vec3(5.4856e-13,4.4201e-13,5.2481e-13);
+    let position=vec3(1.6810e+06,1.7953e+06,2.2084e+06);
+    let variance=vec3(4.3278e+09,9.3046e+09,6.6121e+09);
+    var xyz=value*sqrt(2.0*3.14159265*variance)*cos(position*phase+shift)*exp(-phase*phase*variance);
+    xyz.x+=9.7470e-14*sqrt(2.0*3.14159265*4.5282e+09)*cos(2.2399e+06*phase+shift.x)
+        *exp(-4.5282e+09*phase*phase);
+    xyz/=1.0685e-7;
+    let xyz_to_rec709=mat3x3<f32>(
+        vec3(3.2404542,-0.9692660,0.0556434),
+        vec3(-1.5371385,1.8760108,-0.2040259),
+        vec3(-0.4985314,0.0415560,1.0572252));
+    return xyz_to_rec709*xyz;
+}
+
+// Light leaving the base material towards `v` for light arriving along `l` with unit
+// radiance, cosine included: the shared GGX/Burley material of `brdf`, with the
+// dielectric Fresnel of KHR_materials_ior/specular, thin-film Fresnel and anisotropic GGX.
+// The diffuse lobe keeps the energy the dielectric's strongest Fresnel channel leaves.
+fn layered_brdf(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32,m:Layers)->vec3<f32> {
+    let nl=max(dot(n,l),0.0);
+    if nl<=0.0 {return vec3(0.0);}
+    let nv=max(dot(n,v),0.0001);
+    let h=normalize(v+l);
+    let nh=max(dot(n,h),0.0);
+    let vh=max(dot(v,h),0.0);
+    let alpha=rough*rough;
+    var specular=0.0;
+    if m.anisotropy>0.0 {
+        let at=mix(alpha,1.0,m.anisotropy*m.anisotropy);
+        let ab=alpha;
+        let a2=at*ab;
+        let f=vec3(ab*dot(m.at,h),at*dot(m.ab,h),a2*nh);
+        let w2=a2/dot(f,f);
+        let distribution=a2*w2*w2/3.14159265;
+        let view=nl*length(vec3(at*dot(m.at,v),ab*dot(m.ab,v),nv));
+        let light=nv*length(vec3(at*dot(m.at,l),ab*dot(m.ab,l),nl));
+        specular=distribution*clamp(0.5/(view+light),0.0,1.0);
+    } else {
+        let a2=alpha*alpha;
+        let d0=nh*nh*(a2-1.0)+1.0;
+        let distribution=a2/(3.14159265*d0*d0);
+        specular=distribution*0.5/(nl*sqrt(nv*nv*(1.0-a2)+a2)+nv*sqrt(nl*nl*(1.0-a2)+a2));
+    }
+    let dielectric=mix(schlick(m.f0,m.f90,vh),m.iridescent,m.iridescence);
+    let conductor=mix(schlick(base,vec3(1.0),vh),m.iridescent_metal,m.iridescence);
+    let fresnel=mix(dielectric,conductor,metal);
+    let fd90=0.5+2.0*rough*vh*vh;
+    let diffuse=(1.0+(fd90-1.0)*pow5(1.0-nl))*(1.0+(fd90-1.0)*pow5(1.0-nv))/3.14159265;
+    let kept=vec3(1.0)-mix(vec3(max3(dielectric)),conductor,metal);
+    return nl*(base*(1.0-metal)*kept*diffuse+fresnel*specular);
+}
+
+// Charlie sheen lobe for unit incoming radiance, cosine included.
+fn sheen_light(n:vec3<f32>,v:vec3<f32>,l:vec3<f32>,m:Layers)->vec3<f32> {
+    let nl=dot(n,l);
+    if nl<=0.0 || m.sheen_albedo<=0.0 {return vec3(0.0);}
+    let nv=max(dot(n,v),0.0001);
+    let alpha=m.sheen_rough*m.sheen_rough;
+    let nh=max(dot(n,normalize(v+l)),0.0);
+    return m.sheen*charlie_distribution(alpha,nh)*charlie_visibility(alpha,nv,nl)*nl;
+}
+
+// Clearcoat GGX lobe (F0 0.04) for unit incoming radiance, weighted by the coat.
+fn coat_light(v:vec3<f32>,l:vec3<f32>,m:Layers)->vec3<f32> {
+    let nl=dot(m.coat_n,l);
+    if nl<=0.0 || m.coat<=0.0 {return vec3(0.0);}
+    let n=m.coat_n;
+    let nv=max(dot(n,v),0.0001);
+    let h=normalize(v+l);
+    let nh=max(dot(n,h),0.0);
+    let a2=pow(m.coat_rough,4.0);
+    let d0=nh*nh*(a2-1.0)+1.0;
+    let distribution=a2/(3.14159265*d0*d0);
+    let visibility=0.5/(nl*sqrt(nv*nv*(1.0-a2)+a2)+nv*sqrt(nl*nl*(1.0-a2)+a2));
+    let fresnel=0.04+0.96*pow5(1.0-max(dot(v,h),0.0));
+    return vec3(m.coat*fresnel*distribution*visibility*nl);
+}
+
+// One light on a layered material: the base (sheen-scaled) under the sheen lobe, both
+// under the clearcoat. Area lights shade the base layer only (ltc-plausible-v1).
+fn layered_light(li:u32,x:vec3<f32>,n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32,m:Layers)->vec3<f32> {
+    let scale=m.coat_pass*(1.0-max3(m.sheen)*m.sheen_albedo);
+    if lights[li].position_kind.w>2.5 {return area_lighting(li,x,n,v,base,metal,rough)*scale;}
+    let incident=punctual_incident(li,x);
+    if all(incident.radiance==vec3(0.0)) {return vec3(0.0);}
+    let l=incident.l;
+    return incident.radiance*(layered_brdf(n,v,l,base,metal,rough,m)*scale
+        +sheen_light(n,v,l,m)*m.coat_pass+coat_light(v,l,m));
+}
+
+fn prefiltered_radiance(direction:vec3<f32>,rough:f32)->vec3<f32> {
+    let uv=panorama_uv(environment_direction(direction));
+    let level=rough*environment.info.w;
+    let lower=i32(floor(level));
+    let upper=min(lower+1,i32(environment.info.w));
+    return mix(sample_float_layer(environment_filtered,uv,lower),
+        sample_float_layer(environment_filtered,uv,upper),fract(level));
+}
+
+// Environment and constant fill on a layered material; with default layers this is
+// `environment_lighting`. Sheen reads the GGX-prefiltered panorama at its roughness
+// around the normal; anisotropy bends the reflected direction (KHR_materials_anisotropy).
+fn layered_environment(n:vec3<f32>,v:vec3<f32>,base:vec3<f32>,metal:f32,rough:f32,ao:f32,m:Layers)->vec3<f32> {
+    let sky=environment.flags.x!=0.0 && environment.info.x!=0.0;
+    let constant=environment.constant.rgb;
+    if !sky && all(constant==vec3(0.0)) {return vec3(0.0);}
+    let nv=max(dot(n,v),0.0001);
+    let gain=environment.flags.y*environment.info.x;
+    var reflected=reflect(-v,n);
+    if m.anisotropy>0.0 {
+        var bent=normalize(cross(cross(m.ab,v),m.ab));
+        let a=pow(1.0-m.anisotropy*(1.0-rough),4.0);
+        bent=normalize(mix(bent,n,a));
+        reflected=normalize(mix(reflect(-v,bent),bent,rough*rough));
+    }
+    let dielectric_f0=mix(m.f0,m.iridescent,m.iridescence);
+    let f0=mix(dielectric_f0,mix(base,m.iridescent_metal,m.iridescence),metal);
+    let f90=mix(m.f90,vec3(1.0),metal);
+    let kept_f0=mix(vec3(max3(dielectric_f0)),base,metal);
+    let kept_f90=mix(vec3(max3(m.f90)),vec3(1.0),metal);
+    let fresnel=kept_f0+(max(vec3(1.0-rough)*kept_f90,kept_f0)-kept_f0)*pow5(1.0-nv);
+    // A uniform radiance L is its own diffuse (SH) and prefiltered specular radiance.
+    var irradiance=constant;
+    var prefiltered=constant;
+    if sky {
+        irradiance+=environment_diffuse(environment_direction(n))*gain;
+        prefiltered+=prefiltered_radiance(reflected,rough)*gain;
+    }
+    let dfg=sample_float_image(environment_brdf,vec2(nv,rough),false).rg;
+    let diffuse=(vec3(1.0)-fresnel)*(1.0-metal)*base*irradiance;
+    let specular=prefiltered*(f0*dfg.x+f90*dfg.y);
+    var radiance=(diffuse+specular)*(1.0-max3(m.sheen)*m.sheen_albedo)*m.coat_pass;
+    if m.sheen_albedo>0.0 {
+        var sheen=constant;
+        if sky {sheen+=prefiltered_radiance(n,m.sheen_rough)*gain;}
+        radiance+=sheen*m.sheen*m.sheen_albedo*m.coat_pass;
+    }
+    if m.coat>0.0 {
+        let coat_nv=max(dot(m.coat_n,v),0.0001);
+        var coat=constant;
+        if sky {coat+=prefiltered_radiance(reflect(-v,m.coat_n),m.coat_rough)*gain;}
+        let coat_dfg=sample_float_image(environment_brdf,vec2(coat_nv,m.coat_rough),false).rg;
+        radiance+=coat*(0.04*coat_dfg.x+coat_dfg.y)*m.coat;
+    }
+    return radiance*ao;
+}
+
+// Tangent and bitangent of the texture frame at a fragment: the interpolated tangent,
+// or one derived from position and texture-coordinate derivatives. Zero when neither
+// exists (no texture coordinates or a degenerate UV gradient).
+struct Frame { t:vec3<f32>, b:vec3<f32> };
+fn texture_frame(n:vec3<f32>,tangent:vec4<f32>,px:vec3<f32>,py:vec3<f32>,tx:vec2<f32>,ty:vec2<f32>)->Frame {
+    var t=tangent.xyz;
+    if dot(t,t)>1e-12 {
+        t=normalize(t-n*dot(n,t));
+        return Frame(t,cross(n,t)*tangent.w);
+    }
+    let determinant=tx.x*ty.y-tx.y*ty.x;
+    if abs(determinant)>1e-10 {
+        // Same frame as imported tangents: t along +U, orthogonal to n, and the
+        // bitangent towards decreasing V, the texture's up (glTF normal-map +Y).
+        let dpdu=(px*ty.y-py*tx.y)/determinant;
+        let dpdv=(py*tx.x-px*ty.x)/determinant;
+        let along=dpdu-n*dot(n,dpdu);
+        if dot(along,along)>1e-20 {
+            t=normalize(along);
+            return Frame(t,cross(n,t)*select(1.0,-1.0,dot(cross(n,t),dpdv)>0.0));
+        }
+    }
+    return Frame(vec3(0.0),vec3(0.0));
+}
+
 @fragment
 fn fs_wire() -> @location(0) vec4<f32> {
     return vec4(1.0);
@@ -591,8 +894,8 @@ fn fs_wire() -> @location(0) vec4<f32> {
 // with ONE, ONE_MINUS_SRC_ALPHA). Sampling precedes discards for uniform control flow.
 @fragment
 fn fs_decal(surface:Surface,@builtin(front_facing) front_facing:bool) -> @location(0) vec4<f32> {
-    let base = textureSample(base_map,base_sampler,surface.uv)*object.color*surface.color;
-    let emissive = textureSample(emissive_map,emissive_sampler,surface.uv).rgb*object.emissive_cutoff.rgb;
+    let base = textureSample(base_map,base_sampler,map_uv(SLOT_BASE,surface.uv))*object.color*surface.color;
+    let emissive = textureSample(emissive_map,emissive_sampler,map_uv(SLOT_EMISSIVE,surface.uv)).rgb*object.emissive_cutoff.rgb;
     let front = select(front_facing,!front_facing,object.flags.w!=0u);
     if !front && object.flags.z==0u {discard;}
     if object.emissive_cutoff.w>=0.0 && base.a<object.emissive_cutoff.w {discard;}
@@ -615,12 +918,44 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     }
     if camera.options.w==3u { return vec4(vec3(surface.clip.z),1.0); }
     if camera.options.x==0u { return vec4(object.color.rgb,1.0); }
-    let base = textureSample(base_map,base_sampler,surface.uv)*object.color*surface.color;
-    let mr = textureSample(mr_map,mr_sampler,surface.uv);
-    let normal_texel = textureSample(normal_map,normal_sampler,surface.uv).xyz*2.0-vec3(1.0);
-    let emissive = textureSample(emissive_map,emissive_sampler,surface.uv).rgb*object.emissive_cutoff.rgb;
+    let base = textureSample(base_map,base_sampler,map_uv(SLOT_BASE,surface.uv))*object.color*surface.color;
+    let mr = textureSample(mr_map,mr_sampler,map_uv(SLOT_METAL_ROUGH,surface.uv));
+    let normal_texel = textureSample(normal_map,normal_sampler,map_uv(SLOT_NORMAL,surface.uv)).xyz*2.0-vec3(1.0);
+    let emissive = textureSample(emissive_map,emissive_sampler,map_uv(SLOT_EMISSIVE,surface.uv)).rgb*object.emissive_cutoff.rgb;
     // Occlusion maps affect indirect lighting, not punctual direct lights[li].
-    let occlusion = textureSample(ao_map,ao_sampler,surface.uv).r;
+    let occlusion = textureSample(ao_map,ao_sampler,map_uv(SLOT_OCCLUSION,surface.uv)).r;
+    // Extension maps default to white (no effect); `object` is uniform, so these
+    // branches keep sampling in uniform control flow, before any discard.
+    var coat_texel=vec4(1.0); var coat_rough_texel=vec4(1.0); var coat_normal_texel=vec3(0.0,0.0,1.0);
+    if object.coat.y>0.0 {
+        coat_texel=textureSample(clearcoat_map,clearcoat_sampler,map_uv(SLOT_CLEARCOAT,surface.uv));
+        coat_rough_texel=textureSample(clearcoat_roughness_map,clearcoat_roughness_sampler,
+            map_uv(SLOT_CLEARCOAT_ROUGH,surface.uv));
+        coat_normal_texel=textureSample(clearcoat_normal_map,clearcoat_normal_sampler,
+            map_uv(SLOT_CLEARCOAT_NORMAL,surface.uv)).xyz*2.0-vec3(1.0);
+    }
+    var sheen_texel=vec4(1.0); var sheen_rough_texel=vec4(1.0);
+    if any(object.sheen.rgb>vec3(0.0)) {
+        sheen_texel=textureSample(sheen_color_map,sheen_color_sampler,map_uv(SLOT_SHEEN_COLOR,surface.uv));
+        sheen_rough_texel=textureSample(sheen_roughness_map,sheen_roughness_sampler,
+            map_uv(SLOT_SHEEN_ROUGH,surface.uv));
+    }
+    var specular_texel=vec4(1.0); var specular_color_texel=vec4(1.0);
+    if has_map(SLOT_SPECULAR) || has_map(SLOT_SPECULAR_COLOR) {
+        specular_texel=textureSample(specular_map,specular_sampler,map_uv(SLOT_SPECULAR,surface.uv));
+        specular_color_texel=textureSample(specular_color_map,specular_color_sampler,
+            map_uv(SLOT_SPECULAR_COLOR,surface.uv));
+    }
+    var iridescence_texel=vec4(1.0); var thickness_texel=vec4(1.0);
+    if object.iridescence.x>0.0 {
+        iridescence_texel=textureSample(iridescence_map,iridescence_sampler,map_uv(SLOT_IRIDESCENCE,surface.uv));
+        thickness_texel=textureSample(thickness_map,thickness_sampler,map_uv(SLOT_THICKNESS,surface.uv));
+    }
+    // Without a texture the anisotropy direction is +X at full strength.
+    var anisotropy_texel=vec4(1.0,0.5,1.0,1.0);
+    if object.anisotropy.x>0.0 && has_map(SLOT_ANISOTROPY) {
+        anisotropy_texel=textureSample(anisotropy_map,anisotropy_sampler,map_uv(SLOT_ANISOTROPY,surface.uv));
+    }
     let px=dpdx(surface.position); let py=dpdy(surface.position);
     let tx=dpdx(surface.uv); let ty=dpdy(surface.uv);
     let front = select(front_facing,!front_facing,object.flags.w!=0u);
@@ -638,29 +973,15 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
         if !front {n=-n;}
     }
     let shadow_normal=n;
-    if object.flags.x!=0u {
-        var t=surface.tangent.xyz;
-        var b=vec3(0.0);
-        if dot(t,t)>1e-12 {
-            t=normalize(t-n*dot(n,t));
-            b=cross(n,t)*surface.tangent.w;
-        } else {
-            let determinant=tx.x*ty.y-tx.y*ty.x;
-            if abs(determinant)>1e-10 {
-                // Same frame as imported tangents: t along +U, orthogonal to n, and the
-                // bitangent towards decreasing V, the texture's up (glTF normal-map +Y).
-                let dpdu=(px*ty.y-py*tx.y)/determinant;
-                let dpdv=(py*tx.x-px*ty.x)/determinant;
-                let along=dpdu-n*dot(n,dpdu);
-                if dot(along,along)>1e-20 {
-                    t=normalize(along);
-                    b=cross(n,t)*select(1.0,-1.0,dot(cross(n,t),dpdv)>0.0);
-                }
-            }
-        }
-        if dot(t,t)>1e-12 && dot(b,b)>1e-12 {
-            n=normalize(mat3x3(t,b,n)*vec3(normal_texel.xy*object.factors.z,normal_texel.z));
-        }
+    let coat_mapped=object.coat.y>0.0 && has_map(SLOT_CLEARCOAT_NORMAL);
+    var frame=Frame(vec3(0.0),vec3(0.0));
+    if object.flags.x!=0u || coat_mapped || object.anisotropy.x>0.0 {
+        frame=texture_frame(n,surface.tangent,px,py,tx,ty);
+    }
+    let framed=dot(frame.t,frame.t)>1e-12 && dot(frame.b,frame.b)>1e-12;
+    if object.flags.x!=0u && framed {
+        let xy=map_direction(SLOT_NORMAL,normal_texel.xy);
+        n=normalize(mat3x3(frame.t,frame.b,n)*vec3(xy*object.factors.z,normal_texel.z));
     }
     let metal=clamp(object.factors.x*mr.b,0.0,1.0);
     // Finite raster specular lobe; roughness zero is not a sampled delta mirror.
@@ -679,9 +1000,56 @@ fn fs_main(surface:Surface,@builtin(front_facing) front_facing:bool) -> @locatio
     }
     let rough=sqrt(sqrt(min(alpha2,1.0)));
     let ao=mix(1.0,occlusion,object.factors.w);
-    var radiance=emissive+environment_lighting(n,v,base.rgb,metal,rough,ao);
+    let nv=max(dot(n,v),0.0001);
+    var m:Layers;
+    // KHR_materials_ior and KHR_materials_specular; IOR 0 makes the Fresnel term 1.
+    let ior=object.coat.x;
+    let strength=object.specular.w*specular_texel.a;
+    let q=(ior-1.0)/(ior+1.0);
+    let reflectance=select(q*q,1.0,ior==0.0);
+    m.f0=min(vec3(reflectance)*object.specular.rgb*specular_color_texel.rgb,vec3(1.0))*strength;
+    m.f90=select(vec3(strength),m.f0,ior==0.0);
+    let thickness=mix(object.iridescence.z,object.iridescence.w,thickness_texel.g);
+    // A film of zero thickness is no film.
+    m.iridescence=select(object.iridescence.x*iridescence_texel.r,0.0,thickness<=0.0);
+    if m.iridescence>0.0 {
+        m.iridescent=iridescence_fresnel(object.iridescence.y,nv,thickness,m.f0);
+        m.iridescent_metal=iridescence_fresnel(object.iridescence.y,nv,thickness,base.rgb);
+    }
+    m.anisotropy=object.anisotropy.x*anisotropy_texel.b;
+    if m.anisotropy>0.0 && framed {
+        var direction=vec2(1.0,0.0);
+        if has_map(SLOT_ANISOTROPY) {
+            direction=map_direction(SLOT_ANISOTROPY,normalize(anisotropy_texel.rg*2.0-vec2(1.0)));
+        }
+        let c=object.anisotropy.y; let s=object.anisotropy.z;
+        direction=vec2(c*direction.x-s*direction.y,s*direction.x+c*direction.y);
+        let along=frame.t*direction.x+frame.b*direction.y;
+        m.at=normalize(along-n*dot(n,along));
+        m.ab=cross(n,m.at);
+    } else {
+        m.anisotropy=0.0;
+    }
+    m.sheen=object.sheen.rgb*sheen_texel.rgb;
+    if any(m.sheen>vec3(0.0)) {
+        m.sheen_rough=max(object.sheen.w*sheen_rough_texel.a,0.07);
+        m.sheen_albedo=sample_float_image(environment_brdf,vec2(nv,m.sheen_rough),false).b;
+    }
+    m.coat=object.coat.y*coat_texel.r;
+    m.coat_n=shadow_normal;
+    if coat_mapped && framed {
+        let xy=map_direction(SLOT_CLEARCOAT_NORMAL,coat_normal_texel.xy);
+        m.coat_n=normalize(mat3x3(frame.t,frame.b,shadow_normal)*vec3(xy*object.coat.w,coat_normal_texel.z));
+    }
+    // The coat's own lobe gets the same specular antialiasing as the base.
+    let dcx=dpdx(m.coat_n); let dcy=dpdy(m.coat_n);
+    let coat_alpha2=pow(clamp(object.coat.z*coat_rough_texel.g,0.045,1.0),4.0)
+        +min(0.3*(dot(dcx,dcx)+dot(dcy,dcy)),0.2);
+    m.coat_rough=sqrt(sqrt(min(coat_alpha2,1.0)));
+    m.coat_pass=1.0-m.coat*(0.04+0.96*pow5(1.0-abs(dot(v,m.coat_n))));
+    var radiance=emissive*m.coat_pass+layered_environment(n,v,base.rgb,metal,rough,ao,m);
     for (var i=0u;i<camera.options.y;i++) {
-        let shaded=direct_light(i,surface.position,n,v,base.rgb,metal,rough);
+        let shaded=layered_light(i,surface.position,n,v,base.rgb,metal,rough,m);
         if any(shaded>vec3(0.0)) {
             radiance+=shaded*shadow_visibility(i,surface.position,shadow_normal,px,py);
         }

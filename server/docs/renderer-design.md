@@ -28,8 +28,12 @@ normals. Normal-mapped primitives without `TANGENT` get per-vertex tangents at
 import (#178): UV gradients accumulated over adjacent triangles, Gram-Schmidt
 against the vertex normal, with glTF handedness, so the bitangent
 `cross(n, t) * w` points towards decreasing V, the texture's up. Decoded RGBA8 images are shared across maps/materials.
-Skins, morphs, alpha blending, external resources and unsupported extensions are
-reported as unsupported; animation clips are ignored with a diagnostic. The
+Skins, morphs, alpha blending, external resources and required extensions chr does
+not implement are reported as unsupported; other unimplemented extensions and
+animation clips are ignored with a diagnostic. The material extensions clearcoat,
+sheen, specular, IOR, anisotropy and iridescence, texture transforms, WebP images,
+quantized attributes and converted specular-glossiness materials are imported
+([glTF support](gltf-support.md), #208). The
 explicit `glb::ImportOptions::blend_as_mask` opt-in imports alpha-blended
 materials as alpha masks (cutoff 0.5) and lists each one in the asset's
 warnings; render descriptions request it per asset with `blend_as: "mask"`.
@@ -63,8 +67,10 @@ mesh placement and occlusion, not PBR or shadows; it is not the #40 interactive
 Socket/WebSocket acceptance.
 
 `MeshRenderer::prepare_pbr` now evaluates metallic-roughness PBR using GGX,
-height-correlated Smith visibility and Burley diffuse. It binds base-colour,
-metallic-roughness, normal and emissive maps, authored, imported or
+height-correlated Smith visibility and Burley diffuse, with the glTF material
+extensions layered on it by their Khronos definitions ([glTF support](gltf-support.md)).
+It binds base-colour, metallic-roughness, normal, emissive and occlusion maps and the
+extensions' ten maps, each with its texture transform, authored, imported or
 derivative tangent frames (the screen-derivative fallback, for vertices without
 a UV gradient, uses the same orthogonal glTF-handed frame), vertex colours, alpha masks and double-sided/mirrored surfaces.
 Colour textures and their mipmaps are filtered in linear light; data maps stay
@@ -320,7 +326,7 @@ native/headless shell; do not reproduce the reference's editor and protocol stac
 | Rendering core | trd shares rendering across several front-ends; chr shares its triangle pipeline | One renderer for native surfaces and offscreen textures |
 | Scene | trd has placed primitives, resource stores, overlays, and scene assembly | Flat mesh instances, shared assets, camera, lights, and background; no ECS or scene graph |
 | Geometry | trd loads OBJ and GLB, including material parts | Static indexed meshes and instances, one model matrix per instance; GLB import preserves material parts; OBJ conversion stays outside core |
-| Materials | trd exposes the full Disney parameter set | PBR is the primary/default material path, referencing trd's shading; metallic-roughness, base color, normal, emissive, occlusion, opaque/masked alpha, and double-sided surfaces; unlit is secondary |
+| Materials | trd exposes the full Disney parameter set | PBR is the primary/default material path, referencing trd's shading; metallic-roughness, base color, normal, emissive, occlusion, opaque/masked alpha, and double-sided surfaces; unlit is secondary. glTF clearcoat, sheen, specular, IOR, anisotropy and iridescence follow their Khronos definitions rather than Disney's parameters ([glTF support](gltf-support.md)) |
 | Render modes | Filled, wireframe, textured, PBR, and diagnostic views | PBR is the production path; unlit serves bootstrap, explicitly unlit assets, and diagnostics; wireframe, normals, depth, axes, and bounds do not create separate scene models |
 | Cameras | trd stores view/projection/viewport with CG and CV constructors; chr implements Ti projection math only | Perspective/FOV and calibrated pinhole as equivalent inputs; orthographic; tracked Ti + C; explicit lens distortion |
 | Local/direct lights | trd packs a fixed three-directional-light rig; point-light shader slots exist but default to empty | Authored directional, point, spot, and area lights; no hidden key/fill/rim rig |

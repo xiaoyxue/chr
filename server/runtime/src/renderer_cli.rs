@@ -285,7 +285,7 @@ async fn timed_gpu() -> Result<Gpu> {
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("chr-renderer-cli bench"),
             required_features: adapter.features() & timestamps,
-            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+            required_limits: Gpu::required_limits(&adapter),
             ..Default::default()
         })
         .await?;

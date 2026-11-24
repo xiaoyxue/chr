@@ -175,9 +175,10 @@ impl Registrations {
                 let entry = materials
                     .get_mut(replacement.part as usize)
                     .ok_or_else(|| incompatible("material override part is absent"))?;
-                let decal = entry.factors.decal;
+                let (decal, layers) = (entry.factors.decal, entry.factors.layers);
                 entry.factors = factors(&replacement.factors)?;
                 entry.factors.decal = decal;
+                entry.factors.layers = layers;
             }
             let materials = materials
                 .into_iter()
@@ -549,6 +550,8 @@ fn factors(v: &w::PbrFactors) -> Result<scene::PbrMaterial, ErrorObject> {
         decal: false,
         // Holdouts are grounds the runtime builds, never wire materials.
         holdout: false,
+        // glTF extension layers belong to the asset, kept by the caller like decals.
+        layers: scene::MaterialLayers::default(),
     })
 }
 fn shadow(mode: w::ShadowMode) -> ShadowMode {

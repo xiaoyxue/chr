@@ -33,7 +33,7 @@ impl Gpu {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("chr device"),
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+                required_limits: Self::required_limits(&adapter),
                 ..Default::default()
             })
             .await?;
@@ -42,5 +42,18 @@ impl Gpu {
             device,
             queue,
         })
+    }
+
+    /// Limits every chr device requests: WebGPU defaults raised to the adapter's
+    /// resolution limits, plus room for the 15 material maps (`material_maps.rs`) beside
+    /// the lighting textures in one fragment stage. Desktop Vulkan and D3D12 adapters
+    /// offer far more than 32.
+    pub fn required_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+        let supported = adapter.limits();
+        wgpu::Limits {
+            max_sampled_textures_per_shader_stage: 32,
+            max_samplers_per_shader_stage: 32,
+            ..wgpu::Limits::default().using_resolution(supported)
+        }
     }
 }

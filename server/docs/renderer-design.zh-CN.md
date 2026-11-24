@@ -20,8 +20,10 @@
 默认节点变换与 glTF 到 chr 的坐标轴旋转只烘焙一次；保留材质分组、法线、UV0、
 tangent、顶点颜色及 sampler 元数据。缺少法线时采用三角形平面法线，
 解码后的 RGBA8 图像在贴图/材质间共享。
-骨骼、Morph、alpha blending、外部资源和未支持扩展会明确报错；
-动画片段忽略并给出诊断。显式选项 `glb::ImportOptions::blend_as_mask`
+骨骼、Morph、alpha blending、外部资源以及 chr 未实现却列入
+`extensionsRequired` 的扩展会明确报错；其他未实现扩展和动画片段忽略并给出诊断。
+clearcoat、sheen、specular、IOR、anisotropy、iridescence 材质扩展，贴图变换、WebP 图像、
+量化顶点属性以及转换后的 specular-glossiness 材质均可导入（[glTF 支持](gltf-support.md)，#208）。显式选项 `glb::ImportOptions::blend_as_mask`
 会把 alpha blending 材质按 alpha mask（阈值 0.5）导入，并把每个材质列入资源警告；
 渲染描述按资源用 `blend_as: "mask"` 请求该选项。贴图数据由下述共享 PBR 路径使用。
 
@@ -45,7 +47,8 @@ M1 样例将合成球场和贴地、按面着色的方盒渲染到
 也不等于 #40 的 Socket/WebSocket 交互验收。
 
 `MeshRenderer::prepare_pbr` 已采用 GGX、height-correlated Smith 可见性及 Burley
-漫反射进行金属度-粗糙度 PBR，绑定基础色、金属度/粗糙度、法线和自发光贴图，
+漫反射进行金属度-粗糙度 PBR，并按 Khronos 定义叠加 glTF 材质扩展（[glTF 支持](gltf-support.md)），
+绑定基础色、金属度/粗糙度、法线、自发光、遮蔽贴图及扩展的十张贴图（各带贴图变换），
 支持导入或导数切线基、顶点颜色、alpha mask 和双面/镜像表面。
 颜色纹理及 mipmap 在线性光照域过滤，数据贴图保持线性。三线性采样器同时启用 16x 各向异性过滤，
 使转播机位以掠射角看到的地面广告在横向保持清晰。
@@ -238,7 +241,7 @@ CPU/GPU 测试覆盖原生拟合、预乘 alpha、颜色域分离、BT.709、虚
 | 渲染核心 | trd 多前端共享渲染；chr 共享三角形管线 | 一个渲染器同时支持原生 surface 与离屏纹理 |
 | 场景 | trd 有放置后的图元、资源仓库、辅助线和场景组装 | 扁平网格实例、共享资源、相机、灯光及背景；不引入 ECS 或场景树 |
 | 几何 | trd 加载 OBJ、GLB，并支持材质分组 | 静态索引网格与实例，每个实例一个 model matrix；GLB 导入保留材质分组；OBJ 转换留在核心之外 |
-| 材质 | trd 暴露完整 Disney 参数集 | PBR 是主要/默认材质路径，参考 trd 着色；支持金属度-粗糙度、基础色、法线、自发光、遮蔽、opaque/mask alpha 及双面表面；unlit 为辅助 |
+| 材质 | trd 暴露完整 Disney 参数集 | PBR 是主要/默认材质路径，参考 trd 着色；支持金属度-粗糙度、基础色、法线、自发光、遮蔽、opaque/mask alpha 及双面表面；unlit 为辅助。glTF 的 clearcoat、sheen、specular、IOR、anisotropy 和 iridescence 采用 Khronos 定义而非 Disney 参数（[glTF 支持](gltf-support.md)） |
 | 渲染模式 | 填充、线框、纹理、PBR 和诊断视图 | PBR 用于正式渲染；unlit 用于初期管线、明确的无光照资源和诊断；线框、法线、深度、坐标轴和包围盒不另建场景模型 |
 | 相机 | trd 保存 view/projection/viewport 并提供 CG/CV 构造；chr 只有 Ti 投影数学 | 透视/FOV 与标定针孔是等价输入；正交；跟踪 Ti + C；显式镜头畸变 |
 | 局部/直接光 | trd 打包固定的三盏方向光；点光 shader 槽位存在但默认为空 | 场景直接定义方向光、点光、聚光和面光；没有隐藏的主光/补光/轮廓光 |

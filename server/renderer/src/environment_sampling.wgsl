@@ -39,3 +39,30 @@ fn sample_float_layer(image:texture_2d_array<f32>,uv:vec2<f32>,layer:i32)->vec3<
     let d=textureLoad(image,image_pixel(base+vec2(1,1),size,true),layer,0).rgb;
     return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
 }
+
+// Charlie sheen distribution and its fitted visibility (KHR_materials_sheen); `alpha` is
+// the squared sheen roughness. Shared by the albedo bake and mesh shading.
+fn charlie_distribution(alpha:f32,nh:f32)->f32 {
+    let inverse=1.0/alpha;
+    let sin2=max(1.0-nh*nh,0.0);
+    return (2.0+inverse)*pow(sin2,inverse*0.5)/(2.0*ENV_PI);
+}
+
+fn charlie_fit(x:f32,alpha:f32)->f32 {
+    let t=(1.0-alpha)*(1.0-alpha);
+    let a=mix(21.5473,25.3245,t);
+    let b=mix(3.82987,3.32435,t);
+    let c=mix(0.19823,0.16801,t);
+    let d=mix(-1.97760,-1.27393,t);
+    let e=mix(-4.32054,-4.85967,t);
+    return a/(1.0+b*pow(x,c))+d*x+e;
+}
+
+fn charlie_lambda(cosine:f32,alpha:f32)->f32 {
+    if abs(cosine)<0.5 {return exp(charlie_fit(cosine,alpha));}
+    return exp(2.0*charlie_fit(0.5,alpha)-charlie_fit(1.0-cosine,alpha));
+}
+
+fn charlie_visibility(alpha:f32,nv:f32,nl:f32)->f32 {
+    return 1.0/((1.0+charlie_lambda(nv,alpha)+charlie_lambda(nl,alpha))*(4.0*nv*nl));
+}
