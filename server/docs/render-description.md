@@ -181,7 +181,7 @@ re-registers its asset.
 | Field | Meaning |
 | --- | --- |
 | `width_m`, `height_m` | Flag size in metres, positive |
-| `amplitude_m` | Wave coefficient in metres; the surface leaves its plane by at most 1.53 times this |
+| `amplitude_m` | Wave coefficient in metres; the surface leaves its plane by at most 1.53 times this. Any value works, but the free edges fold over once 0.24 times it exceeds `height_m` |
 | `frequency` | Primary wave cycles from the pinned centre line to either free edge |
 | `speed` | Time scale; 0 freezes the wave |
 | `material` | `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |

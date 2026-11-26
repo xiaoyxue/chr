@@ -233,7 +233,19 @@ mod tests {
 
     #[test]
     fn normals_follow_the_surface_and_samples_stay_in_bounds() {
-        let flag = flag();
+        let tifo = Flag {
+            width: 36.0,
+            height: 13.5,
+            amplitude: 5.0,
+            frequency: 1.35,
+            ..flag()
+        };
+        for flag in [flag(), tifo] {
+            check_normals_and_bounds(flag);
+        }
+    }
+
+    fn check_normals_and_bounds(flag: Flag) {
         let bounds = flag.local_bounds().unwrap();
         let phases = flag.phases(7.0);
         let h = 1e-6;
