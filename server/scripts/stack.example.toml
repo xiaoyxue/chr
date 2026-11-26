@@ -67,7 +67,10 @@ tracking = "worker"
 size = "1280x720"
 # Control and capture sockets and the program tap; kept between runs.
 # dir = "/run/user/1000/chr-stack"
-# Wrap GPU processes with nixGLNvidia (non-NixOS NVIDIA hosts).
+# Wrap GPU processes with nixGLNvidia (non-NixOS NVIDIA hosts). true fetches it and detects
+# the driver version; where that detection fails (some open kernel module drivers), name a
+# wrapper built for this driver instead, for example
+# nixgl = "/path/to/nixGLNvidia/bin/nixGLNvidia-580.178.04"
 nixgl = true
 
 # chr-monitor SRT listener; use an interface address to reach it from other hosts.

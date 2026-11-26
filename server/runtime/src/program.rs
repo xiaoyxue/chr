@@ -14,7 +14,7 @@ use chr_renderer::{
     distortion::{CameraModel, FrameWarp, LensDistortion, RadialDistortion},
 };
 use chr_tracker::pose::rows3;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub mod assets;
 pub mod description;
@@ -62,8 +62,11 @@ pub struct Frame<'a> {
     pub frame_warp: Option<[[f64; 3]; 3]>,
     /// Media time of the frame on its timeline; animates flags reproducibly.
     pub seconds: f64,
-    /// Seconds since the scene started playing: drives instance motion (#157).
+    /// Seconds since the scene started playing: drives instance motion (#157) and
+    /// flag reveals.
     pub motion_seconds: f64,
+    /// Start of each cued flag instance's latest reveal, in `motion_seconds`.
+    pub cues: HashMap<w::Id, f64>,
 }
 
 impl<'a> Frame<'a> {
@@ -85,6 +88,7 @@ impl<'a> Frame<'a> {
                 execution.input.metadata().timeline.time_base,
                 execution.input.metadata().position.ticks.get(),
             ),
+            cues: HashMap::new(),
         })
     }
 }
@@ -352,7 +356,7 @@ impl ProgramRenderer {
             (None, None) => &CameraModel::Pinhole,
         };
         compositor.set_animation_time(frame.seconds);
-        let scene = frame.scene.scene_at(frame.motion_seconds)?;
+        let scene = frame.scene.scene_at(frame.motion_seconds, &frame.cues)?;
         compositor.prepare_model(
             gpu,
             &scene,

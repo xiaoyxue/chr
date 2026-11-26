@@ -46,6 +46,11 @@ pub struct Flag {
     /// Time scale: the wave advances `speed` seconds per second.
     pub speed: f32,
     pub shading: FlagShading,
+    /// Clockwise quarter turns of the artwork within the flag as it reads, 0 to 3.
+    pub artwork_turns: u8,
+    /// Fraction of the width shown, opening outwards from the centre line: 1 shows
+    /// the whole flag and 0 hides it. Columns beyond it collapse onto its edge.
+    pub revealed: f32,
 }
 
 impl Flag {
@@ -59,10 +64,31 @@ impl Flag {
         ]
         .into_iter()
         .all(|v| v.is_finite() && v >= 0.0);
-        if !finite || self.width == 0.0 || self.height == 0.0 {
+        if !finite
+            || self.width == 0.0
+            || self.height == 0.0
+            || self.artwork_turns > 3
+            || !(0.0..=1.0).contains(&self.revealed)
+        {
             return Err(SceneError::InvalidFlag);
         }
         Ok(())
+    }
+
+    /// The grid coordinate `u` in [0, 1] moved onto the revealed part of the width.
+    pub fn revealed_u(self, u: f64) -> f64 {
+        let half = 0.5 * f64::from(self.revealed);
+        0.5 + (u - 0.5).clamp(-half, half)
+    }
+
+    /// Texture coordinates (right, down) of the artwork at flag coordinates `(u, v)`.
+    pub fn artwork_uv(self, u: f64, v: f64) -> [f64; 2] {
+        match self.artwork_turns {
+            1 => [v, 1.0 - u],
+            2 => [1.0 - u, 1.0 - v],
+            3 => [1.0 - v, u],
+            _ => [u, v],
+        }
     }
 
     /// Wave phases at `seconds`, reduced in f64 so long-running clocks keep their
@@ -181,6 +207,8 @@ mod tests {
             frequency: 3.0,
             speed: 1.0,
             shading: FlagShading::Simple,
+            artwork_turns: 0,
+            revealed: 1.0,
         }
     }
 
@@ -251,8 +279,51 @@ mod tests {
                 speed: f32::NAN,
                 ..flag()
             },
+            Flag {
+                artwork_turns: 4,
+                ..flag()
+            },
+            Flag {
+                revealed: 1.5,
+                ..flag()
+            },
         ] {
             assert_eq!(bad.validate(), Err(SceneError::InvalidFlag));
         }
+    }
+
+    #[test]
+    fn the_reveal_opens_from_the_centre_line() {
+        let half = Flag {
+            revealed: 0.5,
+            ..flag()
+        };
+        assert_eq!(
+            [0.0, 0.3, 0.5, 0.7, 1.0].map(|u| half.revealed_u(u)),
+            [0.25, 0.3, 0.5, 0.7, 0.75]
+        );
+        let hidden = Flag {
+            revealed: 0.0,
+            ..flag()
+        };
+        assert_eq!([0.0, 1.0].map(|u| hidden.revealed_u(u)), [0.5, 0.5]);
+        assert_eq!(flag().revealed_u(0.0), 0.0);
+    }
+
+    #[test]
+    fn artwork_turns_clockwise_as_it_reads() {
+        // The flag's top-left corner shows the artwork corner that a clockwise turn
+        // brings there: its bottom-left after a quarter turn.
+        let corners = |turns| {
+            let flag = Flag {
+                artwork_turns: turns,
+                ..flag()
+            };
+            [(0.0, 0.0), (1.0, 0.0)].map(|(u, v)| flag.artwork_uv(u, v))
+        };
+        assert_eq!(corners(0), [[0.0, 0.0], [1.0, 0.0]]);
+        assert_eq!(corners(1), [[0.0, 1.0], [0.0, 0.0]]);
+        assert_eq!(corners(2), [[1.0, 1.0], [0.0, 1.0]]);
+        assert_eq!(corners(3), [[1.0, 0.0], [1.0, 1.0]]);
     }
 }

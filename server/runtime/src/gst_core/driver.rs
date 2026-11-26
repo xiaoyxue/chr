@@ -39,7 +39,10 @@ use serde_json::json;
 
 use super::{Core, DECISION_MARGIN, Error, capture::Captured, output::Summary, select::Frame};
 use crate::{
-    program::synthetic::{Synthetic, id},
+    program::{
+        description::RevealCues,
+        synthetic::{Synthetic, id},
+    },
     retained::SceneControl,
     sdi::VideoMode,
     worker::{
@@ -72,6 +75,8 @@ pub struct Program {
     image: w::ImageDescription,
     /// The rate the program's scene animations step at.
     rate: Rate,
+    /// Reveal cues of a description program's flags.
+    cues: RevealCues,
 }
 
 impl Program {
@@ -95,7 +100,13 @@ impl Program {
                 alpha: w::Alpha::Straight,
             },
             rate: Rate::from_time_base(synthetic.configuration.output_rate)?,
+            cues: RevealCues::default(),
         })
+    }
+
+    /// This program with the reveal cues its frames carry.
+    pub fn with_cues(self, cues: RevealCues) -> Self {
+        Self { cues, ..self }
     }
 
     /// Whether frames of `format` can be rendered: they have the program
@@ -371,10 +382,14 @@ impl<'a> Driver<'a> {
             }
         };
         let input = self.program.frame(key, &camera);
-        match self
-            .render
-            .submit(&self.program.image, memory, &input, &scene, nanoseconds())
-        {
+        match self.render.submit(
+            &self.program.image,
+            memory,
+            &input,
+            &scene,
+            nanoseconds(),
+            self.program.cues.get(),
+        ) {
             Ok(id) => {
                 self.rendering.insert(id, key);
                 let left = self.core.deadline(key.capture).nseconds() as i64

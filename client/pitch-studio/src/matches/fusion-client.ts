@@ -1,5 +1,5 @@
 import { validateModelPose } from '../placements/model-motion.ts';
-import type { FusionAdapter, Match, Placement, FusionAsset } from '../shared/types.ts';
+import type { ArtworkRotation, FusionAdapter, FusionTifo, Match, Placement, FusionAsset } from '../shared/types.ts';
 import { validateMatch } from './match-domain.ts';
 
 function object(value: unknown): Record<string, unknown> {
@@ -34,13 +34,46 @@ function array(value: unknown): unknown[] {
   return value;
 }
 
-export function mapFusionMatch(value: unknown, requestedId: string, offlinePackageId?: string): Match {
+/** What schema version 2 states explicitly about the coordinates that version 1 implied. */
+const V2_COORDINATES: Record<string, string> = { z: 'down', swingSpace: 'field', motionSpace: 'field',
+  motionOrigin: 'neutral-model-bottom-center', motionScale: 'neutral-pose-multiplier' };
+
+/**
+ * A Tifo placement (#210): one PNG / JPEG on the rectangle of four point-cloud corners,
+ * opaque, revealed from its centre line. validateMatch checks its geometry.
+ */
+function mapTifo(raw: unknown, adId: string, adName: string, assets: Map<string, FusionAsset>): FusionTifo {
+  const source = object(raw), sourceId = id(source.id);
+  try {
+    if (source.coordinateSpace !== 'point-cloud') throw new Error('coordinateSpace must be "point-cloud".');
+    const assetIds = array(source.assetIds).map(id), asset = assetIds.length === 1 ? assets.get(assetIds[0]) : undefined;
+    if (!asset || !['image/png', 'image/jpeg'].includes(asset.contentType)) throw new Error('needs exactly one PNG or JPEG image.');
+    if (source.assetOpacity !== undefined && source.assetOpacity !== 1)
+      throw new Error(`assetOpacity ${JSON.stringify(source.assetOpacity)} is not supported: chr flags are opaque, so it must be 1 or absent.`);
+    const reveal = object(source.tifoReveal);
+    if (reveal.direction !== 'center-horizontal') throw new Error(`unsupported tifoReveal direction ${JSON.stringify(reveal.direction)}.`);
+    const corners = array(source.corners).map((corner): [number, number, number] => {
+      const point = object(corner);
+      return [number(point.x), number(point.y), number(point.z)];
+    });
+    return { id: sourceId, name: text(source.name), adId, adName, asset, corners, width: number(source.width), height: number(source.height),
+      assetRotation: number(source.assetRotation) as ArtworkRotation, reveal: { direction: 'center_horizontal', duration: number(reveal.duration) } };
+  } catch (error) { throw new Error(`Tifo placement ${sourceId}: ${(error as Error).message}`); }
+}
+
+/**
+ * The match a Fusion manifest describes. `pointCloudSha256` is the SHA-256 of an
+ * offline package's point cloud, the cloud its Tifo placements are drawn on.
+ */
+export function mapFusionMatch(value: unknown, requestedId: string, offlinePackageId?: string, pointCloudSha256?: string): Match {
   const data = object(value), field = object(data.field), coordinates = object(data.coordinates);
   const matchId = id(data.id), campaignId = id(data.campaignId);
   if (![matchId, campaignId].includes(requestedId)) throw new Error('Fusion returned a different match.');
-  if (data.schemaVersion !== 1 || data.sport !== 'football' || coordinates.unit !== 'meters'
+  if ((data.schemaVersion !== 1 && data.schemaVersion !== 2) || data.sport !== 'football' || coordinates.unit !== 'meters'
     || coordinates.origin !== 'field-center' || coordinates.x !== 'right' || coordinates.y !== 'down-in-top-view'
-    || coordinates.modelUp !== 'gltf-y-up') throw new Error('Unsupported Fusion sport or coordinate convention.');
+    || coordinates.modelUp !== 'gltf-y-up'
+    || (data.schemaVersion === 2 && Object.entries(V2_COORDINATES).some(([key, expected]) => coordinates[key] !== expected)))
+    throw new Error('Unsupported Fusion sport or coordinate convention.');
   const assets = new Map<string, FusionAsset>();
   for (const raw of array(data.assets)) {
     const asset = object(raw), assetId = id(asset.id);
@@ -52,12 +85,16 @@ export function mapFusionMatch(value: unknown, requestedId: string, offlinePacka
       url: offlinePackageId ? `/fusion-offline/packages/${offlinePackageId}/assets/${assetId}`
         : `/fusion-api/matches/${matchId}/assets/${assetId}` });
   }
-  const placements: Placement[] = [];
+  const placements: Placement[] = [], tifos: FusionTifo[] = [];
   const adIds = new Set<string>();
   for (const rawAd of array(data.ads)) {
     const ad = object(rawAd), adId = id(ad.id), adName = text(ad.name);
     if (adIds.has(adId)) throw new Error('Duplicate Fusion Ad identifier.');
     adIds.add(adId);
+    if (ad.type === 'Tifo') {
+      tifos.push(...array(ad.placements).map((raw) => mapTifo(raw, adId, adName, assets)));
+      continue;
+    }
     if (ad.type !== '2D' && ad.type !== '3D') throw new Error('Unsupported Fusion Ad type.');
     for (const raw of array(ad.placements)) {
       const source = object(raw), sourceId = id(source.id);
@@ -88,7 +125,9 @@ export function mapFusionMatch(value: unknown, requestedId: string, offlinePacka
   return validateMatch({ id: requestedId, name: text(data.name), date: text(data.date),
     venue: text(data.venue) || text(field.name), venueId: id(field.id),
     mode: offlinePackageId ? 'offline' : 'api', offlinePackageId,
-    field: { length: number(field.length), width: number(field.width) }, placements });
+    field: { length: number(field.length), width: number(field.width) }, placements,
+    ...(pointCloudSha256 ? { pointCloud: { sha256: pointCloudSha256, fileName: text(object(field.pointCloud).fileName) } } : {}),
+    ...(tifos.length ? { tifos } : {}) });
 }
 
 export class HttpFusionAdapter implements FusionAdapter {

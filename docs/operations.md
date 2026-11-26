@@ -61,7 +61,18 @@ page reloads the current copy. Files in `files/` are never deleted automatically
 ## Prerequisites
 
 - A Linux host with a hardware GPU driver. On non-NixOS NVIDIA hosts keep
-  `nixgl = true`; the stack then runs GPU processes through nixGLNvidia.
+  `nixgl = true`; the stack then runs GPU processes through nixGLNvidia. If nixGL
+  cannot read the driver version (`cannot coerce null to a string` in
+  `render.log`, seen with the open kernel module's version banner), build a wrapper
+  for the driver once and name it: `nixgl = "/path/bin/nixGLNvidia-<version>"`,
+  where `<version>` is `nvidia-smi --query-gpu=driver_version --format=csv,noheader`:
+
+  ```sh
+  NIXPKGS_ALLOW_UNFREE=1 nix build --impure -o output/nixgl-nvidia --expr \
+    'let nixgl = builtins.getFlake "github:nix-community/nixGL";
+         pkgs = import nixgl.inputs.nixpkgs { system = "x86_64-linux"; config.allowUnfree = true; };
+     in (pkgs.callPackage "${nixgl}/nixGL.nix" { nvidiaVersion = "<version>"; }).nixGLNvidia'
+  ```
 - Nix with flakes and `uv` (or Python 3.11 or newer) on the host. Run the stack
   commands outside any Nix shell; the script enters the shells it needs.
 
@@ -431,4 +442,5 @@ tunnel (a 70 MB package takes minutes over a slow one).
 | `status`: input loss slots growing, `capture from … lost; reconnecting` in `render.log` | `chr-sdi-in` stopped or lost its signal; it is restarted by `run-tracked.sh`. Check its lines in `render.log` (a missing clip, FFmpeg errors). The output keeps its cadence meanwhile (`input_loss`). |
 | `stack.py` warns `tracking_wait_ms is now program_delay_ms` | Rename the key in `stack.toml`. |
 | `chr-server`: `--tracking-wait-ms was removed`, `--input-ring was removed` or `--pipeline was removed` | A launcher of an older version: use `--program-delay-ms`, and `chr-sdi-in` with `--capture-socket` (#154). |
+| `render.log`: `cannot find -l:libcuda.so.1` and `CUDA worker exited unexpectedly` from `pitch-track-live` | vchao's wrapper points Triton at `/run/opengl-driver/lib`, which only NixOS provides, and replaces `TRITON_LIBCUDA_PATH`. Provide the driver's `libcuda.so.1` there (vchao's operator manual, driver shim), or run a copy of the wrapper with that directory replaced by the nixGL wrapper's driver `lib`. |
 | `render` log: `NVENC is unavailable …; encoding with x264` | The monitor runs without the NVIDIA driver libraries; keep `nixgl = true`. The preview still works, at more CPU. |

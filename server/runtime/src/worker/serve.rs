@@ -7,7 +7,12 @@
 //! image is the request's payload, mapped from the server's memory without a
 //! copy. Requests are handled in order.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use chr_common::scene_frame as w;
 use chr_renderer::{
@@ -160,6 +165,8 @@ struct Program {
     /// Media seconds of the first frame rendered with `scene`: its motion's time zero,
     /// so a newly loaded scene plays from its start (#157).
     started: f64,
+    /// Each cued flag instance's cue count and the scene seconds its reveal started.
+    cues: HashMap<w::Id, (u32, f64)>,
 }
 
 fn start(requests: &Receiver) -> Result<Worker, Error> {
@@ -225,6 +232,7 @@ fn start(requests: &Receiver) -> Result<Worker, Error> {
                 renderer,
                 scene: None,
                 started: 0.0,
+                cues: HashMap::new(),
             }))
         }
     };
@@ -253,7 +261,11 @@ impl Worker {
                 frame,
                 scene,
                 time_base,
-            } => (*id, self.render(request, image, frame, scene, *time_base)),
+                cues,
+            } => (
+                *id,
+                self.render(request, image, frame, scene, *time_base, cues),
+            ),
         };
         Ok((
             id,
@@ -282,6 +294,7 @@ impl Worker {
         frame: &w::FrameInput,
         snapshot: &w::SceneSnapshot,
         time_base: w::TimeBase,
+        cues: &BTreeMap<w::Id, u32>,
     ) -> Result<(), Error> {
         let Renderer::Program(program) = &mut self.renderer else {
             return Err("this worker renders the triangle, not a program".into());
@@ -291,6 +304,7 @@ impl Worker {
             renderer,
             scene,
             started,
+            cues: started_cues,
         } = &mut **program;
         let seconds = crate::program::media_seconds(time_base, frame.position.ticks.get());
         let pixels = request.payload()?;
@@ -307,6 +321,13 @@ impl Worker {
                 adapter.bind(snapshot.clone()).map_err(|e| e.to_string())?,
             ));
             *started = seconds;
+            started_cues.clear();
+        }
+        let motion_seconds = seconds - *started;
+        for (instance, &count) in cues {
+            if started_cues.get(instance).map(|&(seen, _)| seen) != Some(count) {
+                started_cues.insert(instance.clone(), (count, motion_seconds));
+            }
         }
         let bound = scene.as_ref().expect("bound above");
         let camera = adapter
@@ -323,7 +344,11 @@ impl Worker {
                 lens: crate::program::frame_lens(&frame.geometry)?,
                 frame_warp: crate::program::frame_warp(&frame.geometry),
                 seconds,
-                motion_seconds: seconds - *started,
+                motion_seconds,
+                cues: started_cues
+                    .iter()
+                    .map(|(instance, &(_, start))| (instance.clone(), start))
+                    .collect(),
             },
         )?;
         Ok(())

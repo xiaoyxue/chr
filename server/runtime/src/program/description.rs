@@ -4,11 +4,13 @@
 //! the scene's assets and creates the scene. At runtime `description.load` replaces
 //! the scene: new assets are read from inside the `--asset-root` folders, imported
 //! and registered (with the server and with every render worker it starts), then the
-//! program scene is recreated from the description.
+//! program scene is recreated from the description. `description.cue_reveal`
+//! starts the reveal of a flag waiting for its cue.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use chr_common::{
@@ -367,8 +369,33 @@ fn default_lighting(pitch: [f64; 2]) -> Result<Value, Error> {
 }
 
 /// Serves `description.load` for one running description program.
+/// Reveal cues of the current scene's flag instances (`description.cue_reveal`):
+/// how often each was cued since the scene was loaded. The GStreamer core sends
+/// them with every frame, so a render worker starts a reveal when its count changes.
+#[derive(Clone, Debug, Default)]
+pub struct RevealCues(Arc<Mutex<BTreeMap<w::Id, u32>>>);
+
+impl RevealCues {
+    pub fn get(&self) -> BTreeMap<w::Id, u32> {
+        self.lock().clone()
+    }
+    fn cue(&self, instance: w::Id) -> u32 {
+        let mut cues = self.lock();
+        let count = cues.entry(instance).or_default();
+        *count = count.wrapping_add(1);
+        *count
+    }
+    fn clear(&self) {
+        self.lock().clear();
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<w::Id, u32>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 pub struct Loader {
     control: SceneControl,
+    cues: RevealCues,
     runtime_id: w::Id,
     scene_id: w::Id,
     configuration_id: w::Id,
@@ -409,6 +436,7 @@ impl Loader {
         dir.create(&store)?;
         Ok(Self {
             control,
+            cues: RevealCues::default(),
             runtime_id: program.configuration.runtime_id.clone(),
             scene_id: program.scene_id.clone(),
             configuration_id: program.configuration.configuration_id.clone(),
@@ -520,6 +548,7 @@ impl Loader {
             self.worker.push(asset);
         }
         let applied = self.replace(state).await?;
+        self.cues.clear();
         log::info!(
             "description loaded: {} instances, {imported_count} assets imported, {reused} reused",
             scene.instances.len()
@@ -534,6 +563,42 @@ impl Loader {
 }
 
 impl Loader {
+    /// The reveal cues that frames of this program carry to render workers.
+    pub fn cues(&self) -> RevealCues {
+        self.cues.clone()
+    }
+
+    /// Cues the reveal of `instance`, a flag of the current scene whose reveal
+    /// starts on a cue.
+    pub async fn cue(&self, params: d::CueRevealParams) -> Result<d::CueRevealed, ErrorObject> {
+        // Between loads, so a cue never lands on the scene that replaces its own.
+        let _loading = self.registered.lock().await;
+        let target = json!({"runtime_id": self.runtime_id, "scene_id": self.scene_id});
+        let scene: w::SceneSnapshot =
+            serde_json::from_value(self.control.call(w::SCENE_GET, Some(target)).await?)
+                .map_err(|e| ErrorObject::internal(e.to_string()))?;
+        let cued = scene.state.instances.iter().any(|instance| {
+            instance.instance_id == params.instance
+                && instance
+                    .flag
+                    .as_ref()
+                    .and_then(|flag| flag.reveal.as_ref())
+                    .is_some_and(|reveal| reveal.start == w::RevealStart::Cue)
+        });
+        if !cued {
+            return Err(reject(
+                w::RejectionKind::NotFound,
+                format!(
+                    "instance {} is not a flag whose reveal starts on a cue",
+                    params.instance.as_str()
+                ),
+            ));
+        }
+        Ok(d::CueRevealed {
+            cue: self.cues.cue(params.instance),
+        })
+    }
+
     /// Recreates the program scene from `state`; if that fails, the previous scene
     /// is recreated, so the output keeps its CG.
     async fn replace(&self, state: w::SceneState) -> Result<w::SceneApplied, ErrorObject> {

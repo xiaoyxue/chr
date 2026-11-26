@@ -54,6 +54,74 @@ def package(model, image, pose=None, opacity=None):
     return buffer.getvalue()
 
 
+CORNERS = [(10, 40, -6), (-10, 40, -6), (-10, 44, -2), (10, 44, -2)]
+
+
+def tifo_package(corners=CORNERS, opacity=1, cloud=b"ply\nformat ascii 1.0\n", cloud_hash=None):
+    """A package v2 holding one Tifo on a raked plane, 20 m wide and 4 * sqrt(2) m high."""
+    image = png(960, 360)
+    contents = {f"assets/{PNG_ID}.png": image, "point-cloud/field.ply": cloud}
+    match = {
+        "schemaVersion": 2, "sport": "football",
+        "field": {"length": 105, "width": 68, "pointCloud": {"fileName": "field.ply", "byteLength": len(cloud),
+                                                            "contentPath": "point-cloud/field.ply"}},
+        "coordinates": {"unit": "meters", "origin": "field-center", "x": "right", "y": "down-in-top-view",
+                        "modelUp": "gltf-y-up", **fusion_description.V2_COORDINATES},
+        "ads": [{"id": "AD-tifo", "type": "Tifo", "placements": [{
+            "id": "PLC-tifo", "coordinateSpace": "point-cloud", "x": 0, "y": 42, "width": 20,
+            "height": 4 * math.sqrt(2), "assetRotation": 90, "assetOpacity": opacity, "modelPose": None,
+            "assetIds": [PNG_ID], "corners": [{"x": x, "y": y, "z": z} for x, y, z in corners],
+            "tifoReveal": {"direction": "center-horizontal", "duration": 2}}]}],
+        "assets": [{"id": PNG_ID, "contentType": "image/png", "contentPath": f"assets/{PNG_ID}.png",
+                    "byteLength": len(image)}],
+    }
+    hashes = {entry: hashlib.sha256(data).hexdigest() for entry, data in contents.items()}
+    if cloud_hash:
+        hashes["point-cloud/field.ply"] = cloud_hash
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("manifest.json", json.dumps({"packageVersion": 2, "match": match, "sha256": hashes}))
+        for entry, data in contents.items():
+            archive.writestr(entry, data)
+    return buffer.getvalue()
+
+
+class TifoTests(unittest.TestCase):
+    def describe(self, data):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "match.zip"
+            path.write_bytes(data)
+            return fusion_description.describe_scene(path, "/srv/match.zip")
+
+    def test_a_tifo_becomes_a_turned_flag_on_its_corners_plane_revealed_on_load(self):
+        scene = self.describe(tifo_package())
+        sha = hashlib.sha256(png(960, 360)).hexdigest()
+        self.assertEqual(scene["assets"], [{"id": f"FLAG-{sha[:16]}", "kind": "flag", "sha256": sha,
+                                            "source": {"package": "/srv/match.zip", "entry": f"assets/{PNG_ID}.png"}}])
+        [instance] = scene["instances"]
+        self.assertEqual(instance["id"], "flag-tifo-PLC-tifo")
+        flag = instance["flag"]
+        self.assertAlmostEqual(flag["width_m"], 20)
+        self.assertAlmostEqual(flag["height_m"], 4 * math.sqrt(2))
+        self.assertEqual((flag["artwork_rotation"], flag["material"]), (90, "simple"))
+        self.assertEqual(flag["reveal"], {"direction": "center_horizontal", "duration_s": 2, "start": "load"})
+        # u along -X, v down the rake, u x v away from a viewer above the stand; the
+        # top-left corner moved 0.5 m towards the viewer.
+        h = math.sqrt(0.5)
+        expected = [[-1, 0, 0, 10], [0, h, h, 40 - 0.5 * h], [0, h, -h, -6 + 0.5 * h], [0, 0, 0, 1]]
+        for row, want in zip(instance["model"], expected):
+            for value, target in zip(row, want):
+                self.assertAlmostEqual(value, target)
+
+    def test_tifos_off_their_rectangle_translucent_or_with_a_bad_cloud_are_refused(self):
+        skewed = [CORNERS[0], CORNERS[1], (-9, 44, -2), CORNERS[3]]
+        for case, data in [("skewed corners", tifo_package(corners=skewed)),
+                           ("half opacity", tifo_package(opacity=0.5)),
+                           ("cloud checksum", tifo_package(cloud_hash="0" * 64))]:
+            with self.subTest(case), self.assertRaises(fusion_description.ConversionError):
+                self.describe(data)
+
+
 class DescribeSceneTests(unittest.TestCase):
     def describe(self, model, pose=None, opacity=None, **options):
         with tempfile.TemporaryDirectory() as directory:

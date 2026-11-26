@@ -17,8 +17,8 @@ import { FILE_LIMITS, MATCH_ID, documentValidator } from '../src/shared/store-do
 //   matches/<matchId>/local-ads.json  local placements and flags
 //   matches/<matchId>/session.json    the operator's session
 //   matches/<matchId>/exports/        the default folder for the studio's exports (written via /local-files/write)
-//   files/<sha256>.<ext>              uploaded materials and offline ZIPs, and the materials of
-//                                     offline ZIPs imported by server path (POST /studio-store/packages)
+//   files/<sha256>.<ext>              uploaded materials and offline ZIPs, and the materials and point
+//                                     clouds of offline ZIPs imported by server path (POST /studio-store/packages)
 // Documents hold `{ revision, data }`; a write names the revision it was based on
 // and is refused (409) if another page saved in between. Loopback hosts only; changes only
 // from the studio page itself (see request-guard.ts).
@@ -77,11 +77,28 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
     }
   };
 
+  /**
+   * Stored files are named by their content, so a path to one in another data directory, such as a
+   * store copied from another server, names this directory's file of the same name when it has one.
+   */
+  const rebased = async (value: unknown): Promise<unknown> => {
+    if (Array.isArray(value)) return Promise.all(value.map(rebased));
+    if (value && typeof value === 'object')
+      return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await rebased(item)])));
+    const stored = typeof value === 'string' ? /^\/.+\/files\/([0-9a-f]{64}\.[a-z0-9]+)$/.exec(value) : null;
+    if (!stored) return value;
+    const own = join(await ready, 'files', stored[1]);
+    return own !== value && await stat(own).then((info) => info.isFile(), () => false) ? own : value;
+  };
+
   const document = async (req: IncomingMessage, name: string) => {
     const validate = documentValidator(name);
     if (!validate) throw new Failure(404, `没有这个存储文档：${name}`);
     const file = join(await ready, `${name}.json`);
-    if (req.method === 'GET') return readDocument(file);
+    if (req.method === 'GET') {
+      const { revision, data } = await readDocument(file);
+      return { revision, data: await rebased(data) };
+    }
     if (req.method !== 'PUT') throw new Failure(405, 'Only GET and PUT are supported.');
     let body: { revision?: unknown; data?: unknown };
     try { body = JSON.parse(await readBody(req, MAX_DOCUMENT_BYTES)) as typeof body; }
@@ -103,7 +120,7 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
   /** Streams an upload to a temporary file while hashing it, then keeps it under its SHA-256. */
   const upload = async (req: IncomingMessage, name: string | null) => {
     const extension = extname(name ?? '').toLowerCase(), limit = limits[extension];
-    if (!limit) throw new Failure(415, '只能上传 PNG / JPEG / WebP 图片、GLB 模型或离线 ZIP。');
+    if (!limit) throw new Failure(415, '只能上传 PNG / JPEG / WebP 图片、GLB 模型、离线 ZIP 或其 PLY 点云。');
     if (Number(req.headers['content-length']) > limit) throw new Failure(413, `文件超过 ${limit / MB} MB 上限。`);
     const files = join(await ready, 'files'), temporary = join(files, `upload-${randomUUID()}.part`);
     const hash = createHash('sha256');
@@ -138,7 +155,7 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
 
   /**
    * Reads an offline ZIP by its server path, verifies it as the page does
-   * (readOfflinePackage) and stores its materials, so none crosses the network.
+   * (readOfflinePackage) and stores its materials and point cloud, so none crosses the network.
    * Answers with the manifest's match, which the page maps and checks.
    */
   const importPackage = async (req: IncomingMessage) => {
@@ -159,7 +176,9 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
       assets.push({ id: asset.id, path: stored,
         ...(asset.contentType === 'model/gltf-binary' ? { blended: blendedMaterials(asset.bytes) } : {}) });
     }
-    return { source: read.source, assets };
+    const cloud = read.pointCloud;
+    return { source: read.source, assets,
+      ...(cloud ? { pointCloud: { path: await keep(cloud.bytes, cloud.sha256, '.ply'), sha256: cloud.sha256 } } : {}) };
   };
 
   /** Any regular file inside the data directory, by absolute path; never a hidden one. */

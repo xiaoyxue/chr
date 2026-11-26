@@ -105,8 +105,8 @@ test('stored flags must carry valid wave settings; older ads stay loadable', () 
     normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
   const legacyCloud = { ...ad, type: '3D', space: undefined, cloudId: 'cloud' };
   const flag = { ...ad, type: 'flag', space: 'cloud', cloudId: 'cloud', flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' } };
-  for (const valid of [ad, legacyCloud, flag, { ...flag, flag: { ...flag.flag, material: 'pbr', artworkPath: '/srv/flag.png' } }]) assert.ok(validLocalAd(valid));
-  for (const [key, value] of [['amplitude', 0.8], ['frequency', Number.NaN], ['speed', -1], ['material', 'cloth'], ['artworkPath', 'flag.png']]) {
+  for (const valid of [ad, legacyCloud, flag, { ...flag, flag: { ...flag.flag, material: 'pbr', artworkPath: '/srv/flag.png' } }, { ...flag, flag: { ...flag.flag, material: 'cloth' } }]) assert.ok(validLocalAd(valid));
+  for (const [key, value] of [['amplitude', 0.8], ['frequency', Number.NaN], ['speed', -1], ['material', 'silk'], ['artworkPath', 'flag.png']]) {
     assert.equal(validLocalAd({ ...flag, flag: { ...flag.flag, [key]: value } }), false, key);
   }
   assert.equal(validLocalAd({ ...flag, flag: undefined }), false);
@@ -117,6 +117,15 @@ test('stored flags must carry valid wave settings; older ads stay loadable', () 
   const early = { ...flag, flag: { ...flag.flag, artworkPath: '/srv/flag.png' } };
   assert.deepEqual(upgradeLocalAd(early), { ...flag, materialPath: '/srv/flag.png' });
   assert.equal(upgradeLocalAd(ad), ad);
+  // A tifo flag's artwork rotation, reveal, aspect lock and source (#210); other ads have none.
+  const tifo = { ...flag, artworkRotation: 270, reveal: { direction: 'center_horizontal', duration: 60, start: 'cue' }, aspectLocked: true, fusionTifoId: 'PLC-1' };
+  assert.ok(validLocalAd(tifo));
+  for (const [key, value] of [['artworkRotation', 45], ['reveal', { direction: 'center-horizontal', duration: 2, start: 'load' }],
+    ['reveal', { direction: 'center_horizontal', duration: 0, start: 'load' }], ['reveal', { direction: 'center_horizontal', duration: 61, start: 'load' }],
+    ['reveal', { direction: 'center_horizontal', duration: 2, start: 'later' }], ['aspectLocked', 'yes'], ['fusionTifoId', '../x']]) {
+    assert.equal(validLocalAd({ ...tifo, [key]: value }), false, `${key} ${JSON.stringify(value)}`);
+    assert.equal(validLocalAd({ ...ad, [key]: tifo[key] }), false, `${key} on a 2D ad`);
+  }
 });
 
 test('flags are point-cloud only: stored pitch flags are dropped on load and refused on save', () => {

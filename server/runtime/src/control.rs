@@ -199,6 +199,29 @@ impl Handler for ControlHandler {
                 serde_json::to_value(loaded)
                     .map_err(|error| ErrorObject::internal(error.to_string()))
             }
+            chr_common::description::CUE_REVEAL => {
+                let loader = self
+                    .description
+                    .as_ref()
+                    .ok_or_else(|| ErrorObject::method_not_found(method))?;
+                let request: chr_common::description::CueRevealParams = raw_params
+                    .ok_or_else(|| {
+                        ErrorObject::invalid_params("description.cue_reveal needs params")
+                    })
+                    .and_then(|value| {
+                        serde_json::from_value(value)
+                            .map_err(|error| ErrorObject::invalid_params(error.to_string()))
+                    })?;
+                let instance = request.instance.clone();
+                let cued = loader.cue(request).await?;
+                log::info!(
+                    "{} {method}: {} cue {}",
+                    connection.id,
+                    instance.as_str(),
+                    cued.cue
+                );
+                serde_json::to_value(cued).map_err(|error| ErrorObject::internal(error.to_string()))
+            }
             tracking::GET_STATUS => {
                 params::<NoParams>(raw_params)?;
                 serde_json::to_value(self.tracking(method)?.status())

@@ -22,7 +22,7 @@
 //! goes out once the worker has connected.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -274,9 +274,10 @@ impl Supervisor {
             &Request::Render {
                 id,
                 image: image.clone(),
-                frame: frame.clone(),
+                frame: Box::new(frame.clone()),
                 scene: Box::new(scene.clone()),
                 time_base,
+                cues: BTreeMap::new(),
             },
             Some(memory),
             deadline,
@@ -286,7 +287,7 @@ impl Supervisor {
     /// Submits one program frame without waiting: `memory` (the input image as
     /// `image` describes it, already in shared memory) goes to the worker as it
     /// is, and the frame's UYVY comes back from [`Self::completions`] by the
-    /// returned ID, however late.
+    /// returned ID, however late. `cues` are the scene's reveal cues so far.
     pub fn submit(
         &mut self,
         image: &w::ImageDescription,
@@ -294,14 +295,16 @@ impl Supervisor {
         frame: &w::FrameInput,
         scene: &w::SceneSnapshot,
         time_base: w::TimeBase,
+        cues: BTreeMap<w::Id, u32>,
     ) -> Result<u64, Miss> {
         let id = self.reserve()?;
         let request = Request::Render {
             id,
             image: image.clone(),
-            frame: frame.clone(),
+            frame: Box::new(frame.clone()),
             scene: Box::new(scene.clone()),
             time_base,
+            cues,
         };
         let State::Ready { worker, .. } = &mut self.state else {
             unreachable!("reserved while ready");

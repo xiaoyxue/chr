@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { request as httpRequest, createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -157,6 +157,38 @@ test('deleting a match removes its documents', async () => {
   assert.deepEqual((await store.call('docs/matches/M1/local-ads')).body, { revision: 0, data: null });
 });
 
+test('paths to stored files of a store copied from another server name this store\'s files', async () => {
+  const bytes = Buffer.from('a stored material'), sha = createHash('sha256').update(bytes).digest('hex');
+  const uploaded = await store.call('files?name=logo.png', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes });
+  assert.equal(uploaded.status, 200);
+  const elsewhere = `/home/other/studio/files/${sha}.png`, missing = `/home/other/studio/files/${'0'.repeat(64)}.png`;
+  await mkdir(join(dataDir, 'matches', 'M8'), { recursive: true });
+  await writeFile(join(dataDir, 'matches', 'M8', 'local-ads.json'),
+    JSON.stringify({ revision: 3, data: [{ ...ad, materialPath: elsewhere }, { ...ad, id: 'b', materialPath: missing }] }));
+  const { body } = await store.call('docs/matches/M8/local-ads');
+  assert.equal(body.revision, 3);
+  assert.deepEqual(body.data.map((item) => item.materialPath), [join(dataDir, 'files', `${sha}.png`), missing]);
+});
+
+test('tifo flags seeded after a match was removed and imported again are merged into the new document', async () => {
+  const { LocalAdStore } = await vite.ssrLoadModule('/src/placements/local-ad-store.ts');
+  const pageFetch = globalThis.fetch;
+  // The page's own requests: relative URLs from its origin.
+  globalThis.fetch = (url, init = {}) => String(url).startsWith('/') ? pageFetch(`${store.origin}${url}`, { ...init,
+    headers: { Origin: store.origin, ...(init.method === 'PUT' ? { 'Content-Type': 'application/json' } : {}), ...init.headers } }) : pageFetch(url, init);
+  try {
+    const page = new LocalAdStore(), flag = { ...ad, id: 'tifo-PLC-1', name: 'Tifo' };
+    await page.read('M7');
+    await page.save('M7', () => [ad]);
+    assert.equal((await store.call('matches/M7', { method: 'DELETE' })).status, 200);
+    // This page still holds the removed document's revision: a plain save is refused…
+    await assert.rejects(() => page.save('M7', (saved) => [...saved, flag]), /另一个页面/);
+    // …while a merge reads the new, empty document and adds the flag to it.
+    await page.merge('M7', (saved) => [...saved, flag]);
+    assert.deepEqual((await store.call('docs/matches/M7/local-ads')).body.data.map((item) => item.id), ['tifo-PLC-1']);
+  } finally { globalThis.fetch = pageFetch; }
+});
+
 test('an offline ZIP on the server is verified and its materials stored there; the page gets only the manifest', async () => {
   const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
@@ -193,6 +225,16 @@ test('an offline ZIP on the server is verified and its materials stored there; t
   assert.equal((await post('relative/match.zip')).status, 400);
   assert.equal((await store.call('packages', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
     body: JSON.stringify({ path: join(shared, 'match.zip') }) })).status, 403);
+  // A v2 package's point cloud is stored next to its materials (#210).
+  const ply = Buffer.from('ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n');
+  files['point-cloud/field.ply'] = ply;
+  const v2 = manifest({ ...hashes, 'point-cloud/field.ply': sha(ply) });
+  Object.assign(v2, { packageVersion: 2 });
+  v2.match.field = { pointCloud: { fileName: 'stadium.ply', byteLength: ply.length, contentPath: 'point-cloud/field.ply' } };
+  const withCloud = await post(await write('v2.zip', v2));
+  assert.equal(withCloud.status, 200, JSON.stringify(withCloud.body));
+  assert.deepEqual(withCloud.body.pointCloud, { path: join(dataDir, 'files', `${sha(ply)}.ply`), sha256: sha(ply) });
+  assert.deepEqual(await readFile(withCloud.body.pointCloud.path), ply);
 });
 
 test('stored files may be cached by the browser; other files may not', async () => {

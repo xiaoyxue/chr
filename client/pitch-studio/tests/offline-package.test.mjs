@@ -8,7 +8,10 @@ globalThis.crypto ??= webcrypto;
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
 const { parseOfflinePackage } = await server.ssrLoadModule('/src/matches/offline-package.ts');
-const { validateMatch } = await server.ssrLoadModule('/src/matches/match-domain.ts');
+const { validateLibrary, validateMatch } = await server.ssrLoadModule('/src/matches/match-domain.ts');
+const { seedTifoFlags, tifoPlane } = await server.ssrLoadModule('/src/placements/tifo.ts');
+const { validLocalAd } = await server.ssrLoadModule('/src/placements/local-ad.ts');
+const { flagModel } = await server.ssrLoadModule('/src/placements/flag.ts');
 const image = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64'));
 function glb(uri) {
   const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, ...(uri ? { images: [{ uri }] } : {}) }).padEnd(128, ' '));
@@ -78,7 +81,7 @@ test("a ZIP's model animation (#157) survives import unchanged, and an invalid o
 });
 test('rejects unsupported versions, missing files, bad checksums, invalid metadata and extra files', async () => {
   for (const change of [
-    ({ manifest }) => { manifest.packageVersion = 2; },
+    ({ manifest }) => { manifest.packageVersion = 3; },
     ({ files }) => { delete files['assets/ASSET-image.png']; },
     ({ manifest }) => { manifest.sha256['assets/ASSET-image.png'] = '0'.repeat(64); },
     ({ manifest }) => { manifest.match.assets[0].byteLength++; },
@@ -97,8 +100,129 @@ test('rejects externally linked GLB resources even with valid checksums', async 
   data.manifest.sha256[path] = createHash('sha256').update(bytes).digest('hex');
   await assert.rejects(() => parseOfflinePackage(archive(data)), /external files/);
 });
-test('rejects oversized compressed images before inflation', async () => {
+test('images over 4 MB, such as a full-size tifo, are read like any material', async () => {
   const data = fixture();
-  data.files['assets/ASSET-image.png'] = new Uint8Array(4 * 1024 * 1024 + 1);
-  await assert.rejects(() => parseOfflinePackage(archive(data)), /size limits/);
+  const bytes = new Uint8Array(4 * 1024 * 1024 + 1);
+  data.files['assets/ASSET-image.png'] = bytes;
+  data.manifest.match.assets.find((asset) => asset.id === 'ASSET-image').byteLength = bytes.length;
+  data.manifest.sha256['assets/ASSET-image.png'] = createHash('sha256').update(bytes).digest('hex');
+  await assert.rejects(() => parseOfflinePackage(archive(data)), /Invalid PNG material/);
+});
+
+const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const ply = strToU8('ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n');
+// The sample package's tifo (#210): a rectangle raked like a stand, top edge highest.
+const corners = [[77.44936752319336, 58.89107131958008, -9.244537353515625], [49.511077880859375, 76.05392456054688, -9.966133117675781],
+  [41.86606604495751, 63.909530554114426, -2.820715678007554], [69.80435568729149, 46.74667731314763, -2.0991199138473977]];
+/** A Fusion v2 package: the v1 fixture plus the field's point cloud and a Tifo Ad with its own image. */
+function fixtureV2() {
+  const data = fixture(), { manifest, files } = data, match = manifest.match;
+  manifest.packageVersion = 2;
+  match.schemaVersion = 2;
+  Object.assign(match.coordinates, { z: 'down', swingSpace: 'field', motionSpace: 'field', motionOrigin: 'neutral-model-bottom-center', motionScale: 'neutral-pose-multiplier' });
+  files['point-cloud/field.ply'] = ply;
+  manifest.sha256['point-cloud/field.ply'] = sha(ply);
+  match.field.pointCloud = { fileName: 'stadium.ply', byteLength: ply.length, pointCount: 1, contentPath: 'point-cloud/field.ply' };
+  files['assets/ASSET-tifo.png'] = image;
+  manifest.sha256['assets/ASSET-tifo.png'] = sha(image);
+  match.assets.push({ id: 'ASSET-tifo', name: 'Demo Ground 01 BLUE', contentType: 'image/png', byteLength: image.length, contentPath: 'assets/ASSET-tifo.png' });
+  match.ads.push({ id: 'AD-tifo', name: 'tifo', type: 'Tifo', placements: [{ id: 'PLC-tifo', name: '2', coordinateSpace: 'point-cloud',
+    x: 59.65771678407543, y: 61.40030093684726, width: 32.79683307816114, height: 16.03089211933219, assetRotation: 90, assetOpacity: 1,
+    modelPose: null, assetIds: ['ASSET-tifo'], corners: corners.map(([x, y, z]) => ({ x, y, z })), tifoReveal: { direction: 'center-horizontal', duration: 2 } }] });
+  return data;
+}
+const tifoPlacement = ({ manifest }) => manifest.match.ads[2].placements[0];
+
+test('a v2 package brings its verified point cloud and maps its Tifo placements; 2D / 3D stay as in v1', async () => {
+  const v1 = await parseOfflinePackage(archive(fixture()));
+  const { id, match, pointCloud } = await parseOfflinePackage(archive(fixtureV2()));
+  assert.equal(v1.match.pointCloud, undefined);
+  assert.equal(v1.match.tifos, undefined);
+  assert.deepEqual(match.placements.map(({ asset, ...slot }) => slot), v1.match.placements.map(({ asset, ...slot }) => slot));
+  assert.deepEqual(new Uint8Array(await pointCloud.arrayBuffer()), ply);
+  assert.deepEqual(match.pointCloud, { sha256: sha(ply), fileName: 'stadium.ply' });
+  assert.deepEqual(match.tifos, [{ id: 'PLC-tifo', name: '2', adId: 'AD-tifo', adName: 'tifo',
+    asset: { id: 'ASSET-tifo', name: 'Demo Ground 01 BLUE', contentType: 'image/png', url: `/fusion-offline/packages/${id}/assets/ASSET-tifo` },
+    corners, width: 32.79683307816114, height: 16.03089211933219, assetRotation: 90, reveal: { direction: 'center_horizontal', duration: 2 } }]);
+  // Stored and read back, as the match library does; libraries from before #210 have neither.
+  assert.deepEqual(validateMatch(JSON.parse(JSON.stringify(match))), match);
+  const record = { match, draft: match.placements, assetFiles: { 'ASSET-image': '/data/files/a.png', 'ASSET-model': '/data/files/m.glb', 'ASSET-tifo': '/data/files/t.png' },
+    pointCloudFile: `/data/files/${sha(ply)}.ply` };
+  assert.equal(validateLibrary({ version: 1, records: [record] })[0].pointCloudFile, record.pointCloudFile);
+  assert.throws(() => validateLibrary({ version: 1, records: [{ ...record, assetFiles: { ...record.assetFiles, 'ASSET-tifo': undefined } }] }), /离线素材文件记录无效/);
+  assert.throws(() => validateLibrary({ version: 1, records: [{ ...record, match: v1.match, draft: v1.match.placements, assetFiles: undefined }] }), /离线点云文件记录无效/);
+});
+
+test("a v2 package's point cloud is checked like a material, and v1 packages accept none of v2", async () => {
+  for (const [change, error] of [
+    [({ manifest }) => { manifest.sha256['point-cloud/field.ply'] = '0'.repeat(64); }, /Point cloud checksum failed/],
+    [({ manifest }) => { manifest.match.field.pointCloud.byteLength++; }, /point cloud is missing or has invalid metadata/],
+    [({ manifest }) => { manifest.match.field.pointCloud.contentPath = 'point-cloud/other.ply'; }, /point cloud is missing/],
+    [({ manifest }) => { delete manifest.match.field.pointCloud; }, /unreferenced materials/],
+    [({ files }) => { files['point-cloud/extra.ply'] = ply; }, /unreferenced materials/],
+    [({ manifest }) => { manifest.match.coordinates.z = 'up'; }, /coordinate convention/],
+    [({ manifest }) => { manifest.packageVersion = 1; }, /unreferenced materials/],
+  ]) {
+    const data = fixtureV2(); change(data);
+    await assert.rejects(parseOfflinePackage(archive(data)), error);
+  }
+  const v1 = fixture();
+  v1.manifest.match.ads.push(fixtureV2().manifest.match.ads[2]);
+  await assert.rejects(parseOfflinePackage(archive(v1)), /Tifo placement PLC-tifo/);
+});
+
+test('a Tifo must be an opaque PNG / JPEG on a rectangle of its stated size, revealed from the centre line', async () => {
+  for (const [change, error] of [
+    [(data) => { tifoPlacement(data).corners[2].z += 0.01; }, /PLC-tifo: corners do not form a rectangle/],
+    [(data) => { tifoPlacement(data).width += 0.01; }, /PLC-tifo: width × height/],
+    [(data) => { tifoPlacement(data).assetOpacity = 0.5; }, /PLC-tifo: assetOpacity 0.5 is not supported/],
+    [(data) => { tifoPlacement(data).assetRotation = 45; }, /PLC-tifo: assetRotation/],
+    [(data) => { tifoPlacement(data).coordinateSpace = 'pitch'; }, /PLC-tifo: coordinateSpace/],
+    [(data) => { tifoPlacement(data).tifoReveal.direction = 'left-to-right'; }, /PLC-tifo: unsupported tifoReveal direction/],
+    [(data) => { tifoPlacement(data).tifoReveal.duration = 0; }, /PLC-tifo: tifoReveal/],
+    [(data) => { tifoPlacement(data).assetIds = ['ASSET-model']; }, /PLC-tifo: needs exactly one PNG or JPEG/],
+    [({ manifest, files }) => { delete manifest.match.field.pointCloud; delete manifest.sha256['point-cloud/field.ply']; delete files['point-cloud/field.ply']; },
+      /Tifo placements need the offline package's point cloud/],
+  ]) {
+    const data = fixtureV2(); change(data);
+    await assert.rejects(parseOfflinePackage(archive(data)), error);
+  }
+  const data = fixtureV2();
+  delete tifoPlacement(data).assetOpacity;
+  assert.equal((await parseOfflinePackage(archive(data))).match.tifos.length, 1);
+});
+
+test("a tifo's corners give the flag plane directly: u along the top edge, v down, u x v away from its audience", () => {
+  const plane = tifoPlane(corners);
+  const cross = ([a, b, c], [d, e, f]) => [b * f - c * e, c * d - a * f, a * e - b * d];
+  const close = (actual, expected, tolerance = 1e-9) => actual.forEach((value, i) => assert.ok(Math.abs(value - expected[i]) < tolerance, `${actual} vs ${expected}`));
+  assert.deepEqual(plane.origin, corners[0]);
+  close([plane.width, plane.height], [32.79683307816114, 16.03089211933219], 1e-6);
+  close(plane.u.map((x, i) => corners[0][i] + x * plane.width), corners[1], 1e-6);
+  close(plane.v.map((x, i) => corners[0][i] + x * plane.height), corners[3], 1e-6);
+  close(cross(plane.u, plane.v), [0.217, 0.390, 0.895], 1e-3);
+  // The flag's bottom-right corner lands on c2, half a metre in front of the stand (towards -normal).
+  const rows = flagModel(plane, -0.5), n = cross(plane.u, plane.v);
+  close([0, 1, 2].map((i) => rows[i][0] * plane.width + rows[i][1] * plane.height + rows[i][3]), corners[2].map((x, i) => x - 0.5 * n[i]), 1e-6);
+});
+
+test('importing seeds one editable flag per tifo, and importing again keeps the edited flag', async () => {
+  const { match } = await parseOfflinePackage(archive(fixtureV2()));
+  const materials = { 'ASSET-tifo': { path: `/data/files/${sha(image)}.png`, sha256: sha(image) } };
+  const other = { id: 'mine', name: 'mine', type: '2D', space: 'pitch', plane: { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 1, 0], width: 2, height: 1 },
+    normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
+  const [kept, seeded] = seedTifoFlags([other], match, materials);
+  assert.equal(kept, other);
+  assert.deepEqual({ ...seeded, plane: undefined }, { id: 'tifo-PLC-tifo', name: 'Tifo 2', type: 'flag', space: 'cloud', cloudId: sha(ply),
+    plane: undefined, normalSign: -1, offset: -0.5, scale: 1, yaw: 0, visible: true,
+    materialPath: materials['ASSET-tifo'].path, materialName: 'Demo Ground 01 BLUE', materialSha256: sha(image),
+    flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' }, artworkRotation: 90,
+    reveal: { direction: 'center_horizontal', duration: 2, start: 'load' }, aspectLocked: false, fusionTifoId: 'PLC-tifo' });
+  assert.deepEqual(seeded.plane, tifoPlane(corners));
+  assert.ok(validLocalAd(seeded));
+  const edited = { ...seeded, name: 'Home end', plane: { ...seeded.plane, width: 20 }, reveal: { ...seeded.reveal, start: 'cue' } };
+  assert.deepEqual(seedTifoFlags([other, edited], match, materials), [other, edited]);
+  // A new tifo of a later package is added next to the edited one.
+  const later = { ...match, tifos: [...match.tifos, { ...match.tifos[0], id: 'PLC-new' }] };
+  assert.deepEqual(seedTifoFlags([other, edited], later, materials).map((ad) => ad.id), ['mine', 'tifo-PLC-tifo', 'tifo-PLC-new']);
 });

@@ -126,7 +126,7 @@ object!(MaterialOverride {
     part: u32,
     factors: PbrFactors
 });
-strings!(FlagMaterial { Simple => "simple", Pbr => "pbr" });
+strings!(FlagMaterial { Simple => "simple", Pbr => "pbr", Cloth => "cloth" });
 object!(
     /// SimpleWave flag motion of an instance whose asset is a flag. The flag-local
     /// frame is metres: X along the width from the left edge, Y down from the top
@@ -142,6 +142,25 @@ object!(
     /// Time scale of the wave.
     speed: Finite,
     material: FlagMaterial,
+    /// Clockwise turn of the artwork within the flag as it reads, in degrees: 0, 90,
+    /// 180 or 270. The flag's size stays; the artwork stretches to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artwork_rotation: Option<u32>,
+    /// How the flag appears; absent, it is shown from the start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reveal: Option<FlagReveal>,
+});
+strings!(RevealDirection { CenterHorizontal => "center_horizontal" });
+strings!(RevealStart { Load => "load", Cue => "cue" });
+object!(
+    /// A flag appearing over `duration_s` seconds. `center_horizontal` shows the part
+    /// within `|2 x / width - 1| <= t / duration_s` of the centre line, opening outwards.
+    /// `load` starts with the scene (the motion's time zero); `cue` hides the flag
+    /// until a cue starts it (`description.cue_reveal`).
+    FlagReveal {
+    direction: RevealDirection,
+    duration_s: Finite,
+    start: RevealStart,
 });
 strings!(RotationMode { Swing => "swing", Continuous => "continuous" });
 strings!(Playback { Once => "once", Loop => "loop", PingPong => "ping_pong" });

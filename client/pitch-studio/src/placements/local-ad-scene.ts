@@ -40,28 +40,50 @@ export function disposeLocalObject(root: THREE.Object3D) {
 
 const FLAG_COLUMNS = 96, FLAG_ROWS = 60;
 
-/** A flag grid of 97 × 61 vertices; its texture v runs down from the image's top row. */
+/** A flag grid of 97 × 61 vertices; waveFlag sets their positions and texture coordinates (v down from the image's top row). */
 function flagGeometry() {
-  const uvs: number[] = [], indices: number[] = [];
-  for (let j = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++) uvs.push(i / FLAG_COLUMNS, j / FLAG_ROWS);
+  const indices: number[] = [], count = (FLAG_ROWS + 1) * (FLAG_COLUMNS + 1);
   for (let j = 0; j < FLAG_ROWS; j++) for (let i = 0; i < FLAG_COLUMNS; i++) {
     const a = j * (FLAG_COLUMNS + 1) + i, b = a + FLAG_COLUMNS + 1;
     indices.push(a, b, a + 1, a + 1, b, b + 1);
   }
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(uvs.length / 2 * 3), 3));
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(count * 3), 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(count * 2), 2));
   geometry.setIndex(indices);
   return geometry;
 }
 
-/** Moves the flag's vertices to the renderer's wave after `seconds`, in flag-local metres. */
-function waveFlag(geometry: THREE.BufferGeometry, ad: LocalAd, seconds: number) {
-  const position = geometry.getAttribute('position') as THREE.BufferAttribute, { width, height } = ad.plane;
-  for (let j = 0, k = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++, k++) {
-    position.setXYZ(k, ...flagWave(i / FLAG_COLUMNS, j / FLAG_ROWS, width, height, ad.flag, ad.flag.speed * seconds));
+/** Reveals previewed in this page: flag id → its start, in `performance.now()` seconds as the previews animate. */
+const revealPreviews = new Map<string, number>();
+/** Plays a flag's reveal once in every preview, from now. */
+export function previewReveal(id: string) { revealPreviews.set(id, performance.now() / 1000); }
+
+/** The texture coordinates the renderer reads at flag point (`s` right, `t` down) under a clockwise artwork turn (flag.wgsl). */
+export function artworkUv(s: number, t: number, rotation = 0): [number, number] {
+  switch (rotation) {
+    case 90: return [t, 1 - s];
+    case 180: return [1 - s, 1 - t];
+    case 270: return [1 - t, s];
+    default: return [s, t];
   }
-  position.needsUpdate = true;
+}
+
+/**
+ * Moves the flag's vertices to the renderer's wave after `seconds`, in flag-local metres,
+ * with its artwork turned; during a previewed reveal the columns beyond the revealed
+ * width collapse onto its edge, as the renderer draws them.
+ */
+function waveFlag(geometry: THREE.BufferGeometry, ad: LocalAd, seconds: number) {
+  const position = geometry.getAttribute('position') as THREE.BufferAttribute, uv = geometry.getAttribute('uv') as THREE.BufferAttribute;
+  const { width, height } = ad.plane, start = ad.reveal && revealPreviews.get(ad.id);
+  const half = start === undefined ? 0.5 : 0.5 * THREE.MathUtils.clamp((seconds - start) / ad.reveal.duration, 0, 1);
+  for (let j = 0, k = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++, k++) {
+    const s = 0.5 + THREE.MathUtils.clamp(i / FLAG_COLUMNS - 0.5, -half, half), t = j / FLAG_ROWS;
+    position.setXYZ(k, ...flagWave(s, t, width, height, ad.flag, ad.flag.speed * seconds));
+    uv.setXY(k, ...artworkUv(s, t, ad.artworkRotation));
+  }
+  position.needsUpdate = uv.needsUpdate = true;
   geometry.computeVertexNormals();
   geometry.computeBoundingSphere();
 }

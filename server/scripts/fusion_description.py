@@ -10,6 +10,9 @@ It follows the pitch-studio client's conversion of a match's Fusion placements
 placements), so the result equals the client's 导出渲染描述 for the same package: GLB
 bounds as three.js reports them (Box3.setFromObject over GLTFLoader's accessor
 bounds), images by their pixel size, and assets read by chr-server from the ZIP.
+A package v2 Tifo (#210) becomes the flag the studio seeds from it, unedited and
+with its cloud taken as confirmed: on its corners' plane, with the studio's flag
+defaults, its artwork turned by assetRotation and revealed when the scene loads.
 
 Without --camera it writes `{"scene": …}`, the shape `description.load` takes; with
 --camera it writes a complete description for `chr-server --description` or
@@ -33,9 +36,15 @@ import sys
 import zipfile
 from pathlib import Path
 
-ENTRY = re.compile(r"^(?:manifest\.json|assets/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(?:png|jpg|webp|glb))$")
+ENTRY = re.compile(r"^(?:manifest\.json|assets/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(?:png|jpg|webp|glb)"
+                   r"|point-cloud/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.ply)$")
 EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "model/gltf-binary": ".glb"}
 MAX_INSTANCES = 63
+# The studio's flag defaults (client/pitch-studio/src/placements/flag.ts) for a seeded tifo.
+TIFO_FLAG = {"amplitude_m": 0.32, "frequency": 1.35, "speed": 1, "material": "simple"}
+TIFO_OFFSET = -0.5
+V2_COORDINATES = {"z": "down", "swingSpace": "field", "motionSpace": "field",
+                  "motionOrigin": "neutral-model-bottom-center", "motionScale": "neutral-pose-multiplier"}
 # GLTFLoader's getNormalizedComponentScale, by accessor componentType.
 NORMALIZED_SCALE = {5120: 1 / 127, 5121: 1 / 255, 5122: 1 / 32767, 5123: 1 / 65535}
 
@@ -64,8 +73,15 @@ def read_package(path):
         files = {name: archive.read(name) for name in names}
     require("manifest.json" in files, "The offline package is missing manifest.json.")
     manifest = json.loads(files["manifest.json"].decode("utf-8"))
-    require(manifest.get("packageVersion") == 1, "Unsupported offline package version.")
+    require(manifest.get("packageVersion") in (1, 2), "Unsupported offline package version.")
     match, hashes = manifest["match"], manifest["sha256"]
+    cloud = (match.get("field") or {}).get("pointCloud")
+    if cloud is not None:
+        entry = cloud.get("contentPath")
+        data = files.get(entry)
+        require(isinstance(entry, str) and entry.startswith("point-cloud/") and data is not None
+                and cloud.get("byteLength") == len(data), "The offline point cloud is missing or has invalid metadata.")
+        require(hashes.get(entry) == hashlib.sha256(data).hexdigest(), "Point cloud checksum failed.")
     assets = {}
     for asset in match["assets"]:
         entry = f"assets/{asset['id']}{EXTENSIONS.get(asset['contentType'], '')}"
@@ -75,7 +91,8 @@ def read_package(path):
         digest = hashlib.sha256(data).hexdigest()
         require(hashes.get(entry) == digest, f"Material checksum failed: {asset['id']}.")
         assets[asset["id"]] = {"contentType": asset["contentType"], "entry": entry, "sha256": digest, "data": data}
-    require(len(files) == len(assets) + 1 and len(hashes) == len(assets),
+    clouds = int(cloud is not None)
+    require(len(files) == len(assets) + 1 + clouds and len(hashes) == len(assets) + clouds,
             "The package contains missing or unreferenced materials.")
     return match, assets
 
@@ -83,13 +100,20 @@ def read_package(path):
 def placements(match, assets):
     """The match's placements as mapFusionMatch builds them (z, rx, ry and rz are 0)."""
     coordinates = match["coordinates"]
-    require(match.get("schemaVersion") == 1 and match.get("sport") == "football"
+    version = match.get("schemaVersion")
+    require(version in (1, 2) and match.get("sport") == "football"
             and coordinates.get("unit") == "meters" and coordinates.get("origin") == "field-center"
             and coordinates.get("x") == "right" and coordinates.get("y") == "down-in-top-view"
-            and coordinates.get("modelUp") == "gltf-y-up", "Unsupported Fusion sport or coordinate convention.")
+            and coordinates.get("modelUp") == "gltf-y-up"
+            and (version == 1 or all(coordinates.get(k) == v for k, v in V2_COORDINATES.items())),
+            "Unsupported Fusion sport or coordinate convention.")
     result = []
     for ad in match["ads"]:
-        require(ad["type"] in ("2D", "3D"), "Unsupported Fusion Ad type.")
+        require(ad["type"] in ("2D", "3D", "Tifo"), "Unsupported Fusion Ad type.")
+        if ad["type"] == "Tifo":
+            require(match["field"].get("pointCloud") is not None, "A Tifo needs the package's point cloud.")
+            result.extend(tifo(source, assets) for source in ad["placements"])
+            continue
         for source in ad["placements"]:
             require(source.get("coordinateSpace") == "pitch", f"Placement {source['id']} uses a legacy canvas.")
             asset_ids = source.get("assetIds", [])
@@ -120,6 +144,44 @@ def placements(match, assets):
                 slot.update(region={"width": width, "height": height}, modelPose=pose, scaleX=1)
             result.append(slot)
     return result
+
+
+def tifo(source, assets):
+    """A Tifo placement: its image, its corners' rectangle and how it appears."""
+    name = source["id"]
+    require(source.get("coordinateSpace") == "point-cloud", f"Tifo {name} must be placed on the point cloud.")
+    asset_ids = source.get("assetIds", [])
+    require(len(asset_ids) == 1 and asset_ids[0] in assets
+            and assets[asset_ids[0]]["contentType"] in ("image/png", "image/jpeg"),
+            f"Tifo {name} needs one PNG or JPEG image.")
+    corners = [[number(c[k]) for k in ("x", "y", "z")] for c in source.get("corners", [])]
+    require(len(corners) == 4, f"Tifo {name} needs four corners.")
+    c0, c1, c2, c3 = corners
+    u, v = [b - a for a, b in zip(c0, c1)], [b - a for a, b in zip(c0, c3)]
+    width, height = math.hypot(*u), math.hypot(*v)
+    require(width > 0 and height > 0
+            and all(abs(a + c - b - d) < 1e-3 for a, b, c, d in zip(c0, c1, c2, c3))
+            and abs(sum(a * b for a, b in zip(u, v))) < 1e-4 * width * height
+            and abs(width - number(source["width"])) < 1e-3 and abs(height - number(source["height"])) < 1e-3,
+            f"Tifo {name}: its corners are not the {source['width']} x {source['height']} m rectangle.")
+    rotation = number(source.get("assetRotation", 0))
+    require(rotation in (0, 90, 180, 270), "Invalid image rotation.")
+    require(source.get("assetOpacity", 1) == 1, f"Tifo {name}: chr flags are opaque; assetOpacity must be 1.")
+    reveal = source.get("tifoReveal")
+    if reveal is not None:
+        require(reveal.get("direction") == "center-horizontal" and 0 < number(reveal.get("duration")) <= 60,
+                f"Tifo {name}: unsupported tifoReveal.")
+    return {"id": name, "type": "Tifo", "asset": asset_ids[0], "origin": c0,
+            "u": [x / width for x in u], "v": [x / height for x in v], "width": width, "height": height,
+            "assetRotation": int(rotation), "reveal": reveal and reveal["duration"]}
+
+
+def flag_model(slot, offset):
+    """flagModel: columns u, v, their cross product and the top-left corner moved along it."""
+    u, v = slot["u"], slot["v"]
+    n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+    o = [a + b * offset for a, b in zip(slot["origin"], n)]
+    return [[u[i], v[i], n[i], o[i]] for i in range(3)] + [[0, 0, 0, 1]]
 
 
 def image_size(data, content_type):
@@ -288,10 +350,14 @@ def quad_model(slot, width, height):
 def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), rotations=()):
     """The description scene of the ZIP's Fusion placements, assets read from `package_path`."""
     match, assets = read_package(zip_path)
-    slots = {slot["id"]: slot for slot in placements(match, assets)}
-    edited = [edit[0] for edit in [*moves, *scales, *rotations]]
-    for placement_id in edited + list(hidden):
+    every = placements(match, assets)
+    slots = {slot["id"]: slot for slot in every if slot["type"] != "Tifo"}
+    tifos = [slot for slot in every if slot["type"] == "Tifo"]
+    for placement_id in [edit[0] for edit in [*moves, *scales, *rotations]]:
         require(placement_id in slots, f"Unknown placement {placement_id}.")
+    for placement_id in hidden:
+        require(placement_id in slots or any(t["id"] == placement_id for t in tifos),
+                f"Unknown placement {placement_id}.")
     for placement_id, dx, dy in moves:
         slots[placement_id]["x"] += dx
         slots[placement_id]["y"] += dy
@@ -332,6 +398,20 @@ def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), 
         scene["instances"].append({"id": slot["id"], "asset": slot["asset"], "model": model,
                                    "visible": slot["id"] not in hidden, **({"motion": motion} if motion else {}),
                                    **({"opacity": slot["assetOpacity"]} if slot["type"] == "2D" else {})})
+    package = str(package_path or Path(zip_path).resolve())
+    for slot in tifos:
+        asset = assets[slot["asset"]]
+        asset_id = f"FLAG-{asset['sha256'][:16]}"
+        if not any(listed["id"] == asset_id for listed in scene["assets"]):
+            scene["assets"].append({"id": asset_id, "kind": "flag", "source": {"package": package, "entry": asset["entry"]},
+                                    "sha256": asset["sha256"]})
+        flag = {"width_m": slot["width"], "height_m": slot["height"], **TIFO_FLAG,
+                **({"artwork_rotation": slot["assetRotation"]} if slot["assetRotation"] else {}),
+                **({"reveal": {"direction": "center_horizontal", "duration_s": slot["reveal"], "start": "load"}}
+                   if slot["reveal"] else {})}
+        scene["instances"].append({"id": f"flag-tifo-{slot['id']}", "asset": asset_id,
+                                   "model": flag_model(slot, TIFO_OFFSET), "visible": slot["id"] not in hidden,
+                                   "flag": flag})
     require(len(scene["instances"]) <= MAX_INSTANCES,
             f"chr-server places at most {MAX_INSTANCES} instances; this match has {len(scene['instances'])}.")
     return scene

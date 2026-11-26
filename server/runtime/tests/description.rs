@@ -389,6 +389,99 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
     owner.await.unwrap();
 }
 
+#[tokio::test]
+async fn tifo_flags_turn_their_artwork_and_reveal_on_load_or_on_cue() {
+    let fixture = Fixture::new("tifo");
+    let path = fixture.description(json!([]));
+    let (program, adapter) = description::load(&path, MODE, runtime_id().unwrap()).unwrap();
+    let (control, owner) = SceneControl::spawn(adapter, 8).unwrap();
+    program.create_scene(&control).await.unwrap();
+    let loader = Loader::new(
+        &program,
+        control.clone(),
+        vec![fixture.root()],
+        WorkerAssets::default(),
+        fixture.dir.join("store"),
+    )
+    .unwrap();
+    let artwork = json!({"id": "tifo", "kind": "flag", "source": {"path": fixture.dir.join("ad.png")},
+        "sha256": sha(&png([255, 0, 0, 255]))});
+    let tifo = |id: &str, rotation: Value, reveal: Value| {
+        json!({"id": id, "asset": "tifo",
+            "model": [[1, 0, 0, -1.6], [0, 0, -1, 0], [0, 1, 0, -4], [0, 0, 0, 1]],
+            "flag": {"width_m": 32.8, "height_m": 16.0, "amplitude_m": 0.32, "frequency": 1.35,
+                "speed": 1.0, "material": "cloth", "artwork_rotation": rotation, "reveal": reveal}})
+    };
+    let reveal = |start: &str, duration: f64| json!({"direction": "center_horizontal", "duration_s": duration, "start": start});
+    let cue = |instance: &str| {
+        loader.cue(d::CueRevealParams {
+            instance: serde_json::from_value(json!(instance)).unwrap(),
+        })
+    };
+    loader
+        .load(scene(
+            &fixture,
+            json!([artwork]),
+            json!([
+                tifo("cued", json!(90), reveal("cue", 2.0)),
+                tifo("loaded", json!(0), reveal("load", 2.0)),
+            ]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cue("cued").await.unwrap().cue, 1);
+    assert_eq!(cue("cued").await.unwrap().cue, 2);
+    assert_eq!(loader.cues().get().into_values().collect::<Vec<_>>(), [2]);
+    for instance in ["loaded", "absent"] {
+        let error = cue(instance).await.unwrap_err();
+        assert_eq!(error.code, w::RejectionKind::NotFound.code(), "{instance}");
+    }
+
+    loader
+        .load(scene(
+            &fixture,
+            json!([]),
+            json!([tifo("cued", json!(180), reveal("cue", 1.0))]),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        loader.cues().get().is_empty(),
+        "a new scene clears the cues"
+    );
+    for (case, instance) in [
+        (
+            "a rotation of 45 degrees",
+            tifo("bad", json!(45), reveal("load", 2.0)),
+        ),
+        (
+            "a reveal of no time",
+            tifo("bad", json!(0), reveal("load", 0.0)),
+        ),
+        (
+            "a reveal over a minute",
+            tifo("bad", json!(0), reveal("cue", 61.0)),
+        ),
+    ] {
+        let error = loader
+            .load(scene(&fixture, json!([]), json!([instance])))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            w::RejectionKind::IncompatibleInput.code(),
+            "{case}"
+        );
+        assert!(
+            error.message.contains("instance bad"),
+            "{case}: {}",
+            error.message
+        );
+    }
+    drop((control, loader));
+    owner.await.unwrap();
+}
+
 #[test]
 fn cameras_up_to_4k_render_at_any_output_size_of_their_aspect() {
     let camera = |width: u32, height: u32| -> d::RenderDescription {
