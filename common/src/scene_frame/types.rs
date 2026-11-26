@@ -126,7 +126,7 @@ object!(MaterialOverride {
     part: u32,
     factors: PbrFactors
 });
-strings!(FlagMaterial { Simple => "simple", Pbr => "pbr" });
+strings!(FlagMaterial { Simple => "simple", Pbr => "pbr", Cloth => "cloth" });
 object!(
     /// SimpleWave flag motion of an instance whose asset is a flag. The flag-local
     /// frame is metres: X along the width from the left edge, Y down from the top

@@ -410,7 +410,7 @@ async fn tifo_flags_turn_their_artwork_and_reveal_on_load_or_on_cue() {
         json!({"id": id, "asset": "tifo",
             "model": [[1, 0, 0, -1.6], [0, 0, -1, 0], [0, 1, 0, -4], [0, 0, 0, 1]],
             "flag": {"width_m": 32.8, "height_m": 16.0, "amplitude_m": 0.32, "frequency": 1.35,
-                "speed": 1.0, "material": "simple", "artwork_rotation": rotation, "reveal": reveal}})
+                "speed": 1.0, "material": "cloth", "artwork_rotation": rotation, "reveal": reveal}})
     };
     let reveal = |start: &str, duration: f64| json!({"direction": "center_horizontal", "duration_s": duration, "start": start});
     let cue = |instance: &str| {

@@ -184,7 +184,7 @@ re-registers its asset.
 | `amplitude_m` | Wave coefficient in metres; the surface leaves its plane by at most 1.53 times this |
 | `frequency` | Primary wave cycles from the pinned centre line to either free edge |
 | `speed` | Time scale; 0 freezes the wave |
-| `material` | `"simple"` or `"pbr"` |
+| `material` | `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
 | `artwork_rotation` | Optional: 0, 90, 180 or 270 degrees, turning the artwork clockwise as it reads, like a 2D Fusion placement's `assetRotation`; the artwork stretches to the flag's size |
 | `reveal` | Optional: how the flag appears (#210), `{"direction": "center_horizontal", "duration_s": 2, "start": "load"}` |
 

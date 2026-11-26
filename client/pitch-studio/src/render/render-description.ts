@@ -39,7 +39,7 @@ export interface FlagParameters {
   amplitude_m: number;
   frequency: number;
   speed: number;
-  material: 'simple' | 'pbr';
+  material: 'simple' | 'pbr' | 'cloth';
   /** Clockwise degrees as the artwork reads; omitted when 0. */
   artwork_rotation?: 90 | 180 | 270;
   reveal?: { direction: 'center_horizontal'; duration_s: number; start: 'load' | 'cue' };

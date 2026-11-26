@@ -17,7 +17,8 @@ export interface FlagSettings {
   /** Primary wave cycles from the centre line to either edge. */
   frequency: number;
   speed: number;
-  material: 'simple' | 'pbr';
+  /** `cloth`: PBR fabric, matte with a soft sheen at grazing angles. */
+  material: 'simple' | 'pbr' | 'cloth';
 }
 export interface LocalAd {
   id: string;
@@ -78,7 +79,7 @@ function validFlag(flag: StoredFlag) {
   return Boolean(flag) && typeof flag === 'object'
     && (['amplitude', 'frequency', 'speed'] as const).every((key) => Number.isFinite(flag[key])
       && flag[key] >= FLAG_LIMITS[key][0] && flag[key] <= FLAG_LIMITS[key][1])
-    && ['simple', 'pbr'].includes(flag.material) && validPath(flag.artworkPath);
+    && ['simple', 'pbr', 'cloth'].includes(flag.material) && validPath(flag.artworkPath);
 }
 
 /** A stored record in the current shape: an early flag's `artworkPath` becomes its `materialPath`. */

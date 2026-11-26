@@ -105,8 +105,8 @@ test('stored flags must carry valid wave settings; older ads stay loadable', () 
     normalSign: -1, offset: 0, scale: 1, yaw: 0, visible: true };
   const legacyCloud = { ...ad, type: '3D', space: undefined, cloudId: 'cloud' };
   const flag = { ...ad, type: 'flag', space: 'cloud', cloudId: 'cloud', flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' } };
-  for (const valid of [ad, legacyCloud, flag, { ...flag, flag: { ...flag.flag, material: 'pbr', artworkPath: '/srv/flag.png' } }]) assert.ok(validLocalAd(valid));
-  for (const [key, value] of [['amplitude', 0.8], ['frequency', Number.NaN], ['speed', -1], ['material', 'cloth'], ['artworkPath', 'flag.png']]) {
+  for (const valid of [ad, legacyCloud, flag, { ...flag, flag: { ...flag.flag, material: 'pbr', artworkPath: '/srv/flag.png' } }, { ...flag, flag: { ...flag.flag, material: 'cloth' } }]) assert.ok(validLocalAd(valid));
+  for (const [key, value] of [['amplitude', 0.8], ['frequency', Number.NaN], ['speed', -1], ['material', 'silk'], ['artworkPath', 'flag.png']]) {
     assert.equal(validLocalAd({ ...flag, flag: { ...flag.flag, [key]: value } }), false, key);
   }
   assert.equal(validLocalAd({ ...flag, flag: undefined }), false);

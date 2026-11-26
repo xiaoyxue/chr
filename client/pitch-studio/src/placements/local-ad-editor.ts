@@ -74,7 +74,7 @@ function editorMarkup(space: AdSpace, prefix: string) {
       <p ${id('local-ad-readonly')} class="on-readonly"></p>
     </fieldset>
     <fieldset ${id('local-flag-controls')} class="on-inspector-group"><h3>旗帜飘动</h3>${wave}
-      <div class="on-slider-row"><span>材质</span><div class="on-segmented" role="radiogroup" aria-label="旗帜材质"><label><input type="radio" name="flagMaterial" value="simple" />简易双面光照</label><label><input type="radio" name="flagMaterial" value="pbr" />PBR</label></div></div>
+      <div class="on-slider-row"><span>材质</span><div class="on-segmented" role="radiogroup" aria-label="旗帜材质"><label><input type="radio" name="flagMaterial" value="simple" />简易双面光照</label><label><input type="radio" name="flagMaterial" value="pbr" />PBR</label><label><input type="radio" name="flagMaterial" value="cloth" />布料</label></div></div>
       <p data-flag-note class="on-help"></p></fieldset>
     <div ${id('local-reveal-actions')} class="on-inspector-group"><div class="on-action-row">
       <button ${id('preview-reveal')} class="on-button" type="button">预览展开</button>
@@ -268,7 +268,7 @@ export class LocalAdEditor {
     if (input.name.endsWith('Slider')) pair(input.name.slice(0, -'Slider'.length)).value = input.value;
     else if (input.type === 'number') pair(`${input.name}Slider`).value = input.value;
     this.flagDraft = { id: selected.id, amplitude: pair('amplitude').value, frequency: pair('frequency').value, speed: pair('speed').value,
-      material: form.querySelector<HTMLInputElement>('[name=flagMaterial]:checked')?.value === 'pbr' ? 'pbr' : 'simple' };
+      material: (['pbr', 'cloth'] as const).find((value) => value === form.querySelector<HTMLInputElement>('[name=flagMaterial]:checked')?.value) ?? 'simple' };
     if (this.notice?.failed) this.notice = undefined;
     this.renderSaveState();
     this.renderFlagNote(selected);

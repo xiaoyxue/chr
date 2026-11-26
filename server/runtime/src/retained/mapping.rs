@@ -204,6 +204,13 @@ impl Registrations {
                 }
             };
             let mut materials = asset.materials.clone();
+            if instance
+                .flag
+                .as_ref()
+                .is_some_and(|flag| flag.material == w::FlagMaterial::Cloth)
+            {
+                materials.iter_mut().for_each(|m| cloth(&mut m.factors));
+            }
             for replacement in &instance.material_overrides {
                 let entry = materials
                     .get_mut(replacement.part as usize)
@@ -570,7 +577,7 @@ fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
         speed: f(flag.speed)?,
         shading: match flag.material {
             w::FlagMaterial::Simple => scene::FlagShading::Simple,
-            w::FlagMaterial::Pbr => scene::FlagShading::Pbr,
+            w::FlagMaterial::Pbr | w::FlagMaterial::Cloth => scene::FlagShading::Pbr,
         },
         artwork_turns: match flag.artwork_rotation.unwrap_or(0) {
             0 => 0,
@@ -585,6 +592,14 @@ fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
         },
         revealed: 1.0,
     })
+}
+/// A flag's `cloth` look: PBR fabric, matte with a soft sheen at grazing angles
+/// (`KHR_materials_sheen`) and a weak dielectric highlight.
+fn cloth(factors: &mut scene::PbrMaterial) {
+    factors.roughness = 0.9;
+    factors.layers.specular = 0.3;
+    factors.layers.sheen_color = [0.45; 3];
+    factors.layers.sheen_roughness = 0.5;
 }
 fn v3(v: w::Vec3) -> Result<[f32; 3], ErrorObject> {
     Ok([f(v[0])?, f(v[1])?, f(v[2])?])

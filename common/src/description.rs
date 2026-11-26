@@ -269,7 +269,7 @@ mod tests {
         );
         for (key, value) in [
             ("pole", json!(true)),
-            ("material", json!("cloth")),
+            ("material", json!("silk")),
             (
                 "reveal",
                 json!({"direction": "center-horizontal", "duration_s": 2, "start": "load"}),
