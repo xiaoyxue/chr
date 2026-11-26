@@ -62,6 +62,15 @@ pub fn read_verified(asset: &Asset, paths: &Paths) -> Result<Vec<u8>, Error> {
 
 /// Imports verified source bytes as `asset.kind` describes them.
 pub fn import(asset: &Asset, bytes: &[u8]) -> Result<Imported, Error> {
+    // A checkout whose Git LFS files were not fetched holds a small text pointer instead,
+    // such as the asset/ibl panoramas before `git lfs pull`.
+    if bytes.starts_with(b"version https://git-lfs.github.com/spec/") {
+        return Err(format!(
+            "asset {} is a Git LFS pointer, not its file: run `git lfs pull` where it is checked out",
+            asset.id.as_str()
+        )
+        .into());
+    }
     if asset.blend_as.is_some() && asset.kind != AssetKind::Glb {
         return Err(format!(
             "asset {}: blend_as applies to glb assets only",
@@ -359,6 +368,17 @@ mod tests {
         assert_eq!(map.pixels()[3], [3.0, 0.5, 2.0]);
         let error = environment("square.exr", 2, 2).err().unwrap().to_string();
         assert!(error.contains("2:1"), "{error}");
+        let pointer =
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:e1d9\nsize 95419853\n";
+        let mut described = asset(
+            AssetSource::File(FilePath {
+                path: "sky.exr".into(),
+            }),
+            pointer,
+        );
+        described.kind = AssetKind::Environment;
+        let error = import(&described, pointer).err().unwrap().to_string();
+        assert!(error.contains("git lfs pull"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
