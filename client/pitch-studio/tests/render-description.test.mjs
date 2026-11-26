@@ -306,7 +306,7 @@ test('typed flag fields are unsaved until they match the flag, and are range-che
   assert.equal(flagDraftChanged({ ...draft, amplitude: '' }, flagSettings), true);
   assert.equal(flagDraftChanged({ ...draft, material: 'pbr' }, flagSettings), true);
   assert.deepEqual(parseFlagDraft({ ...draft, speed: '1.5', material: 'pbr' }), { wave: { amplitude: 0.32, frequency: 1.35, speed: 1.5, material: 'pbr' } });
-  assert.deepEqual(parseFlagDraft({ ...draft, amplitude: '0.9' }), { error: '振幅应介于 0 – 0.7。' });
+  assert.deepEqual(parseFlagDraft({ ...draft, amplitude: '5.5' }), { error: '振幅应介于 0 – 5。' });
   assert.deepEqual(parseFlagDraft({ ...draft, frequency: '' }), { error: '频率应介于 0.3 – 3。' });
 });
 

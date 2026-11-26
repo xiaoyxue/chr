@@ -9,7 +9,8 @@ import type { AdPlane, FlagSettings, Vector3Tuple } from './local-ad.ts';
 
 export type FlagRows = [number, number, number, number][];
 
-export const FLAG_LIMITS = { amplitude: [0, 0.7], frequency: [0.3, 3], speed: [0, 10] } as const;
+// Amplitude reaches tifo scale: a 36 m flag waves like a 3.2 m one at 0.32 m with 3.6 m.
+export const FLAG_LIMITS = { amplitude: [0, 5], frequency: [0.3, 3], speed: [0, 10] } as const;
 export const DEFAULT_FLAG: FlagSettings = { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' };
 /** Peak displacement off the plane per metre of amplitude. */
 export const FLAG_PEAK = 1.53;
