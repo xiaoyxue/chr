@@ -157,6 +157,25 @@ test('deleting a match removes its documents', async () => {
   assert.deepEqual((await store.call('docs/matches/M1/local-ads')).body, { revision: 0, data: null });
 });
 
+test('tifo flags seeded after a match was removed and imported again are merged into the new document', async () => {
+  const { LocalAdStore } = await vite.ssrLoadModule('/src/placements/local-ad-store.ts');
+  const pageFetch = globalThis.fetch;
+  // The page's own requests: relative URLs from its origin.
+  globalThis.fetch = (url, init = {}) => String(url).startsWith('/') ? pageFetch(`${store.origin}${url}`, { ...init,
+    headers: { Origin: store.origin, ...(init.method === 'PUT' ? { 'Content-Type': 'application/json' } : {}), ...init.headers } }) : pageFetch(url, init);
+  try {
+    const page = new LocalAdStore(), flag = { ...ad, id: 'tifo-PLC-1', name: 'Tifo' };
+    await page.read('M7');
+    await page.save('M7', () => [ad]);
+    assert.equal((await store.call('matches/M7', { method: 'DELETE' })).status, 200);
+    // This page still holds the removed document's revision: a plain save is refused…
+    await assert.rejects(() => page.save('M7', (saved) => [...saved, flag]), /另一个页面/);
+    // …while a merge reads the new, empty document and adds the flag to it.
+    await page.merge('M7', (saved) => [...saved, flag]);
+    assert.deepEqual((await store.call('docs/matches/M7/local-ads')).body.data.map((item) => item.id), ['tifo-PLC-1']);
+  } finally { globalThis.fetch = pageFetch; }
+});
+
 test('an offline ZIP on the server is verified and its materials stored there; the page gets only the manifest', async () => {
   const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');

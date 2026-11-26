@@ -1111,7 +1111,7 @@ async function seedTifos(record: MatchRecord) {
   const materials = Object.fromEntries(await Promise.all(match.tifos.map(async ({ asset }) =>
     [asset.id, { path: record.assetFiles[asset.id], sha256: await serverSha256(record.assetFiles[asset.id]) }] as const)));
   let added = 0;
-  await localAdStore.save(match.id, (saved) => {
+  await localAdStore.merge(match.id, (saved) => {
     const next = seedTifoFlags(saved, match, materials);
     added = next.length - saved.length;
     return next;

@@ -43,6 +43,14 @@ export class LocalAdStore {
     return this.save(matchId, (saved) => [...saved.filter((ad) => (ad.space ?? 'cloud') !== space), ...ads]);
   }
 
+  /**
+   * Adds what `change` finds missing, such as a package's tifo flags, to the stored placements: after
+   * another page's save or a removed and re-imported match it reads them again and applies `change` once more.
+   */
+  merge(matchId: string, change: (saved: LocalAd[]) => LocalAd[]) {
+    return this.document(matchId).update((saved) => change(saved ?? []).map(storedLocalAd));
+  }
+
   /** Changes all of the match's placements at once, such as an import, from the copy last read or saved. */
   save(matchId: string, change: (saved: LocalAd[]) => LocalAd[]) {
     return this.document(matchId).save((saved) => change(saved ?? []).map(storedLocalAd)).catch((error: unknown) => {
