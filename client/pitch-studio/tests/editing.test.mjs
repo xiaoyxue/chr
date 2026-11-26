@@ -117,6 +117,15 @@ test('stored flags must carry valid wave settings; older ads stay loadable', () 
   const early = { ...flag, flag: { ...flag.flag, artworkPath: '/srv/flag.png' } };
   assert.deepEqual(upgradeLocalAd(early), { ...flag, materialPath: '/srv/flag.png' });
   assert.equal(upgradeLocalAd(ad), ad);
+  // A tifo flag's artwork rotation, reveal, aspect lock and source (#210); other ads have none.
+  const tifo = { ...flag, artworkRotation: 270, reveal: { direction: 'center_horizontal', duration: 60, start: 'cue' }, aspectLocked: true, fusionTifoId: 'PLC-1' };
+  assert.ok(validLocalAd(tifo));
+  for (const [key, value] of [['artworkRotation', 45], ['reveal', { direction: 'center-horizontal', duration: 2, start: 'load' }],
+    ['reveal', { direction: 'center_horizontal', duration: 0, start: 'load' }], ['reveal', { direction: 'center_horizontal', duration: 61, start: 'load' }],
+    ['reveal', { direction: 'center_horizontal', duration: 2, start: 'later' }], ['aspectLocked', 'yes'], ['fusionTifoId', '../x']]) {
+    assert.equal(validLocalAd({ ...tifo, [key]: value }), false, `${key} ${JSON.stringify(value)}`);
+    assert.equal(validLocalAd({ ...ad, [key]: tifo[key] }), false, `${key} on a 2D ad`);
+  }
 });
 
 test('flags are point-cloud only: stored pitch flags are dropped on load and refused on save', () => {

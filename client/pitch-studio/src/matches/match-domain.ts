@@ -1,7 +1,8 @@
 import { validateDimensions } from '../scene/pitch/dimensions.ts';
 import { isPlacementInside } from '../scene/pitch/pitch-layout.ts';
 import { validateModelPose } from '../placements/model-motion.ts';
-import type { FusionAdapter, Match, MatchRecord, Placement, FieldDimensions, FusionAsset } from '../shared/types.ts';
+import { rectangleProblem } from '../placements/tifo.ts';
+import type { FusionAdapter, FusionTifo, Match, MatchRecord, Placement, FieldDimensions, FusionAsset } from '../shared/types.ts';
 
 export const MATCH_STORAGE_KEY = 'liveshow.onsite.matches.v1';
 
@@ -65,6 +66,31 @@ export function validatePlacement(slot: unknown, field: FieldDimensions): Placem
   return { ...pose, ...scales, id, name, type, assetRole };
 }
 
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/** A Tifo placement of an offline package: its image, rectangle, artwork rotation and reveal. */
+function validateTifo(tifo: unknown, offlinePackageId: string): FusionTifo {
+  if (!isRecord(tifo) || typeof tifo.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(tifo.id)) throw new Error('Invalid Tifo placement.');
+  const fail = (text: string) => new Error(`Tifo placement ${tifo.id}: ${text}`);
+  const { asset, corners, width, height, assetRotation, reveal } = tifo;
+  if (typeof tifo.name !== 'string' || typeof tifo.adId !== 'string' || typeof tifo.adName !== 'string') throw fail('invalid name or Ad.');
+  if (!isRecord(asset) || typeof asset.id !== 'string' || typeof asset.name !== 'string' || !['image/png', 'image/jpeg'].includes(asset.contentType as string)
+    || asset.url !== `/fusion-offline/packages/${offlinePackageId}/assets/${asset.id}`) throw fail('needs one PNG or JPEG image of its package.');
+  if (!Array.isArray(corners) || corners.length !== 4
+    || !corners.every((corner) => Array.isArray(corner) && corner.length === 3 && corner.every(Number.isFinite))) throw fail('needs four corners.');
+  if (typeof width !== 'number' || typeof height !== 'number' || !(width >= 0.01 && width <= 1000 && height >= 0.01 && height <= 1000))
+    throw fail('width and height must be 0.01 to 1000 m.');
+  const problem = rectangleProblem(corners as [number, number, number][], width, height);
+  if (problem) throw fail(problem);
+  if (typeof assetRotation !== 'number' || ![0, 90, 180, 270].includes(assetRotation)) throw fail('assetRotation must be 0, 90, 180 or 270.');
+  if (!isRecord(reveal) || reveal.direction !== 'center_horizontal' || typeof reveal.duration !== 'number'
+    || !(reveal.duration > 0 && reveal.duration <= 60)) throw fail('tifoReveal needs the center-horizontal direction and a duration over 0 up to 60 s.');
+  return { id: tifo.id, name: tifo.name, adId: tifo.adId, adName: tifo.adName,
+    asset: { id: asset.id, name: asset.name, url: asset.url, contentType: asset.contentType as string },
+    corners: corners.map((corner) => [...corner]) as FusionTifo['corners'], width, height, assetRotation: assetRotation as FusionTifo['assetRotation'],
+    reveal: { direction: 'center_horizontal', duration: reveal.duration } };
+}
+
 export function validateMatch(match: unknown): Match {
   if (!isRecord(match) || typeof match.id !== 'string' || !match.id.trim() || match.id.length > 80
     || typeof match.name !== 'string' || !match.name.trim()
@@ -82,8 +108,23 @@ export function validateMatch(match: unknown): Match {
     : !slot.asset.url.startsWith('/fusion-api/matches/')))) throw new Error('Material source does not match the match configuration.');
   if (new Set(slots.map((slot) => slot.id)).size !== slots.length
     || new Set(slots.filter((slot) => slot.type === '3D' && slot.assetRole).map((slot) => slot.assetRole)).size !== slots.filter((slot) => slot.type === '3D' && slot.assetRole).length) throw new Error('场次广告位 ID 或模型角色重复。');
+  let pointCloud: Match['pointCloud'];
+  if (match.pointCloud !== undefined) {
+    const { sha256, fileName } = isRecord(match.pointCloud) ? match.pointCloud : {} as Record<string, unknown>;
+    if (match.mode !== 'offline' || typeof sha256 !== 'string' || !SHA256.test(sha256) || typeof fileName !== 'string' || !fileName || fileName.length > 255)
+      throw new Error('Invalid offline point cloud.');
+    pointCloud = { sha256, fileName };
+  }
+  let tifos: FusionTifo[] | undefined;
+  if (match.tifos !== undefined) {
+    if (!Array.isArray(match.tifos) || !pointCloud) throw new Error("Tifo placements need the offline package's point cloud.");
+    tifos = match.tifos.map((tifo) => validateTifo(tifo, match.offlinePackageId as string));
+    if (new Set(tifos.map((tifo) => tifo.id)).size !== tifos.length) throw new Error('Duplicate Tifo placement identifier.');
+  }
   return { ...match, id: match.id, name: match.name, date: match.date, venue: match.venue, venueId: match.venueId,
-    mode: match.mode, field, placements: slots };
+    mode: match.mode, field, placements: slots,
+    ...(pointCloud ? { pointCloud } : {}),
+    ...(tifos ? { tifos } : {}) };
 }
 
 export function validateScanFile<T extends Pick<File, 'name' | 'size'>>(file: T): T {
@@ -150,7 +191,7 @@ export function validateLibrary(data: unknown): MatchRecord[] {
     }
     const assetFiles = record.assetFiles;
     if (assetFiles !== undefined) {
-      const used = new Set(match.placements.flatMap((slot) => slot.asset ? [slot.asset.id] : []));
+      const used = new Set([...match.placements.flatMap((slot) => slot.asset ? [slot.asset.id] : []), ...(match.tifos ?? []).map((tifo) => tifo.asset.id)]);
       if (match.mode !== 'offline' || !isRecord(assetFiles)
         || Object.entries(assetFiles).some(([id, path]) => !used.has(id) || typeof path !== 'string' || !path.startsWith('/') || path.split('/').some((part) => part.startsWith('.')))
         || [...used].some((id) => !(id in assetFiles))) throw new Error('离线素材文件记录无效。');
@@ -158,7 +199,10 @@ export function validateLibrary(data: unknown): MatchRecord[] {
     const assetBlended = record.assetBlended;
     if (assetBlended !== undefined && (!assetFiles || !isRecord(assetBlended) || Object.entries(assetBlended).some(([id, names]) => !(id in (assetFiles as object))
       || !Array.isArray(names) || names.length > 1000 || names.some((name) => typeof name !== 'string' || name.length > 255)))) throw new Error('离线素材的半透明材质记录无效。');
-    return { match, draft, hiddenPlacementIds: [...new Set(hiddenPlacementIds)],
+    const { pointCloudFile } = record;
+    if (pointCloudFile !== undefined && (!match.pointCloud || typeof pointCloudFile !== 'string' || !pointCloudFile.startsWith('/')
+      || pointCloudFile.split('/').some((part) => part.startsWith('.')))) throw new Error('离线点云文件记录无效。');
+    return { match, draft, hiddenPlacementIds: [...new Set(hiddenPlacementIds)], ...(pointCloudFile ? { pointCloudFile: pointCloudFile as string } : {}),
       updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined, ...(assetFiles ? { assetFiles: assetFiles as Record<string, string> } : {}),
       ...(assetBlended ? { assetBlended: assetBlended as Record<string, string[]> } : {}) };
   });

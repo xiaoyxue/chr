@@ -45,6 +45,8 @@ export function localRow(ad: LocalAd, clouds: CloudState): LocalRow {
   const size = `${number(ad.plane.width)} × ${number(ad.plane.height)} m`;
   const detail = ad.type === 'flag'
     ? `振幅 ${number(ad.flag.amplitude)} m · 频率 ${number(ad.flag.frequency)} · 速度 ${number(ad.flag.speed)}× · ${ad.flag.material === 'pbr' ? 'PBR' : '简易光照'}`
+      + (ad.artworkRotation ? ` · 图片旋转 ${ad.artworkRotation}°` : '')
+      + (ad.reveal ? ` · 中线展开 ${number(ad.reveal.duration)} s（${ad.reveal.start === 'cue' ? '手动触发' : '加载时'}）` : '')
     : ad.type === '3D' ? `缩放 ×${number(ad.scale)} · 朝向 ${number(ad.yaw)}°` : '';
   return {
     id: ad.id, space: ad.space === 'pitch' ? 'pitch' : 'cloud', type: ad.type, badge: ad.type === 'flag' ? '旗帜' : ad.type,

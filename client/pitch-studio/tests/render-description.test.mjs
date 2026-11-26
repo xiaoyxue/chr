@@ -141,6 +141,13 @@ test('flags with the same artwork share one asset but keep their own size and wa
     ['flag-f2', 'FLAG-abababababababab', false, { width_m: 6, height_m: 3, amplitude_m: 0.6, frequency: 2.5, speed: 0.4, material: 'pbr' }],
   ]);
   assert.deepEqual(scene.instances[0].model, flagModel(wall, -0.5));
+  // A turned artwork and a reveal (#210) travel with the flag; an unturned artwork says nothing.
+  const tifo = { ...ad, id: 'tifo-PLC-1', artworkRotation: 90, reveal: { direction: 'center_horizontal', duration: 2, start: 'cue' } };
+  const [turned, unturned] = describeScene({ ...options, locals: [{ ad: tifo, sha256: sha }, { ad: { ...tifo, artworkRotation: 0, reveal: undefined }, sha256: sha }] }).instances;
+  assert.equal(turned.id, 'flag-tifo-PLC-1');
+  assert.deepEqual(turned.flag, { width_m: 4, height_m: 2, amplitude_m: 0.32, frequency: 1.35, speed: 1, material: 'simple',
+    artwork_rotation: 90, reveal: { direction: 'center_horizontal', duration_s: 2, start: 'cue' } });
+  assert.deepEqual(unturned.flag, { width_m: 4, height_m: 2, amplitude_m: 0.32, frequency: 1.35, speed: 1, material: 'simple' });
   const many = Array.from({ length: 64 }, (_, i) => ({ ad: { ...ad, id: `f${i}` }, sha256: sha }));
   assert.throws(() => describeScene({ ...options, locals: many }), /最多放置 63 个实例/);
 });

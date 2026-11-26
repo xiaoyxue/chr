@@ -4,15 +4,20 @@ import { importStoredPackage, storedFileUrl, uploadFile } from '../shared/studio
 import type { FusionAsset, Match } from '../shared/types.ts';
 
 const offlinePath = /^\/fusion-offline\/packages\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})\/assets\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})$/;
-export interface OfflinePackage { id: string; match: Match; assets: Map<string, Blob> }
-/** A package whose materials are already in the studio store, by asset ID. */
-export interface StoredPackage { id: string; match: Match; assetFiles: Record<string, string>; assetBlended: Record<string, string[]> }
+export interface OfflinePackage { id: string; match: Match; assets: Map<string, Blob>; pointCloud?: Blob }
+/**
+ * A package whose materials (by asset ID) and point cloud, if any, are already in the
+ * studio store.
+ */
+export interface StoredPackage {
+  id: string; match: Match; assetFiles: Record<string, string>; assetBlended: Record<string, string[]>; pointCloudFile?: string;
+}
 
-/** The match of a package's manifest, under a new package ID; each material must serve a placement. */
-function packageMatch(source: Record<string, unknown>, assetIds: string[]) {
+/** The match of a package's manifest, under a new package ID; each material must serve a placement or a tifo. */
+function packageMatch(source: Record<string, unknown>, assetIds: string[], pointCloudSha256?: string) {
   const id = crypto.randomUUID();
-  const match = mapFusionMatch(source, source.id as string, id);
-  const assigned = new Set(match.placements.flatMap((slot) => slot.asset ? [slot.asset.id] : []));
+  const match = mapFusionMatch(source, source.id as string, id, pointCloudSha256);
+  const assigned = new Set([...match.placements.flatMap((slot) => slot.asset ? [slot.asset.id] : []), ...(match.tifos ?? []).map((tifo) => tifo.asset.id)]);
   if (assetIds.length !== assigned.size || assetIds.some((asset) => !assigned.has(asset)))
     throw new Error('The package contains missing or unreferenced materials.');
   return { id, match };
@@ -20,9 +25,10 @@ function packageMatch(source: Record<string, unknown>, assetIds: string[]) {
 
 /** A ZIP chosen on this computer: read and verified here, its materials stored by storeOfflineAssets. */
 export async function parseOfflinePackage(file: Blob): Promise<OfflinePackage> {
-  const { source, assets } = await readOfflinePackage(new Uint8Array(await file.arrayBuffer()));
-  const { id, match } = packageMatch(source, assets.map((asset) => asset.id));
-  return { id, match, assets: new Map(assets.map((asset) => [asset.id, new Blob([new Uint8Array(asset.bytes).buffer], { type: asset.contentType })])) };
+  const { source, assets, pointCloud } = await readOfflinePackage(new Uint8Array(await file.arrayBuffer()));
+  const { id, match } = packageMatch(source, assets.map((asset) => asset.id), pointCloud?.sha256);
+  return { id, match, assets: new Map(assets.map((asset) => [asset.id, new Blob([new Uint8Array(asset.bytes).buffer], { type: asset.contentType })])),
+    ...(pointCloud ? { pointCloud: new Blob([new Uint8Array(pointCloud.bytes).buffer]) } : {}) };
 }
 
 /**
@@ -31,10 +37,10 @@ export async function parseOfflinePackage(file: Blob): Promise<OfflinePackage> {
  * the network.
  */
 export async function importServerPackage(path: string): Promise<StoredPackage> {
-  const { source, assets } = await importStoredPackage(path);
-  const { id, match } = packageMatch(source, assets.map((asset) => asset.id));
+  const { source, assets, pointCloud } = await importStoredPackage(path);
+  const { id, match } = packageMatch(source, assets.map((asset) => asset.id), pointCloud?.sha256);
   return {
-    id, match,
+    id, match, ...(pointCloud ? { pointCloudFile: pointCloud.path } : {}),
     assetFiles: Object.fromEntries(assets.map((asset) => [asset.id, asset.path])),
     assetBlended: Object.fromEntries(assets.flatMap((asset) => asset.blended ? [[asset.id, asset.blended]] : [])),
   };
@@ -45,9 +51,9 @@ let storedAsset: (packageId: string, assetId: string) => string | undefined = ()
 export function setOfflineAssetFiles(lookup: typeof storedAsset) { storedAsset = lookup; }
 
 /**
- * Stores each material of a parsed package on the server, content-addressed, so a stored
- * file's name is the SHA-256 the package declared; also notes each GLB's alpha-blended
- * materials, so a send needs neither file again.
+ * Stores each material and the point cloud of a parsed package on the server,
+ * content-addressed, so a stored file's name is the SHA-256 the package declared; also
+ * notes each GLB's alpha-blended materials, so a send needs neither file again.
  */
 export async function storeOfflineAssets(packageData: OfflinePackage) {
   const assetFiles: Record<string, string> = {}, assetBlended: Record<string, string[]> = {};
@@ -55,7 +61,8 @@ export async function storeOfflineAssets(packageData: OfflinePackage) {
     assetFiles[id] = await uploadFile(blob, `${id}${EXTENSIONS[blob.type]}`);
     if (blob.type === 'model/gltf-binary') assetBlended[id] = blendedMaterials(new Uint8Array(await blob.arrayBuffer()));
   }
-  return { assetFiles, assetBlended };
+  const pointCloudFile = packageData.pointCloud && await uploadFile(packageData.pointCloud, `${packageData.id}.ply`);
+  return { assetFiles, assetBlended, ...(pointCloudFile ? { pointCloudFile } : {}) };
 }
 
 /**

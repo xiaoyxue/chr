@@ -1,13 +1,14 @@
 // The editor of one space's local placements: 2D images and 3D models on the
 // pitch; images, models and flags on point-cloud planes. Both spaces share the inspector: position, size and
-// material are protected by the lock and saved as soon as a field changes; a
-// flag's wave is editable while locked and saved explicitly.
+// material (and a flag's artwork rotation, aspect lock and reveal) are protected by
+// the lock and saved as soon as a field changes; a flag's wave is editable while
+// locked and saved explicitly.
 import { imageOpacity, withoutPitchFlags } from './local-ad.ts';
 import { localAdStore } from './local-ad-store.ts';
 import { serverSha256, uploadFile } from '../shared/studio-store.ts';
 import { materialFacts } from '../render/send-materials.ts';
 import { fetchServerFile, serverPath } from '../shared/server-files.ts';
-import { glbBounds, planeFromPoints, validateLocalAdMaterial } from './local-ad-scene.ts';
+import { glbBounds, planeFromPoints, previewReveal, validateLocalAdMaterial } from './local-ad-scene.ts';
 import { parseAspect, type Anchor } from './ground-edit.ts';
 import { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } from './plane-edit.ts';
 import { DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, flagDraft, flagDraftChanged, orientFlagPlane, parseFlagDraft, type FlagDraft } from './flag.ts';
@@ -52,9 +53,16 @@ function editorMarkup(space: AdSpace, prefix: string) {
         <p class="on-help">左上角是图片左上角（平面 u / v 方向的起点）${pitch ? '；俯视图中 +X 向右、+Y 向下' : ''}。</p></div>
       <div class="on-inspector-group"><h3>尺寸</h3>
         <div class="on-field-grid">${field('width', pitch ? '长 X / m' : '宽（u 方向）/ m', 'min="0.01" max="1000"')}${field('height', pitch ? '宽 Y / m' : '高（v 方向）/ m', 'min="0.01" max="1000"')}</div>
-        <div class="on-aspect-row"><label>宽高比 W:H<input name="aspect" type="text" inputmode="decimal" aria-label="宽高比，如 16:9 或 1.78" /></label>
-        <label class="on-check"><input name="keepAspect" type="checkbox" checked /> 锁定宽高比</label></div>
-        <p class="on-help">输入 16:9 或 1.78 后按 Enter：保持宽和锚点，按比例调整高。</p></div>
+        <div class="on-aspect-row"><label data-aspect-input>宽高比 W:H<input name="aspect" type="text" inputmode="decimal" aria-label="宽高比，如 16:9 或 1.78" /></label>
+        <label class="on-check" data-keep-aspect><input name="keepAspect" type="checkbox" checked /> 锁定宽高比</label>
+        <label class="on-check" data-flag-group><input name="aspectLocked" type="checkbox" /> 锁定宽高比（矩形跟随图片）</label></div>
+        <p class="on-help" data-aspect-input>输入 16:9 或 1.78 后按 Enter：保持宽和锚点，按比例调整高。</p></div>
+      <div data-flag-group class="on-inspector-group"><h3>旗帜图片与展开</h3>
+        <div class="on-field-grid"><label>图片旋转（顺时针）<select name="artworkRotation" aria-label="图片旋转">${[0, 90, 180, 270].map((angle) => `<option value="${angle}">${angle}°</option>`).join('')}</select></label>
+        <label>展开<select name="revealDirection" aria-label="展开方式"><option value="">无（直接显示）</option><option value="center_horizontal">中线水平展开</option></select></label>
+        <label data-reveal-only>时长 / s<input name="revealDuration" type="number" min="0.1" max="60" step="0.1" required /></label>
+        <label data-reveal-only>开始<select name="revealStart" aria-label="展开开始"><option value="load">加载时</option><option value="cue">手动触发</option></select></label></div>
+        <p class="on-help">图片按所选角度顺时针旋转后拉伸到矩形；锁定宽高比时，矩形按（旋转后的）图片比例调整高度。中线水平展开从竖直中线向两侧打开。</p></div>
       <div data-model-group class="on-inspector-group"><h3>模型</h3>
         <div class="on-field-grid">${field('scale', '整体缩放 / ×', 'min="0.01" max="1000"')}${field('yaw', '朝向 / °', 'min="-360" max="360"')}</div>
         ${pitch ? '' : '<label class="on-check"><input name="flip" type="checkbox" /> 反转模型立起方向（平面法线）</label>'}</div>
@@ -68,6 +76,10 @@ function editorMarkup(space: AdSpace, prefix: string) {
     <fieldset ${id('local-flag-controls')} class="on-inspector-group"><h3>旗帜飘动</h3>${wave}
       <div class="on-slider-row"><span>材质</span><div class="on-segmented" role="radiogroup" aria-label="旗帜材质"><label><input type="radio" name="flagMaterial" value="simple" />简易双面光照</label><label><input type="radio" name="flagMaterial" value="pbr" />PBR</label></div></div>
       <p data-flag-note class="on-help"></p></fieldset>
+    <div ${id('local-reveal-actions')} class="on-inspector-group"><div class="on-action-row">
+      <button ${id('preview-reveal')} class="on-button" type="button">预览展开</button>
+      <button ${id('cue-reveal')} class="on-button" type="button">触发展开</button></div>
+      <p data-reveal-note class="on-help"></p></div>
     <fieldset data-locked-controls>
       <label ${id('local-ad-material-label')} for="${prefix}local-ad-material-path">素材的服务器路径（chr-server 从这里读取）</label>
       <div class="on-source-row"><input ${id('local-ad-material-path')} class="on-path-input" autocomplete="off" />
@@ -124,6 +136,8 @@ export class LocalAdEditor {
     recordUndo?: (label: string, restore: () => Promise<void>, reapply: () => Promise<void>) => void;
     /** Runs the renderer bar's send action and resolves with its status message. */
     send?: () => Promise<{ text: string; failed: boolean }>;
+    /** Starts the reveal of a sent flag whose reveal waits for a cue; resolves with the renderer's status message. */
+    cue?: (ad: LocalAd) => Promise<{ text: string; failed: boolean }>;
     /** The ad to select when the match or point cloud loads, such as the one selected before a reload. */
     preferredSelection?: () => string | undefined;
   }) {
@@ -164,6 +178,8 @@ export class LocalAdEditor {
       event.preventDefault();
       void this.save();
     });
+    this.element('preview-reveal').addEventListener('click', () => { if (this.selectedId) previewReveal(this.selectedId); });
+    this.element('cue-reveal').addEventListener('click', () => { void this.cue(); });
     this.element('save-local').addEventListener('click', () => { void this.save(); });
     this.element('save-send-local').addEventListener('click', () => { void this.saveAndSend(); });
     this.element('local-ad-enabled').addEventListener('click', () => {
@@ -304,6 +320,25 @@ export class LocalAdEditor {
     const { text, failed } = await this.options.send();
     this.notice = { id, text: `已保存。${text}`, failed };
     this.renderSaveState();
+  }
+
+  /** Cues the selected flag's reveal on the renderer, as last sent. */
+  private async cue() {
+    const selected = this.selected();
+    if (!selected?.reveal || !this.options.cue) return;
+    this.notice = { id: selected.id, text: `正在触发“${selected.name}”展开…` };
+    this.renderSaveState();
+    const { text, failed } = await this.options.cue(selected);
+    this.notice = { id: selected.id, text, failed };
+    this.renderSaveState();
+  }
+
+  /** The image's width / height as the flag shows it, turned by its artwork rotation. */
+  private async imageAspect(ad: LocalAd, file = ad.material) {
+    if (!file) throw new Error('旗帜图片尚未载入，无法按图片锁定宽高比；请先加载图片。');
+    const bitmap = await createImageBitmap(file), ratio = bitmap.width / bitmap.height;
+    bitmap.close();
+    return ad.artworkRotation === 90 || ad.artworkRotation === 270 ? 1 / ratio : ratio;
   }
 
   /** Enables or disables one ad, as its switch here or in the overall list does. */
@@ -484,9 +519,21 @@ export class LocalAdEditor {
   }
 
   /** The selected ad with the form's values, after the operator changed `input`. */
-  private edited(selected: LocalAd, input: HTMLInputElement): { next: LocalAd; action: string } {
+  private async edited(selected: LocalAd, input: HTMLInputElement): Promise<{ next: LocalAd; action: string }> {
     const data = new FormData(this.form), scalar = (name: string) => Number(data.get(name)), plane = selected.plane;
+    // A flag locked to its image's aspect follows the image whenever its rotation changes.
+    const fitImage = async (ad: LocalAd) => ad.aspectLocked ? { ...ad, plane: planeWithAspect(ad.plane, this.anchor, await this.imageAspect(ad)) } : ad;
     switch (input.name) {
+      case 'artworkRotation':
+        return { next: await fitImage({ ...selected, artworkRotation: Number(input.value) as LocalAd['artworkRotation'] }), action: '旋转图片' };
+      case 'aspectLocked':
+        return { next: await fitImage({ ...selected, aspectLocked: input.checked }), action: input.checked ? '锁定宽高比' : '解除宽高比锁定' };
+      case 'revealDirection': {
+        const { reveal, ...rest } = selected;
+        return { next: input.value ? { ...rest, reveal: { duration: 2, start: 'load', ...reveal, direction: 'center_horizontal' } } : rest, action: '设置展开' };
+      }
+      case 'revealDuration': return { next: { ...selected, reveal: { ...selected.reveal, duration: input.valueAsNumber } }, action: '设置展开时长' };
+      case 'revealStart': return { next: { ...selected, reveal: { ...selected.reveal, start: input.value === 'cue' ? 'cue' : 'load' } }, action: '设置展开开始' };
       case 'name': return { next: { ...selected, name: String(data.get('name')).trim() }, action: '重命名' };
       case 'z': return { next: { ...selected, plane: { ...plane, origin: [plane.origin[0], plane.origin[1], scalar('z')] } }, action: '调整高度' };
       case 'offset': return { next: { ...selected, offset: scalar('offset') }, action: '调整法线偏移' };
@@ -495,8 +542,10 @@ export class LocalAdEditor {
       case 'flip': return { next: { ...selected, normalSign: input.checked ? -1 : 1 }, action: '反转' };
       case 'opacity': case 'opacitySlider': return { next: { ...selected, opacity: input.valueAsNumber }, action: '调整不透明度' };
       case 'aspect': return { next: { ...selected, plane: planeWithAspect(plane, this.anchor, parseAspect(input.value)) }, action: '设置宽高比' };
-      case 'width': case 'height':
-        return { next: { ...selected, plane: resizePlane(plane, this.anchor, input.name, input.valueAsNumber, this.keepAspect) }, action: '调整尺寸' };
+      case 'width': case 'height': {
+        const keep = selected.type === 'flag' ? Boolean(selected.aspectLocked) : this.keepAspect;
+        return { next: { ...selected, plane: resizePlane(plane, this.anchor, input.name, input.valueAsNumber, keep) }, action: '调整尺寸' };
+      }
       default: {
         const point = planeAnchor(plane, this.anchor);
         const to: Vector3Tuple = [scalar('anchorX'), scalar('anchorY'), this.options.space === 'pitch' ? point[2] : scalar('anchorZ')];
@@ -518,7 +567,10 @@ export class LocalAdEditor {
       return refuse(input.name === 'aspect' ? '宽高比请输入 16:9 这样的 W:H，或 1.78 这样的正数。' : '请输入数值。');
     if (input.type === 'number' && ((input.min && input.valueAsNumber < Number(input.min)) || (input.max && input.valueAsNumber > Number(input.max))))
       return refuse(`该数值应介于 ${input.min} – ${input.max}。`);
-    const { next, action } = this.edited(selected, input);
+    let edit: { next: LocalAd; action: string };
+    try { edit = await this.edited(selected, input); }
+    catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
+    const { next, action } = edit;
     if (!next.name) return refuse('请输入广告位名称。');
     return this.commit(this.items.map((ad) => ad.id === next.id ? next : ad), next.id, `${action} ${next.name}`);
   }
@@ -533,12 +585,14 @@ export class LocalAdEditor {
       if (selected.type === 'flag') {
         if (!/\.(png|jpe?g)$/i.test(file.name) || file.size > 20 * 1024 * 1024 || !file.size) throw new Error('旗帜图片需为不超过 20 MB 的 PNG / JPEG。');
       }
+      let plane = selected.plane;
       if (selected.type !== '3D') {
         if (!/\.(png|jpe?g|webp)$/i.test(file.name) || file.size > 20 * 1024 * 1024 || !file.size) throw new Error('图片素材需为不超过 20 MB 的 PNG / JPEG / WebP。');
         const bitmap = await createImageBitmap(file);
         const valid = bitmap.width <= 8192 && bitmap.height <= 8192;
         bitmap.close();
         if (!valid) throw new Error('图片宽高不得超过 8192 像素。');
+        if (selected.aspectLocked) plane = planeWithAspect(plane, this.anchor, await this.imageAspect(selected, file));
       } else {
         if (!/\.glb$/i.test(file.name) || !file.size || file.size > 64 * 1024 * 1024) throw new Error('模型素材需为不超过 64 MB 的自包含 GLB 文件。');
         const buffer = await file.arrayBuffer(), view = new DataView(buffer);
@@ -552,7 +606,7 @@ export class LocalAdEditor {
       if (version !== this.version) return;
       this.busy = false;
       await this.commit(this.items.map((ad) => ad.id !== selected.id ? ad
-        : { ...ad, material: file, materialPath, materialName: file.name, ...facts }), selected.id, `更换素材 ${selected.name}`);
+        : { ...ad, plane, material: file, materialPath, materialName: file.name, ...facts }), selected.id, `更换素材 ${selected.name}`);
     } catch (error) { this.options.error(error); }
     finally { if (version === this.version) { this.busy = false; this.render(); } }
   }
@@ -679,14 +733,35 @@ export class LocalAdEditor {
     }
     show('[data-model-group]', selected.type === '3D');
     show('[data-image-group]', selected.type === '2D');
+    show('[data-flag-group]', flag);
+    show('[data-keep-aspect]', !flag);
+    show('[data-aspect-input]', !(flag && selected.aspectLocked));
+    show('[data-reveal-only]', flag && Boolean(selected.reveal));
     set('opacity', imageOpacity(selected)); set('opacitySlider', imageOpacity(selected));
     set('scale', selected.scale); set('yaw', selected.yaw);
     const flip = form.elements.namedItem('flip') as HTMLInputElement | null;
     if (flip) flip.checked = flip.defaultChecked = selected.normalSign === -1;
     this.element('local-ad-readonly').textContent = selected.type === '2D' ? `${pitch ? '贴地图片' : '贴面图片'}，图片上边沿 v 反方向 · 暂不支持调整旋转`
-      : flag ? '旗帜，图片上边朝上、从选面一侧正读 · 暂不支持调整旋转'
+      : flag ? `旗帜，图片从选面一侧正读，上边沿 v 反方向${selected.fusionTifoId ? ` · 由 Fusion Tifo ${selected.fusionTifoId} 导入，可自由编辑` : ''}`
       : `模型从平面${pitch ? '向上' : '沿法线'}立起，可调缩放与朝向`;
+    const actions = this.element('local-reveal-actions');
+    actions.hidden = !flag || !selected.reveal;
     if (flag) {
+      const select = (name: string, value: string) => { (form.elements.namedItem(name) as HTMLSelectElement).value = value; };
+      select('artworkRotation', String(selected.artworkRotation ?? 0));
+      select('revealDirection', selected.reveal?.direction ?? '');
+      select('revealStart', selected.reveal?.start ?? 'load');
+      set('revealDuration', selected.reveal?.duration ?? 2);
+      const aspectLocked = form.elements.namedItem('aspectLocked') as HTMLInputElement;
+      aspectLocked.checked = aspectLocked.defaultChecked = Boolean(selected.aspectLocked);
+      const cue = selected.reveal?.start === 'cue';
+      this.element<HTMLButtonElement>('preview-reveal').disabled = !open || !selected.visible;
+      const cueButton = this.element<HTMLButtonElement>('cue-reveal');
+      cueButton.hidden = !cue || !this.options.cue;
+      cueButton.disabled = !open || !selected.visible;
+      actions.querySelector('[data-reveal-note]').textContent = cue
+        ? '手动触发：发送到渲染器后旗帜保持隐藏，点“触发展开”后从中线展开；再次点击重新展开。修改需先保存并发送。'
+        : '加载时：场景载入渲染器后自动从中线展开。“预览展开”只在本页预览中播放。';
       // Unsaved typed values win over the saved flag, so a re-render never loses them.
       const draft = this.flagDraft?.id === selected.id ? this.flagDraft : flagDraft(selected.flag);
       for (const [key] of WAVE) for (const name of [key, `${key}Slider`]) {

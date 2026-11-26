@@ -32,7 +32,7 @@ export interface DescribedLocal {
   bounds?: GlbBounds;
   blendAs?: 'mask';
 }
-/** `chr_common::scene_frame::Flag`: the flag's size in metres and its wave. */
+/** `chr_common::scene_frame::Flag`: the flag's size in metres, its wave, artwork turn and reveal. */
 export interface FlagParameters {
   width_m: number;
   height_m: number;
@@ -40,6 +40,9 @@ export interface FlagParameters {
   frequency: number;
   speed: number;
   material: 'simple' | 'pbr';
+  /** Clockwise degrees as the artwork reads; omitted when 0. */
+  artwork_rotation?: 90 | 180 | 270;
+  reveal?: { direction: 'center_horizontal'; duration_s: number; start: 'load' | 'cue' };
 }
 export interface DescriptionScene {
   ground: { pitch_m: [number, number] };
@@ -55,6 +58,8 @@ export interface DescribedLighting { lighting: WireLighting; environment?: { id:
 export const environmentAssetId = (sha256: string) => `IBL-${sha256.slice(0, 16)}`;
 /** chr-server places at most this many instances per description. */
 export const MAX_INSTANCES = 63;
+/** A local flag's render instance, which `description.cue_reveal` names. */
+export const flagInstanceId = (ad: Pick<LocalAd, 'id'>) => `flag-${ad.id}`;
 /** One asset per distinct local material and kind: flags `FLAG-`, images and models `LOCAL-`. */
 export const localAssetId = (ad: LocalAd, sha256: string) => `${ad.type === 'flag' ? 'FLAG' : 'LOCAL'}-${sha256.slice(0, 16)}`;
 const LOCAL_KIND = { '2D': 'image_quad', '3D': 'glb', flag: 'flag' } as const;
@@ -166,9 +171,11 @@ export function describeScene(options: {
     if (!scene.assets.some((listed) => listed.id === asset))
       scene.assets.push({ id: asset, kind: LOCAL_KIND[ad.type], source: { path: ad.materialPath }, sha256, ...(blendAs ? { blend_as: blendAs } : {}) });
     if (ad.type === 'flag') {
-      const { width, height } = ad.plane, { amplitude, frequency, speed, material } = ad.flag;
-      scene.instances.push({ id: `flag-${ad.id}`, asset, model: flagModel(ad.plane, ad.offset), visible: ad.visible,
-        flag: { width_m: width, height_m: height, amplitude_m: amplitude, frequency, speed, material } });
+      const { width, height } = ad.plane, { amplitude, frequency, speed, material } = ad.flag, { artworkRotation, reveal } = ad;
+      scene.instances.push({ id: flagInstanceId(ad), asset, model: flagModel(ad.plane, ad.offset), visible: ad.visible,
+        flag: { width_m: width, height_m: height, amplitude_m: amplitude, frequency, speed, material,
+          ...(artworkRotation ? { artwork_rotation: artworkRotation } : {}),
+          ...(reveal ? { reveal: { direction: reveal.direction, duration_s: reveal.duration, start: reveal.start } } : {}) } });
     } else if (ad.type === '2D') {
       scene.instances.push({ id: `local-${ad.id}`, asset, model: localQuadModel(ad), visible: ad.visible, opacity: imageOpacity(ad) });
     } else {
@@ -245,6 +252,8 @@ export function rendererFailure(method: string, error: unknown): string {
       return 'chr-server 已连接，但没有运行渲染 worker（可能是默认的三角形程序）。请用 --tracked-scene 或 --description 启动渲染程序。';
     if (method === 'description.load')
       return 'chr-server 没有启用场景描述加载：请以 --description 和 --asset-root 启动（stack.toml 的 description / asset_root）。';
+    if (method === 'description.cue_reveal')
+      return 'chr-server 不支持触发旗帜展开：请更新 chr-server，并以 --description 启动。';
   }
   return `chr-server 拒绝了 ${method}（错误 ${error.code}）：${error.message}`;
 }
@@ -334,4 +343,9 @@ export function sendDescription(url: string, scene: DescriptionScene, timeoutMs 
     const loaded = await call('description.load', { scene }, timeoutMs) as LoadResult;
     return { loaded, sdi, worker };
   });
+}
+
+/** Starts the reveal of a loaded flag `instance` whose reveal waits for a cue; resolves with its cue count. */
+export function cueReveal(url: string, instance: string) {
+  return session(url, async (call) => (await call('description.cue_reveal', { instance }) as { cue: number }).cue);
 }

@@ -6,6 +6,7 @@ import { ResultReview } from '../analysis/result-review.ts';
 import { LocalAdEditor } from '../placements/local-ad-editor.ts';
 import { validatePitchAd, type LocalAd } from '../placements/local-ad.ts';
 import { localAdStore } from '../placements/local-ad-store.ts';
+import { seedTifoFlags } from '../placements/tifo.ts';
 import { exportLocalPlacements, importedAlignment, mergeLocalPlacements, parseLocalPlacements, waitingForCloud, type ImportMode } from '../placements/local-export.ts';
 import { StoreConflict, StoredDocument, connectStore, readServerFile, removeMatchDocuments, serverSha256, storeDirectory, uploadFile, writeServerJson } from '../shared/studio-store.ts';
 import { validateMatchLibrary, validatePackagePaths } from '../shared/store-documents.ts';
@@ -14,7 +15,7 @@ import { localProblem, localRow, sendScope, type CloudState, type LocalRow } fro
 import { glbBounds } from '../placements/local-ad-scene.ts';
 import { PointCloudPreview } from '../scene/point-cloud-preview.ts';
 import { exportTarget, fetchServerFile, isServerPath, serverPath } from '../shared/server-files.ts';
-import { describeScene, environmentAssetId, sendDescription } from '../render/render-description.ts';
+import { cueReveal, describeScene, environmentAssetId, flagInstanceId, sendDescription } from '../render/render-description.ts';
 import { fusionAssets, localMaterials, type MaterialAccess } from '../render/send-materials.ts';
 import '../styles/base.css';
 import '../styles/pitch-preview.css';
@@ -114,6 +115,8 @@ const localEditor = new LocalAdEditor({
   error: showError,
   recordUndo: (label, restore, reapply) => undo.push({ label, restore, reapply }),
   send: () => sendToRenderer(),
+  cue: (ad) => rendererAction('正在触发展开…', async () =>
+    `已触发“${ad.name}”展开（本场景第 ${await cueReveal(rendererUrl(), flagInstanceId(ad))} 次）。`, '触发展开失败'),
 });
 resultReview.onChange = () => renderAnalysis();
 resultReview.onSource = (matchId, source) => remember('result', source, matchId);
@@ -648,7 +651,11 @@ function renderAnalysis() {
   $('#analysis-workspace').hidden = !result;
   $('#cloud-controls').hidden = !result;
   $('#analysis-empty-title').textContent = '尚未导入点云';
-  $('#analysis-empty-description').textContent = '导入 PLY 后在下方绘制独立点云广告；上方球场 2D / 3D 广告不需要点云。';
+  const packageCloud = current()?.pointCloudFile;
+  $('#analysis-empty-description').textContent = packageCloud
+    ? `本场次的 Fusion 离线包带有点云（${current().match.pointCloud.fileName}），已存储在服务器 ${packageCloud}：点“按路径加载”载入后，可在点云中查看和编辑 Tifo 旗帜。`
+    : '导入 PLY 后在下方绘制独立点云广告；上方球场 2D / 3D 广告不需要点云。';
+  if (packageCloud && !result && !$<HTMLInputElement>('#analysis-path').value) $<HTMLInputElement>('#analysis-path').value = packageCloud;
   const notice = analysisNotice?.matchId === currentId ? analysisNotice : undefined;
   $('#analysis-import-status').textContent = busy ? '正在读取并在本地解析点云，请稍候…'
     : notice?.text ?? (result ? `${result.cloud.fileName} · ${(result.cloud.positions.length / 3).toLocaleString('zh-CN')} 点 · ${(result.cloud.byteLength / 1024 / 1024).toFixed(1)} MB · 未上传`
@@ -690,7 +697,9 @@ async function selectAnalysisFile(source: File | string): Promise<boolean> {
   clearError();
   renderAnalysis();
   try {
-    const file = typeof source === 'string' ? await fetchServerFile(source, job.controller.signal) : source;
+    // An offline package's point cloud is in the studio store, which /local-files may not share.
+    const file = typeof source !== 'string' ? source : serverPath(source).startsWith(`${storeDirectory()}/`)
+      ? await readServerFile(source, undefined, undefined, job.controller.signal) : await fetchServerFile(source, job.controller.signal);
     const cloud = await importPlyFile(file, job.controller.signal);
     if (job.controller.signal.aborted || currentId !== job.matchId) return false;
     if (!cloudEngine) {
@@ -1061,12 +1070,18 @@ async function importOfflinePackage(source: File | string) {
       $('#offline-package-status').textContent = 'Import cancelled. Previous configuration and materials were retained.';
       return;
     }
-    const { assetFiles, assetBlended } = packageData;
-    await saveLibrary([...records.filter((item) => item.match.id !== packageData.match.id),
-      { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [], assetFiles, assetBlended }]);
+    const { assetFiles, assetBlended, pointCloudFile } = packageData;
+    const record: MatchRecord = { match: packageData.match, draft: structuredClone(packageData.match.placements), hiddenPlacementIds: [],
+      assetFiles, assetBlended, ...(pointCloudFile ? { pointCloudFile } : {}) };
+    await saveLibrary([...records.filter((item) => item.match.id !== packageData.match.id), record]);
     rememberPackagePath(packageData.id, zipPath);
     renderMatches();
-    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${Object.keys(assetFiles).length} materials. Saved on the onsite server (${zipPath}); no Fusion API is used.`;
+    // The match is saved by now: a failure here leaves only its Tifo flags missing, and importing again adds them.
+    const tifos = await seedTifos(record).then((added) => `${added} added; flags already imported keep their edits`,
+      (error: unknown) => `not added: ${error instanceof Error ? error.message : String(error)} Import the ZIP again to add them`);
+    $('#offline-package-status').textContent = `Imported ${packageData.match.placements.length} placements and ${Object.keys(assetFiles).length} materials. Saved on the onsite server (${zipPath}); no Fusion API is used.`
+      + (packageData.match.tifos ? ` ${packageData.match.tifos.length} Tifo placements become point-cloud flags (${tifos}).` : '')
+      + (pointCloudFile ? ` Point cloud ${packageData.match.pointCloud.fileName} stored at ${pointCloudFile}; load it under 广告位预览 to see and edit the Tifo flags.` : '');
     if (location.hash === startingRoute || currentId === packageData.match.id) {
       const route = `#match/${encodeURIComponent(packageData.match.id)}/preview`;
       if (location.hash !== route) history.pushState(null, '', route);
@@ -1081,6 +1096,28 @@ async function importOfflinePackage(source: File | string) {
     setLibraryBusy(false);
     $<HTMLInputElement>('#offline-package-file').value = '';
   }
+}
+/**
+ * Adds a point-cloud flag for each Tifo of an imported offline match that has none
+ * yet (placements/tifo.ts), and records that the package's point cloud is in pitch
+ * coordinates, as Fusion defines it, unless the operator answered otherwise.
+ * Resolves with the number of flags added.
+ */
+async function seedTifos(record: MatchRecord) {
+  const { match } = record;
+  if (match.pointCloud) sessions.update(match.id, (session) =>
+    session.alignment[match.pointCloud.sha256] === undefined ? withAlignment(session, match.pointCloud.sha256, true) : session);
+  if (!match.tifos) return 0;
+  const materials = Object.fromEntries(await Promise.all(match.tifos.map(async ({ asset }) =>
+    [asset.id, { path: record.assetFiles[asset.id], sha256: await serverSha256(record.assetFiles[asset.id]) }] as const)));
+  let added = 0;
+  await localAdStore.save(match.id, (saved) => {
+    const next = seedTifoFlags(saved, match, materials);
+    added = next.length - saved.length;
+    return next;
+  });
+  if (added && currentId === match.id) await Promise.all([pitchEditor.reload(), localEditor.reload()]);
+  return added;
 }
 for (const selector of ['#import-offline-package', '#replace-offline-package']) {
   $<HTMLButtonElement>(selector).addEventListener('click', () => $<HTMLInputElement>('#offline-package-file').click());
@@ -1471,13 +1508,14 @@ function rendererProgress(step: string) {
   renderRendererBars();
 }
 
+/** chr-server's control WebSocket, through the page's /chr-render proxy. */
+const rendererUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
 const sendToRenderer = () => rendererAction('正在检查素材…', async () => {
   const record = current(), started = performance.now();
   const { scene, masked, skipped, fusion, lightingName } = await renderScene();
   const checked = performance.now();
   rendererProgress('正在发送到 chr-server…');
-  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/chr-render`;
-  const { loaded, sdi } = await sendDescription(url, scene);
+  const { loaded, sdi } = await sendDescription(rendererUrl(), scene);
   const seconds = (from: number, to: number) => ((to - from) / 1000).toFixed(1);
   const timing = `检查素材 ${seconds(started, checked)} 秒，发送 ${seconds(checked, performance.now())} 秒`;
   if (fusion) rememberPackagePath(record.match.offlinePackageId, serverPath(rendererPaths[0].value));

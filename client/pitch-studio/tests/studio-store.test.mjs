@@ -193,6 +193,16 @@ test('an offline ZIP on the server is verified and its materials stored there; t
   assert.equal((await post('relative/match.zip')).status, 400);
   assert.equal((await store.call('packages', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
     body: JSON.stringify({ path: join(shared, 'match.zip') }) })).status, 403);
+  // A v2 package's point cloud is stored next to its materials (#210).
+  const ply = Buffer.from('ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n');
+  files['point-cloud/field.ply'] = ply;
+  const v2 = manifest({ ...hashes, 'point-cloud/field.ply': sha(ply) });
+  Object.assign(v2, { packageVersion: 2 });
+  v2.match.field = { pointCloud: { fileName: 'stadium.ply', byteLength: ply.length, contentPath: 'point-cloud/field.ply' } };
+  const withCloud = await post(await write('v2.zip', v2));
+  assert.equal(withCloud.status, 200, JSON.stringify(withCloud.body));
+  assert.deepEqual(withCloud.body.pointCloud, { path: join(dataDir, 'files', `${sha(ply)}.ply`), sha256: sha(ply) });
+  assert.deepEqual(await readFile(withCloud.body.pointCloud.path), ply);
 });
 
 test('stored files may be cached by the browser; other files may not', async () => {

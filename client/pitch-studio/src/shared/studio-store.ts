@@ -49,10 +49,10 @@ export async function writeServerJson(path: string, text: string, overwrite = fa
 const isStoredFile = (path: string) => Boolean(dataDir) && path.startsWith(`${dataDir}/`);
 
 /** A file of the studio store, or any other server file (through /local-files), as a browser File. */
-export async function readServerFile(path: string, name = path.split('/').pop(), type?: string): Promise<File> {
+export async function readServerFile(path: string, name = path.split('/').pop(), type?: string, signal?: AbortSignal): Promise<File> {
   path = serverPath(path);
   const url = `${isStoredFile(path) ? '/studio-store/file' : '/local-files/file'}?path=${encodeURIComponent(path)}`;
-  const blob = await (await request(url)).blob();
+  const blob = await (await request(url, { signal })).blob();
   return new File([blob], name, { type: type ?? blob.type });
 }
 
@@ -72,7 +72,7 @@ export async function serverSha256(path: string): Promise<string> {
 /** Stores a file chosen in the browser on the server, content-addressed; resolves with its absolute server path. */
 export async function uploadFile(file: Blob, name: string): Promise<string> {
   const limit = FILE_LIMITS[name.slice(name.lastIndexOf('.')).toLowerCase()];
-  if (!limit) throw new Error(`不能存储 ${name}：只接受 PNG / JPEG / WebP 图片、GLB 模型或离线 ZIP。`);
+  if (!limit) throw new Error(`不能存储 ${name}：只接受 PNG / JPEG / WebP 图片、GLB 模型、离线 ZIP 或其 PLY 点云。`);
   if (file.size > limit) throw new Error(`${name} 超过 ${limit / 1024 / 1024} MB 上限，未上传。`);
   const response = await request(`/studio-store/files?name=${encodeURIComponent(name)}`, { method: 'POST', body: file,
     headers: { 'Content-Type': 'application/octet-stream' } });
@@ -82,10 +82,11 @@ export async function uploadFile(file: Blob, name: string): Promise<string> {
 /** A stored file's address for the browser, which may cache it: a stored file never changes. */
 export const storedFileUrl = (path: string) => `/studio-store/file?path=${encodeURIComponent(serverPath(path))}`;
 
-/** What the page server read from a Fusion ZIP on the onsite server, its materials now in the store. */
+/** What the page server read from a Fusion ZIP on the onsite server, its materials and point cloud now in the store. */
 export interface StoredPackageImport {
   source: Record<string, unknown>;
   assets: { id: string; path: string; blended?: string[] }[];
+  pointCloud?: { path: string; sha256: string };
 }
 
 /** Has the page server read, verify and store an offline ZIP by its server path (see scripts/studio-store.ts). */

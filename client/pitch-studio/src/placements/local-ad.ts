@@ -1,5 +1,5 @@
 import { FLAG_LIMITS } from './flag.ts';
-import type { FieldDimensions } from '../shared/types.ts';
+import type { ArtworkRotation, FieldDimensions, FlagReveal } from '../shared/types.ts';
 
 export type Vector3Tuple = [number, number, number];
 export type AdSpace = 'pitch' | 'cloud';
@@ -49,7 +49,21 @@ export interface LocalAd {
   flag?: FlagSettings;
   /** A 2D ad's opacity, 0 to 1: the image's alpha is multiplied by this. Absent: `LOCAL_IMAGE_OPACITY`. */
   opacity?: number;
+  /** A flag's clockwise turn of its artwork as it reads; the artwork stretches to the rectangle. Absent: 0. */
+  artworkRotation?: ArtworkRotation;
+  /** How a flag appears; absent, it is shown from the start. */
+  reveal?: FlagReveal;
+  /** A flag whose rectangle follows its (turned) image's aspect when resized. */
+  aspectLocked?: boolean;
+  /** The Fusion Tifo placement a flag was seeded from (placements/tifo.ts). */
+  fusionTifoId?: string;
 }
+
+/** A flag's reveal durations, in seconds, as chr-server accepts them. */
+export const REVEAL_DURATION = [0, 60] as const;
+export const validReveal = (reveal: FlagReveal) => Boolean(reveal) && typeof reveal === 'object' && reveal.direction === 'center_horizontal'
+  && Number.isFinite(reveal.duration) && reveal.duration > REVEAL_DURATION[0] && reveal.duration <= REVEAL_DURATION[1]
+  && ['load', 'cue'].includes(reveal.start);
 
 /** Opacity of a local 2D ad that has none of its own, as chr-server has drawn image quads since #163. */
 export const LOCAL_IMAGE_OPACITY = 0.5;
@@ -82,6 +96,11 @@ export function validLocalAd(value: unknown): value is LocalAd {
   return typeof ad.id === 'string' && typeof ad.name === 'string'
     && (ad.space === 'pitch' ? ad.cloudId === undefined : (ad.space === undefined || ad.space === 'cloud') && typeof ad.cloudId === 'string')
     && ['2D', '3D', 'flag'].includes(ad.type) && (ad.type === 'flag' ? validFlag(ad.flag) : ad.flag === undefined)
+    && (ad.type === 'flag' || [ad.artworkRotation, ad.reveal, ad.aspectLocked, ad.fusionTifoId].every((field) => field === undefined))
+    && (ad.artworkRotation === undefined || [0, 90, 180, 270].includes(ad.artworkRotation))
+    && (ad.reveal === undefined || validReveal(ad.reveal))
+    && (ad.aspectLocked === undefined || typeof ad.aspectLocked === 'boolean')
+    && (ad.fusionTifoId === undefined || (typeof ad.fusionTifoId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(ad.fusionTifoId)))
     && (ad.opacity === undefined || (ad.type === '2D' && typeof ad.opacity === 'number' && ad.opacity >= 0 && ad.opacity <= 1))
     && typeof ad.visible === 'boolean' && Boolean(ad.plane)
     && vector(ad.plane.origin) && vector(ad.plane.u) && vector(ad.plane.v)

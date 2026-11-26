@@ -188,14 +188,16 @@ export class LocalAdDragControls {
       const origin = new THREE.Vector3(...original.plane.origin);
       let { width, height } = original.plane;
       if (anchor) {
-        if (anchor[0] !== 0.5) {
-          width = THREE.MathUtils.clamp(width + delta.dot(u) * (anchor[0] === 0 ? -1 : 1), 0.01, 1000);
-          if (anchor[0] === 0) origin.addScaledVector(u, original.plane.width - width);
+        if (anchor[0] !== 0.5) width = THREE.MathUtils.clamp(width + delta.dot(u) * (anchor[0] === 0 ? -1 : 1), 0.01, 1000);
+        if (anchor[1] !== 0.5) height = THREE.MathUtils.clamp(height + delta.dot(v) * (anchor[1] === 0 ? -1 : 1), 0.01, 1000);
+        if (original.aspectLocked) {
+          const ratio = original.plane.width / original.plane.height;
+          if (anchor[0] !== 0.5) height = width / ratio;
+          else width = height * ratio;
         }
-        if (anchor[1] !== 0.5) {
-          height = THREE.MathUtils.clamp(height + delta.dot(v) * (anchor[1] === 0 ? -1 : 1), 0.01, 1000);
-          if (anchor[1] === 0) origin.addScaledVector(v, original.plane.height - height);
-        }
+        // The side opposite the handle stays; an edge handle keeps the other axis centred.
+        origin.addScaledVector(u, (original.plane.width - width) * (1 - anchor[0]))
+          .addScaledVector(v, (original.plane.height - height) * (1 - anchor[1]));
       } else {
         origin.add(delta);
       }
