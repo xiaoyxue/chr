@@ -50,7 +50,7 @@ export class LightingPanel {
   }
 
   private get library() { return this.document.data ?? emptyLibrary(); }
-  private builtIns() { return builtInPresets(this.context.field() ?? { length: 105, width: 68 }, this.context.iblDir()); }
+  private builtIns() { return builtInPresets(this.context.field() ?? { length: 105, width: 68 }); }
   private allPresets() { return availablePresets(this.library, this.builtIns()); }
 
   /** The preset the current match uses, for the render description. */
@@ -69,7 +69,7 @@ export class LightingPanel {
       const exrs = files.map((file) => ({ name: file.path.slice(file.path.indexOf('/') + 1), size: file.size }))
         .filter(({ name }) => !name.includes('/') && /\.exr$/i.test(name));
       const large = exrs.filter(({ size }) => size > MAX_ASSET_BYTES).map(({ name }) => name);
-      this.panoramas = exrs.filter(({ size }) => size <= MAX_ASSET_BYTES).map(({ name }) => `${dir}/${name}`).sort();
+      this.panoramas = exrs.filter(({ size }) => size <= MAX_ASSET_BYTES).map(({ name }) => name).sort();
       this.status = large.length ? `未列出超过 256 MB（渲染器素材上限）的环境贴图：${large.join('、')}。` : '';
     } catch (error) {
       this.panoramas = [];
@@ -111,7 +111,7 @@ export class LightingPanel {
         ${open ? `<div class="on-field-grid on-light-details">${details}</div>` : ''}</div>`;
     };
     const panoramas = [...new Set([...this.panoramas, ...(preset.environment.path ? [preset.environment.path] : [])])];
-    const skyPath = environmentPath(preset);
+    const skyPath = environmentPath(preset, this.context.iblDir());
     const cap = preset.environment.maxRadiance;
     const sky = skyPath ? `IBL ${skyPath.split('/').pop()} × ${round(preset.environment.gain)}${cap ? `（上限 ${round(cap)}）` : ''}` : 'IBL 关闭';
     const fill = preset.constant.enabled ? `常量光 ${round(preset.constant.intensity)}` : '常量光关闭';
@@ -133,7 +133,7 @@ export class LightingPanel {
             <p class="on-help" role="status">${escape(this.status) || (builtIn ? '内置预设可直接修改，修改保存为它的现场版本，可恢复内置默认。' : '修改即时保存到现场服务器。')}</p></div></section>
         <section class="on-card ${preset.environment.enabled ? '' : 'is-off'}"><div class="on-card-head"><div><h2>环境光 IBL</h2><p class="on-help">EXR 全景图照明，无阴影、不显示背景。图中有太阳时开启亮度上限，截掉太阳，避免与平行光重复并在金属上闪点。</p></div>${toggle('environmentEnabled', preset.environment.enabled)}</div>
           <div class="on-card-body"><label>环境贴图<select data-field="environment"><option value="">无</option>${panoramas.map((path) =>
-            `<option value="${escape(path)}" ${path === preset.environment.path ? 'selected' : ''}>${escape(path.split('/').pop())}</option>`).join('')}</select></label>
+            `<option value="${escape(path)}" ${path === preset.environment.path ? 'selected' : ''}>${escape(path)}</option>`).join('')}</select></label>
             <div class="on-field-grid">${number('gain', 'gain', preset.environment.gain, 'min="0" max="100"')}${number('rotation', '旋转 / °', preset.environment.rotation, 'min="-360" max="360"')}
               <label>亮度上限（gain 前）<span class="on-inline-field"><input type="checkbox" data-field="maxRadianceEnabled" aria-label="启用亮度上限" ${cap ? 'checked' : ''} />
                 <input type="number" step="any" data-field="maxRadiance" value="${round(cap ?? DEFAULT_MAX_RADIANCE)}" min="0" aria-label="亮度上限" ${cap ? '' : 'disabled'} /></span></label></div></div></section>
@@ -185,7 +185,7 @@ export class LightingPanel {
     await this.editPreset((preset) => {
       if (field === 'environment') Object.assign(preset.environment, { path: target.value || null, enabled: Boolean(target.value) });
       else if (field === 'environmentEnabled') {
-        const path = preset.environment.path ?? this.panoramas.find((item) => item.endsWith(`/${DEFAULT_EXR}`)) ?? this.panoramas[0] ?? null;
+        const path = preset.environment.path ?? this.panoramas.find((item) => item === DEFAULT_EXR) ?? this.panoramas[0] ?? null;
         Object.assign(preset.environment, { path, enabled: (target as HTMLInputElement).checked && path !== null });
       } else if (field === 'constantEnabled') preset.constant.enabled = (target as HTMLInputElement).checked;
       else if (field === 'gain') preset.environment.gain = value;

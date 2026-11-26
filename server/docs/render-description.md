@@ -335,7 +335,9 @@ newer package keeps them:
   intensities), its panorama as an `environment` asset `IBL-` plus the first 16 hex of
   its SHA-256 (hashed by the page server, not downloaded; `visible: false`), and its
   constant fill. Presets are one global library in the store's `lighting.json`, with
-  the preset each match uses. Two built-ins are offered: chr-server's default rig lit by
+  the preset each match uses. A preset names its panorama by its file name in the IBL
+  folder (`STUDIO_IBL_DIR`), and a send resolves it there, so a library moves between
+  servers; a library that named it by absolute path is read by its file name. Two built-ins are offered: chr-server's default rig lit by
   `fly-studio-03_4K.exr` (gain 0.5; the panorama IBL picks first when switched on), and
   `orlando_stadium_4k.exr` (gain 0.5, `max_radiance` 50, which caps off its sun) with
   that rig and a constant fill of 0.1. The IBL card's 亮度上限 sets `max_radiance`

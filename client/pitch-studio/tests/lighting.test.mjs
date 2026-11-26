@@ -4,7 +4,7 @@ import { createServer } from 'vite';
 
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
-const { DEFAULT_PRESET, ORLANDO_PRESET, availablePresets, builtInPresets, describeLighting, emptyLibrary, selectedPreset, validateLightingLibrary } =
+const { DEFAULT_PRESET, ORLANDO_PRESET, availablePresets, builtInPresets, describeLighting, emptyLibrary, environmentPath, selectedPreset, validateLightingLibrary } =
   await server.ssrLoadModule('/src/lighting/lighting.ts');
 const { describeScene, environmentAssetId } = await server.ssrLoadModule('/src/render/render-description.ts');
 
@@ -13,9 +13,10 @@ const close = (actual, expected, tolerance = 1e-9) =>
   actual.forEach((value, i) => assert.ok(Math.abs(value - expected[i]) <= tolerance, `${actual} vs ${expected}`));
 
 test("the built-in default preset is chr-server's default rig lit by the fly-studio panorama", () => {
-  const [preset] = builtInPresets(field, '/srv/ibl');
+  const [preset] = builtInPresets(field);
   assert.equal(preset.id, DEFAULT_PRESET);
-  assert.equal(preset.environment.path, '/srv/ibl/fly-studio-03_4K.exr');
+  assert.equal(preset.environment.path, 'fly-studio-03_4K.exr');
+  assert.equal(environmentPath(preset, '/srv/ibl/'), '/srv/ibl/fly-studio-03_4K.exr');
   const lighting = describeLighting(preset, 'IBL-fly');
   assert.deepEqual(lighting.environment, { asset_ref: 'IBL-fly', gain: 0.5, rotation: 0, visible: false });
   assert.equal(lighting.constant, undefined);
@@ -32,8 +33,8 @@ test("the built-in default preset is chr-server's default rig lit by the fly-stu
 });
 
 test('the Orlando preset adds its panorama, capped below its sun, and a constant fill', () => {
-  const orlando = builtInPresets(field, '/srv/ibl/').find((preset) => preset.id === ORLANDO_PRESET);
-  assert.equal(orlando.environment.path, '/srv/ibl/orlando_stadium_4k.exr');
+  const orlando = builtInPresets(field).find((preset) => preset.id === ORLANDO_PRESET);
+  assert.equal(orlando.environment.path, 'orlando_stadium_4k.exr');
   assert.throws(() => describeLighting(orlando), /素材/);
   const lighting = describeLighting(orlando, 'IBL-abc');
   assert.deepEqual(lighting.environment, { asset_ref: 'IBL-abc', gain: 0.5, rotation: 0, visible: false, max_radiance: 50 });
@@ -49,7 +50,7 @@ test('the Orlando preset adds its panorama, capped below its sun, and a constant
 });
 
 test("an operator's edit of a built-in replaces it, keeps its ID and can be dropped to reset it", () => {
-  const builtIns = builtInPresets(field, '/srv/ibl');
+  const builtIns = builtInPresets(field);
   const edit = structuredClone(builtIns.find((preset) => preset.id === ORLANDO_PRESET));
   delete edit.builtIn;
   edit.environment.gain = 0.2;
@@ -65,7 +66,7 @@ test("an operator's edit of a built-in replaces it, keeps its ID and can be drop
 });
 
 test('operator presets: disabled lights, shadows off, the light limit and the stored document', () => {
-  const [base] = builtInPresets(field, '/srv/ibl');
+  const [base] = builtInPresets(field);
   const preset = { ...structuredClone(base), id: 'preset-1', name: 'Night' };
   delete preset.builtIn;
   preset.lights[0].enabled = false;
@@ -83,8 +84,8 @@ test('operator presets: disabled lights, shadows off, the light limit and the st
 
   const library = { ...emptyLibrary(), presets: [preset], selected: { 'MATCH-1': 'preset-1' } };
   assert.equal(validateLightingLibrary(library), library);
-  assert.equal(selectedPreset(library, builtInPresets(field, '/x'), 'MATCH-1').name, 'Night');
-  assert.equal(selectedPreset(library, builtInPresets(field, '/x'), 'MATCH-2').id, DEFAULT_PRESET);
+  assert.equal(selectedPreset(library, builtInPresets(field), 'MATCH-1').name, 'Night');
+  assert.equal(selectedPreset(library, builtInPresets(field), 'MATCH-2').id, DEFAULT_PRESET);
   // Presets stored before the cap existed have none and stay valid.
   const uncapped = structuredClone(preset);
   delete uncapped.environment.maxRadiance;
@@ -95,18 +96,29 @@ test('operator presets: disabled lights, shadows off, the light limit and the st
     { ...preset, environment: { ...preset.environment, maxRadiance: -5 } },
     { ...preset, id: 'builtin-unknown' },
     { ...preset, lights: preset.lights.map((light) => light.kind === 'spot' ? { ...light, inner: 50, outer: 40 } : light) },
-    { ...preset, environment: { enabled: true, path: 'relative.exr', gain: 1, rotation: 0 } },
+    { ...preset, environment: { enabled: true, path: 'sub/inside.exr', gain: 1, rotation: 0 } },
+    { ...preset, environment: { enabled: true, path: '.hidden.exr', gain: 1, rotation: 0 } },
     { ...preset, environment: { enabled: true, path: null, gain: 1, rotation: 0 } },
     { ...preset, constant: { enabled: true, intensity: 1, color: [0, 0, 0] } },
   ]) assert.throws(() => validateLightingLibrary({ ...library, presets: [broken] }));
 });
 
 test('a described scene carries the lighting and its panorama as an environment asset', () => {
-  const orlando = builtInPresets(field, '/srv/ibl').find((preset) => preset.id === ORLANDO_PRESET);
+  const orlando = builtInPresets(field).find((preset) => preset.id === ORLANDO_PRESET);
   const sha256 = 'ab'.repeat(32), id = environmentAssetId(sha256);
   const scene = describeScene({ field, slots: [], hidden: new Set(), geometry: new Map(), assets: new Map(), packagePath: '',
-    lighting: { lighting: describeLighting(orlando, id), environment: { id, path: orlando.environment.path, sha256 } } });
+    lighting: { lighting: describeLighting(orlando, id), environment: { id, path: environmentPath(orlando, '/srv/ibl'), sha256 } } });
   assert.deepEqual(scene.assets, [{ id: 'IBL-abababababababab', kind: 'environment', source: { path: '/srv/ibl/orlando_stadium_4k.exr' }, sha256 }]);
   assert.equal(scene.lighting.environment.asset_ref, id);
   assert.equal(describeScene({ field, slots: [], hidden: new Set(), geometry: new Map(), assets: new Map(), packagePath: '' }).lighting, undefined);
+});
+
+test('panoramas are named by file name in the IBL folder, so a library moves between servers', () => {
+  const [preset] = builtInPresets(field);
+  const moved = { ...preset, id: DEFAULT_PRESET, builtIn: undefined, environment: { ...preset.environment, path: '/home/other/chr/asset/ibl/stadium_01_4k.exr' } };
+  delete moved.builtIn;
+  const library = validateLightingLibrary({ ...emptyLibrary(), presets: [moved] });
+  assert.equal(library.presets[0].environment.path, 'stadium_01_4k.exr');
+  assert.equal(environmentPath(library.presets[0], '/srv/ibl'), '/srv/ibl/stadium_01_4k.exr');
+  assert.equal(environmentPath({ ...library.presets[0], environment: { ...library.presets[0].environment, enabled: false } }, '/srv/ibl'), null);
 });

@@ -1482,7 +1482,7 @@ async function renderScene() {
 /** The match's lighting preset as the description carries it; its panorama is hashed by the page server, not downloaded. */
 async function renderLighting() {
   const preset = lightingPanel.preset();
-  const path = environmentPath(preset), sha256 = path ? await serverSha256(path) : undefined;
+  const path = environmentPath(preset, iblDir), sha256 = path ? await serverSha256(path) : undefined;
   const environment = path ? { id: environmentAssetId(sha256), path, sha256 } : undefined;
   return { name: preset.name, described: { lighting: describeLighting(preset, environment?.id), environment } };
 }

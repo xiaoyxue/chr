@@ -35,7 +35,8 @@ export interface LightingPreset {
   name: string;
   lights: StudioLight[];
   /**
-   * Image-based lighting from an OpenEXR panorama on the onsite server; gain scales it, rotation
+   * Image-based lighting from an OpenEXR panorama of the onsite server's IBL folder (STUDIO_IBL_DIR),
+   * named by its file name there so a library moves between servers; gain scales it, rotation
    * turns it (degrees). `maxRadiance` clamps brighter panorama texels before gain, to drop a sun the
    * directional light already carries (#177); absent or null keeps the panorama whole.
    */
@@ -96,13 +97,12 @@ function towerRig({ length, width }: FieldDimensions): StudioLight[] {
  * The built-in presets: chr-server's default rig lit by the fly-studio panorama, and the
  * Orlando stadium panorama, its sun capped off, with a fill next to the same rig.
  */
-export function builtInPresets(field: FieldDimensions, iblDir: string): LightingPreset[] {
-  const dir = iblDir.replace(/\/+$/, '');
+export function builtInPresets(field: FieldDimensions): LightingPreset[] {
   return [
     { id: DEFAULT_PRESET, name: '默认：四角灯塔 + 太阳 + fly-studio IBL', builtIn: true, lights: towerRig(field),
-      environment: { enabled: true, path: `${dir}/${DEFAULT_EXR}`, gain: 0.5, rotation: 0 }, constant: { enabled: false, intensity: 0.1, color: [1, 1, 1] } },
+      environment: { enabled: true, path: DEFAULT_EXR, gain: 0.5, rotation: 0 }, constant: { enabled: false, intensity: 0.1, color: [1, 1, 1] } },
     { id: ORLANDO_PRESET, name: 'Orlando 球场 IBL + 灯塔 + 太阳 + 常量光', builtIn: true, lights: towerRig(field),
-      environment: { enabled: true, path: `${dir}/${ORLANDO_EXR}`, gain: 0.5, rotation: 0, maxRadiance: DEFAULT_MAX_RADIANCE },
+      environment: { enabled: true, path: ORLANDO_EXR, gain: 0.5, rotation: 0, maxRadiance: DEFAULT_MAX_RADIANCE },
       constant: { enabled: true, intensity: 0.1, color: [1, 1, 1] } },
   ];
 }
@@ -144,7 +144,7 @@ export function describeLighting(preset: LightingPreset, environment?: string): 
       inner_angle: radians(light.inner), outer_angle: radians(light.outer) };
   });
   if (lights.length > MAX_LIGHTS) throw new Error(`chr-server 最多绘制 ${MAX_LIGHTS} 盏灯，当前预设启用了 ${lights.length} 盏；请停用部分灯光。`);
-  const sky = environmentPath(preset);
+  const sky = preset.environment.enabled && preset.environment.path;
   if (sky && !environment) throw new Error('环境贴图尚未登记为渲染素材。');
   const fill = preset.constant.enabled ? scaled(preset.constant.color, preset.constant.intensity) : [0, 0, 0];
   return {
@@ -155,9 +155,19 @@ export function describeLighting(preset: LightingPreset, environment?: string): 
   };
 }
 
-/** The panorama a preset lights with, when its IBL is enabled. */
-export function environmentPath(preset: LightingPreset) {
-  return preset.environment.enabled ? preset.environment.path : null;
+/** The server path of the panorama a preset lights with, in `iblDir`, when its IBL is enabled. */
+export function environmentPath(preset: LightingPreset, iblDir: string) {
+  return preset.environment.enabled ? `${iblDir.replace(/\/+$/, '')}/${preset.environment.path}` : null;
+}
+
+/** A panorama's file name in the IBL folder: no folders, not hidden. */
+const PANORAMA = /^[^/\\.][^/\\]*\.exr$/i;
+
+/** A stored preset in the current shape: libraries before #210 named the panorama by its absolute path. */
+function upgradePreset(preset: LightingPreset): LightingPreset {
+  const path = preset?.environment?.path;
+  if (typeof path !== 'string' || !path.startsWith('/')) return preset;
+  return { ...preset, environment: { ...preset.environment, path: path.split('/').pop() } };
 }
 
 const finite = (value: unknown, min: number, max: number): value is number => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
@@ -184,7 +194,7 @@ export function validPreset(preset: LightingPreset) {
     && typeof preset.name === 'string' && preset.name.trim().length > 0 && preset.name.length <= 80
     && Array.isArray(preset.lights) && preset.lights.length <= 32 && preset.lights.every(validLight)
     && new Set(preset.lights.map((light) => light.id)).size === preset.lights.length
-    && Boolean(environment) && typeof environment.enabled === 'boolean' && (environment.path === null || (typeof environment.path === 'string' && /^\/.+\.exr$/i.test(environment.path)))
+    && Boolean(environment) && typeof environment.enabled === 'boolean' && (environment.path === null || (typeof environment.path === 'string' && PANORAMA.test(environment.path)))
     && finite(environment.gain, 0, 100) && finite(environment.rotation, -360, 360)
     && (environment.maxRadiance == null || (finite(environment.maxRadiance, 0, 1e6) && environment.maxRadiance > 0))
     && Boolean(constant) && typeof constant.enabled === 'boolean' && finite(constant.intensity, 0, 100) && rgb(constant.color)
@@ -193,6 +203,8 @@ export function validPreset(preset: LightingPreset) {
 
 /** The stored lighting document, or an error the store returns to the page. */
 export function validateLightingLibrary(data: unknown): LightingLibrary {
+  if (Array.isArray((data as LightingLibrary)?.presets) && (data as LightingLibrary).presets.some((preset) => upgradePreset(preset) !== preset))
+    data = { ...(data as LightingLibrary), presets: (data as LightingLibrary).presets.map(upgradePreset) };
   const library = data as LightingLibrary;
   if (!library || library.version !== 1 || !Array.isArray(library.presets) || library.presets.length > 100
     || !library.presets.every(validPreset) || new Set(library.presets.map((preset) => preset.id)).size !== library.presets.length
