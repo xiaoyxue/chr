@@ -628,6 +628,8 @@ fn golden_base_decal_shadow_catcher_and_flag() {
                 frequency: 1.35,
                 speed: 1.0,
                 shading: FlagShading::Pbr,
+                artwork_turns: 0,
+                revealed: 1.0,
             }),
         )
         .unwrap();

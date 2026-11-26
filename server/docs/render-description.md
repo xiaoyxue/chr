@@ -185,6 +185,8 @@ re-registers its asset.
 | `frequency` | Primary wave cycles from the pinned centre line to either free edge |
 | `speed` | Time scale; 0 freezes the wave |
 | `material` | `"simple"` or `"pbr"` |
+| `artwork_rotation` | Optional: 0, 90, 180 or 270 degrees, turning the artwork clockwise as it reads, like a 2D Fusion placement's `assetRotation`; the artwork stretches to the flag's size |
+| `reveal` | Optional: how the flag appears (#210), `{"direction": "center_horizontal", "duration_s": 2, "start": "load"}` |
 
 As in [Simulation-SimpleWave](https://github.com/xiaoyxue/Simulation-SimpleWave),
 there is no pole: the centre line stays pinned and both halves wave outwards. Make
@@ -192,6 +194,24 @@ there is no pole: the centre line stays pinned and both halves wave outwards. Ma
 the flag, their cross product, and the top-left corner. Size then stays in `flag`,
 not in the matrix. The wave's time is each frame's media time, so a still render of
 `--frame <n>` is reproducible.
+
+A **reveal** opens the flag from its vertical centre line outwards: `t` seconds
+after it starts, the part within `|2 x / width_m - 1| <= t / duration_s` is
+shown, and the whole flag after `duration_s` (above 0, at most 60). The columns
+not yet shown collapse onto the edge of the shown part, so the edge is exact, the
+artwork is never squeezed, and shadows follow it. `"load"` starts with the scene,
+at its motion's time zero. `"cue"` hides the flag until a cue starts it:
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `description.cue_reveal` | `{"instance": <flag instance ID>}` | `{"cue": n}`, the instance's cues since its scene was loaded |
+
+A cue reaches the render worker with the next frame, which starts the reveal at
+its own scene time; a repeated cue restarts it. A cue of an instance that is not
+a flag with `"start": "cue"` in the current scene is rejected with `not_found`.
+`description.load` clears the cues, so a new scene's cued flags wait again; a
+restarted render worker replays the latest cue's reveal from its start, as it
+replays motion.
 
 `source` is either `{"path": …}` or `{"package": <zip>, "entry": <name>}`, such
 as a Fusion offline package. `sha256` (lowercase hex of the source bytes) is
@@ -257,6 +277,21 @@ newer package keeps them:
   in the draft, editable as 不透明度 in the inspector once unlocked, drawn by the
   preview and sent as the instance's [`opacity`](#image-opacity), never multiplied
   by another 0.5.
+- **Fusion tifos** (package v2, #210): a v2 offline ZIP (`packageVersion` 2,
+  `schemaVersion` 2, whose `coordinates` add `z: down` and the motion spaces) may
+  carry the field's point cloud (`match.field.pointCloud`, a `point-cloud/*.ply`
+  entry checked by size and SHA-256 and stored in the studio store) and `Tifo`
+  Ads. A Tifo placement lies on the point cloud, whose coordinates are the pitch's:
+  four `corners` (top-left, top-right, bottom-right, bottom-left) that must form
+  its `width` x `height` rectangle, one PNG or JPEG, `assetRotation`
+  (0/90/180/270), `assetOpacity` 1 (chr flags are opaque; other values fail the
+  import) and `tifoReveal` (`center-horizontal`, `duration` seconds). Importing
+  the ZIP seeds each tifo the match lacks as a point-cloud **flag** `tifo-<id>`
+  of the package's cloud, which counts as confirmed: `u` along the top edge, `v`
+  down the left edge, offset -0.5 m, the flag defaults, the image from the store
+  as its material, its rotation and a reveal on load. From then on it is an
+  ordinary flag the operator edits, and importing again neither duplicates it nor
+  undoes edits.
 - **Local placements:** drawn in the studio on the pitch (2D, 3D) or on a
   point-cloud plane (2D, 3D, flags). Each lies on a rectangle with unit axes `u`
   (image right) and `v` (image down) and normal `u × v`; the preview and the
@@ -275,7 +310,11 @@ newer package keeps them:
     is -0.5 m, towards the viewer, so the wave (up to 1.53 × amplitude) clears the
     surface. The instance's rigid `model` is `[u, v, u × v, top-left + offset ·
     (u × v)]` with its own `flag` size and wave. Pitch flags of earlier versions
-    are removed when a match loads, and the page says how many.
+    are removed when a match loads, and the page says how many. The inspector
+    also sets the flag's 图片旋转 (`artwork_rotation`), 锁定宽高比 (the rectangle
+    follows the turned image's aspect), and its 展开 (`reveal`: none or 中线水平展开,
+    时长, 开始 加载时 / 手动触发); 预览展开 plays it in the page, and 触发展开 calls
+    `description.cue_reveal` for a sent flag that starts on a cue.
 
   chr-server reads local materials from their server paths (inside its
   `--asset-root`); a material chosen on the operator's computer is uploaded to
@@ -375,7 +414,8 @@ block for a startup file, for example
 `jq -s '.[0] + {scene: .[1].scene}' camera.json scene.json`.
 
 Without the page, `server/scripts/fusion_description.py` converts a Fusion offline
-ZIP the same way (Fusion placements only, all enabled, no local placements); its
+ZIP the same way (Fusion placements and the flags seeded from its tifos, all
+enabled, read from the ZIP rather than the store, no other local placements); its
 output equals the page's export for an unedited package. `--camera <json>` takes the
 `camera` of another description and writes a complete one, and `--move <placement>
 <dx> <dy>` shifts a placement in pitch metres first, for example to render a still:
@@ -420,6 +460,10 @@ The tests cover:
 - the `blend_as` opt-in;
 - an unlit quad drawn through the tracked camera on the GPU;
 - flag parameters required for flag assets and rejected for others;
+- tifo flags: artwork rotations and reveal durations checked at load, cues counted
+  per instance, rejected for flags without a cued reveal and cleared by a load;
+  reveals start with the scene or the latest cue, and both the turned artwork and
+  the reveal are drawn on the GPU with either material;
 - environment assets: OpenEXR import, used only by lighting, and a constant fill
   next to them; a constant fill shades like a uniform environment of the same
   radiance;

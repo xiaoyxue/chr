@@ -13,7 +13,7 @@
 //!
 //! The end of the worker's input stream makes it exit.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use chr_common::{rate::Rate, scene_frame as w};
 use serde::{Deserialize, Serialize};
@@ -105,9 +105,14 @@ pub enum Request {
     Render {
         id: u64,
         image: w::ImageDescription,
-        frame: w::FrameInput,
+        frame: Box<w::FrameInput>,
         scene: Box<w::SceneSnapshot>,
         time_base: w::TimeBase,
+        /// Reveal cues of the scene's flag instances so far
+        /// (`description.cue_reveal`); a changed count starts that flag's reveal at
+        /// this frame.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        cues: BTreeMap<w::Id, u32>,
     },
     Triangle {
         id: u64,

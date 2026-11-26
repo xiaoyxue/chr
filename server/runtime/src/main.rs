@@ -986,6 +986,10 @@ fn run_core(args: Args) -> Result<()> {
             )?)),
             None => None,
         };
+        let cues = loader
+            .as_ref()
+            .map(|loader| loader.cues())
+            .unwrap_or_default();
         let (commands, receiver) =
             tokio::sync::mpsc::channel(chr_runtime::pipeline::COMMAND_QUEUE_CAPACITY);
         tokio::spawn(chr_runtime::pipeline::answer_commands(receiver, mode.fps));
@@ -1013,7 +1017,7 @@ fn run_core(args: Args) -> Result<()> {
             let websocket = WebSocketListener::bind(args.ws).await?;
             log::info!("websocket listening on ws://{}", websocket.local_addr()?);
             let native = serve_native(&server, args.socket.as_deref()).await?;
-            let program = Program::new(&synthetic, control.clone())?;
+            let program = Program::new(&synthetic, control.clone())?.with_cues(cues);
             // Frames in a program delay at the highest rate the input may switch to.
             let slots = Rate::fps(chr_common::rate::MAX_FPS).frames_in(core.config().program_delay);
             let driver = Driver::new(

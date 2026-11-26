@@ -183,6 +183,29 @@ impl SceneView {
         &self.state.lighting
     }
 
+    /// This view with some flags changed, such as a reveal evaluated per frame; the
+    /// flags must be valid and their instances flag grids.
+    pub fn with_flags(
+        &self,
+        flags: impl IntoIterator<Item = (InstanceId, Flag)>,
+    ) -> Result<Self, SceneError> {
+        let mut state = State::clone(&self.state);
+        for (id, flag) in flags {
+            flag.validate()?;
+            let mut instance = state.instances.get(id.0)?.as_ref().clone();
+            instance.bounds = Instance::bounds_of(
+                state.meshes.get(instance.mesh.0)?,
+                Some(flag),
+                instance.model,
+            )?;
+            instance.flag = Some(flag);
+            state.instances.replace(id.0, instance)?;
+        }
+        Ok(Self {
+            state: Arc::new(state),
+        })
+    }
+
     /// This view with some instances moved, for animation evaluated per frame: a new
     /// view (view-keyed caches such as shadow maps see a change), bounds following the
     /// new models. Meshes and materials stay shared.

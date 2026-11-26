@@ -17,6 +17,38 @@ use super::{incompatible, motion::Motion, reject};
 
 /// An animated instance: its neutral model and its motion.
 pub(super) type Animated = (scene::InstanceId, ModelMatrix, Motion);
+
+/// A flag that appears over `duration` seconds: its instance and its fully shown
+/// flag. A cued flag waits for a cue of its scene instance `cue`; the others
+/// start with the scene.
+#[derive(Clone, Debug)]
+pub(super) struct Revealing {
+    pub id: scene::InstanceId,
+    pub flag: scene::Flag,
+    pub duration: f64,
+    pub cue: Option<w::Id>,
+}
+
+impl Revealing {
+    /// The flag `seconds` after its scene started, with the cue start times of its
+    /// scene's instances.
+    pub fn at(&self, seconds: f64, cues: &HashMap<w::Id, f64>) -> scene::Flag {
+        let start = match &self.cue {
+            None => Some(0.0),
+            Some(instance) => cues.get(instance).copied(),
+        };
+        let revealed = start.map_or(0.0, |start| {
+            ((seconds - start) / self.duration).clamp(0.0, 1.0)
+        });
+        scene::Flag {
+            revealed: revealed as f32,
+            ..self.flag
+        }
+    }
+}
+
+/// A bound scene's view with its camera and the instances that change per frame.
+pub(super) type Prepared = (SceneView, Option<Camera>, Vec<Animated>, Vec<Revealing>);
 use chr_tracker::pose::rows3;
 
 /// Immutable native binding for a declared calibration context. No calibration is inferred.
@@ -120,7 +152,7 @@ impl Registrations {
         &self,
         config: &w::Configuration,
         state: &w::SceneState,
-    ) -> Result<(SceneView, Option<Camera>, Vec<Animated>), ErrorObject> {
+    ) -> Result<Prepared, ErrorObject> {
         state.validate().map_err(incompatible)?;
         self.world(&state.world)?;
         if state.configuration_id != config.configuration_id {
@@ -143,6 +175,7 @@ impl Registrations {
         let mut scene = Scene::new().map_err(incompatible)?;
         let mut meshes = HashMap::new();
         let mut animated = Vec::new();
+        let mut revealing = Vec::new();
         for instance in &state.instances {
             let asset = self.models.get(&instance.asset_ref).ok_or_else(|| {
                 reject(w::RejectionKind::NotFound, "model asset is not registered")
@@ -195,9 +228,37 @@ impl Registrations {
                 .set_visible(id, instance.visible)
                 .map_err(incompatible)?;
             if let Some(flag) = &instance.flag {
-                scene
-                    .set_flag(id, Some(native_flag(flag)?))
-                    .map_err(incompatible)?;
+                let named = |e: ErrorObject| {
+                    incompatible(format!(
+                        "instance {}: {}",
+                        instance.instance_id.as_str(),
+                        e.message
+                    ))
+                };
+                let native = native_flag(flag).map_err(named)?;
+                let shown = match &flag.reveal {
+                    None => native,
+                    Some(reveal) => {
+                        let duration = reveal.duration_s.get();
+                        if !(duration > 0.0 && duration <= 60.0) {
+                            return Err(named(incompatible(
+                                "reveal duration_s must be above 0 and at most 60",
+                            )));
+                        }
+                        revealing.push(Revealing {
+                            id,
+                            flag: native,
+                            duration,
+                            cue: (reveal.start == w::RevealStart::Cue)
+                                .then(|| instance.instance_id.clone()),
+                        });
+                        scene::Flag {
+                            revealed: 0.0,
+                            ..native
+                        }
+                    }
+                };
+                scene.set_flag(id, Some(shown)).map_err(incompatible)?;
             }
             if let Some(motion) = &instance.motion {
                 let motion = Motion::new(motion).map_err(|e| {
@@ -266,7 +327,7 @@ impl Registrations {
         }
         scene.set_lighting(lighting).map_err(incompatible)?;
         shadow_budget(config, state)?;
-        Ok((scene.snapshot(), camera, animated))
+        Ok((scene.snapshot(), camera, animated, revealing))
     }
 
     pub(super) fn frame_camera(
@@ -511,6 +572,18 @@ fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
             w::FlagMaterial::Simple => scene::FlagShading::Simple,
             w::FlagMaterial::Pbr => scene::FlagShading::Pbr,
         },
+        artwork_turns: match flag.artwork_rotation.unwrap_or(0) {
+            0 => 0,
+            90 => 1,
+            180 => 2,
+            270 => 3,
+            _ => {
+                return Err(incompatible(
+                    "flag artwork_rotation must be 0, 90, 180 or 270",
+                ));
+            }
+        },
+        revealed: 1.0,
     })
 }
 fn v3(v: w::Vec3) -> Result<[f32; 3], ErrorObject> {
@@ -712,4 +785,52 @@ fn shadow_budget(config: &w::Configuration, state: &w::SceneState) -> Result<(),
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reveals_start_with_the_scene_or_with_their_latest_cue() {
+        let flag = scene::Flag {
+            width: 4.0,
+            height: 2.0,
+            amplitude: 0.3,
+            frequency: 1.35,
+            speed: 1.0,
+            shading: scene::FlagShading::Simple,
+            artwork_turns: 1,
+            revealed: 1.0,
+        };
+        let id = |name: &str| serde_json::from_value::<w::Id>(serde_json::json!(name)).unwrap();
+        let mut scene = Scene::new().unwrap();
+        let grid = scene.add_mesh(scene::MeshData::flag_grid()).unwrap();
+        let material = scene.add_material(scene::PbrMaterial::default()).unwrap();
+        let instance = scene
+            .add_instance(grid, vec![material], ModelMatrix::IDENTITY)
+            .unwrap();
+        let revealing = |cue: Option<w::Id>| Revealing {
+            id: instance,
+            flag,
+            duration: 2.0,
+            cue,
+        };
+        let revealed =
+            |r: &Revealing, seconds, cues: &HashMap<w::Id, f64>| r.at(seconds, cues).revealed;
+        let none = HashMap::new();
+        let loaded = revealing(None);
+        assert_eq!(
+            [0.0, 0.5, 2.0, 9.0].map(|t| revealed(&loaded, t, &none)),
+            [0.0, 0.25, 1.0, 1.0]
+        );
+        let cued = revealing(Some(id("tifo")));
+        assert_eq!(revealed(&cued, 9.0, &none), 0.0, "hidden until cued");
+        let cues = HashMap::from([(id("tifo"), 3.0), (id("other"), 0.0)]);
+        assert_eq!(
+            [2.0, 4.0, 5.0].map(|t| revealed(&cued, t, &cues)),
+            [0.0, 0.5, 1.0]
+        );
+        assert_eq!(cued.at(4.0, &cues).artwork_turns, 1);
+    }
 }

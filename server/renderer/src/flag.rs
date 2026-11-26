@@ -11,8 +11,10 @@ use crate::{
     scene::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag},
 };
 
-/// Bytes of one surface vertex: position, normal and tangent as `vec4<f32>`.
-const VERTEX_BYTES: u64 = 48;
+/// Bytes of one surface vertex: position, normal, tangent and artwork UV as `vec4<f32>`.
+const VERTEX_BYTES: u64 = 64;
+/// Floats of one flag's compute parameters ([`params`]).
+pub(crate) const PARAMS: usize = 12;
 const WORKGROUP: u32 = 64;
 
 /// WGSL constants shared by the compute and draw shaders.
@@ -20,9 +22,10 @@ pub(crate) fn prelude() -> String {
     format!("const FLAG_COLUMNS: u32 = {FLAG_COLUMNS}u;\nconst FLAG_ROWS: u32 = {FLAG_ROWS}u;\n")
 }
 
-/// Compute parameters of one flag: size and wave, then its phases at the frame time.
-/// A flat flag keeps fixed phases, so its unchanged surface keeps cached shadows.
-pub(crate) fn params(flag: Flag, seconds: f64) -> [f32; 8] {
+/// Compute parameters of one flag: size and wave, its phases at the frame time, then
+/// its revealed fraction and artwork turns. A flat flag keeps fixed phases, so its
+/// unchanged surface keeps cached shadows.
+pub(crate) fn params(flag: Flag, seconds: f64) -> [f32; PARAMS] {
     let seconds = if flag.amplitude == 0.0 { 0.0 } else { seconds };
     let [a, b, c] = flag.phases(seconds).map(|phase| phase as f32);
     [
@@ -33,6 +36,10 @@ pub(crate) fn params(flag: Flag, seconds: f64) -> [f32; 8] {
         a,
         b,
         c,
+        0.0,
+        flag.revealed,
+        f32::from(flag.artwork_turns),
+        0.0,
         0.0,
     ]
 }
@@ -51,7 +58,7 @@ pub(crate) struct FlagGpu {
     slots: Vec<Slot>,
     /// Draw groups of this frame's flags, in draw order.
     draws: Vec<wgpu::BindGroup>,
-    last: Vec<[f32; 8]>,
+    last: Vec<[f32; PARAMS]>,
 }
 
 impl FlagGpu {
@@ -72,7 +79,7 @@ impl FlagGpu {
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: NonZeroU64::new(32),
+                min_binding_size: NonZeroU64::new(4 * PARAMS as u64),
             },
             count: None,
         };
@@ -123,7 +130,7 @@ impl FlagGpu {
     pub(crate) fn prepare(
         &mut self,
         gpu: &Gpu,
-        flags: &[[f32; 8]],
+        flags: &[[f32; PARAMS]],
         objects: &wgpu::Buffer,
         instances: &wgpu::Buffer,
     ) -> bool {
@@ -132,7 +139,7 @@ impl FlagGpu {
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("flag parameters"),
-                    contents: &[0; 32],
+                    contents: &[0; 4 * PARAMS],
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
             let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -239,6 +246,8 @@ mod tests {
             frequency: 3.0,
             speed: 2.5,
             shading: FlagShading::Simple,
+            artwork_turns: 1,
+            revealed: 0.6,
         };
         // A day of media time: phases are reduced on the CPU before reaching f32.
         let seconds = 86_400.25;
@@ -273,13 +282,18 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         let data = readback.slice(..).get_mapped_range().unwrap();
-        let vertices: &[[f32; 12]] = bytemuck::cast_slice(&data);
+        let vertices: &[[f32; 16]] = bytemuck::cast_slice(&data);
         let phases = flag.phases(seconds);
         let columns = FLAG_COLUMNS + 1;
         for (index, vertex) in (0..).zip(vertices) {
-            let u = f64::from(index % columns) / f64::from(FLAG_COLUMNS);
+            let u = flag.revealed_u(f64::from(index % columns) / f64::from(FLAG_COLUMNS));
             let v = f64::from(index / columns) / f64::from(FLAG_ROWS);
             let (position, normal) = flag.sample(u, v, phases);
+            let uv = flag.artwork_uv(u, v);
+            for axis in 0..2 {
+                let error = (f64::from(vertex[12 + axis]) - uv[axis]).abs();
+                assert!(error < 1e-6, "vertex {index} uv {axis} is {error} off");
+            }
             for axis in 0..3 {
                 let error = (f64::from(vertex[axis]) - position[axis]).abs();
                 assert!(error < 1e-4, "vertex {index} axis {axis} is {error} m off");

@@ -2,11 +2,16 @@
 //! model, media-time animation, shadows that follow the surface, and the simple and
 //! PBR looks. World metres, ground Z=0, upwards -Z.
 
+use std::sync::Arc;
+
 use chr_renderer::{
     Gpu, MeshRenderer, OffscreenTarget, PbrSettings, ShadowMode, ShadowSettings,
     camera::Camera,
     coordinates::ImageExtent,
-    scene::{Flag, FlagShading, Light, Lighting, MeshData, ModelMatrix, PbrMaterial, Scene},
+    scene::{
+        Filter, Flag, FlagShading, Light, Lighting, MaterialMaps, MeshData, ModelMatrix,
+        PbrMaterial, Scene, TextureData, TextureSampler, Wrap,
+    },
 };
 
 const SIZE: u32 = 160;
@@ -25,12 +30,19 @@ fn flag(amplitude: f32, shading: FlagShading) -> Flag {
         frequency: 1.35,
         speed: 1.0,
         shading,
+        artwork_turns: 0,
+        revealed: 1.0,
     }
 }
 
 /// A red flag hanging upright in the XZ plane, its top edge 4 m up, facing -Y,
 /// above a shadow-catcher ground, optionally lit by a sun from -Y.
 fn scene(flag: Flag, lit: bool) -> Scene {
+    scene_with(flag, lit, [0.8, 0.05, 0.05, 1.0], MaterialMaps::default())
+}
+
+/// [`scene`] with the flag's base colour and maps.
+fn scene_with(flag: Flag, lit: bool, base_color: [f32; 4], maps: MaterialMaps) -> Scene {
     let mut scene = Scene::new().unwrap();
     let ground = scene
         .add_mesh(
@@ -59,11 +71,14 @@ fn scene(flag: Flag, lit: bool) -> Scene {
         .unwrap();
     let grid = scene.add_mesh(MeshData::flag_grid()).unwrap();
     let red = scene
-        .add_material(PbrMaterial {
-            base_color: [0.8, 0.05, 0.05, 1.0],
-            roughness: 0.8,
-            ..Default::default()
-        })
+        .add_material_with_maps(
+            PbrMaterial {
+                base_color,
+                roughness: 0.8,
+                ..Default::default()
+            },
+            maps,
+        )
         .unwrap();
     // Columns: local X along world X, local Y (down the flag) along world +Z, and
     // their cross product along world -Y; the origin is the top-left corner.
@@ -224,4 +239,101 @@ fn the_simple_look_ignores_scene_lights_and_pbr_follows_them() {
         r.abs_diff(231) <= 2 && g.abs_diff(63) <= 2 && b.abs_diff(63) <= 2,
         "unlit view shows the base colour: {r} {g} {b}"
     );
+}
+
+/// Artwork of 2 x 2 texels: red, green on top, blue, white below.
+fn quadrants() -> MaterialMaps {
+    let pixels = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255; 4],
+    ];
+    let texture = TextureData::new(ImageExtent::new(2, 2).unwrap(), pixels.concat())
+        .unwrap()
+        .with_sampler(TextureSampler {
+            wrap_u: Wrap::Clamp,
+            wrap_v: Wrap::Clamp,
+            mag: Filter::Nearest,
+            min: Filter::Nearest,
+            mip: None,
+        });
+    MaterialMaps {
+        base_color: Some(Arc::new(texture)),
+        ..Default::default()
+    }
+}
+
+/// The quadrant colour a pixel shows: 0 red, 1 green, 2 blue, 3 white.
+fn quadrant([r, g, b]: [u8; 3]) -> usize {
+    let channels = [r, g, b];
+    if channels.iter().all(|&c| c > 40)
+        && channels.iter().max().unwrap() - channels.iter().min().unwrap() < 40
+    {
+        return 3;
+    }
+    (0..3).max_by_key(|&i| channels[i]).unwrap()
+}
+
+/// The world point of flag coordinates `(u, v)` of a flat 3.2 x 2 m flag in [`scene`].
+fn on_flag(u: f64, v: f64) -> [f64; 3] {
+    [3.2 * u - 1.6, 0.0, 2.0 * v - 4.0]
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn artwork_turns_and_reveals_follow_the_flag_with_either_material() {
+    let gpu = gpu();
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    for (shading, lit) in [(FlagShading::Simple, false), (FlagShading::Pbr, true)] {
+        for turns in 0..4 {
+            let flat = Flag {
+                artwork_turns: turns,
+                ..flag(0.0, shading)
+            };
+            let pixels = render(
+                &gpu,
+                &mut renderer,
+                &scene_with(flat, lit, [1.0; 4], quadrants()),
+                0.0,
+            );
+            for (u, v) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                let [s, t] = flat.artwork_uv(u, v);
+                let expected = 2 * usize::from(t > 0.5) + usize::from(s > 0.5);
+                let colour = at(&pixels, on_flag(u, v));
+                assert_eq!(
+                    quadrant(colour),
+                    expected,
+                    "{shading:?}, {turns} turns, at ({u}, {v}): {colour:?}"
+                );
+            }
+        }
+        let mut shown = |revealed| {
+            let flag = Flag {
+                revealed,
+                ..flag(0.0, shading)
+            };
+            render(
+                &gpu,
+                &mut renderer,
+                &scene_with(flag, lit, [1.0; 4], quadrants()),
+                0.0,
+            )
+        };
+        let (hidden, half) = (shown(0.0), shown(0.5));
+        for u in [0.05, 0.2, 0.8, 0.95] {
+            assert_eq!(
+                at(&half, on_flag(u, 0.5)),
+                at(&hidden, on_flag(u, 0.5)),
+                "{shading:?}: u {u} is not revealed yet"
+            );
+        }
+        for u in [0.3, 0.45, 0.55, 0.7] {
+            assert_ne!(
+                at(&half, on_flag(u, 0.5)),
+                at(&hidden, on_flag(u, 0.5)),
+                "{shading:?}: u {u} is revealed"
+            );
+        }
+    }
 }

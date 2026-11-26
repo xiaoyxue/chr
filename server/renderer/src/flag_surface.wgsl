@@ -2,13 +2,8 @@
 // surface (flag.wgsl) to the object uniform and instances; the fragment stages are mesh.wgsl's,
 // except the simple look below.
 
-struct FlagVertex { position: vec4<f32>, normal: vec4<f32>, tangent: vec4<f32> };
+struct FlagVertex { position: vec4<f32>, normal: vec4<f32>, tangent: vec4<f32>, uv: vec4<f32> };
 @group(1) @binding(1) var<storage,read> flag_vertices: array<FlagVertex>;
-
-fn flag_uv(index:u32)->vec2<f32> {
-    let columns=FLAG_COLUMNS+1u;
-    return vec2(f32(index%columns)/f32(FLAG_COLUMNS),f32(index/columns)/f32(FLAG_ROWS));
-}
 
 @vertex
 fn vs_flag(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u32)->Surface {
@@ -19,7 +14,7 @@ fn vs_flag(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u3
     out.clip=camera.clip_from_world*world;
     out.position=world.xyz;
     out.normal=instances[instance].normal*flag.normal.xyz;
-    out.uv=flag_uv(index);
+    out.uv=flag.uv.xy;
     out.tangent=vec4((model*vec4(flag.tangent.xyz,0.0)).xyz,
         flag.tangent.w*select(1.0,-1.0,object.flags.w!=0u));
     out.color=vec4(1.0);
@@ -29,9 +24,10 @@ fn vs_flag(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u3
 @vertex
 fn vs_flag_shadow(@builtin(vertex_index) index:u32,@builtin(instance_index) instance:u32)->ShadowSurface {
     var out:ShadowSurface;
-    let world=instances[instance].model*vec4(flag_vertices[index].position.xyz,1.0);
+    let flag=flag_vertices[index];
+    let world=instances[instance].model*vec4(flag.position.xyz,1.0);
     out.clip=camera.clip_from_world*world;
-    out.uv=flag_uv(index);
+    out.uv=flag.uv.xy;
     out.alpha=1.0;
     out.position=world.xyz;
     return out;

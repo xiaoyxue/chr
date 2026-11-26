@@ -21,6 +21,23 @@ pub const PROFILE: &str = "chr-render-description-v1";
 /// Result: [`Loaded`]. The lens and native extent stay as started.
 pub const LOAD: &str = "description.load";
 
+/// Starts the reveal of a flag instance whose `reveal.start` is `cue`, at the next
+/// rendered frame; a repeated cue restarts it. A new scene clears the cues.
+/// Params: [`CueRevealParams`]. Result: [`CueRevealed`].
+pub const CUE_REVEAL: &str = "description.cue_reveal";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CueRevealParams {
+    pub instance: Id,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CueRevealed {
+    /// Cues of this instance since its scene was loaded, this one included.
+    pub cue: u32,
+}
+
 /// A complete startup description: the lens is fixed for the server's lifetime.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,7 +258,27 @@ mod tests {
         let flag = json!({"width_m": 1, "height_m": 1, "amplitude_m": 0, "frequency": 1,
                           "speed": 1, "material": "simple"});
         assert!(serde_json::from_value::<Flag>(flag.clone()).is_ok());
-        for (key, value) in [("pole", json!(true)), ("material", json!("cloth"))] {
+        let mut tifo = flag.clone();
+        tifo["artwork_rotation"] = json!(90);
+        tifo["reveal"] = json!({"direction": "center_horizontal", "duration_s": 2, "start": "cue"});
+        let tifo: Flag = serde_json::from_value(tifo).unwrap();
+        assert_eq!(tifo.artwork_rotation, Some(90));
+        assert_eq!(
+            tifo.reveal.unwrap().start,
+            crate::scene_frame::RevealStart::Cue
+        );
+        for (key, value) in [
+            ("pole", json!(true)),
+            ("material", json!("cloth")),
+            (
+                "reveal",
+                json!({"direction": "center-horizontal", "duration_s": 2, "start": "load"}),
+            ),
+            (
+                "reveal",
+                json!({"direction": "center_horizontal", "duration_s": 2}),
+            ),
+        ] {
             let mut bad = flag.clone();
             bad[key] = value;
             assert!(serde_json::from_value::<Flag>(bad).is_err(), "{key}");
