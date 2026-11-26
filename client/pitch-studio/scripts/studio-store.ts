@@ -77,11 +77,28 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
     }
   };
 
+  /**
+   * Stored files are named by their content, so a path to one in another data directory, such as a
+   * store copied from another server, names this directory's file of the same name when it has one.
+   */
+  const rebased = async (value: unknown): Promise<unknown> => {
+    if (Array.isArray(value)) return Promise.all(value.map(rebased));
+    if (value && typeof value === 'object')
+      return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await rebased(item)])));
+    const stored = typeof value === 'string' ? /^\/.+\/files\/([0-9a-f]{64}\.[a-z0-9]+)$/.exec(value) : null;
+    if (!stored) return value;
+    const own = join(await ready, 'files', stored[1]);
+    return own !== value && await stat(own).then((info) => info.isFile(), () => false) ? own : value;
+  };
+
   const document = async (req: IncomingMessage, name: string) => {
     const validate = documentValidator(name);
     if (!validate) throw new Failure(404, `没有这个存储文档：${name}`);
     const file = join(await ready, `${name}.json`);
-    if (req.method === 'GET') return readDocument(file);
+    if (req.method === 'GET') {
+      const { revision, data } = await readDocument(file);
+      return { revision, data: await rebased(data) };
+    }
     if (req.method !== 'PUT') throw new Failure(405, 'Only GET and PUT are supported.');
     let body: { revision?: unknown; data?: unknown };
     try { body = JSON.parse(await readBody(req, MAX_DOCUMENT_BYTES)) as typeof body; }

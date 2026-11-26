@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { request as httpRequest, createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -155,6 +155,19 @@ test("migration moves only the browser's matches the server does not have", () =
 test('deleting a match removes its documents', async () => {
   assert.equal((await store.call('matches/M1', { method: 'DELETE' })).status, 200);
   assert.deepEqual((await store.call('docs/matches/M1/local-ads')).body, { revision: 0, data: null });
+});
+
+test('paths to stored files of a store copied from another server name this store\'s files', async () => {
+  const bytes = Buffer.from('a stored material'), sha = createHash('sha256').update(bytes).digest('hex');
+  const uploaded = await store.call('files?name=logo.png', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: bytes });
+  assert.equal(uploaded.status, 200);
+  const elsewhere = `/home/other/studio/files/${sha}.png`, missing = `/home/other/studio/files/${'0'.repeat(64)}.png`;
+  await mkdir(join(dataDir, 'matches', 'M8'), { recursive: true });
+  await writeFile(join(dataDir, 'matches', 'M8', 'local-ads.json'),
+    JSON.stringify({ revision: 3, data: [{ ...ad, materialPath: elsewhere }, { ...ad, id: 'b', materialPath: missing }] }));
+  const { body } = await store.call('docs/matches/M8/local-ads');
+  assert.equal(body.revision, 3);
+  assert.deepEqual(body.data.map((item) => item.materialPath), [join(dataDir, 'files', `${sha}.png`), missing]);
 });
 
 test('tifo flags seeded after a match was removed and imported again are merged into the new document', async () => {
