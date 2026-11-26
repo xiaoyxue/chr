@@ -57,6 +57,7 @@ class ConfigTests(unittest.TestCase):
                              ("program_delay_ms = 4", "program_delay_ms must be"),
                              ('input_loss = "freeze"', "input_loss must be"),
                              ('output_rate = "50"', "output_rate must be"),
+                             ('nixgl = "nixGLNvidia"', "nixgl must be"),
                              ('audio = "no"', "audio must be")):
             with self.assertRaisesRegex(SystemExit, message):
                 self.load(f'scene = "a"\nvideo = "b"\n{bad}\n')
@@ -88,6 +89,10 @@ class ComponentTests(unittest.TestCase):
             self.assertEqual(lit_components["pitch-studio"].env["STUDIO_IBL_DIR"], ibl)
         self.assertNotIn("--description", render)
         self.assertIn("--tracking-worker", render, "the tracking worker is the default")
+        wrapped = stack.Config(scene="s.json", video="v.mp4", nixgl="/opt/nixgl/bin/nixGLNvidia-580.178.04")
+        render = next(c for c in stack.components(wrapped) if c.name == "render").command
+        self.assertEqual(render[render.index("--command") + 1], "/opt/nixgl/bin/nixGLNvidia-580.178.04")
+        self.assertNotIn("github:nix-community/nixGL#nixGLNvidia", render)
         external = stack.Config(scene="s.json", video="v.mp4", tracking="external")
         render = next(c for c in stack.components(external) if c.name == "render").command
         self.assertNotIn("--tracking-worker", render)

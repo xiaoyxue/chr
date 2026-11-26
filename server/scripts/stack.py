@@ -54,7 +54,9 @@ class Config:
     asset_root: str | None = None
     size: str = "1280x720"
     dir: str = field(default_factory=lambda: f"{os.environ.get('XDG_RUNTIME_DIR', '/tmp')}/chr-stack")
-    nixgl: bool = True
+    # Wrap GPU processes with nixGLNvidia: true fetches it and detects the driver; a path names
+    # a nixGL wrapper built for this host's driver, for hosts where that detection fails.
+    nixgl: bool | str = True
     srt: str = "127.0.0.1:9001"
     server_ws: str = "127.0.0.1:8787"
     monitor_ws: str = "127.0.0.1:8789"
@@ -163,6 +165,9 @@ def load_config(path: Path) -> Config:
     rate = values.get("output_rate")
     if rate is not None and rate != "follow" and not str(rate).startswith("fixed:"):
         raise SystemExit(f"{path}: output_rate must be \"follow\" or \"fixed:<rate>\"")
+    nixgl = values.get("nixgl", True)
+    if not isinstance(nixgl, bool) and not (isinstance(nixgl, str) and nixgl.startswith("/")):
+        raise SystemExit(f"{path}: nixgl must be true, false or the absolute path of a nixGL wrapper")
     if not isinstance(values.get("audio", True), bool):
         raise SystemExit(f"{path}: audio must be true or false")
     return Config(**values)
@@ -228,7 +233,7 @@ def components(config: Config) -> list[Component]:
         render += ["--no-audio"]
     render += lens_args(config)
     if config.nixgl:
-        render = NIXGL + render
+        render = ([config.nixgl] if isinstance(config.nixgl, str) else NIXGL) + render
     stack = [
         Component("render", ["nix", "develop", ".#media", "--command", *render], {},
                   [("chr-server", *endpoint(config.server_ws)), ("chr-monitor", *endpoint(config.monitor_ws))]),
