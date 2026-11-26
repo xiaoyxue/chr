@@ -100,10 +100,13 @@ test('rejects externally linked GLB resources even with valid checksums', async 
   data.manifest.sha256[path] = createHash('sha256').update(bytes).digest('hex');
   await assert.rejects(() => parseOfflinePackage(archive(data)), /external files/);
 });
-test('rejects oversized compressed images before inflation', async () => {
+test('images over 4 MB, such as a full-size tifo, are read like any material', async () => {
   const data = fixture();
-  data.files['assets/ASSET-image.png'] = new Uint8Array(4 * 1024 * 1024 + 1);
-  await assert.rejects(() => parseOfflinePackage(archive(data)), /size limits/);
+  const bytes = new Uint8Array(4 * 1024 * 1024 + 1);
+  data.files['assets/ASSET-image.png'] = bytes;
+  data.manifest.match.assets.find((asset) => asset.id === 'ASSET-image').byteLength = bytes.length;
+  data.manifest.sha256['assets/ASSET-image.png'] = createHash('sha256').update(bytes).digest('hex');
+  await assert.rejects(() => parseOfflinePackage(archive(data)), /Invalid PNG material/);
 });
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');

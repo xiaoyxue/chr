@@ -79,7 +79,7 @@ export async function readOfflinePackage(bytes: Uint8Array): Promise<{ source: R
         throw new Error('The offline ZIP contains duplicate or unexpected files.');
       names.add(entry.name);
       const maximum = entry.name === 'manifest.json' ? MAX_MANIFEST_BYTES : entry.name.endsWith('.ply') ? MAX_PLY_BYTES
-        : entry.name.endsWith('.glb') ? MAX_MATERIAL_BYTES : 4 * 1024 * 1024;
+        : MAX_MATERIAL_BYTES;
       if (!Number.isSafeInteger(entry.originalSize) || entry.originalSize <= 0 || entry.originalSize > maximum
         || (total += entry.originalSize) > MAX_MATERIAL_BYTES + MAX_PLY_BYTES + MAX_MANIFEST_BYTES)
         throw new Error('The offline package exceeds its material size limits.');
