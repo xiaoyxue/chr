@@ -22,7 +22,11 @@ export const TIFO_FLAG: FlagSettings = { amplitude: 1.1, frequency: 1.35, speed:
 export const TIFO_CLEARANCE = Math.max(FLAG_CLEARANCE, FLAG_PEAK * TIFO_FLAG.amplitude);
 
 /** A native flag's wind and fabric as the reference simulation (xiaoyxue/Simulation) starts them. */
-export const NATIVE_FLAG: Required<NativeFlagSettings> = { wind: 7, direction: 25, autoDirection: true, tension: 65, slack: 10 };
+/** A native flag's settings with the reference's for those it lacks; it is raised only when it says so. */
+export type NativeSettings = Required<Omit<NativeFlagSettings, 'raise'>> & Pick<NativeFlagSettings, 'raise'>;
+export const NATIVE_FLAG: NativeSettings = { wind: 7, direction: 25, autoDirection: true, tension: 65, slack: 10 };
+/** The duration a raise starts with in the editor: the reference simulation's lift. */
+export const RAISE_DURATION = 6;
 /**
  * Wind in m/s, base direction in whole degrees, tension in percent: the reference
  * simulation's controls; and slack in percent, the part of the cloth's length its
@@ -32,7 +36,7 @@ export const NATIVE_LIMITS = { wind: [0, 18], direction: [-180, 180], tension: [
 /** Rows of a native flag's cloth, whose segments make its rest arc. */
 const NATIVE_ROWS = 41;
 /** A flag's native settings, with the reference's for those it has none of. */
-export const nativeSettings = (flag: FlagSettings): Required<NativeFlagSettings> => ({ ...NATIVE_FLAG, ...flag.native });
+export const nativeSettings = (flag: FlagSettings): NativeSettings => ({ ...NATIVE_FLAG, ...flag.native });
 /** How far a native flag's cloth reaches off its plane at rest: its arc's depth, in metres. */
 export function nativeBulge(height: number, slack: number) {
   const rest = nativeRest(1, height, slack);
@@ -143,6 +147,8 @@ export interface FlagDraft {
   type: FlagType;
   amplitude: string; frequency: string; speed: string;
   wind: string; direction: string; autoDirection: boolean; tension: string; slack: string;
+  /** Whether a native flag is raised, over how many seconds and from when. */
+  raise: boolean; raiseDuration: string; raiseStart: 'load' | 'cue';
   material: FlagSettings['material'];
 }
 export type FlagType = NonNullable<FlagSettings['type']>;
@@ -153,7 +159,8 @@ export const flagDraft = (flag: FlagSettings): FlagDraft => {
   const { amplitude, frequency, speed, material } = flag, native = nativeSettings(flag);
   return { type: flag.type ?? 'default', amplitude: String(amplitude), frequency: String(frequency), speed: String(speed),
     wind: String(native.wind), direction: String(native.direction), autoDirection: native.autoDirection, tension: String(native.tension),
-    slack: String(native.slack), material };
+    slack: String(native.slack), raise: Boolean(native.raise), raiseDuration: String(native.raise?.duration ?? RAISE_DURATION),
+    raiseStart: native.raise?.start ?? 'load', material };
 };
 
 /** Whether the typed fields of the draft's type differ from the saved flag; a cleared field counts as a change. */
@@ -161,7 +168,10 @@ export function flagDraftChanged(draft: FlagDraft, flag: FlagSettings) {
   if (draft.type !== (flag.type ?? 'default') || draft.material !== flag.material) return true;
   if (draft.type === 'default') return WAVE_FIELDS.some(([key]) => draft[key].trim() === '' || Number(draft[key]) !== flag[key]);
   const native = nativeSettings(flag);
-  return draft.autoDirection !== native.autoDirection || NATIVE_FIELDS.some(([key]) => draft[key].trim() === '' || Number(draft[key]) !== native[key]);
+  const raise = draft.raise !== Boolean(native.raise) || (draft.raise
+    && (draft.raiseStart !== native.raise.start || draft.raiseDuration.trim() === '' || Number(draft.raiseDuration) !== native.raise.duration));
+  return raise || draft.autoDirection !== native.autoDirection
+    || NATIVE_FIELDS.some(([key]) => draft[key].trim() === '' || Number(draft[key]) !== native[key]);
 }
 
 /**
@@ -171,12 +181,17 @@ export function flagDraftChanged(draft: FlagDraft, flag: FlagSettings) {
 export function parseFlagDraft(draft: FlagDraft): { wave: Partial<FlagSettings> } | { error: string } {
   const number = (text: string) => text.trim() === '' ? Number.NaN : Number(text);
   if (draft.type === 'native') {
-    const native = { wind: 0, direction: 0, autoDirection: draft.autoDirection, tension: 0, slack: 0 };
+    const native: NativeFlagSettings = { wind: 0, direction: 0, autoDirection: draft.autoDirection, tension: 0, slack: 0 };
     for (const [key, label] of NATIVE_FIELDS) {
       const value = number(draft[key]), [min, max] = NATIVE_LIMITS[key];
       if (!(value >= min && value <= max) || (key === 'direction' && !Number.isInteger(value)))
         return { error: `${label}应介于 ${min} – ${max}${key === 'direction' ? ' 之间的整数度' : ''}。` };
       native[key] = value;
+    }
+    if (draft.raise) {
+      const duration = number(draft.raiseDuration);
+      if (!(duration > 0)) return { error: '升起时长应大于 0 秒。' };
+      native.raise = { duration, start: draft.raiseStart };
     }
     return { wave: { type: 'native', native, material: draft.material } };
   }

@@ -19,12 +19,14 @@ use super::{incompatible, motion::Motion, reject};
 pub(super) type Animated = (scene::InstanceId, ModelMatrix, Motion);
 
 /// A flag that changes with its scene's time, from `flag` fully shown: one that
-/// appears over a reveal, or a native flag, whose cloth runs on the scene's clock.
+/// appears over a reveal, or a native flag, whose cloth runs on the scene's clock, or
+/// from the latest cue of `raise_cue` for a raise that waits for one.
 #[derive(Clone, Debug)]
 pub(super) struct TimedFlag {
     pub id: scene::InstanceId,
     pub flag: scene::Flag,
     pub reveal: Option<Reveal>,
+    pub raise_cue: Option<w::Id>,
 }
 
 /// A reveal over `duration` seconds. A cued reveal waits for a cue of its scene
@@ -50,6 +52,13 @@ impl TimedFlag {
         });
         let motion = match self.flag.motion {
             scene::FlagMotion::Cloth(cloth) => {
+                // Folded until the cue; a later cue's clock starts over, so it folds again.
+                let seconds = match &self.raise_cue {
+                    None => seconds,
+                    Some(instance) => cues
+                        .get(instance)
+                        .map_or(0.0, |start| (seconds - start).max(0.0)),
+                };
                 scene::FlagMotion::Cloth(scene::Cloth { seconds, ..cloth })
             }
             wave => wave,
@@ -271,10 +280,17 @@ impl Registrations {
                         })
                     }
                 };
+                let raise_cue = match &flag.motion {
+                    w::FlagMotion::Native(w::FlagCloth {
+                        raise: Some(raise), ..
+                    }) if raise.start == w::RevealStart::Cue => Some(instance.instance_id.clone()),
+                    _ => None,
+                };
                 let flag = TimedFlag {
                     id,
                     flag: scene_flag(flag).map_err(named)?,
                     reveal,
+                    raise_cue,
                 };
                 let shown = flag.at(0.0, &HashMap::new());
                 if flag.reveal.is_some() || matches!(flag.flag.motion, scene::FlagMotion::Cloth(_))
@@ -600,6 +616,13 @@ fn scene_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
                 auto_direction: cloth.auto_direction,
                 tension: f(cloth.tension)?,
                 slack: f(cloth.slack)?,
+                raise: cloth
+                    .raise
+                    .map(|raise| match raise.duration_s.get() {
+                        duration if duration > 0.0 => f(raise.duration_s),
+                        _ => Err(incompatible("raise duration_s must be above 0")),
+                    })
+                    .transpose()?,
                 seconds: 0.0,
             }),
         },
@@ -876,6 +899,7 @@ mod tests {
             id: instance,
             flag,
             reveal: Some(Reveal { duration: 2.0, cue }),
+            raise_cue: None,
         };
         let revealed =
             |r: &TimedFlag, seconds, cues: &HashMap<w::Id, f64>| r.at(seconds, cues).revealed;
@@ -910,6 +934,7 @@ mod tests {
             auto_direction: true,
             tension: 0.65,
             slack: 0.1,
+            raise: None,
             seconds: 0.0,
         };
         let native = TimedFlag {
@@ -919,6 +944,7 @@ mod tests {
                 ..flag
             },
             reveal: None,
+            raise_cue: None,
         };
         let at = native.at(7.5, &none);
         assert_eq!(at.revealed, 1.0);
@@ -929,5 +955,19 @@ mod tests {
                 ..cloth
             })
         );
+
+        // A raise that waits for a cue keeps its cloth's clock at zero, folded, until
+        // the cue, and runs it from the latest cue.
+        let cued = TimedFlag {
+            raise_cue: Some(id("jensen")),
+            ..native
+        };
+        let clock = |seconds, cues: &HashMap<w::Id, f64>| match cued.at(seconds, cues).motion {
+            scene::FlagMotion::Cloth(cloth) => cloth.seconds,
+            scene::FlagMotion::Wave(_) => unreachable!("a native flag"),
+        };
+        assert_eq!(clock(9.0, &none), 0.0);
+        let cues = HashMap::from([(id("jensen"), 4.0)]);
+        assert_eq!([clock(3.0, &cues), clock(10.5, &cues)], [0.0, 6.5]);
     }
 }

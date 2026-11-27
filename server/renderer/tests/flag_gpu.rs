@@ -214,6 +214,7 @@ fn native(seconds: f64) -> Flag {
             auto_direction: true,
             tension: 0.65,
             slack: 0.1,
+            raise: None,
             seconds,
         }),
         ..flag(0.0, FlagShading::Pbr)

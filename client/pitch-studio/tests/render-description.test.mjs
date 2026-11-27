@@ -161,6 +161,9 @@ test('flags with the same artwork share one asset but keep their own size and wa
     tension: 0.3, slack: 0.02, material: 'cloth' });
   assert.deepEqual(unset.flag, { width_m: 4, height_m: 2, type: 'native', wind_mps: 7, wind_direction_deg: 25, auto_direction: true,
     tension: 0.65, slack: 0.1, material: 'cloth' });
+  // A raise goes out with its duration and start.
+  const raised = { ...native, flag: { ...native.flag, native: { ...native.flag.native, raise: { duration: 8, start: 'cue' } } } };
+  assert.deepEqual(describeScene({ ...options, locals: [{ ad: raised, sha256: sha }] }).instances[0].flag.raise, { duration_s: 8, start: 'cue' });
   // Settings stored before slack existed take the reference's 10 %.
   const older = { ...native, flag: { ...native.flag, native: { wind: 12.5, direction: -40, autoDirection: false, tension: 30 } } };
   assert.equal(describeScene({ ...options, locals: [{ ad: older, sha256: sha }] }).instances[0].flag.slack, 0.1);
@@ -329,6 +332,7 @@ test('typed flag fields are unsaved until they match the flag, and are range-che
 test('a native flag drafts its wind and fabric, keeping its wave for switching back', () => {
   const draft = flagDraft(flagSettings);
   assert.deepEqual([draft.type, draft.wind, draft.direction, draft.autoDirection, draft.tension, draft.slack], ['default', '7', '25', true, '65', '10']);
+  assert.deepEqual([draft.raise, draft.raiseDuration, draft.raiseStart], [false, '6', 'load'], 'hanging raised, a 6 s raise offered');
   const native = { ...draft, type: 'native' };
   assert.equal(flagDraftChanged(native, flagSettings), true, 'switching the type is a change');
   // Only the native fields are checked and saved: the wave stays as it was.
@@ -339,6 +343,15 @@ test('a native flag drafts its wind and fabric, keeping its wave for switching b
   assert.equal(flagDraftChanged({ ...flagDraft(saved), autoDirection: true }, saved), true);
   assert.equal(flagDraftChanged({ ...flagDraft(saved), amplitude: '3' }, saved), false, 'a native flag ignores its wave');
   assert.deepEqual(flagDraft({ ...saved, type: 'default' }).amplitude, '0.32');
+  // A raise: its duration and start are saved, and changing either is a change.
+  const lifted = parseFlagDraft({ ...native, raise: true, raiseDuration: '10', raiseStart: 'cue' });
+  assert.deepEqual(lifted.wave.native.raise, { duration: 10, start: 'cue' });
+  const raisedFlag = { ...flagSettings, ...lifted.wave };
+  assert.equal(flagDraftChanged(flagDraft(raisedFlag), raisedFlag), false);
+  assert.equal(flagDraftChanged({ ...flagDraft(raisedFlag), raiseStart: 'load' }, raisedFlag), true);
+  assert.equal(flagDraftChanged({ ...flagDraft(raisedFlag), raise: false }, raisedFlag), true);
+  assert.equal(parseFlagDraft({ ...flagDraft(raisedFlag), raise: false }).wave.native.raise, undefined, 'unchecked: hangs raised');
+  assert.deepEqual(parseFlagDraft({ ...native, raise: true, raiseDuration: '0' }), { error: '升起时长应大于 0 秒。' });
   for (const [key, value, error] of [['wind', '18.5', '风速应介于 0 – 18。'], ['tension', '', '布料张力应介于 0 – 100。'],
     ['direction', '12.5', '风向应介于 -180 – 180 之间的整数度。'], ['direction', '181', '风向应介于 -180 – 180 之间的整数度。'],
     ['slack', '25', '布料余量应介于 0 – 20。']]) {

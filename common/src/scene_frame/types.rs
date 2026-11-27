@@ -136,8 +136,8 @@ strings!(FlagType { Default => "default", Native => "native" });
 ///
 /// On the wire, `type` selects the motion (absent, as it is written for `default`)
 /// and only that motion's fields are accepted: `amplitude_m`, `frequency` and `speed` for `default`;
-/// `wind_mps`, `wind_direction_deg`, `auto_direction`, `tension` and `slack` for
-/// `native`.
+/// `wind_mps`, `wind_direction_deg`, `auto_direction`, `tension`, `slack` and `raise`
+/// for `native`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "FlagFields", into = "FlagFields")]
 pub struct Flag {
@@ -191,7 +191,21 @@ pub struct FlagCloth {
     /// The part of the cloth's length the pinned edges do not span, 0 (taut) to 0.2;
     /// 0.1, a cloth 11 % longer than `height_m`.
     pub slack: Finite,
+    /// How the flag is raised; absent, it hangs raised from the start.
+    pub raise: Option<FlagRaise>,
 }
+
+object!(
+    /// A native flag raised over `duration_s` seconds (finite, above 0), as the
+    /// reference simulation's lift: the cloth starts folded just above its pinned
+    /// bottom edge and its top edge rises to Y = 0 on a smoothstep, then stays. `load`
+    /// starts with the scene; `cue` keeps it folded until a cue starts it
+    /// (`description.cue_reveal`), and a repeated cue folds and raises it again.
+    #[derive(Copy)]
+    FlagRaise {
+    duration_s: Finite,
+    start: RevealStart,
+});
 
 object!(@private FlagFields {
     width_m: Finite, height_m: Finite,
@@ -213,6 +227,8 @@ object!(@private FlagFields {
     tension: Option<Finite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     slack: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raise: Option<FlagRaise>,
     /// `cloth`.
     #[serde(default = "cloth_material")]
     material: FlagMaterial,
@@ -226,6 +242,22 @@ fn cloth_material() -> FlagMaterial {
     FlagMaterial::Cloth
 }
 
+impl Flag {
+    /// Whether a cue starts this flag's reveal or raise.
+    pub fn cued(&self) -> bool {
+        let raise = match &self.motion {
+            FlagMotion::Native(cloth) => cloth.raise.as_ref(),
+            FlagMotion::Wave(_) => None,
+        };
+        self.reveal
+            .as_ref()
+            .map(|reveal| reveal.start)
+            .into_iter()
+            .chain(raise.map(|raise| raise.start))
+            .any(|start| start == RevealStart::Cue)
+    }
+}
+
 impl TryFrom<FlagFields> for Flag {
     type Error = ValidationError;
     fn try_from(f: FlagFields) -> Result<Self, Self::Error> {
@@ -236,10 +268,12 @@ impl TryFrom<FlagFields> for Flag {
         let cloth = [f.wind_mps, f.wind_direction_deg, f.tension, f.slack];
         let motion = match f.kind.unwrap_or(FlagType::Default) {
             FlagType::Default
-                if cloth.iter().any(Option::is_some) || f.auto_direction.is_some() =>
+                if cloth.iter().any(Option::is_some)
+                    || f.auto_direction.is_some()
+                    || f.raise.is_some() =>
             {
                 return Err(ValidationError(
-                    "wind, tension and slack are for native flags",
+                    "wind, tension, slack and raise are for native flags",
                 ));
             }
             FlagType::Native if wave.iter().any(Option::is_some) => {
@@ -258,6 +292,7 @@ impl TryFrom<FlagFields> for Flag {
                 auto_direction: f.auto_direction.unwrap_or(true),
                 tension: or(f.tension, 0.65),
                 slack: or(f.slack, 0.1),
+                raise: f.raise,
             }),
         };
         Ok(Self {
@@ -285,6 +320,7 @@ impl From<Flag> for FlagFields {
             auto_direction: None,
             tension: None,
             slack: None,
+            raise: None,
             material: flag.material,
             artwork_rotation: flag.artwork_rotation,
             reveal: flag.reveal,
@@ -302,6 +338,7 @@ impl From<Flag> for FlagFields {
                 fields.auto_direction = Some(cloth.auto_direction);
                 fields.tension = Some(cloth.tension);
                 fields.slack = Some(cloth.slack);
+                fields.raise = cloth.raise;
             }
         }
         fields

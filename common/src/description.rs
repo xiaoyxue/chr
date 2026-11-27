@@ -21,8 +21,9 @@ pub const PROFILE: &str = "chr-render-description-v1";
 /// Result: [`Loaded`]. The lens and native extent stay as started.
 pub const LOAD: &str = "description.load";
 
-/// Starts the reveal of a flag instance whose `reveal.start` is `cue`, at the next
-/// rendered frame; a repeated cue restarts it. A new scene clears the cues.
+/// Starts the reveal of a flag instance whose `reveal.start` is `cue`, and the raise
+/// of a native one whose `raise.start` is `cue`, at the next rendered frame; a repeated
+/// cue restarts them. A new scene clears the cues.
 /// Params: [`CueRevealParams`]. Result: [`CueRevealed`].
 pub const CUE_REVEAL: &str = "description.cue_reveal";
 
@@ -333,8 +334,23 @@ mod tests {
             [12.0, 25.0, 0.65, 0.1]
         );
         assert!(cloth.auto_direction);
+        assert_eq!(cloth.raise, None);
+        assert!(!native.cued());
+        // A native flag may be raised, from the scene load or on a cue.
+        let raised: Flag = serde_json::from_value(json!({"width_m": 40, "height_m": 40,
+            "type": "native", "raise": {"duration_s": 8, "start": "cue"}}))
+        .unwrap();
+        let FlagMotion::Native(cloth) = &raised.motion else {
+            panic!("a native flag simulates cloth")
+        };
+        assert_eq!(cloth.raise.as_ref().unwrap().duration_s.get(), 8.0);
+        assert!(raised.cued());
         // Each type keeps exactly its own fields through a round trip.
-        for parsed in [native, serde_json::from_value(flag.clone()).unwrap()] {
+        for parsed in [
+            native,
+            raised,
+            serde_json::from_value(flag.clone()).unwrap(),
+        ] {
             let wire = serde_json::to_value(&parsed).unwrap();
             assert_eq!(serde_json::from_value::<Flag>(wire).unwrap(), parsed);
         }
@@ -346,6 +362,8 @@ mod tests {
             json!({"width_m": 1, "height_m": 1, "amplitude_m": 1, "type": "native"}),
             json!({"width_m": 1, "height_m": 1, "tension": 0.5}),
             json!({"width_m": 1, "height_m": 1, "slack": 0.02}),
+            json!({"width_m": 1, "height_m": 1, "raise": {"duration_s": 6, "start": "load"}}),
+            json!({"width_m": 1, "height_m": 1, "type": "native", "raise": {"duration_s": 6}}),
             json!({"width_m": 1, "height_m": 1, "type": "default", "auto_direction": false}),
             json!({"width_m": 1, "height_m": 1, "type": "physical"}),
         ] {

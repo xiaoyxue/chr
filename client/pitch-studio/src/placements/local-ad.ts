@@ -47,6 +47,11 @@ export interface NativeFlagSettings {
    * percent, 0 (taut) to 20. Absent (as stored before it existed): the reference's 10.
    */
   slack?: number;
+  /**
+   * Raises the flag from folded over `duration` seconds, from the scene load or from a
+   * cue (as a reveal's `start`); absent, it hangs raised from the start.
+   */
+  raise?: { duration: number; start: 'load' | 'cue' };
 }
 export interface LocalAd {
   id: string;
@@ -103,7 +108,9 @@ function validNative(native: NativeFlagSettings) {
   return Boolean(native) && typeof native === 'object' && within(native.wind, NATIVE_LIMITS.wind)
     && within(native.direction, NATIVE_LIMITS.direction) && Number.isInteger(native.direction)
     && within(native.tension, NATIVE_LIMITS.tension) && typeof native.autoDirection === 'boolean'
-    && (native.slack === undefined || within(native.slack, NATIVE_LIMITS.slack));
+    && (native.slack === undefined || within(native.slack, NATIVE_LIMITS.slack))
+    && (native.raise === undefined || (Boolean(native.raise) && typeof native.raise === 'object'
+      && Number.isFinite(native.raise.duration) && native.raise.duration > 0 && ['load', 'cue'].includes(native.raise.start)));
 }
 
 function validFlag(flag: StoredFlag) {

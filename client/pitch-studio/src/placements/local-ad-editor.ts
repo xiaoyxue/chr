@@ -23,7 +23,8 @@ type AdType = LocalAd['type'];
 const WAVE = [['amplitude', '振幅 / m', 0.01], ['frequency', '频率（中线到边缘周数）', 0.05], ['speed', '速度 / ×', 0.05]] as const;
 /** The draft fields typed in a number field and a slider. */
 const PAIRED = [...WAVE.map(([key]) => key), 'wind', 'direction', 'tension', 'slack'] as const;
-const FLAG_INPUTS = new Set(['flagType', 'flagMaterial', 'autoDirection', ...PAIRED.flatMap((key) => [key, `${key}Slider`])]);
+const FLAG_INPUTS = new Set(['flagType', 'flagMaterial', 'autoDirection', 'raise', 'raiseDuration', 'raiseStart',
+  ...PAIRED.flatMap((key) => [key, `${key}Slider`])]);
 const typeLabel = (type: AdType) => type === 'flag' ? '旗帜' : type;
 const LOCKED = '已锁定：点击“🔒 已锁定”解锁后，才能修改位置、尺寸和素材。';
 
@@ -60,7 +61,11 @@ function nativeMarkup(prefix: string) {
     <p id="${prefix}wind-dial-help" class="on-help">拖动表盘设置基准角。实线箭头：当前风向；虚线箭头：基准。方向键 1°（Shift 10°），PageUp / PageDown 10°，Home / End 到 −180° / +180°。角度相对旗面：0° 沿旗面吹向右边（从读图侧看），+90° 吹向读图侧。</p>
     ${slider('tension', '布料张力 / %', 1, '柔软飘逸', '挺括紧致')}
     ${slider('slack', '布料余量 / %', 0.5, '绷直', '宽松鼓起')}
-    <p class="on-help">布料比上下两边的间距长出的部分。参考模拟为 10%，小旗会鼓起飘动；大旗或斜放在看台上的旗会因此下垂、显得短，调到 1–3% 可拉直。</p>`;
+    <p class="on-help">布料比上下两边的间距长出的部分。参考模拟为 10%，小旗会鼓起飘动；大旗或斜放在看台上的旗会因此下垂、显得短，调到 1–3% 可拉直。</p>
+    <div class="on-slider-row"><span>升旗</span><label class="on-check"><input name="raise" type="checkbox" /> 从折叠状态升起</label></div>
+    <div class="on-field-grid"><label>升起时长 / s<input name="raiseDuration" type="number" min="0.1" step="0.1" required /></label>
+      <label>开始<select name="raiseStart" aria-label="升旗开始"><option value="load">加载时</option><option value="cue">手动触发</option></select></label></div>
+    <p class="on-help">和参考模拟一样：旗子先折叠在底边上方，上边在设定的时长内平滑升到顶后固定，风一直在吹。手动触发时保持折叠，点“触发升旗”才升起，再点一次会重新折叠并升起。</p>`;
 }
 
 function editorMarkup(space: AdSpace, prefix: string) {
@@ -317,11 +322,12 @@ export class LocalAdEditor {
     const checked = (name: string) => form.querySelector<HTMLInputElement>(`[name=${name}]:checked`)?.value;
     // A slider and its number field show one value.
     if (input.name.endsWith('Slider')) pair(input.name.slice(0, -'Slider'.length)).value = input.value;
-    else if (input.type === 'number') pair(`${input.name}Slider`).value = input.value;
+    else if (input.type === 'number' && (PAIRED as readonly string[]).includes(input.name)) pair(`${input.name}Slider`).value = input.value;
     this.flagDraft = { id: selected.id, type: checked('flagType') === 'native' ? 'native' : 'default',
       amplitude: pair('amplitude').value, frequency: pair('frequency').value, speed: pair('speed').value,
       wind: pair('wind').value, direction: pair('direction').value, autoDirection: pair('autoDirection').checked, tension: pair('tension').value,
-      slack: pair('slack').value,
+      slack: pair('slack').value, raise: pair('raise').checked, raiseDuration: pair('raiseDuration').value,
+      raiseStart: pair('raiseStart').value === 'cue' ? 'cue' : 'load',
       material: (['pbr', 'cloth'] as const).find((value) => value === checked('flagMaterial')) ?? 'simple' };
     if (this.notice?.failed) this.notice = undefined;
     this.renderSaveState();
@@ -399,6 +405,8 @@ export class LocalAdEditor {
       group.hidden = !visible;
       group.querySelectorAll('input').forEach((input) => { input.disabled = !visible; });
     }
+    for (const name of ['raiseDuration', 'raiseStart'])
+      (this.form.elements.namedItem(name) as HTMLInputElement).disabled = !native || !draft.raise;
     this.renderFlagNote(selected);
     this.renderWind();
   }
@@ -905,7 +913,8 @@ export class LocalAdEditor {
       : flag ? `旗帜，图片从选面一侧正读，上边沿 v 反方向${selected.fusionTifoId ? ` · 由 Fusion Tifo ${selected.fusionTifoId} 导入，可自由编辑` : ''}`
       : `模型从平面${pitch ? '向上' : '沿法线'}立起，可调缩放与朝向`;
     const actions = this.element('local-reveal-actions');
-    actions.hidden = !flag || !selected.reveal;
+    const raise = flag && selected.flag.type === 'native' ? nativeSettings(selected.flag).raise : undefined;
+    actions.hidden = !flag || !(selected.reveal || raise?.start === 'cue');
     if (flag) {
       const select = (name: string, value: string) => { (form.elements.namedItem(name) as HTMLSelectElement).value = value; };
       select('artworkRotation', String(selected.artworkRotation ?? 0));
@@ -914,15 +923,20 @@ export class LocalAdEditor {
       set('revealDuration', selected.reveal?.duration ?? REVEAL_DURATION);
       const aspectLocked = form.elements.namedItem('aspectLocked') as HTMLInputElement;
       aspectLocked.checked = aspectLocked.defaultChecked = Boolean(selected.aspectLocked);
-      const cue = selected.reveal?.start === 'cue';
-      this.element<HTMLButtonElement>('preview-reveal').disabled = !open || !selected.visible;
+      const cue = selected.reveal?.start === 'cue', raiseCue = raise?.start === 'cue';
+      const preview = this.element<HTMLButtonElement>('preview-reveal');
+      preview.hidden = !selected.reveal;
+      preview.disabled = !open || !selected.visible;
       const cueButton = this.element<HTMLButtonElement>('cue-reveal');
-      cueButton.hidden = !cue || !this.options.cue;
+      cueButton.hidden = !(cue || raiseCue) || !this.options.cue;
       cueButton.disabled = !open || !selected.visible;
+      cueButton.textContent = cue && raiseCue ? '触发展开与升旗' : raiseCue ? '触发升旗' : '触发展开';
       const how = selected.reveal ? REVEAL_LABELS[selected.reveal.direction] : '';
-      actions.querySelector('[data-reveal-note]').textContent = cue
-        ? `手动触发：发送到渲染器后旗帜保持隐藏，点“触发展开”后${how}；再次点击只重新展开这面旗。修改需先保存并发送。`
-        : `加载时：场景载入渲染器后自动${how}。“预览展开”只在本页预览中播放。`;
+      const notes = selected.reveal ? [cue
+        ? `手动触发：发送到渲染器后旗帜保持隐藏，点“${cueButton.textContent}”后${how}；再次点击只重新展开这面旗。修改需先保存并发送。`
+        : `加载时：场景载入渲染器后自动${how}。“预览展开”只在本页预览中播放。`] : [];
+      if (raiseCue) notes.push(`升旗手动触发：发送后旗子折叠等待，点“${cueButton.textContent}”后在 ${raise.duration} s 内升起；再次点击会重新折叠并升起。`);
+      actions.querySelector('[data-reveal-note]').textContent = notes.join(' ');
       // Unsaved typed values win over the saved flag, so a re-render never loses them.
       const draft = this.draftOf(selected);
       for (const key of PAIRED) for (const name of [key, `${key}Slider`]) {
@@ -930,6 +944,10 @@ export class LocalAdEditor {
         if (input !== document.activeElement) input.value = draft[key];
       }
       (form.elements.namedItem('autoDirection') as HTMLInputElement).checked = draft.autoDirection;
+      (form.elements.namedItem('raise') as HTMLInputElement).checked = draft.raise;
+      const raiseDuration = form.elements.namedItem('raiseDuration') as HTMLInputElement;
+      if (raiseDuration !== document.activeElement) raiseDuration.value = draft.raiseDuration;
+      (form.elements.namedItem('raiseStart') as HTMLSelectElement).value = draft.raiseStart;
       for (const radio of form.querySelectorAll<HTMLInputElement>('[name=flagType]')) radio.checked = radio.value === draft.type;
       for (const radio of form.querySelectorAll<HTMLInputElement>('[name=flagMaterial]')) radio.checked = radio.value === draft.material;
       this.renderFlagMotion(selected);

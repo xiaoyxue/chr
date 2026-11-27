@@ -25,6 +25,11 @@ pub const STEP: f64 = 1.0 / 120.0;
 pub const ITERATIONS: u32 = 36;
 /// The largest slack: a cloth 25 % longer than its pinned span.
 pub const MAX_SLACK: f32 = 0.2;
+/// The span a raised cloth starts folded over, per metre of its height: the
+/// reference's 0.25 m over its 4.8 m.
+const FOLDED: f64 = 0.25 / 4.8;
+/// Cloth rows per accordion fold of a folded cloth, as the reference's.
+const FOLD_ROWS: u32 = 8;
 /// The strongest wind the reference keeps stable at either tension, in m/s.
 pub const MAX_WIND: f32 = 18.0;
 /// The reference's visually tuned gravity in m/s², lighter than free fall.
@@ -57,6 +62,10 @@ pub struct Cloth {
     /// than the flag, so it billows; a large flag lying along a stand sags by as
     /// much, about a fifth of its height.
     pub slack: f32,
+    /// Seconds over which the cloth is raised from its clock's zero, or `None` when
+    /// it hangs raised from the start. A raised cloth starts folded just above its
+    /// pinned bottom edge and its top edge rises to Y = 0 ([`Cloth::top_at`]).
+    pub raise: Option<f32>,
     /// Seconds since the cloth hung in its slack arc. The renderer simulates each
     /// cloth up to its time in fixed steps as frames are prepared (`flag_cloth`).
     pub seconds: f64,
@@ -68,6 +77,9 @@ impl Cloth {
             && self.wind_direction.is_finite()
             && (0.0..=1.0).contains(&self.tension)
             && (0.0..=MAX_SLACK).contains(&self.slack)
+            && self
+                .raise
+                .is_none_or(|duration| duration.is_finite() && duration > 0.0)
             && self.seconds.is_finite()
             && self.seconds >= 0.0
     }
@@ -98,6 +110,27 @@ impl Cloth {
         let speed = f64::from(self.wind_speed);
         let (sin, cos) = self.direction_at(seconds).to_radians().sin_cos();
         ([speed * cos, 0.0, -speed * sin], speed * RIPPLE_PER_WIND)
+    }
+
+    /// Flag-local Y of the pinned top edge of a cloth `height` tall at `seconds` of its
+    /// clock: 0 once raised, else rising from just above the bottom edge on the
+    /// reference's smoothstep.
+    pub fn top_at(self, height: f32, seconds: f64) -> f64 {
+        let Some(duration) = self.raise else {
+            return 0.0;
+        };
+        let height = f64::from(height);
+        let progress = (seconds / f64::from(duration)).clamp(0.0, 1.0);
+        let eased = progress * progress * (3.0 - 2.0 * progress);
+        (height - height * FOLDED) * (1.0 - eased)
+    }
+
+    /// The cloth's particles when its clock starts: folded to be raised, or hanging.
+    pub fn start_positions(self, width: f32, height: f32) -> Vec<[f64; 3]> {
+        match self.raise {
+            Some(_) => folded_positions(width, height, self.slack),
+            None => initial_positions(width, height, self.slack),
+        }
     }
 
     /// The reference's bending strength at this tension.
@@ -174,6 +207,25 @@ pub fn initial_positions(width: f32, height: f32, slack: f32) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// The cloth folded to be raised, row by row, as the reference's folded
+/// `initialParticles`: its rows evenly spaced down the folded span above the bottom
+/// edge, zigzagging towards the reading side (-Z) in accordion folds of
+/// [`FOLD_ROWS`] rows whose segments keep their rest length.
+fn folded_positions(width: f32, height: f32, slack: f32) -> Vec<[f64; 3]> {
+    let [across, segment] = spacing(width, height, slack);
+    let span = f64::from(height) * FOLDED;
+    let rise = span / f64::from(CLOTH_ROWS - 1);
+    let step = (segment * segment - rise * rise).sqrt();
+    (0..CLOTH_ROWS)
+        .flat_map(|row| {
+            let fold = row % FOLD_ROWS;
+            let depth = f64::from(fold.min(FOLD_ROWS - fold)) * step;
+            let y = f64::from(height) - span + f64::from(row) * rise;
+            (0..CLOTH_COLUMNS).map(move |column| [f64::from(column) * across, y, -depth])
+        })
+        .collect()
+}
+
 /// Conservative flag-local bounds of a `width` × `height` cloth in any state: every
 /// particle stays within its stretched rest path of a pinned edge, at most half the
 /// rest length down the flag.
@@ -196,8 +248,60 @@ mod tests {
             auto_direction: true,
             tension: 0.65,
             slack: 0.1,
+            raise: None,
             seconds: 0.0,
         }
+    }
+
+    #[test]
+    fn a_raised_cloth_starts_folded_and_its_top_rises_smoothly() {
+        let raised = Cloth {
+            raise: Some(6.0),
+            ..cloth()
+        };
+        let (width, height) = (40.0, 40.0);
+        let folded = raised.start_positions(width, height);
+        let [_, down] = spacing(width, height, 0.1);
+        let at = |row: u32| folded[(row * CLOTH_COLUMNS + 3) as usize];
+        // Pinned rows: the top just above the bottom edge, which stays at Y = height.
+        assert!((at(0)[1] - raised.top_at(height, 0.0)).abs() < 1e-9 && at(0)[2] == 0.0);
+        assert_eq!((at(CLOTH_ROWS - 1)[1], at(CLOTH_ROWS - 1)[2]), (40.0, 0.0));
+        for row in 1..CLOTH_ROWS {
+            let (a, b) = (at(row - 1), at(row));
+            let length = (0..3).map(|i| (b[i] - a[i]).powi(2)).sum::<f64>().sqrt();
+            assert!(
+                (length - down).abs() < 1e-9,
+                "row {row}: {length} vs {down}"
+            );
+            assert!(b[2] <= 0.0, "folds towards -Z");
+        }
+        let bounds = local_bounds(width, height, 0.1).unwrap();
+        assert!(
+            folded
+                .iter()
+                .all(|p| (0..3).all(|i| bounds.min()[i] <= p[i] && p[i] <= bounds.max()[i]))
+        );
+        // The top rises monotonically on a smoothstep and then holds at Y = 0.
+        let tops: Vec<f64> = (0..=80)
+            .map(|k| raised.top_at(height, f64::from(k) * 0.1))
+            .collect();
+        assert!((tops[0] - 40.0 * (1.0 - 0.25 / 4.8)).abs() < 1e-9);
+        assert!(tops.windows(2).all(|w| w[1] <= w[0]));
+        assert!(
+            (tops[30] - tops[0] / 2.0).abs() < 1e-9,
+            "halfway at half time"
+        );
+        assert_eq!(tops[60], 0.0);
+        assert_eq!(tops[80], 0.0);
+        assert_eq!(
+            cloth().top_at(height, 0.0),
+            0.0,
+            "an unraised cloth hangs raised"
+        );
+        assert_eq!(
+            cloth().start_positions(width, height),
+            initial_positions(width, height, 0.1)
+        );
     }
 
     #[test]
@@ -344,6 +448,14 @@ mod tests {
             },
             Cloth {
                 slack: -0.01,
+                ..cloth()
+            },
+            Cloth {
+                raise: Some(0.0),
+                ..cloth()
+            },
+            Cloth {
+                raise: Some(f32::INFINITY),
                 ..cloth()
             },
         ] {

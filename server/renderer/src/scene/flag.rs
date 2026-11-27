@@ -354,6 +354,7 @@ mod tests {
             auto_direction: true,
             tension: 0.65,
             slack: 0.1,
+            raise: None,
             seconds: 1.0,
         };
         let native = |cloth| Flag {

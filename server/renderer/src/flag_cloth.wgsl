@@ -2,7 +2,8 @@
 // CLOTH_ROWS are prepended too. A port of the AER reference's `predict` and
 // `constrain` in flag-local metres (X across, Y down, Z = X x Y): its Y-up, +Z-front
 // constants turn to -Y and -Z, and its floor contact is dropped. Particles ping-pong
-// between two buffers; the top and bottom rows never move.
+// between two buffers; the bottom row never moves and the top row follows its anchor,
+// which rises while the flag is raised.
 
 struct Particle { position: vec4<f32>, previous: vec4<f32> };
 struct Step {
@@ -12,6 +13,8 @@ struct Step {
     gravity: vec4<f32>,
     // Rest spacing across and down the cloth (m), bending strength and the step (s).
     shape: vec4<f32>,
+    // Flag-local Y of the pinned top edge after this step: 0 once raised (scene/cloth.rs).
+    anchor: vec4<f32>,
 };
 // flag.rs params(): a cloth's surface reads only its reveal and artwork turns.
 struct FlagParams { size_wave: vec4<f32>, phases: vec4<f32>, artwork: vec4<f32> };
@@ -37,6 +40,11 @@ fn predict(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i % CLOTH_COLUMNS;
     let y = i / CLOTH_COLUMNS;
     let p = source[i];
+    if y == 0u {
+        let top = vec4(f32(x) * stepping.shape.x, stepping.anchor.x, 0.0, 1.0);
+        destination[i] = Particle(top, top);
+        return;
+    }
     if pinned(y) {
         destination[i] = Particle(p.position, p.position);
         return;

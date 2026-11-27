@@ -14,7 +14,7 @@ use crate::{
     Gpu,
     scene::{
         CLOTH_COLUMNS, CLOTH_ROWS, Cloth, FLAG_VERTICES, GRAVITY, ITERATIONS, InstanceId,
-        ModelMatrix, STEP, initial_positions, spacing,
+        ModelMatrix, STEP, spacing,
     },
 };
 
@@ -22,7 +22,7 @@ const PARTICLES: u32 = CLOTH_COLUMNS * CLOTH_ROWS;
 /// Bytes of one particle: its position and previous position as `vec4<f32>`.
 const PARTICLE_BYTES: u64 = 32;
 /// Bytes of one step's settings (`Step` in `flag_cloth.wgsl`).
-const STEP_BYTES: u64 = 48;
+const STEP_BYTES: u64 = 64;
 /// Bytes of a flag's surface parameters (`flag::PARAMS` floats).
 const PARAMS_BYTES: u64 = 4 * super::flag::PARAMS as u64;
 const WORKGROUP: u32 = 64;
@@ -60,8 +60,8 @@ impl ClothDraw {
 }
 
 struct State {
-    /// Width and height, and slack, which together fix the rest shape.
-    shape: [f32; 3],
+    /// Width, height, slack and raise duration (0 unraised): what fixes the start shape.
+    shape: [f32; 4],
     particles: [wgpu::Buffer; 2],
     settings: wgpu::Buffer,
     /// Steps `settings` holds room for.
@@ -190,8 +190,9 @@ impl ClothGpu {
     }
 
     /// Plans a cloth for this frame: steps towards its clock, then its surface into
-    /// `vertices` with the flag's surface `params`. A cloth whose size or slack
-    /// changed or whose clock went back restarts from its rest arc. Returns whether its surface
+    /// `vertices` with the flag's surface `params`. A cloth whose size, slack or raise
+    /// changed or whose clock went back restarts from its start shape, hanging or
+    /// folded to be raised. Returns whether its surface
     /// changes.
     pub(crate) fn plan(
         &mut self,
@@ -207,13 +208,13 @@ impl ClothGpu {
             gravity,
         } = draw;
         let target = (cloth.seconds / STEP).floor() as u64;
-        let shape = [size[0], size[1], cloth.slack];
+        let shape = [size[0], size[1], cloth.slack, cloth.raise.unwrap_or(0.0)];
         let restart = self
             .states
             .get(&id)
             .is_none_or(|state| state.shape != shape || state.steps > target);
         if restart {
-            let state = self.state(gpu, shape);
+            let state = self.state(gpu, size, cloth, shape);
             self.states.insert(id, state);
         }
         let state = self.states.get_mut(&id).expect("state inserted above");
@@ -257,6 +258,11 @@ impl ClothGpu {
                     down,
                     cloth.bending(),
                     STEP,
+                    // The pinned top edge where this step leaves it.
+                    cloth.top_at(size[1], seconds + STEP),
+                    0.0,
+                    0.0,
+                    0.0,
                 ]
                 .map(|x| x as f32);
                 chunk[..STEP_BYTES as usize].copy_from_slice(bytemuck::cast_slice(&settings));
@@ -291,8 +297,9 @@ impl ClothGpu {
             .retain(|id, _| runs.iter().any(|run| run.id == *id));
     }
 
-    fn state(&self, gpu: &Gpu, shape: [f32; 3]) -> State {
-        let rest: Vec<[f32; 8]> = initial_positions(shape[0], shape[1], shape[2])
+    fn state(&self, gpu: &Gpu, size: [f32; 2], cloth: Cloth, shape: [f32; 4]) -> State {
+        let rest: Vec<[f32; 8]> = cloth
+            .start_positions(size[0], size[1])
             .into_iter()
             .map(|p| {
                 let p = [p[0] as f32, p[1] as f32, p[2] as f32, 1.0];
@@ -388,7 +395,7 @@ mod tests {
     use super::*;
     use crate::scene::{
         FLAG_COLUMNS, FLAG_ROWS, Flag, FlagMotion, FlagShading, MeshData, PbrMaterial,
-        RevealDirection, Scene,
+        RevealDirection, Scene, initial_positions,
     };
 
     const SIZE: [f32; 2] = [3.2, 4.8];
@@ -400,6 +407,7 @@ mod tests {
             auto_direction: false,
             tension,
             slack: 0.1,
+            raise: None,
             seconds: 0.0,
         }
     }
@@ -641,6 +649,53 @@ mod tests {
         };
         assert!(harness.frame(&[(0, taut)]));
         assert!(harness.positions(0).iter().all(|p| p[2] == 0.0));
+    }
+
+    #[test]
+    #[ignore = "requires a hardware GPU"]
+    fn a_raised_cloth_unfolds_as_its_top_edge_rises_and_then_holds() {
+        let mut harness = Harness::new();
+        let raised = Cloth {
+            raise: Some(2.0),
+            ..cloth(12.0, 25.0, 0.65)
+        };
+        let top = |positions: &[[f32; 3]]| positions[..CLOTH_COLUMNS as usize].to_vec();
+        let bottom =
+            |positions: &[[f32; 3]]| positions[(PARTICLES - CLOTH_COLUMNS) as usize..].to_vec();
+        harness.frame(&[(0, raised)]);
+        let folded = harness.positions(0);
+        let start: Vec<[f32; 3]> = raised
+            .start_positions(SIZE[0], SIZE[1])
+            .into_iter()
+            .map(|p| p.map(|x| x as f32))
+            .collect();
+        assert_eq!(folded, start, "it starts folded");
+        let bounds = flag().local_bounds().unwrap();
+        for frame in 1..=150_u32 {
+            let seconds = f64::from(frame) / 50.0;
+            harness.frame(&[(0, Cloth { seconds, ..raised })]);
+            if frame != 50 && frame != 150 {
+                continue;
+            }
+            let positions = harness.positions(0);
+            let expected = raised.top_at(SIZE[1], seconds) as f32;
+            for (column, p) in top(&positions).into_iter().enumerate() {
+                assert_eq!(p[1], expected, "{seconds} s: top row at its anchor");
+                assert!((p[0] - column as f32 * SIZE[0] / 64.0).abs() < 1e-5 && p[2] == 0.0);
+            }
+            assert_eq!(bottom(&positions), bottom(&start), "the bottom edge stays");
+            for p in &positions {
+                assert!(p.iter().all(|x| x.is_finite()));
+                assert!((0..3).all(|i| {
+                    bounds.min()[i] <= f64::from(p[i]) && f64::from(p[i]) <= bounds.max()[i]
+                }));
+            }
+        }
+        assert_eq!(
+            top(&harness.positions(0))[0][1],
+            0.0,
+            "raised and held at Y = 0"
+        );
     }
 
     #[test]
