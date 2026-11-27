@@ -186,7 +186,7 @@ re-registers its asset.
 | `speed` | Time scale; 0 freezes the wave |
 | `material` | `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
 | `artwork_rotation` | Optional: 0, 90, 180 or 270 degrees, turning the artwork clockwise as it reads, like a 2D Fusion placement's `assetRotation`; the artwork stretches to the flag's size |
-| `reveal` | Optional: how the flag appears (#210), `{"direction": "center_horizontal", "duration_s": 2, "start": "load"}` |
+| `reveal` | Optional: how the flag appears (#210, #215), `{"direction": "left_to_right", "duration_s": 2, "start": "load"}`; absent, the flag is shown from the start |
 
 As in [Simulation-SimpleWave](https://github.com/xiaoyxue/Simulation-SimpleWave),
 there is no pole: the centre line stays pinned and both halves wave outwards. Make
@@ -195,19 +195,37 @@ the flag, their cross product, and the top-left corner. Size then stays in `flag
 not in the matrix. The wave's time is each frame's media time, so a still render of
 `--frame <n>` is reproducible.
 
-A **reveal** opens the flag from its vertical centre line outwards: `t` seconds
-after it starts, the part within `|2 x / width_m - 1| <= t / duration_s` is
-shown, and the whole flag after `duration_s` (above 0, at most 60). The columns
-not yet shown collapse onto the edge of the shown part, so the edge is exact, the
-artwork is never squeezed, and shadows follow it. `"load"` starts with the scene,
-at its motion's time zero. `"cue"` hides the flag until a cue starts it:
+A **reveal** opens the flag once over `duration_s` seconds (any finite number
+above 0; there is no upper limit, as in Fusion) and then keeps it whole. At
+progress `p = t / duration_s` (clamped to 1) it shows the part of the flag's
+rectangle that `direction` has opened, in flag-local `x / width_m` and
+`y / height_m`, measured from the top-left corner (the `model` origin) with `x`
+along the top edge and `y` down the left edge:
+
+| `direction` | Fusion `tifoReveal.direction` | Shown at progress `p` |
+| --- | --- | --- |
+| `left_to_right` | `left-to-right` | `x / width_m <= p` |
+| `right_to_left` | `right-to-left` | `x / width_m >= 1 - p` |
+| `top_to_bottom` | `top-to-bottom` | `y / height_m <= p` |
+| `bottom_to_top` | `bottom-to-top` | `y / height_m >= 1 - p` |
+| `center_horizontal` | `center-horizontal` | `|2 x / width_m - 1| <= p`: from the vertical centre line out to the left and right |
+| `center_vertical` | `center-vertical` | `|2 y / height_m - 1| <= p`: from the horizontal centre line out to the top and bottom |
+
+The direction belongs to the rectangle as its corners lay it out, as in Fusion's
+preview, not to the artwork: `artwork_rotation` turns the image inside the
+rectangle and leaves the opening edge where it is. The grid points not yet shown
+collapse onto the edge of the shown part, so the edge is exact, the artwork there
+is cut at its own texels (never squeezed or stretched), and shadows follow it.
+`"load"` starts with the scene, at its motion's time zero. `"cue"` hides the
+flag until a cue starts it:
 
 | Method | Params | Result |
 | --- | --- | --- |
 | `description.cue_reveal` | `{"instance": <flag instance ID>}` | `{"cue": n}`, the instance's cues since its scene was loaded |
 
 A cue reaches the render worker with the next frame, which starts the reveal at
-its own scene time; a repeated cue restarts it. A cue of an instance that is not
+its own scene time; a repeated cue restarts that flag's reveal only, leaving other
+flags, their reveals and every motion as they are. A cue of an instance that is not
 a flag with `"start": "cue"` in the current scene is rejected with `not_found`.
 `description.load` clears the cues, so a new scene's cued flags wait again; a
 restarted render worker replays the latest cue's reveal from its start, as it
@@ -285,13 +303,24 @@ newer package keeps them:
   four `corners` (top-left, top-right, bottom-right, bottom-left) that must form
   its `width` x `height` rectangle, one PNG or JPEG, `assetRotation`
   (0/90/180/270), `assetOpacity` 1 (chr flags are opaque; other values fail the
-  import) and `tifoReveal` (`center-horizontal`, `duration` seconds). Importing
+  import) and an optional `tifoReveal` (#215): `direction`, one of the six in the
+  table under [Flags](#flags) (`left-to-right`, `right-to-left`, `top-to-bottom`,
+  `bottom-to-top`, `center-horizontal`, `center-vertical`), and `duration` in
+  seconds, any finite number above 0, 2 when absent or null. An absent or null
+  `tifoReveal` gives a static tifo, shown whole from the start. An unknown
+  direction or a duration that is not a positive finite number fails the import
+  with a message naming the placement and the accepted values; nothing is clamped
+  or replaced. Importing
   the ZIP seeds each tifo the match lacks as a point-cloud **flag** `tifo-<id>`
   of the package's cloud, which counts as confirmed: `u` along the top edge, `v`
   down the left edge, offset -0.5 m, the flag defaults, the image from the store
-  as its material, its rotation and a reveal on load. From then on it is an
+  as its material, its rotation and its reveal (same direction and duration,
+  starting on load), or none. From then on it is an
   ordinary flag the operator edits, and importing again neither duplicates it nor
-  undoes edits.
+  undoes edits. `server/scripts/fusion_description.py` maps a package the same way.
+  For example, `"tifoReveal": {"direction": "bottom-to-top", "duration": 3.5}`
+  becomes the flag's `"reveal": {"direction": "bottom_to_top", "duration_s": 3.5,
+  "start": "load"}`.
 - **Local placements:** drawn in the studio on the pitch (2D, 3D) or on a
   point-cloud plane (2D, 3D, flags). Each lies on a rectangle with unit axes `u`
   (image right) and `v` (image down) and normal `u × v`; the preview and the
@@ -312,8 +341,9 @@ newer package keeps them:
     (u × v)]` with its own `flag` size and wave. Pitch flags of earlier versions
     are removed when a match loads, and the page says how many. The inspector
     also sets the flag's 图片旋转 (`artwork_rotation`), 锁定宽高比 (the rectangle
-    follows the turned image's aspect), and its 展开 (`reveal`: none or 中线水平展开,
-    时长, 开始 加载时 / 手动触发); 预览展开 plays it in the page, and 触发展开 calls
+    follows the turned image's aspect), and its 展开 (`reveal`: none or one of the
+    six directions, 时长 in seconds above 0, 开始 加载时 / 手动触发); 预览展开 plays
+    it in the page with the renderer's geometry, and 触发展开 calls
     `description.cue_reveal` for a sent flag that starts on a cue.
 
   chr-server reads local materials from their server paths (inside its
@@ -462,10 +492,11 @@ The tests cover:
 - the `blend_as` opt-in;
 - an unlit quad drawn through the tracked camera on the GPU;
 - flag parameters required for flag assets and rejected for others;
-- tifo flags: artwork rotations and reveal durations checked at load, cues counted
-  per instance, rejected for flags without a cued reveal and cleared by a load;
-  reveals start with the scene or the latest cue, and both the turned artwork and
-  the reveal are drawn on the GPU with either material;
+- tifo flags: artwork rotations and reveal directions and durations checked at
+  load, cues counted per instance, rejected for flags without a cued reveal and
+  cleared by a load; reveals start with the scene or the latest cue, and both the
+  turned artwork and each of the six reveal directions (at progress 0, 0.5 and 1,
+  under every artwork rotation) are drawn on the GPU with either material;
 - environment assets: OpenEXR import, used only by lighting, and a constant fill
   next to them; a constant fill shades like a uniform environment of the same
   radiance;

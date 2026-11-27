@@ -10,7 +10,7 @@ use chr_renderer::{
     coordinates::ImageExtent,
     scene::{
         Filter, Flag, FlagShading, Light, Lighting, MaterialMaps, MeshData, ModelMatrix,
-        PbrMaterial, Scene, TextureData, TextureSampler, Wrap,
+        PbrMaterial, RevealDirection, Scene, TextureData, TextureSampler, Wrap,
     },
 };
 
@@ -32,6 +32,7 @@ fn flag(amplitude: f32, shading: FlagShading) -> Flag {
         shading,
         artwork_turns: 0,
         revealed: 1.0,
+        reveal_direction: RevealDirection::CenterHorizontal,
     }
 }
 
@@ -308,9 +309,11 @@ fn artwork_turns_and_reveals_follow_the_flag_with_either_material() {
                 );
             }
         }
-        let mut shown = |revealed| {
+        let mut shown = |revealed, direction, turns| {
             let flag = Flag {
                 revealed,
+                reveal_direction: direction,
+                artwork_turns: turns,
                 ..flag(0.0, shading)
             };
             render(
@@ -320,20 +323,44 @@ fn artwork_turns_and_reveals_follow_the_flag_with_either_material() {
                 0.0,
             )
         };
-        let (hidden, half) = (shown(0.0), shown(0.5));
-        for u in [0.05, 0.2, 0.8, 0.95] {
-            assert_eq!(
-                at(&half, on_flag(u, 0.5)),
-                at(&hidden, on_flag(u, 0.5)),
-                "{shading:?}: u {u} is not revealed yet"
-            );
-        }
-        for u in [0.3, 0.45, 0.55, 0.7] {
-            assert_ne!(
-                at(&half, on_flag(u, 0.5)),
-                at(&hidden, on_flag(u, 0.5)),
-                "{shading:?}: u {u} is revealed"
-            );
+        // Grid points at least 0.1 from every half-progress edge and quadrant border.
+        let points = [0.1, 0.4, 0.6, 0.9].map(|u| [0.1, 0.4, 0.6, 0.9].map(|v| (u, v)));
+        for direction in DIRECTIONS {
+            for turns in 0..4 {
+                let (hidden, half, full) = (
+                    shown(0.0, direction, turns),
+                    shown(0.5, direction, turns),
+                    shown(1.0, direction, turns),
+                );
+                let reference = Flag {
+                    revealed: 0.5,
+                    reveal_direction: direction,
+                    artwork_turns: turns,
+                    ..flag(0.0, shading)
+                };
+                for (u, v) in points.into_iter().flatten() {
+                    let point = on_flag(u, v);
+                    let [s, t] = reference.artwork_uv(u, v);
+                    let artwork = 2 * usize::from(t > 0.5) + usize::from(s > 0.5);
+                    let case = format!("{shading:?}, {direction:?}, {turns} turns, ({u}, {v})");
+                    assert_eq!(quadrant(at(&full, point)), artwork, "{case}: complete");
+                    assert_ne!(at(&full, point), at(&hidden, point), "{case}: hidden");
+                    if reference.revealed_uv(u, v) == [u, v] {
+                        assert_eq!(quadrant(at(&half, point)), artwork, "{case}: opened");
+                    } else {
+                        assert_eq!(at(&half, point), at(&hidden, point), "{case}: not yet");
+                    }
+                }
+            }
         }
     }
 }
+
+const DIRECTIONS: [RevealDirection; 6] = [
+    RevealDirection::CenterHorizontal,
+    RevealDirection::CenterVertical,
+    RevealDirection::LeftToRight,
+    RevealDirection::RightToLeft,
+    RevealDirection::TopToBottom,
+    RevealDirection::BottomToTop,
+];

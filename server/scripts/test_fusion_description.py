@@ -57,7 +57,11 @@ def package(model, image, pose=None, opacity=None):
 CORNERS = [(10, 40, -6), (-10, 40, -6), (-10, 44, -2), (10, 44, -2)]
 
 
-def tifo_package(corners=CORNERS, opacity=1, cloud=b"ply\nformat ascii 1.0\n", cloud_hash=None):
+CENTRE_REVEAL = {"direction": "center-horizontal", "duration": 2}
+ABSENT = object()
+
+
+def tifo_package(corners=CORNERS, opacity=1, cloud=b"ply\nformat ascii 1.0\n", cloud_hash=None, reveal=CENTRE_REVEAL):
     """A package v2 holding one Tifo on a raked plane, 20 m wide and 4 * sqrt(2) m high."""
     image = png(960, 360)
     contents = {f"assets/{PNG_ID}.png": image, "point-cloud/field.ply": cloud}
@@ -71,7 +75,7 @@ def tifo_package(corners=CORNERS, opacity=1, cloud=b"ply\nformat ascii 1.0\n", c
             "id": "PLC-tifo", "coordinateSpace": "point-cloud", "x": 0, "y": 42, "width": 20,
             "height": 4 * math.sqrt(2), "assetRotation": 90, "assetOpacity": opacity, "modelPose": None,
             "assetIds": [PNG_ID], "corners": [{"x": x, "y": y, "z": z} for x, y, z in corners],
-            "tifoReveal": {"direction": "center-horizontal", "duration": 2}}]}],
+            **({} if reveal is ABSENT else {"tifoReveal": reveal})}]}],
         "assets": [{"id": PNG_ID, "contentType": "image/png", "contentPath": f"assets/{PNG_ID}.png",
                     "byteLength": len(image)}],
     }
@@ -112,6 +116,45 @@ class TifoTests(unittest.TestCase):
         for row, want in zip(instance["model"], expected):
             for value, target in zip(row, want):
                 self.assertAlmostEqual(value, target)
+
+    def test_every_fusion_reveal_direction_keeps_its_direction_and_duration(self):
+        model = self.describe(tifo_package())["instances"][0]["model"]
+        for fusion, chr_direction, duration in [("left-to-right", "left_to_right", 2),
+                                                ("right-to-left", "right_to_left", 0.25),
+                                                ("top-to-bottom", "top_to_bottom", 90),
+                                                ("bottom-to-top", "bottom_to_top", 3600),
+                                                ("center-horizontal", "center_horizontal", 2.5),
+                                                ("center-vertical", "center_vertical", 7)]:
+            with self.subTest(fusion):
+                [instance] = self.describe(tifo_package(reveal={"direction": fusion, "duration": duration}))["instances"]
+                self.assertEqual(instance["flag"]["reveal"],
+                                 {"direction": chr_direction, "duration_s": duration, "start": "load"})
+                # The reveal leaves the raked rectangle and the artwork turn as they are.
+                self.assertEqual(instance["model"], model)
+                self.assertEqual(instance["flag"]["artwork_rotation"], 90)
+
+    def test_a_tifo_without_a_reveal_is_static_and_a_reveal_lasts_2_s_by_default(self):
+        for case, reveal in [("absent", ABSENT), ("null", None)]:
+            with self.subTest(case):
+                [instance] = self.describe(tifo_package(reveal=reveal))["instances"]
+                self.assertNotIn("reveal", instance["flag"])
+        for reveal in [{"direction": "center-vertical"}, {"direction": "center-vertical", "duration": None}]:
+            [instance] = self.describe(tifo_package(reveal=reveal))["instances"]
+            self.assertEqual(instance["flag"]["reveal"], {"direction": "center_vertical", "duration_s": 2, "start": "load"})
+
+    def test_unknown_reveal_directions_and_invalid_durations_name_the_placement(self):
+        for case, reveal, message in [
+                ("unknown direction", {"direction": "diagonal", "duration": 2}, "direction \"diagonal\""),
+                ("chr spelling", {"direction": "left_to_right", "duration": 2}, "direction \"left_to_right\""),
+                ("no direction", {"duration": 2}, "direction null"),
+                ("zero duration", {"direction": "left-to-right", "duration": 0}, "duration 0"),
+                ("negative duration", {"direction": "top-to-bottom", "duration": -1}, "duration -1"),
+                ("text duration", {"direction": "top-to-bottom", "duration": "2"}, "duration \"2\""),
+                ("not an object", "left-to-right", "must be an object")]:
+            with self.subTest(case), self.assertRaises(fusion_description.ConversionError) as raised:
+                self.describe(tifo_package(reveal=reveal))
+            self.assertIn("Tifo PLC-tifo", str(raised.exception))
+            self.assertIn(message, str(raised.exception))
 
     def test_tifos_off_their_rectangle_translucent_or_with_a_bad_cloud_are_refused(self):
         skewed = [CORNERS[0], CORNERS[1], (-9, 44, -2), CORNERS[3]]

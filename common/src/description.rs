@@ -267,12 +267,32 @@ mod tests {
             tifo.reveal.unwrap().start,
             crate::scene_frame::RevealStart::Cue
         );
+        for direction in [
+            "left_to_right",
+            "right_to_left",
+            "top_to_bottom",
+            "bottom_to_top",
+            "center_horizontal",
+            "center_vertical",
+        ] {
+            let mut revealed = flag.clone();
+            revealed["reveal"] = json!({"direction": direction, "duration_s": 90, "start": "load"});
+            let parsed: Flag = serde_json::from_value(revealed).unwrap();
+            assert_eq!(
+                serde_json::to_value(parsed.reveal.unwrap().direction).unwrap(),
+                direction
+            );
+        }
         for (key, value) in [
             ("pole", json!(true)),
             ("material", json!("silk")),
             (
                 "reveal",
                 json!({"direction": "center-horizontal", "duration_s": 2, "start": "load"}),
+            ),
+            (
+                "reveal",
+                json!({"direction": "left-to-right", "duration_s": 2, "start": "load"}),
             ),
             (
                 "reveal",

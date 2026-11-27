@@ -228,6 +228,7 @@ fn flags_wave_only_the_shared_grid_and_widen_their_bounds() {
         shading: FlagShading::Pbr,
         artwork_turns: 0,
         revealed: 1.0,
+        reveal_direction: Default::default(),
     };
     assert_eq!(
         scene.set_flag(other_id, Some(flag)),

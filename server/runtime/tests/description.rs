@@ -412,7 +412,8 @@ async fn tifo_flags_turn_their_artwork_and_reveal_on_load_or_on_cue() {
             "flag": {"width_m": 32.8, "height_m": 16.0, "amplitude_m": 0.32, "frequency": 1.35,
                 "speed": 1.0, "material": "cloth", "artwork_rotation": rotation, "reveal": reveal}})
     };
-    let reveal = |start: &str, duration: f64| json!({"direction": "center_horizontal", "duration_s": duration, "start": start});
+    let revealed = |direction: &str, start: &str, duration: f64| json!({"direction": direction, "duration_s": duration, "start": start});
+    let reveal = |start: &str, duration: f64| revealed("center_horizontal", start, duration);
     let cue = |instance: &str| {
         loader.cue(d::CueRevealParams {
             instance: serde_json::from_value(json!(instance)).unwrap(),
@@ -425,14 +426,25 @@ async fn tifo_flags_turn_their_artwork_and_reveal_on_load_or_on_cue() {
             json!([
                 tifo("cued", json!(90), reveal("cue", 2.0)),
                 tifo("loaded", json!(0), reveal("load", 2.0)),
+                // Every direction, and durations past a minute, as Fusion allows (#215).
+                tifo("ltr", json!(0), revealed("left_to_right", "load", 90.0)),
+                tifo("rtl", json!(90), revealed("right_to_left", "cue", 2.0)),
+                tifo("ttb", json!(180), revealed("top_to_bottom", "load", 0.5)),
+                tifo("btt", json!(270), revealed("bottom_to_top", "cue", 600.0)),
+                tifo("cv", json!(0), revealed("center_vertical", "load", 2.0)),
             ]),
         ))
         .await
         .unwrap();
     assert_eq!(cue("cued").await.unwrap().cue, 1);
     assert_eq!(cue("cued").await.unwrap().cue, 2);
-    assert_eq!(loader.cues().get().into_values().collect::<Vec<_>>(), [2]);
-    for instance in ["loaded", "absent"] {
+    assert_eq!(cue("btt").await.unwrap().cue, 1);
+    assert_eq!(
+        loader.cues().get().into_values().collect::<Vec<_>>(),
+        [1, 2],
+        "a cue counts only for its own instance"
+    );
+    for instance in ["loaded", "ltr", "absent"] {
         let error = cue(instance).await.unwrap_err();
         assert_eq!(error.code, w::RejectionKind::NotFound.code(), "{instance}");
     }
@@ -459,8 +471,8 @@ async fn tifo_flags_turn_their_artwork_and_reveal_on_load_or_on_cue() {
             tifo("bad", json!(0), reveal("load", 0.0)),
         ),
         (
-            "a reveal over a minute",
-            tifo("bad", json!(0), reveal("cue", 61.0)),
+            "a reveal of negative time",
+            tifo("bad", json!(0), revealed("top_to_bottom", "cue", -1.0)),
         ),
     ] {
         let error = loader

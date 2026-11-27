@@ -12,7 +12,8 @@ bounds as three.js reports them (Box3.setFromObject over GLTFLoader's accessor
 bounds), images by their pixel size, and assets read by chr-server from the ZIP.
 A package v2 Tifo (#210) becomes the flag the studio seeds from it, unedited and
 with its cloud taken as confirmed: on its corners' plane, with the studio's flag
-defaults, its artwork turned by assetRotation and revealed when the scene loads.
+defaults, its artwork turned by assetRotation and revealed as its tifoReveal says
+(direction and duration) when the scene loads.
 
 Without --camera it writes `{"scene": …}`, the shape `description.load` takes; with
 --camera it writes a complete description for `chr-server --description` or
@@ -43,6 +44,11 @@ MAX_INSTANCES = 63
 # The studio's flag defaults (client/pitch-studio/src/placements/flag.ts) for a seeded tifo.
 TIFO_FLAG = {"amplitude_m": 0.32, "frequency": 1.35, "speed": 1, "material": "simple"}
 TIFO_OFFSET = -0.5
+# Fusion's tifoReveal.direction and the render description's flag reveal direction (#215).
+REVEAL_DIRECTIONS = {"left-to-right": "left_to_right", "right-to-left": "right_to_left",
+                     "top-to-bottom": "top_to_bottom", "bottom-to-top": "bottom_to_top",
+                     "center-horizontal": "center_horizontal", "center-vertical": "center_vertical"}
+REVEAL_DURATION = 2
 V2_COORDINATES = {"z": "down", "swingSpace": "field", "motionSpace": "field",
                   "motionOrigin": "neutral-model-bottom-center", "motionScale": "neutral-pose-multiplier"}
 # GLTFLoader's getNormalizedComponentScale, by accessor componentType.
@@ -167,13 +173,26 @@ def tifo(source, assets):
     rotation = number(source.get("assetRotation", 0))
     require(rotation in (0, 90, 180, 270), "Invalid image rotation.")
     require(source.get("assetOpacity", 1) == 1, f"Tifo {name}: chr flags are opaque; assetOpacity must be 1.")
-    reveal = source.get("tifoReveal")
-    if reveal is not None:
-        require(reveal.get("direction") == "center-horizontal" and 0 < number(reveal.get("duration")) <= 60,
-                f"Tifo {name}: unsupported tifoReveal.")
     return {"id": name, "type": "Tifo", "asset": asset_ids[0], "origin": c0,
             "u": [x / width for x in u], "v": [x / height for x in v], "width": width, "height": height,
-            "assetRotation": int(rotation), "reveal": reveal and reveal["duration"]}
+            "assetRotation": int(rotation), "reveal": tifo_reveal(source.get("tifoReveal"), name)}
+
+
+def tifo_reveal(reveal, name):
+    """tifoReveal as a flag reveal's direction and duration; absent or null, the tifo is static."""
+    if reveal is None:
+        return None
+    require(isinstance(reveal, dict), f"Tifo {name}: tifoReveal must be an object or null.")
+    direction = reveal.get("direction")
+    require(direction in REVEAL_DIRECTIONS,
+            f"Tifo {name}: unsupported tifoReveal direction {json.dumps(direction)}; "
+            f"expected one of {', '.join(REVEAL_DIRECTIONS)}.")
+    duration = reveal.get("duration")  # absent or null: Fusion's default
+    duration = REVEAL_DURATION if duration is None else duration
+    require(isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration)
+            and duration > 0, f"Tifo {name}: tifoReveal duration {json.dumps(duration)} must be a finite number of "
+                              "seconds above 0.")
+    return {"direction": REVEAL_DIRECTIONS[direction], "duration_s": duration}
 
 
 def flag_model(slot, offset):
@@ -407,8 +426,7 @@ def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), 
                                     "sha256": asset["sha256"]})
         flag = {"width_m": slot["width"], "height_m": slot["height"], **TIFO_FLAG,
                 **({"artwork_rotation": slot["assetRotation"]} if slot["assetRotation"] else {}),
-                **({"reveal": {"direction": "center_horizontal", "duration_s": slot["reveal"], "start": "load"}}
-                   if slot["reveal"] else {})}
+                **({"reveal": {**slot["reveal"], "start": "load"}} if slot["reveal"] else {})}
         scene["instances"].append({"id": f"flag-tifo-{slot['id']}", "asset": asset_id,
                                    "model": flag_model(slot, TIFO_OFFSET), "visible": slot["id"] not in hidden,
                                    "flag": flag})

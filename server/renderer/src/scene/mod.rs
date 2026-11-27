@@ -18,7 +18,7 @@ use thiserror::Error;
 pub use appearance::{
     AreaShape, EnvironmentMap, Light, Lighting, MaterialLayers, PbrMaterial, ShadowMode, SkyLight,
 };
-pub use flag::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagShading};
+pub use flag::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagShading, RevealDirection};
 pub use geometry::{Aabb, MeshAttributes, MeshData, ModelMatrix};
 use storage::{Key, Store};
 pub use texture::{Filter, MapSlot, MaterialMaps, TextureData, TextureSampler, UvTransform, Wrap};

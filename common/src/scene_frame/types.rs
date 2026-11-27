@@ -150,11 +150,19 @@ object!(
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reveal: Option<FlagReveal>,
 });
-strings!(RevealDirection { CenterHorizontal => "center_horizontal" });
+strings!(RevealDirection {
+    LeftToRight => "left_to_right", RightToLeft => "right_to_left",
+    TopToBottom => "top_to_bottom", BottomToTop => "bottom_to_top",
+    CenterHorizontal => "center_horizontal", CenterVertical => "center_vertical",
+});
 strings!(RevealStart { Load => "load", Cue => "cue" });
 object!(
-    /// A flag appearing over `duration_s` seconds. `center_horizontal` shows the part
-    /// within `|2 x / width - 1| <= t / duration_s` of the centre line, opening outwards.
+    /// A flag appearing over `duration_s` seconds (finite, above 0): at progress
+    /// `p = t / duration_s` it shows the part of its rectangle that `direction` has
+    /// opened, in flag-local `x / width` and `y / height` (from the top-left corner,
+    /// whatever the artwork rotation): `left_to_right` `x <= p`, `right_to_left`
+    /// `x >= 1 - p`, `top_to_bottom` `y <= p`, `bottom_to_top` `y >= 1 - p`,
+    /// `center_horizontal` `|2 x - 1| <= p` and `center_vertical` `|2 y - 1| <= p`.
     /// `load` starts with the scene (the motion's time zero); `cue` hides the flag
     /// until a cue starts it (`description.cue_reveal`).
     FlagReveal {

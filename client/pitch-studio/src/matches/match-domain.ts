@@ -1,6 +1,7 @@
 import { validateDimensions } from '../scene/pitch/dimensions.ts';
 import { isPlacementInside } from '../scene/pitch/pitch-layout.ts';
 import { validateModelPose } from '../placements/model-motion.ts';
+import { isRevealDirection, validRevealDuration } from '../placements/reveal.ts';
 import { rectangleProblem } from '../placements/tifo.ts';
 import type { FusionAdapter, FusionTifo, Match, MatchRecord, Placement, FieldDimensions, FusionAsset } from '../shared/types.ts';
 
@@ -83,12 +84,13 @@ function validateTifo(tifo: unknown, offlinePackageId: string): FusionTifo {
   const problem = rectangleProblem(corners as [number, number, number][], width, height);
   if (problem) throw fail(problem);
   if (typeof assetRotation !== 'number' || ![0, 90, 180, 270].includes(assetRotation)) throw fail('assetRotation must be 0, 90, 180 or 270.');
-  if (!isRecord(reveal) || reveal.direction !== 'center_horizontal' || typeof reveal.duration !== 'number'
-    || !(reveal.duration > 0 && reveal.duration <= 60)) throw fail('tifoReveal needs the center-horizontal direction and a duration over 0 up to 60 s.');
+  if (reveal !== undefined && (!isRecord(reveal) || !isRevealDirection(reveal.direction) || !validRevealDuration(reveal.duration)))
+    throw fail('tifoReveal needs a known direction and a finite duration over 0 s.');
+  const checked = reveal as FusionTifo['reveal'];
   return { id: tifo.id, name: tifo.name, adId: tifo.adId, adName: tifo.adName,
     asset: { id: asset.id, name: asset.name, url: asset.url, contentType: asset.contentType as string },
     corners: corners.map((corner) => [...corner]) as FusionTifo['corners'], width, height, assetRotation: assetRotation as FusionTifo['assetRotation'],
-    reveal: { direction: 'center_horizontal', duration: reveal.duration } };
+    ...(checked ? { reveal: { direction: checked.direction, duration: checked.duration } } : {}) };
 }
 
 export function validateMatch(match: unknown): Match {

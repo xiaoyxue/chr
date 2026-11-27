@@ -630,6 +630,7 @@ fn golden_base_decal_shadow_catcher_and_flag() {
                 shading: FlagShading::Pbr,
                 artwork_turns: 0,
                 revealed: 1.0,
+                reveal_direction: Default::default(),
             }),
         )
         .unwrap();

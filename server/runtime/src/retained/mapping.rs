@@ -247,11 +247,13 @@ impl Registrations {
                     None => native,
                     Some(reveal) => {
                         let duration = reveal.duration_s.get();
-                        if !(duration > 0.0 && duration <= 60.0) {
-                            return Err(named(incompatible(
-                                "reveal duration_s must be above 0 and at most 60",
-                            )));
+                        if duration <= 0.0 {
+                            return Err(named(incompatible("reveal duration_s must be above 0")));
                         }
+                        let native = scene::Flag {
+                            reveal_direction: reveal_direction(reveal.direction),
+                            ..native
+                        };
                         revealing.push(Revealing {
                             id,
                             flag: native,
@@ -591,7 +593,18 @@ fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
             }
         },
         revealed: 1.0,
+        reveal_direction: scene::RevealDirection::CenterHorizontal,
     })
+}
+fn reveal_direction(direction: w::RevealDirection) -> scene::RevealDirection {
+    match direction {
+        w::RevealDirection::LeftToRight => scene::RevealDirection::LeftToRight,
+        w::RevealDirection::RightToLeft => scene::RevealDirection::RightToLeft,
+        w::RevealDirection::TopToBottom => scene::RevealDirection::TopToBottom,
+        w::RevealDirection::BottomToTop => scene::RevealDirection::BottomToTop,
+        w::RevealDirection::CenterHorizontal => scene::RevealDirection::CenterHorizontal,
+        w::RevealDirection::CenterVertical => scene::RevealDirection::CenterVertical,
+    }
 }
 /// A flag's `cloth` look: PBR fabric, matte with a soft sheen at grazing angles
 /// (`KHR_materials_sheen`) and a weak dielectric highlight.
@@ -817,6 +830,7 @@ mod tests {
             shading: scene::FlagShading::Simple,
             artwork_turns: 1,
             revealed: 1.0,
+            reveal_direction: scene::RevealDirection::BottomToTop,
         };
         let id = |name: &str| serde_json::from_value::<w::Id>(serde_json::json!(name)).unwrap();
         let mut scene = Scene::new().unwrap();
@@ -847,5 +861,9 @@ mod tests {
             [0.0, 0.5, 1.0]
         );
         assert_eq!(cued.at(4.0, &cues).artwork_turns, 1);
+        assert_eq!(
+            cued.at(4.0, &cues).reveal_direction,
+            scene::RevealDirection::BottomToTop
+        );
     }
 }

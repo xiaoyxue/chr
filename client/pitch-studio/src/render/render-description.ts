@@ -9,7 +9,7 @@ import { flagModel } from '../placements/flag.ts';
 import { wireMotion, type WireMotion } from '../placements/model-motion.ts';
 import { adRoot, modelFit } from '../placements/local-ad-transform.ts';
 import { imageOpacity, type LocalAd } from '../placements/local-ad.ts';
-import type { FieldDimensions, GroundPlacement, ModelPlacement, Placement } from '../shared/types.ts';
+import type { FieldDimensions, GroundPlacement, ModelPlacement, Placement, RevealDirection } from '../shared/types.ts';
 import type { WireLighting } from '../lighting/lighting.ts';
 
 export type Rows = [number, number, number, number][];
@@ -42,7 +42,7 @@ export interface FlagParameters {
   material: 'simple' | 'pbr' | 'cloth';
   /** Clockwise degrees as the artwork reads; omitted when 0. */
   artwork_rotation?: 90 | 180 | 270;
-  reveal?: { direction: 'center_horizontal'; duration_s: number; start: 'load' | 'cue' };
+  reveal?: { direction: RevealDirection; duration_s: number; start: 'load' | 'cue' };
 }
 export interface DescriptionScene {
   ground: { pitch_m: [number, number] };

@@ -37,8 +37,10 @@ export interface ModelPlacement extends SlotBase {
 }
 export type Placement = GroundPlacement | ModelPlacement;
 export type ArtworkRotation = 0 | 90 | 180 | 270;
-/** How a flag appears: opening from its vertical centre line over `duration` seconds, from the scene load or an operator cue. */
-export interface FlagReveal { direction: 'center_horizontal'; duration: number; start: 'load' | 'cue' }
+/** Where a reveal opens a flag's rectangle (#215), as chr's render description names it (placements/reveal.ts). */
+export type RevealDirection = 'left_to_right' | 'right_to_left' | 'top_to_bottom' | 'bottom_to_top' | 'center_horizontal' | 'center_vertical';
+/** How a flag appears: opening from `direction` over `duration` seconds, from the scene load or an operator cue. */
+export interface FlagReveal { direction: RevealDirection; duration: number; start: 'load' | 'cue' }
 /**
  * A Fusion v2 Tifo placement (#210): an image on a rectangle of the package's point
  * cloud, whose coordinates are the pitch frame (metres, z down). `corners` are top-left,
@@ -55,7 +57,8 @@ export interface FusionTifo {
   width: number;
   height: number;
   assetRotation: ArtworkRotation;
-  reveal: Omit<FlagReveal, 'start'>;
+  /** Its tifoReveal; absent when the package has none (or null): a static tifo. */
+  reveal?: Omit<FlagReveal, 'start'>;
 }
 export interface Match {
   id: string;

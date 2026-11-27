@@ -1,4 +1,5 @@
 import { FLAG_LIMITS } from './flag.ts';
+import { validReveal } from './reveal.ts';
 import type { ArtworkRotation, FieldDimensions, FlagReveal } from '../shared/types.ts';
 
 export type Vector3Tuple = [number, number, number];
@@ -59,12 +60,6 @@ export interface LocalAd {
   /** The Fusion Tifo placement a flag was seeded from (placements/tifo.ts). */
   fusionTifoId?: string;
 }
-
-/** A flag's reveal durations, in seconds, as chr-server accepts them. */
-export const REVEAL_DURATION = [0, 60] as const;
-export const validReveal = (reveal: FlagReveal) => Boolean(reveal) && typeof reveal === 'object' && reveal.direction === 'center_horizontal'
-  && Number.isFinite(reveal.duration) && reveal.duration > REVEAL_DURATION[0] && reveal.duration <= REVEAL_DURATION[1]
-  && ['load', 'cue'].includes(reveal.start);
 
 /** Opacity of a local 2D ad that has none of its own, as chr-server has drawn image quads since #163. */
 export const LOCAL_IMAGE_OPACITY = 0.5;

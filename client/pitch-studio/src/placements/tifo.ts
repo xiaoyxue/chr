@@ -42,7 +42,8 @@ export const tifoFlagId = (tifo: Pick<FusionTifo, 'id'>) => `tifo-${tifo.id}`;
 /**
  * The tifo as an editable point-cloud flag: its artwork is the package's stored image
  * (`material`: server path and SHA-256) stretched to the rectangle, revealed as Fusion
- * says from the scene load, in front of the surface like a flag picked from the reading side.
+ * says (direction and duration) from the scene load or static without a tifoReveal, in
+ * front of the surface like a flag picked from the reading side.
  */
 export function tifoFlag(tifo: FusionTifo, cloudId: string, material: { path: string; sha256: string }): LocalAd {
   return {
@@ -50,7 +51,7 @@ export function tifoFlag(tifo: FusionTifo, cloudId: string, material: { path: st
     plane: tifoPlane(tifo.corners), normalSign: -1, offset: -FLAG_CLEARANCE, scale: 1, yaw: 0, visible: true,
     materialPath: material.path, materialName: tifo.asset.name, materialSha256: material.sha256,
     flag: { ...DEFAULT_FLAG }, artworkRotation: tifo.assetRotation,
-    reveal: { ...tifo.reveal, start: 'load' }, aspectLocked: false, fusionTifoId: tifo.id,
+    ...(tifo.reveal ? { reveal: { ...tifo.reveal, start: 'load' } } : {}), aspectLocked: false, fusionTifoId: tifo.id,
   };
 }
 

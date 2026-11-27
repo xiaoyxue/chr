@@ -33,6 +33,22 @@ pub enum FlagShading {
     Pbr,
 }
 
+/// Where a reveal opens the flag, in its rectangle as the flag-local frame lays it
+/// out (`u` right along the width, `v` down the height), whatever the artwork turn.
+/// The discriminant is the code `flag.wgsl` reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RevealDirection {
+    /// From the vertical centre line out to the left and right edges.
+    #[default]
+    CenterHorizontal = 0,
+    /// From the horizontal centre line out to the top and bottom edges.
+    CenterVertical = 1,
+    LeftToRight = 2,
+    RightToLeft = 3,
+    TopToBottom = 4,
+    BottomToTop = 5,
+}
+
 /// Size and motion of a flag instance; the instance model maps flag-local metres
 /// to the world and should be rigid so the amplitude stays in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,9 +64,11 @@ pub struct Flag {
     pub shading: FlagShading,
     /// Clockwise quarter turns of the artwork within the flag as it reads, 0 to 3.
     pub artwork_turns: u8,
-    /// Fraction of the width shown, opening outwards from the centre line: 1 shows
-    /// the whole flag and 0 hides it. Columns beyond it collapse onto its edge.
+    /// Fraction of the flag shown, opened from `reveal_direction`: 1 shows the whole
+    /// flag and 0 hides it. Grid points not yet shown collapse onto the edge of the
+    /// shown part, so the artwork there is cut, never squeezed.
     pub revealed: f32,
+    pub reveal_direction: RevealDirection,
 }
 
 impl Flag {
@@ -75,10 +93,18 @@ impl Flag {
         Ok(())
     }
 
-    /// The grid coordinate `u` in [0, 1] moved onto the revealed part of the width.
-    pub fn revealed_u(self, u: f64) -> f64 {
-        let half = 0.5 * f64::from(self.revealed);
-        0.5 + (u - 0.5).clamp(-half, half)
+    /// Grid coordinates `(u, v)` in [0, 1]² moved onto the revealed part of the flag.
+    pub fn revealed_uv(self, u: f64, v: f64) -> [f64; 2] {
+        let p = f64::from(self.revealed);
+        let centred = |x: f64| 0.5 + (x - 0.5).clamp(-0.5 * p, 0.5 * p);
+        match self.reveal_direction {
+            RevealDirection::CenterHorizontal => [centred(u), v],
+            RevealDirection::CenterVertical => [u, centred(v)],
+            RevealDirection::LeftToRight => [u.min(p), v],
+            RevealDirection::RightToLeft => [u.max(1.0 - p), v],
+            RevealDirection::TopToBottom => [u, v.min(p)],
+            RevealDirection::BottomToTop => [u, v.max(1.0 - p)],
+        }
     }
 
     /// Texture coordinates (right, down) of the artwork at flag coordinates `(u, v)`.
@@ -209,6 +235,7 @@ mod tests {
             shading: FlagShading::Simple,
             artwork_turns: 0,
             revealed: 1.0,
+            reveal_direction: RevealDirection::CenterHorizontal,
         }
     }
 
@@ -305,21 +332,64 @@ mod tests {
     }
 
     #[test]
-    fn the_reveal_opens_from_the_centre_line() {
-        let half = Flag {
-            revealed: 0.5,
-            ..flag()
+    fn each_reveal_direction_opens_from_its_edge_or_centre_line() {
+        use RevealDirection::*;
+        let at = |direction, revealed: f32, u, v| {
+            Flag {
+                revealed,
+                reveal_direction: direction,
+                ..flag()
+            }
+            .revealed_uv(u, v)
         };
-        assert_eq!(
-            [0.0, 0.3, 0.5, 0.7, 1.0].map(|u| half.revealed_u(u)),
-            [0.25, 0.3, 0.5, 0.7, 0.75]
-        );
-        let hidden = Flag {
-            revealed: 0.0,
-            ..flag()
-        };
-        assert_eq!([0.0, 1.0].map(|u| hidden.revealed_u(u)), [0.5, 0.5]);
-        assert_eq!(flag().revealed_u(0.0), 0.0);
+        // At half progress: the grid's corners and centre, moved onto the shown part.
+        let points = [(0.0, 0.0), (1.0, 1.0), (0.5, 0.5), (0.3, 0.7)];
+        for (direction, expected) in [
+            (
+                CenterHorizontal,
+                [[0.25, 0.0], [0.75, 1.0], [0.5, 0.5], [0.3, 0.7]],
+            ),
+            (
+                CenterVertical,
+                [[0.0, 0.25], [1.0, 0.75], [0.5, 0.5], [0.3, 0.7]],
+            ),
+            (
+                LeftToRight,
+                [[0.0, 0.0], [0.5, 1.0], [0.5, 0.5], [0.3, 0.7]],
+            ),
+            (
+                RightToLeft,
+                [[0.5, 0.0], [1.0, 1.0], [0.5, 0.5], [0.5, 0.7]],
+            ),
+            (
+                TopToBottom,
+                [[0.0, 0.0], [1.0, 0.5], [0.5, 0.5], [0.3, 0.5]],
+            ),
+            (
+                BottomToTop,
+                [[0.0, 0.5], [1.0, 1.0], [0.5, 0.5], [0.3, 0.7]],
+            ),
+        ] {
+            assert_eq!(
+                points.map(|(u, v)| at(direction, 0.5, u, v)),
+                expected,
+                "{direction:?}"
+            );
+            // Hidden: every grid point lies on one line, so the flag covers no area.
+            let hidden = points.map(|(u, v)| at(direction, 0.0, u, v));
+            let horizontal = matches!(direction, CenterHorizontal | LeftToRight | RightToLeft);
+            let axis = usize::from(!horizontal);
+            assert!(
+                hidden.iter().all(|p| p[axis] == hidden[0][axis]),
+                "{direction:?}"
+            );
+            // Complete: the grid is unchanged.
+            assert_eq!(
+                points.map(|(u, v)| at(direction, 1.0, u, v)),
+                points.map(|(u, v)| [u, v]),
+                "{direction:?}"
+            );
+        }
     }
 
     #[test]

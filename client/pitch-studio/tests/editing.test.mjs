@@ -120,8 +120,13 @@ test('stored flags must carry valid wave settings; older ads stay loadable', () 
   // A tifo flag's artwork rotation, reveal, aspect lock and source (#210); other ads have none.
   const tifo = { ...flag, artworkRotation: 270, reveal: { direction: 'center_horizontal', duration: 60, start: 'cue' }, aspectLocked: true, fusionTifoId: 'PLC-1' };
   assert.ok(validLocalAd(tifo));
+  // Every direction, and durations past a minute as Fusion allows (#215).
+  for (const direction of ['left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top', 'center_horizontal', 'center_vertical'])
+    assert.ok(validLocalAd({ ...tifo, reveal: { direction, duration: 600, start: 'load' } }), direction);
   for (const [key, value] of [['artworkRotation', 45], ['reveal', { direction: 'center-horizontal', duration: 2, start: 'load' }],
-    ['reveal', { direction: 'center_horizontal', duration: 0, start: 'load' }], ['reveal', { direction: 'center_horizontal', duration: 61, start: 'load' }],
+    ['reveal', { direction: 'diagonal', duration: 2, start: 'load' }],
+    ['reveal', { direction: 'center_horizontal', duration: 0, start: 'load' }], ['reveal', { direction: 'center_horizontal', duration: -1, start: 'load' }],
+    ['reveal', { direction: 'center_horizontal', duration: Infinity, start: 'load' }],
     ['reveal', { direction: 'center_horizontal', duration: 2, start: 'later' }], ['aspectLocked', 'yes'], ['fusionTifoId', '../x']]) {
     assert.equal(validLocalAd({ ...tifo, [key]: value }), false, `${key} ${JSON.stringify(value)}`);
     assert.equal(validLocalAd({ ...ad, [key]: tifo[key] }), false, `${key} on a 2D ad`);

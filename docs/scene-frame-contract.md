@@ -238,7 +238,15 @@ type RenderInstance = {
     amplitude_m: number;
     frequency: number;
     speed: number;
-    material: "simple" | "pbr";
+    material: "simple" | "pbr" | "cloth";
+    artwork_rotation?: 0 | 90 | 180 | 270; // clockwise turn of the artwork (#210)
+    // Extension (#210, #215): absent, the flag is shown from the start.
+    reveal?: {
+      direction: "left_to_right" | "right_to_left" | "top_to_bottom" | "bottom_to_top"
+        | "center_horizontal" | "center_vertical";
+      duration_s: number; // finite, above 0
+      start: "load" | "cue";
+    };
   };
   // Extension (#157): rigid animation of the whole instance; may be omitted. At t
   // seconds after the scene's first rendered frame the model is
