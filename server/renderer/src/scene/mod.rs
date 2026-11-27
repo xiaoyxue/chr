@@ -20,9 +20,10 @@ pub use appearance::{
     AreaShape, EnvironmentMap, Light, Lighting, MaterialLayers, PbrMaterial, ShadowMode, SkyLight,
 };
 pub use cloth::{
-    CLOTH_COLUMNS, CLOTH_ROWS, Cloth, ITERATIONS, MAX_SLACK, MAX_WIND, STEP, initial_positions,
+    CLOTH_COLUMNS, CLOTH_ROWS, Cloth, ITERATIONS, MAX_SLACK, MAX_WIND, SIMULATED_HEIGHT, STEP,
+    initial_positions,
 };
-pub(crate) use cloth::{GRAVITY, spacing};
+pub(crate) use cloth::{GRAVITY, simulated_size, spacing};
 pub use flag::{
     FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagMotion, FlagShading, RevealDirection, Wave,
 };

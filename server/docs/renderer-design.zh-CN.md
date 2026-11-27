@@ -488,7 +488,9 @@ chr 世界坐标：对齐次列向量，`world_position = model * local_position
 1/120 s 步长在两个 ping-pong 粒子 buffer 上做一次 Verlet `predict` 和 36 次加权 Jacobi
 `constrain` dispatch，然后 `surface` pass 把粒子双线性采样（位置和逐粒子的曲面方向，
 因此法线平滑）到共享旗帜网格上，展开收拢与图片旋转沿用与 SimpleWave pass 共享的
-`flag_shared.wgsl`。绘制、阴影和外观不变。
+`flag_shared.wgsl`。每块布料都按旗帜宽高比、以 `SIMULATED_HEIGHT`（4.8 m，参考实现的
+跨度）的高度模拟，`surface` pass 再按旗帜高度与它之比缩放位置，因此任意大小的旗帜
+都和参考实现一样褶皱深、动得快。绘制、阴影和外观不变。
 
 与 SimpleWave 不同，布料有状态。`FlagGpu` 在原生旗帜被绘制期间按 `InstanceId`
 跨帧保留其粒子；新场景的实例 ID 不同，因此从静止开始。布料时钟是 `Cloth::seconds`，

@@ -625,7 +625,10 @@ solver: a Verlet `predict` and 36 weighted Jacobi `constrain` dispatches per fix
 1/120 s step over two ping-pong particle buffers, then a `surface` pass that samples
 the particles bilinearly (positions and per-particle surface directions, so normals
 are smooth) onto the shared flag grid, after the reveal collapse and artwork turns
-that `flag_shared.wgsl` shares with the SimpleWave pass. Draws, shadows and looks
+that `flag_shared.wgsl` shares with the SimpleWave pass. Every cloth is simulated
+`SIMULATED_HEIGHT` (4.8 m, the reference's span) tall at its flag's aspect, and the
+`surface` pass scales its positions by the flag's height over it, so a flag of any
+size folds as deeply and as quickly as the reference's. Draws, shadows and looks
 are unchanged.
 
 Unlike SimpleWave, the cloth is stateful. `FlagGpu` keeps each native flag's

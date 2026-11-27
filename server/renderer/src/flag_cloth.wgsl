@@ -16,7 +16,7 @@ struct Step {
     // Flag-local Y of the pinned top edge after this step: 0 once raised (scene/cloth.rs).
     anchor: vec4<f32>,
 };
-// flag.rs params(): a cloth's surface reads only its reveal and artwork turns.
+// flag.rs params(): a cloth's surface reads only its height, reveal and artwork turns.
 struct FlagParams { size_wave: vec4<f32>, phases: vec4<f32>, artwork: vec4<f32> };
 
 @group(0) @binding(0) var<storage,read> source: array<Particle>;
@@ -123,7 +123,8 @@ fn bilinear(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>, f: vec2<f32>
 
 // The flag grid's surface sampled from the cloth: positions and surface directions
 // blended over the cloth cell under each (revealed) grid point, so the shading
-// normal is smooth across cells.
+// normal is smooth across cells. The cloth is simulated SIMULATED_HEIGHT tall
+// (scene/cloth.rs); its positions scale to the flag's height.
 @compute @workgroup_size(64)
 fn surface(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= (FLAG_COLUMNS + 1u) * (FLAG_ROWS + 1u) { return; }
@@ -132,7 +133,8 @@ fn surface(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = min(u32(cell.x), CLOTH_COLUMNS - 2u);
     let r = min(u32(cell.y), CLOTH_ROWS - 2u);
     let f = cell - vec2(f32(c), f32(r));
-    let position = bilinear(particle(c, r), particle(c + 1u, r), particle(c, r + 1u), particle(c + 1u, r + 1u), f);
+    let scale = params.size_wave.y / SIMULATED_HEIGHT;
+    let position = scale * bilinear(particle(c, r), particle(c + 1u, r), particle(c, r + 1u), particle(c + 1u, r + 1u), f);
     let du = bilinear(across(c, r), across(c + 1u, r), across(c, r + 1u), across(c + 1u, r + 1u), f);
     let dv = bilinear(down(c, r), down(c + 1u, r), down(c, r + 1u), down(c + 1u, r + 1u), f);
     let normal = cross(dv, du);

@@ -12,6 +12,11 @@
 //! reads the artwork; here those are -Y and -Z, a proper rotation, so its formulas
 //! carry over with only its constant vectors turned. Its floor contact is dropped:
 //! flag-local space has no ground.
+//!
+//! Every cloth is simulated [`SIMULATED_HEIGHT`] tall, the reference's, at its flag's
+//! aspect, and scaled to its flag ([`simulated_size`]): a flag of any size folds and
+//! ripples as deeply and as quickly as the reference's does, where a real cloth tens
+//! of metres tall would move in proportionally shallower, slower folds.
 
 use super::{Aabb, SceneError};
 
@@ -25,6 +30,8 @@ pub const STEP: f64 = 1.0 / 120.0;
 pub const ITERATIONS: u32 = 36;
 /// The largest slack: a cloth 25 % longer than its pinned span.
 pub const MAX_SLACK: f32 = 0.2;
+/// The height in metres every cloth is simulated at: the reference's pinned span.
+pub const SIMULATED_HEIGHT: f32 = 4.8;
 /// The span a raised cloth starts folded over, per metre of its height: the
 /// reference's 0.25 m over its 4.8 m.
 const FOLDED: f64 = 0.25 / 4.8;
@@ -147,6 +154,13 @@ fn auto_offset(segment: u32) -> f64 {
     value = (value ^ (value >> 16)).wrapping_mul(0x45d9f3b);
     value ^= value >> 16;
     (f64::from(value) / f64::from(u32::MAX) * 2.0 - 1.0) * AUTO_RANGE
+}
+
+/// The size a `width` × `height` flag's cloth is simulated at: [`SIMULATED_HEIGHT`]
+/// tall at the flag's aspect. Its surface is scaled back by `height /
+/// SIMULATED_HEIGHT` (`flag_cloth.wgsl`).
+pub(crate) fn simulated_size(width: f32, height: f32) -> [f32; 2] {
+    [width * (SIMULATED_HEIGHT / height), SIMULATED_HEIGHT]
 }
 
 /// The cloth's rest length down a flag of `height` with `slack`.

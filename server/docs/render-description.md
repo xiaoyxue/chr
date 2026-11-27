@@ -227,9 +227,10 @@ Each fixed 1/120 s step integrates the reference's visually tuned gravity
 (3.8 m/s², world down turned into the flag's axes through `model`), damping and an
 aerodynamic load from the gusting wind, then relaxes structural, shear and bending
 distances in 36 Jacobi iterations. There is no pole, ground contact, self-collision
-or air simulation, and the wind is relative to the flag, not to the world. The
-reference is tuned at 3.2 × 4.8 m; much larger flags move like a smaller flag in
-slow motion.
+or air simulation, and the wind is relative to the flag, not to the world. Every
+cloth is simulated 4.8 m tall, the reference's height, at its flag's aspect, and
+scaled to the flag: a 25 m flag folds and ripples as deeply and as quickly as the
+reference's, rather than in the shallower, slower folds of a real cloth its size.
 
 The cloth's clock is the scene's time, as for reveals: it starts at rest when the
 scene starts playing, and each frame the renderer steps it up to the frame (at

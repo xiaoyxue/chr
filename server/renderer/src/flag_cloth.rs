@@ -14,7 +14,7 @@ use crate::{
     Gpu,
     scene::{
         CLOTH_COLUMNS, CLOTH_ROWS, Cloth, FLAG_VERTICES, GRAVITY, ITERATIONS, InstanceId,
-        ModelMatrix, STEP, spacing,
+        ModelMatrix, SIMULATED_HEIGHT, STEP, simulated_size, spacing,
     },
 };
 
@@ -149,7 +149,7 @@ impl ClothGpu {
             label: Some("flag cloth"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}const CLOTH_COLUMNS: u32 = {CLOTH_COLUMNS}u;\nconst CLOTH_ROWS: u32 = {CLOTH_ROWS}u;\n{}",
+                    "{}const CLOTH_COLUMNS: u32 = {CLOTH_COLUMNS}u;\nconst CLOTH_ROWS: u32 = {CLOTH_ROWS}u;\nconst SIMULATED_HEIGHT: f32 = {SIMULATED_HEIGHT:?};\n{}",
                     super::flag::prelude(),
                     include_str!("flag_cloth.wgsl")
                 )
@@ -209,6 +209,8 @@ impl ClothGpu {
         } = draw;
         let target = (cloth.seconds / STEP).floor() as u64;
         let shape = [size[0], size[1], cloth.slack, cloth.raise.unwrap_or(0.0)];
+        // The particles live at the simulated size; the surface pass scales them.
+        let size = simulated_size(size[0], size[1]);
         let restart = self
             .states
             .get(&id)
@@ -418,10 +420,16 @@ mod tests {
         params: wgpu::Buffer,
         vertices: wgpu::Buffer,
         ids: Vec<InstanceId>,
+        size: [f32; 2],
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::sized(SIZE)
+        }
+
+        /// Cloths of flags `size` metres.
+        fn sized(size: [f32; 2]) -> Self {
             let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
             assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
             let mut scene = Scene::new().unwrap();
@@ -434,11 +442,16 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
+            let flag = Flag {
+                width: size[0],
+                height: size[1],
+                ..flag()
+            };
             let params = gpu
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
-                    contents: bytemuck::cast_slice(&crate::flag::params(flag(), 0.0)),
+                    contents: bytemuck::cast_slice(&crate::flag::params(flag, 0.0)),
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
             let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -453,6 +466,7 @@ mod tests {
                 params,
                 vertices,
                 ids,
+                size,
             }
         }
 
@@ -469,7 +483,7 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ])
                 .unwrap();
-                let draw = ClothDraw::new(self.ids[index], SIZE, cloth, model);
+                let draw = ClothDraw::new(self.ids[index], self.size, cloth, model);
                 assert_eq!(draw.gravity, [0.0, GRAVITY, 0.0]);
                 moved |= self
                     .cloth
@@ -730,6 +744,35 @@ mod tests {
             assert!(v.iter().all(|x| x.is_finite()));
             let length = (v[4] * v[4] + v[5] * v[5] + v[6] * v[6]).sqrt();
             assert!((length - 1.0).abs() < 1e-3, "unit normal: {length}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a hardware GPU"]
+    fn a_larger_flag_folds_as_the_simulated_cloth_scaled_to_it() {
+        let gusty = Cloth {
+            auto_direction: true,
+            ..cloth(16.0, -13.0, 0.24)
+        };
+        let surface = |size: [f32; 2]| {
+            let mut harness = Harness::sized(size);
+            harness.run(&[(0, gusty)], 1.0);
+            harness.read(&harness.vertices)
+        };
+        // A power-of-two scale keeps the simulated size, and so the simulation, exact.
+        let simulated = surface(SIZE);
+        let large = surface(SIZE.map(|x| 4.0 * x));
+        let pairs = simulated
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .zip(large.as_chunks::<16>().0);
+        for (s, l) in pairs {
+            assert!((0..3).all(|i| (l[i] - 4.0 * s[i]).abs() <= 1e-5 * (1.0 + l[i].abs())));
+            assert!(
+                (4..16).all(|i| (l[i] - s[i]).abs() <= 1e-5),
+                "{s:?} vs {l:?}"
+            );
         }
     }
 }
