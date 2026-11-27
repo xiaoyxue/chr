@@ -164,6 +164,30 @@ class TifoTests(unittest.TestCase):
         # The corners are already pitch coordinates: the package's cloud changes nothing (#217).
         self.assertEqual(self.describe(tifo_package(cloud=None)), self.describe(tifo_package()))
 
+    def test_the_scene_is_lit_as_the_studios_default_preset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, exr = Path(directory) / "match.zip", Path(directory) / "fly-studio-03_4K.exr"
+            path.write_bytes(tifo_package())
+            exr.write_bytes(b"exr")
+            unlit = fusion_description.describe_scene(path, "/srv/match.zip")
+            lit = fusion_description.describe_scene(path, "/srv/match.zip", ibl=exr)
+        # chr-server's default rig: four corner towers 35 m up aimed at the centre, and the sun.
+        lights = unlit["lighting"]["lights"]
+        self.assertEqual([light["position"] for light in lights[:4]],
+                         [[-52.5, -34, -35], [-52.5, 34, -35], [52.5, -34, -35], [52.5, 34, -35]])
+        self.assertEqual(lights[0]["direction"], [52.5, 34, 35])
+        length = math.hypot(0.5, 0.6, 1.0)
+        for value, target in zip(lights[4]["direction"], [0.5 / length, 0.6 / length, 1 / length]):
+            self.assertAlmostEqual(value, target)
+        self.assertIsNone(unlit["lighting"]["environment"])
+        # --ibl adds the panorama, named by its content, at the preset's gain.
+        sha = hashlib.sha256(b"exr").hexdigest()
+        self.assertEqual(lit["assets"][-1], {"id": f"IBL-{sha[:16]}", "kind": "environment",
+                                             "source": {"path": str(exr)}, "sha256": sha})
+        self.assertEqual(lit["lighting"]["environment"],
+                         {"asset_ref": f"IBL-{sha[:16]}", "gain": 0.5, "rotation": 0, "visible": False})
+        self.assertEqual(lit["lighting"]["lights"], lights)
+
     def test_tifos_off_their_rectangle_translucent_or_with_a_bad_cloud_are_refused(self):
         skewed = [CORNERS[0], CORNERS[1], (-9, 44, -2), CORNERS[3]]
         for case, data in [("skewed corners", tifo_package(corners=skewed)),

@@ -455,12 +455,16 @@ block for a startup file, for example
 Without the page, `server/scripts/fusion_description.py` converts a Fusion offline
 ZIP the same way (Fusion placements and the flags seeded from its tifos, all
 enabled, read from the ZIP rather than the store, no other local placements); its
-output equals the page's export for an unedited package. `--camera <json>` takes the
+output equals the page's export for an unedited package. It lights the scene as the
+page's default preset does: chr-server's default rig, written out, and with `--ibl
+<server path of fly-studio-03_4K.exr>` its panorama at gain 0.5 as an `environment`
+asset. `--camera <json>` takes the
 `camera` of another description and writes a complete one, and `--move <placement>
 <dx> <dy>` shifts a placement in pitch metres first, for example to render a still:
 
 ```sh
 uv run server/scripts/fusion_description.py match.zip --camera start.json \
+  --ibl /srv/ibl/fly-studio-03_4K.exr \
   --move PLC-… 0 10 --output output/description/moved.json
 cargo run --locked --release -p chr-runtime --bin chr-renderer-cli -- render \
   --description output/description/moved.json --fps 30 --size 1920x1080 \
