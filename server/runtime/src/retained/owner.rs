@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{
     incompatible,
-    mapping::{Animated, NativeSettings, Registrations, Revealing},
+    mapping::{Animated, NativeSettings, Registrations, TimedFlag},
     reject,
     rotation::{Request as RotationRequest, Rotation},
     value,
@@ -20,7 +20,7 @@ pub struct BoundScene {
     snapshot: w::SceneSnapshot,
     scene: SceneView,
     animated: Vec<Animated>,
-    revealing: Vec<Revealing>,
+    timed: Vec<TimedFlag>,
     camera: Option<Camera>,
     settings: NativeSettings,
     generation: Arc<()>,
@@ -33,9 +33,9 @@ impl BoundScene {
     pub fn scene(&self) -> &SceneView {
         &self.scene
     }
-    /// The scene `seconds` after it started playing: animated instances moved and
-    /// flags revealed, or the bound view itself when nothing changes, so its caches
-    /// stay valid. `cues` holds the start time, in the same seconds, of each cued
+    /// The scene `seconds` after it started playing: animated instances moved, flags
+    /// revealed and native flags' cloth clocks at `seconds`, or the bound view itself
+    /// when nothing changes, so its caches stay valid. `cues` holds the start time, in the same seconds, of each cued
     /// flag instance's latest cue.
     pub fn scene_at(&self, seconds: f64, cues: &HashMap<w::Id, f64>) -> Result<SceneView, String> {
         let mut scene = self.scene.clone();
@@ -47,8 +47,11 @@ impl BoundScene {
                 .collect::<Result<Vec<_>, String>>()?;
             scene = scene.with_models(models).map_err(|e| e.to_string())?;
         }
-        if !self.revealing.is_empty() {
-            let flags = self.revealing.iter().map(|r| (r.id, r.at(seconds, cues)));
+        if !self.timed.is_empty() {
+            let flags = self
+                .timed
+                .iter()
+                .map(|flag| (flag.id, flag.at(seconds, cues)));
             scene = scene.with_flags(flags).map_err(|e| e.to_string())?;
         }
         Ok(scene)
@@ -342,8 +345,7 @@ impl SceneAdapter {
         effect: w::Effect,
         generation: Arc<()>,
     ) -> Result<BoundScene, ErrorObject> {
-        let (scene, camera, animated, revealing) =
-            self.registrations.prepare(&self.config, &state)?;
+        let (scene, camera, animated, timed) = self.registrations.prepare(&self.config, &state)?;
         let settings = NativeSettings::new(&self.config, state.shadow_mode)?;
         Ok(BoundScene {
             snapshot: w::SceneSnapshot {
@@ -355,7 +357,7 @@ impl SceneAdapter {
             },
             scene,
             animated,
-            revealing,
+            timed,
             camera,
             settings,
             generation,

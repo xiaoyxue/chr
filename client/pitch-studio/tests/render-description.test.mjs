@@ -6,7 +6,7 @@ const server = await createServer({ configFile: false, server: { middlewareMode:
 after(() => server.close());
 const { RpcError, blendedMaterials, describeScene, sendDescription, glbModel, localGlbModel, localQuadModel, quadModel, rendererFailure, trackerProblem, workerProblem } = await server.ssrLoadModule('/src/render/render-description.ts');
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
-const { flagDraft, flagDraftChanged, flagModel, orientFlagPlane, parseFlagDraft } = await server.ssrLoadModule('/src/placements/flag.ts');
+const { NATIVE_SLACK, flagDraft, flagDraftChanged, flagModel, nativeRest, orientFlagPlane, parseFlagDraft, windDirectionAt, windHeading } = await server.ssrLoadModule('/src/placements/flag.ts');
 const { localRow, sendScope } = await server.ssrLoadModule('/src/placements/placement-list.ts');
 const { revealedPoint } = await server.ssrLoadModule('/src/placements/reveal.ts');
 const { fusionAssets, localMaterials } = await server.ssrLoadModule('/src/render/send-materials.ts');
@@ -154,6 +154,11 @@ test('flags with the same artwork share one asset but keep their own size and wa
     const [instance] = describeScene({ ...options, locals: [{ ad: { ...tifo, reveal: { direction, duration: 90, start: 'load' } }, sha256: sha }] }).instances;
     assert.deepEqual(instance.flag.reveal, { direction, duration_s: 90, start: 'load' }, direction);
   }
+  // A native flag sends its wind and fabric instead of a wave, its tension as 0 – 1.
+  const native = { ...ad, id: 'n1', flag: { ...flagSettings, type: 'native', native: { wind: 12.5, direction: -40, autoDirection: false, tension: 30 }, material: 'cloth' } };
+  const [simulated, unset] = describeScene({ ...options, locals: [{ ad: native, sha256: sha }, { ad: { ...native, flag: { ...native.flag, native: undefined } }, sha256: sha }] }).instances;
+  assert.deepEqual(simulated.flag, { width_m: 4, height_m: 2, type: 'native', wind_mps: 12.5, wind_direction_deg: -40, auto_direction: false, tension: 0.3, material: 'cloth' });
+  assert.deepEqual(unset.flag, { width_m: 4, height_m: 2, type: 'native', wind_mps: 7, wind_direction_deg: 25, auto_direction: true, tension: 0.65, material: 'cloth' });
   const many = Array.from({ length: 64 }, (_, i) => ({ ad: { ...ad, id: `f${i}` }, sha256: sha }));
   assert.throws(() => describeScene({ ...options, locals: many }), /最多放置 63 个实例/);
 });
@@ -311,9 +316,50 @@ test('typed flag fields are unsaved until they match the flag, and are range-che
   assert.equal(flagDraftChanged({ ...draft, speed: '1.5' }, flagSettings), true);
   assert.equal(flagDraftChanged({ ...draft, amplitude: '' }, flagSettings), true);
   assert.equal(flagDraftChanged({ ...draft, material: 'pbr' }, flagSettings), true);
-  assert.deepEqual(parseFlagDraft({ ...draft, speed: '1.5', material: 'pbr' }), { wave: { amplitude: 0.32, frequency: 1.35, speed: 1.5, material: 'pbr' } });
+  assert.deepEqual(parseFlagDraft({ ...draft, speed: '1.5', material: 'pbr' }), { wave: { type: 'default', amplitude: 0.32, frequency: 1.35, speed: 1.5, material: 'pbr' } });
   assert.deepEqual(parseFlagDraft({ ...draft, amplitude: '5.5' }), { error: '振幅应介于 0 – 5。' });
   assert.deepEqual(parseFlagDraft({ ...draft, frequency: '' }), { error: '频率应介于 0.3 – 3。' });
+});
+
+test('a native flag drafts its wind and fabric, keeping its wave for switching back', () => {
+  const draft = flagDraft(flagSettings);
+  assert.deepEqual([draft.type, draft.wind, draft.direction, draft.autoDirection, draft.tension], ['default', '7', '25', true, '65']);
+  const native = { ...draft, type: 'native' };
+  assert.equal(flagDraftChanged(native, flagSettings), true, 'switching the type is a change');
+  // Only the native fields are checked and saved: the wave stays as it was.
+  const parsed = parseFlagDraft({ ...native, amplitude: '', wind: '12', direction: '-90', autoDirection: false, tension: '20' });
+  assert.deepEqual(parsed, { wave: { type: 'native', native: { wind: 12, direction: -90, autoDirection: false, tension: 20 }, material: 'simple' } });
+  const saved = { ...flagSettings, ...parsed.wave };
+  assert.equal(flagDraftChanged(flagDraft(saved), saved), false);
+  assert.equal(flagDraftChanged({ ...flagDraft(saved), autoDirection: true }, saved), true);
+  assert.equal(flagDraftChanged({ ...flagDraft(saved), amplitude: '3' }, saved), false, 'a native flag ignores its wave');
+  assert.deepEqual(flagDraft({ ...saved, type: 'default' }).amplitude, '0.32');
+  for (const [key, value, error] of [['wind', '18.5', '风速应介于 0 – 18。'], ['tension', '', '布料张力应介于 0 – 100。'],
+    ['direction', '12.5', '风向应介于 -180 – 180 之间的整数度。'], ['direction', '181', '风向应介于 -180 – 180 之间的整数度。']]) {
+    assert.deepEqual(parseFlagDraft({ ...native, [key]: value }), { error }, `${key} ${value}`);
+  }
+});
+
+test('automatic wind follows the reference sequence and heads where it blows', () => {
+  // xiaoyxue/Simulation windDirectionAt(t, { direction, autoDirection: true }); chr-renderer checks the same values.
+  for (const [seconds, direction, expected] of [[0.3, 25, 10.023014532854518], [1.37, 25, 27.040520015593643],
+    [7.25, -170, -177.58095059254697], [123.4, 170, 144.30564734558254]]) {
+    assert.ok(Math.abs(windDirectionAt(seconds, { direction, autoDirection: true }) - expected) < 1e-9, `${seconds} s`);
+  }
+  assert.equal(windDirectionAt(3.3, { direction: 25, autoDirection: false }), 25);
+  assert.deepEqual([0, 90, 25, -135, 180].map(windHeading), ['右', '正面', '右 + 正面', '左 + 背面', '左']);
+});
+
+test('a native flag previews its cloth at rest: pinned edges and rest-length rows bowed towards its front', () => {
+  const [width, height] = [3.2, 4.8], rest = nativeRest(width, height);
+  close(rest(0, 0), [0, 0, 0]);
+  close(rest(1, 1), [width, height, 0]);
+  const segment = height / NATIVE_SLACK / 40;
+  for (let row = 1; row <= 40; row++) {
+    const [a, b] = [rest(0.5, (row - 1) / 40), rest(0.5, row / 40)];
+    assert.ok(Math.abs(Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) - segment) < 1e-9, `row ${row}`);
+    assert.ok(b[2] <= 1e-12, 'bowed towards -Z, the side that reads the artwork');
+  }
 });
 
 test('sending is refused with a reason until the render worker is ready', () => {

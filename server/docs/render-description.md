@@ -175,20 +175,32 @@ All lights inherit the scene's `shadow_mode` unless they set their own.
 
 A `flag` asset is only the artwork; each instance carries its own `flag` object,
 which is required for flag assets and rejected for every other asset. Two instances
-can share one artwork with different sizes and waves, and editing a flag never
+can share one artwork with different sizes and motions, and editing a flag never
 re-registers its asset.
+
+A flag moves in one of two ways, chosen by `type`: `"default"` (or absent) is the
+closed-form SimpleWave below; `"native"` is a physically based cloth simulated by
+the renderer (#219, [Native flags](#native-flags)). Only the fields of the chosen
+type are accepted: wave fields on a native flag, or wind fields on a default one,
+are refused.
 
 | Field | Meaning |
 | --- | --- |
 | `width_m`, `height_m` | Flag size in metres, positive |
-| `amplitude_m` | Optional, 1.1: wave coefficient in metres; the surface leaves its plane by at most 1.53 times this. Any value works, but the free edges fold over once 0.24 times it exceeds `height_m` |
-| `frequency` | Optional, 1.35: primary wave cycles from the pinned centre line to either free edge |
-| `speed` | Optional, 5.5: time scale; 0 freezes the wave |
+| `type` | Optional, `"default"`: `"default"` or `"native"`. Written only for native flags |
+| `amplitude_m` | Default flags. Optional, 1.1: wave coefficient in metres; the surface leaves its plane by at most 1.53 times this. Any value works, but the free edges fold over once 0.24 times it exceeds `height_m` |
+| `frequency` | Default flags. Optional, 1.35: primary wave cycles from the pinned centre line to either free edge |
+| `speed` | Default flags. Optional, 5.5: time scale; 0 freezes the wave |
+| `wind_mps` | Native flags. Optional, 7: wind speed in m/s, 0 to 18 |
+| `wind_direction_deg` | Native flags. Optional, 25: base direction the wind blows towards, in degrees about the flag-local Y axis: 0 along +X (towards the right edge as the artwork reads), 90 along -Z (towards the side that reads it), -90 away from it |
+| `auto_direction` | Native flags. Optional, `true`: turn the wind smoothly to a new target within 45° of the base every 0.5 s, the same sequence every run |
+| `tension` | Native flags. Optional, 0.65: bending stiffness from 0 (soft and flowing) to 1 (crisp and firm) |
 | `material` | Optional, `"cloth"`: `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
 
-The defaults are the wave and material pitch-studio gives a tifo, within its
-limits (amplitude 0 to 5 m, frequency 0.3 to 3, speed 0 to 10), so
-`{"width_m": 36, "height_m": 13.5}` is a complete tifo flag.
+The default flag's defaults are the wave and material pitch-studio gives a tifo,
+within its limits (amplitude 0 to 5 m, frequency 0.3 to 3, speed 0 to 10), so
+`{"width_m": 36, "height_m": 13.5}` is a complete tifo flag. A native flag's are
+the reference simulation's controls.
 | `artwork_rotation` | Optional: 0, 90, 180 or 270 degrees, turning the artwork clockwise as it reads, like a 2D Fusion placement's `assetRotation`; the artwork stretches to the flag's size |
 | `reveal` | Optional: how the flag appears (#210, #215), `{"direction": "left_to_right", "duration_s": 2, "start": "load"}`; absent, the flag is shown from the start |
 
@@ -198,6 +210,31 @@ there is no pole: the centre line stays pinned and both halves wave outwards. Ma
 the flag, their cross product, and the top-left corner. Size then stays in `flag`,
 not in the matrix. The wave's time is each frame's media time, so a still render of
 `--frame <n>` is reproducible.
+
+#### Native flags
+
+A native flag is the cloth of the AER WebGPU flag simulation
+([xiaoyxue/Simulation](https://github.com/xiaoyxue/Simulation) at `ff9c934`, its
+raised state), ported to the renderer: 65 × 41 particles whose top row is pinned
+along the flag's top edge (Y = 0) and bottom row along its bottom edge
+(Y = `height_m`), with free sides. The cloth is 10 % longer than that span, so it
+billows; it starts as a slack arc bowed towards the side that reads the artwork.
+Each fixed 1/120 s step integrates the reference's visually tuned gravity
+(3.8 m/s², world down turned into the flag's axes through `model`), damping and an
+aerodynamic load from the gusting wind, then relaxes structural, shear and bending
+distances in 36 Jacobi iterations. There is no pole, ground contact, self-collision
+or air simulation, and the wind is relative to the flag, not to the world. The
+reference is tuned at 3.2 × 4.8 m; much larger flags move like a smaller flag in
+slow motion.
+
+The cloth's clock is the scene's time, as for reveals: it starts at rest when the
+scene starts playing, and each frame the renderer steps it up to the frame (at
+most 8 steps a frame, so it keeps real time down to 15 fps; a longer stall is
+skipped, not made up). A cloth first drawn late, such as a still render of
+`--frame <n>`, takes up to its last 3 s at once, so stills are reproducible and
+show a cloth in the wind. Hiding a native flag (`visible: false`) forgets its
+state; it restarts at rest when shown again. Reveals and artwork rotation work as
+for default flags; a native flag's shadows follow it every frame.
 
 A **reveal** opens the flag once over `duration_s` seconds (any finite number
 above 0; there is no upper limit, as in Fusion) and then keeps it whole. At
@@ -400,8 +437,14 @@ newer package keeps them:
 reason; a row selects the placement in its editor, and its switch enables it. The
 pitch and point-cloud editors share one inspector: position, size and material
 are locked until **🔒 已锁定** is unlocked and save as a field changes; a flag's
-wave (three sliders) stays editable while locked, is previewed live as an
-animated wave and saved with **保存旗帜属性**. Both editors have undo and redo
+motion stays editable while locked and is saved with **保存旗帜属性**. Its type
+switches between **默认（正弦飘动）**, whose wave (three sliders) is previewed live
+as an animated wave, and **物理模拟（布料）**, a native flag with the reference
+simulation's control panel: wind speed, a wind dial (drag, or arrow keys) with
+its base angle and slider, automatic direction (the dial's solid arrow shows it
+turning, the dashed one the base) and fabric tension. The page previews a native
+flag only at rest; its motion shows in the renderer's output. Switching type keeps
+the other type's settings. Both editors have undo and redo
 and **保存并发送到渲染器**; sending or exporting with unsaved edits asks to save
 them first.
 

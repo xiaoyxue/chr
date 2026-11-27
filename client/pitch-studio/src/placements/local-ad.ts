@@ -1,4 +1,4 @@
-import { FLAG_LIMITS } from './flag.ts';
+import { FLAG_LIMITS, NATIVE_LIMITS } from './flag.ts';
 import { validReveal } from './reveal.ts';
 import type { ArtworkRotation, FieldDimensions, FlagReveal } from '../shared/types.ts';
 
@@ -11,15 +11,37 @@ export interface AdPlane {
   width: number;
   height: number;
 }
-/** A flag's wave and look; its size is the plane rectangle (see flag.ts). */
+/** A flag's motion and look; its size is the plane rectangle (see flag.ts). */
 export interface FlagSettings {
+  /**
+   * `default` (absent): SimpleWave, its centre line pinned, waving by `amplitude`,
+   * `frequency` and `speed`. `native`: a cloth pinned along its top and bottom edges,
+   * simulated by the renderer in the wind of `native`.
+   */
+  type?: 'default' | 'native';
   /** Wave coefficient in metres; the peak displacement is at most 1.53 times this. */
   amplitude: number;
   /** Primary wave cycles from the centre line to either edge. */
   frequency: number;
   speed: number;
+  /** A native flag's wind and fabric, kept while the flag is `default`. Absent: `NATIVE_FLAG`. */
+  native?: NativeFlagSettings;
   /** `cloth`: PBR fabric, matte with a soft sheen at grazing angles. */
   material: 'simple' | 'pbr' | 'cloth';
+}
+/** The reference simulation's controls (xiaoyxue/Simulation). */
+export interface NativeFlagSettings {
+  /** Wind speed in m/s. */
+  wind: number;
+  /**
+   * Base direction the wind blows towards, in whole degrees: 0 along the flag to its
+   * right as the artwork reads, +90 towards the side that reads it.
+   */
+  direction: number;
+  /** Turns the wind within ±45° of `direction`, to a new target every 0.5 s. */
+  autoDirection: boolean;
+  /** Bending stiffness in percent, from soft and flowing to crisp and firm. */
+  tension: number;
 }
 export interface LocalAd {
   id: string;
@@ -70,10 +92,18 @@ const validPath = (path: unknown) => path === undefined || (typeof path === 'str
 /** Early flag records kept their server path as `flag.artworkPath`. */
 type StoredFlag = FlagSettings & { artworkPath?: string };
 
+const within = (value: unknown, [min, max]: readonly [number, number]) => typeof value === 'number' && value >= min && value <= max;
+
+function validNative(native: NativeFlagSettings) {
+  return Boolean(native) && typeof native === 'object' && within(native.wind, NATIVE_LIMITS.wind)
+    && within(native.direction, NATIVE_LIMITS.direction) && Number.isInteger(native.direction)
+    && within(native.tension, NATIVE_LIMITS.tension) && typeof native.autoDirection === 'boolean';
+}
+
 function validFlag(flag: StoredFlag) {
   return Boolean(flag) && typeof flag === 'object'
-    && (['amplitude', 'frequency', 'speed'] as const).every((key) => Number.isFinite(flag[key])
-      && flag[key] >= FLAG_LIMITS[key][0] && flag[key] <= FLAG_LIMITS[key][1])
+    && (['amplitude', 'frequency', 'speed'] as const).every((key) => within(flag[key], FLAG_LIMITS[key]))
+    && [undefined, 'default', 'native'].includes(flag.type) && (flag.native === undefined || validNative(flag.native))
     && ['simple', 'pbr', 'cloth'].includes(flag.material) && validPath(flag.artworkPath);
 }
 

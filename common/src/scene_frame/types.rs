@@ -127,52 +127,173 @@ object!(MaterialOverride {
     factors: PbrFactors
 });
 strings!(FlagMaterial { Simple => "simple", Pbr => "pbr", Cloth => "cloth" });
-object!(
-    /// SimpleWave flag motion of an instance whose asset is a flag. The flag-local
-    /// frame is metres: X along the width from the left edge, Y down from the top
-    /// edge and Z their cross product; the instance `model` maps it to the world and
-    /// should be rigid. The artwork reads upright from the -Z side and mirrored from
-    /// the other. The centre line stays pinned; both halves wave outwards.
-    /// The wave and material default to a tifo's in pitch-studio (`TIFO_FLAG`).
-    Flag {
-    width_m: Finite, height_m: Finite,
-    /// Wave coefficient, not the peak displacement (at most 1.53 times this); 1.1.
-    #[serde(default = "flag_default::amplitude")]
-    amplitude_m: Finite,
-    /// Primary wave cycles from the centre line to either free edge; 1.35.
-    #[serde(default = "flag_default::frequency")]
-    frequency: Finite,
-    /// Time scale of the wave; 5.5.
-    #[serde(default = "flag_default::speed")]
-    speed: Finite,
-    /// `cloth`.
-    #[serde(default = "flag_default::material")]
-    material: FlagMaterial,
+strings!(FlagType { Default => "default", Native => "native" });
+
+/// Flag motion of an instance whose asset is a flag. The flag-local frame is metres:
+/// X along the width from the left edge, Y down from the top edge and Z their cross
+/// product; the instance `model` maps it to the world and should be rigid. The
+/// artwork reads upright from the -Z side and mirrored from the other.
+///
+/// On the wire, `type` selects the motion (absent, as it is written for `default`)
+/// and only that motion's fields are accepted: `amplitude_m`, `frequency` and `speed` for `default`;
+/// `wind_mps`, `wind_direction_deg`, `auto_direction` and `tension` for `native`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "FlagFields", into = "FlagFields")]
+pub struct Flag {
+    pub width_m: Finite,
+    pub height_m: Finite,
+    pub motion: FlagMotion,
+    pub material: FlagMaterial,
     /// Clockwise turn of the artwork within the flag as it reads, in degrees: 0, 90,
     /// 180 or 270. The flag's size stays; the artwork stretches to it.
+    pub artwork_rotation: Option<u32>,
+    /// How the flag appears; absent, it is shown from the start.
+    pub reveal: Option<FlagReveal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlagMotion {
+    /// `default`: the closed-form SimpleWave.
+    Wave(FlagWave),
+    /// `native`: a physically based cloth simulation.
+    Native(FlagCloth),
+}
+
+/// SimpleWave: the centre line stays pinned and both halves wave outwards. Absent
+/// fields take a tifo's wave, as in pitch-studio (`TIFO_FLAG`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlagWave {
+    /// Wave coefficient, not the peak displacement (at most 1.53 times this); 1.1.
+    pub amplitude_m: Finite,
+    /// Primary wave cycles from the centre line to either free edge; 1.35.
+    pub frequency: Finite,
+    /// Time scale of the wave; 5.5.
+    pub speed: Finite,
+}
+
+/// A cloth pinned along its top (Y = 0) and bottom (Y = `height_m`) edges with free
+/// sides, 10 % longer than that span so it billows, blown by a gusting wind. Absent
+/// fields take the reference simulation's defaults.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlagCloth {
+    /// Wind speed in m/s, 0 to 18; 7.
+    pub wind_mps: Finite,
+    /// Base direction the wind blows towards, in degrees about the flag's Y axis:
+    /// 0 along +X (towards the right edge as the artwork reads) and 90 along -Z
+    /// (towards the side that reads it); 25.
+    pub wind_direction_deg: Finite,
+    /// Turns the wind smoothly to a new target within 45° of the base direction
+    /// every 0.5 s; true.
+    pub auto_direction: bool,
+    /// Bending stiffness from 0 (soft and flowing) to 1 (crisp and firm); 0.65.
+    pub tension: Finite,
+}
+
+object!(@private FlagFields {
+    width_m: Finite, height_m: Finite,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    kind: Option<FlagType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    amplitude_m: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frequency: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speed: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wind_mps: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wind_direction_deg: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_direction: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tension: Option<Finite>,
+    /// `cloth`.
+    #[serde(default = "cloth_material")]
+    material: FlagMaterial,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artwork_rotation: Option<u32>,
-    /// How the flag appears; absent, it is shown from the start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reveal: Option<FlagReveal>,
 });
-mod flag_default {
-    use super::{Finite, FlagMaterial};
 
-    fn finite(value: f64) -> Finite {
-        Finite::try_from(value).expect("a finite literal")
+fn cloth_material() -> FlagMaterial {
+    FlagMaterial::Cloth
+}
+
+impl TryFrom<FlagFields> for Flag {
+    type Error = ValidationError;
+    fn try_from(f: FlagFields) -> Result<Self, Self::Error> {
+        let or = |value: Option<Finite>, default: f64| {
+            value.unwrap_or_else(|| Finite::try_from(default).expect("a finite literal"))
+        };
+        let wave = [f.amplitude_m, f.frequency, f.speed];
+        let cloth = [f.wind_mps, f.wind_direction_deg, f.tension];
+        let motion = match f.kind.unwrap_or(FlagType::Default) {
+            FlagType::Default
+                if cloth.iter().any(Option::is_some) || f.auto_direction.is_some() =>
+            {
+                return Err(ValidationError("wind and tension are for native flags"));
+            }
+            FlagType::Native if wave.iter().any(Option::is_some) => {
+                return Err(ValidationError(
+                    "amplitude, frequency and speed are for default flags",
+                ));
+            }
+            FlagType::Default => FlagMotion::Wave(FlagWave {
+                amplitude_m: or(f.amplitude_m, 1.1),
+                frequency: or(f.frequency, 1.35),
+                speed: or(f.speed, 5.5),
+            }),
+            FlagType::Native => FlagMotion::Native(FlagCloth {
+                wind_mps: or(f.wind_mps, 7.0),
+                wind_direction_deg: or(f.wind_direction_deg, 25.0),
+                auto_direction: f.auto_direction.unwrap_or(true),
+                tension: or(f.tension, 0.65),
+            }),
+        };
+        Ok(Self {
+            width_m: f.width_m,
+            height_m: f.height_m,
+            motion,
+            material: f.material,
+            artwork_rotation: f.artwork_rotation,
+            reveal: f.reveal,
+        })
     }
-    pub(super) fn amplitude() -> Finite {
-        finite(1.1)
-    }
-    pub(super) fn frequency() -> Finite {
-        finite(1.35)
-    }
-    pub(super) fn speed() -> Finite {
-        finite(5.5)
-    }
-    pub(super) fn material() -> FlagMaterial {
-        FlagMaterial::Cloth
+}
+
+impl From<Flag> for FlagFields {
+    fn from(flag: Flag) -> Self {
+        let mut fields = Self {
+            width_m: flag.width_m,
+            height_m: flag.height_m,
+            kind: None,
+            amplitude_m: None,
+            frequency: None,
+            speed: None,
+            wind_mps: None,
+            wind_direction_deg: None,
+            auto_direction: None,
+            tension: None,
+            material: flag.material,
+            artwork_rotation: flag.artwork_rotation,
+            reveal: flag.reveal,
+        };
+        match flag.motion {
+            FlagMotion::Wave(wave) => {
+                fields.amplitude_m = Some(wave.amplitude_m);
+                fields.frequency = Some(wave.frequency);
+                fields.speed = Some(wave.speed);
+            }
+            FlagMotion::Native(cloth) => {
+                fields.kind = Some(FlagType::Native);
+                fields.wind_mps = Some(cloth.wind_mps);
+                fields.wind_direction_deg = Some(cloth.wind_direction_deg);
+                fields.auto_direction = Some(cloth.auto_direction);
+                fields.tension = Some(cloth.tension);
+            }
+        }
+        fields
     }
 }
 strings!(RevealDirection {

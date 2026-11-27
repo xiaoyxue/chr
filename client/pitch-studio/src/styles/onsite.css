@@ -280,3 +280,24 @@
 .on-lighting .on-field-grid input[type=color] { width:100%; height:40px; }
 .on-lighting .on-card.is-off .on-card-body { opacity:.5; }
 .on-lighting .on-toggle-check { flex-shrink:0; color:var(--on-ink); font-size:12px; }
+/* A native flag's wind panel, after the reference simulation's (xiaoyxue/Simulation). */
+.on-range-labels { display:flex; justify-content:space-between; gap:8px; margin:-4px 0 8px; color:var(--on-muted); font-size:9px; }
+.on-wind-editor { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); align-items:center; gap:12px; margin:8px 0; }
+.on-wind-dial { width:100%; aspect-ratio:1; touch-action:none; user-select:none; cursor:grab; border-radius:50%; }
+.on-wind-dial:active { cursor:grabbing; }
+.on-wind-dial:focus-visible { outline:2px solid var(--on-lime); outline-offset:3px; }
+.on-wind-dial svg { display:block; width:100%; height:100%; overflow:visible; }
+.on-wind-dial text { fill:var(--on-muted); text-anchor:middle; font-size:8px; }
+.on-wind-dial .dial-ring { fill:#12232e; stroke:#3a5261; }
+.on-wind-dial .dial-axis { fill:none; stroke:#3a5261; stroke-dasharray:2 3; }
+.on-wind-dial .dial-cloth { fill:none; stroke:#7d95a2; stroke-width:3; }
+.on-wind-dial .dial-arrow { fill:none; stroke:var(--on-lime); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+.on-wind-dial .dial-base-arrow { fill:none; stroke:var(--on-muted); stroke-width:1.5; stroke-dasharray:3 3; }
+.on-wind-dial .dial-handle { fill:var(--on-lime); stroke:var(--on-card); stroke-width:2; }
+.on-wind-dial .dial-center { fill:var(--on-lime); }
+.on-wind-entry { min-width:0; font-size:10px; color:var(--on-muted); }
+.onsite .on-wind-entry label { margin:0; font-size:11px; color:var(--on-muted); }
+.onsite .on-wind-entry input { display:block; width:100%; margin:6px 0 10px; padding:6px; }
+.on-wind-entry input[aria-invalid="true"] { border-color:#ff8a98; }
+.on-wind-entry output { display:block; margin:3px 0 8px; font-size:11px; color:var(--on-ink); }
+.onsite .on-wind-row input[type=range] { width:100%; margin:4px 0; accent-color:var(--on-lime); }

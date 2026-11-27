@@ -1,16 +1,20 @@
-//! SimpleWave flags: a closed-form sine/cosine surface over a shared unit grid.
+//! Flags over a shared unit grid, in one of two motions: SimpleWave, a closed-form
+//! sine/cosine surface, or a native cloth simulated on the GPU ([`super::cloth`]).
 //!
 //! Flag-local coordinates are metres: X along the width from the left edge, Y down
 //! from the top edge and Z = X × Y. As in image coordinates, the artwork reads
 //! upright from the -Z side, where the front normal points (like an image quad's);
-//! the +Z side shows it mirrored. The centre line `u = 0.5` stays pinned and both
-//! halves wave outwards; there is no pole, gravity or cloth solver.
-//! The GPU evaluates the same formulas (`flag.wgsl`); [`Flag::sample`] is their
+//! the +Z side shows it mirrored. A SimpleWave flag's centre line `u = 0.5` stays
+//! pinned and both halves wave outwards; it has no pole, gravity or cloth solver.
+//! The GPU evaluates the same formulas (`flag.wgsl`); [`Wave::sample`] is their
 //! reference.
 
 use std::{f64::consts::TAU, sync::OnceLock};
 
-use super::{Aabb, MeshAttributes, MeshData, SceneError};
+use super::{
+    Aabb, MeshAttributes, MeshData, SceneError,
+    cloth::{self, Cloth},
+};
 
 /// Grid cells across the flag's width.
 pub const FLAG_COLUMNS: u32 = 96;
@@ -50,17 +54,12 @@ pub enum RevealDirection {
 }
 
 /// Size and motion of a flag instance; the instance model maps flag-local metres
-/// to the world and should be rigid so the amplitude stays in metres.
+/// to the world and should be rigid so the motion stays in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Flag {
     pub width: f32,
     pub height: f32,
-    /// Wave coefficient in metres; the peak displacement is at most 1.53 times this.
-    pub amplitude: f32,
-    /// Primary wave cycles from the centre line to either free edge.
-    pub frequency: f32,
-    /// Time scale: the wave advances `speed` seconds per second.
-    pub speed: f32,
+    pub motion: FlagMotion,
     pub shading: FlagShading,
     /// Clockwise quarter turns of the artwork within the flag as it reads, 0 to 3.
     pub artwork_turns: u8,
@@ -71,20 +70,36 @@ pub struct Flag {
     pub reveal_direction: RevealDirection,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FlagMotion {
+    /// SimpleWave, animated by the renderer's animation time.
+    Wave(Wave),
+    /// A cloth pinned along its top and bottom edges, simulated up to its own clock.
+    Cloth(Cloth),
+}
+
+/// SimpleWave's wave.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wave {
+    /// Wave coefficient in metres; the peak displacement is at most 1.53 times this.
+    pub amplitude: f32,
+    /// Primary wave cycles from the centre line to either free edge.
+    pub frequency: f32,
+    /// Time scale: the wave advances `speed` seconds per second.
+    pub speed: f32,
+}
+
 impl Flag {
     pub(crate) fn validate(self) -> Result<(), SceneError> {
-        let finite = [
-            self.width,
-            self.height,
-            self.amplitude,
-            self.frequency,
-            self.speed,
-        ]
-        .into_iter()
-        .all(|v| v.is_finite() && v >= 0.0);
-        if !finite
-            || self.width == 0.0
-            || self.height == 0.0
+        let motion = match self.motion {
+            FlagMotion::Wave(wave) => [wave.amplitude, wave.frequency, wave.speed]
+                .into_iter()
+                .all(|v| v.is_finite() && v >= 0.0),
+            FlagMotion::Cloth(cloth) => cloth.validate(),
+        };
+        if !motion
+            || !(self.width.is_finite() && self.width > 0.0)
+            || !(self.height.is_finite() && self.height > 0.0)
             || self.artwork_turns > 3
             || !(0.0..=1.0).contains(&self.revealed)
         {
@@ -117,6 +132,26 @@ impl Flag {
         }
     }
 
+    /// Conservative flag-local bounds of every phase or cloth state.
+    pub(crate) fn local_bounds(self) -> Result<Aabb, SceneError> {
+        match self.motion {
+            FlagMotion::Wave(wave) => {
+                let amplitude = f64::from(wave.amplitude);
+                Aabb::new(
+                    [0.0, 0.0, -NORMAL_REACH * amplitude],
+                    [
+                        f64::from(self.width),
+                        f64::from(self.height) + SAG_REACH * amplitude,
+                        NORMAL_REACH * amplitude,
+                    ],
+                )
+            }
+            FlagMotion::Cloth(_) => cloth::local_bounds(self.width, self.height),
+        }
+    }
+}
+
+impl Wave {
     /// Wave phases at `seconds`, reduced in f64 so long-running clocks keep their
     /// precision once the GPU evaluates them in f32.
     pub fn phases(self, seconds: f64) -> [f64; 3] {
@@ -124,11 +159,18 @@ impl Flag {
         [1.6 * t, 2.3 * t, 0.9 * t].map(|phase| phase.rem_euclid(TAU))
     }
 
-    /// Flag-local position and unit front normal (-Z at rest) at grid coordinates
-    /// `(u, v)` in [0, 1].
-    pub fn sample(self, u: f64, v: f64, phases: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    /// Flag-local position and unit front normal (-Z at rest) of a `width` ×
+    /// `height` flag at grid coordinates `(u, v)` in [0, 1].
+    pub fn sample(
+        self,
+        width: f32,
+        height: f32,
+        u: f64,
+        v: f64,
+        phases: [f64; 3],
+    ) -> ([f64; 3], [f64; 3]) {
         let [width, height, amplitude, frequency] =
-            [self.width, self.height, self.amplitude, self.frequency].map(f64::from);
+            [width, height, self.amplitude, self.frequency].map(f64::from);
         let r = (2.0 * u - 1.0).abs();
         let drdu = 2.0 * (2.0 * u - 1.0).signum();
         let k = TAU * frequency;
@@ -157,19 +199,6 @@ impl Flag {
         ];
         let length = normal.iter().map(|n| n * n).sum::<f64>().sqrt();
         (position, normal.map(|n| n / length))
-    }
-
-    /// Conservative flag-local bounds of every phase.
-    pub(crate) fn local_bounds(self) -> Result<Aabb, SceneError> {
-        let amplitude = f64::from(self.amplitude);
-        Aabb::new(
-            [0.0, 0.0, -NORMAL_REACH * amplitude],
-            [
-                f64::from(self.width),
-                f64::from(self.height) + SAG_REACH * amplitude,
-                NORMAL_REACH * amplitude,
-            ],
-        )
     }
 }
 
@@ -225,13 +254,17 @@ impl MeshData {
 mod tests {
     use super::*;
 
+    const WAVE: Wave = Wave {
+        amplitude: 0.7,
+        frequency: 3.0,
+        speed: 1.0,
+    };
+
     fn flag() -> Flag {
         Flag {
             width: 4.0,
             height: 2.0,
-            amplitude: 0.7,
-            frequency: 3.0,
-            speed: 1.0,
+            motion: FlagMotion::Wave(WAVE),
             shading: FlagShading::Simple,
             artwork_turns: 0,
             revealed: 1.0,
@@ -241,17 +274,17 @@ mod tests {
 
     #[test]
     fn the_centre_line_stays_pinned_and_zero_amplitude_is_flat() {
-        let phases = flag().phases(12.3);
+        let phases = WAVE.phases(12.3);
         for v in [0.0, 0.4, 1.0] {
-            let (position, normal) = flag().sample(0.5, v, phases);
+            let (position, normal) = WAVE.sample(4.0, 2.0, 0.5, v, phases);
             assert_eq!(position, [2.0, 2.0 * v, 0.0]);
             assert!((normal[2] + 1.0).abs() < 1e-12);
         }
-        let still = Flag {
+        let still = Wave {
             amplitude: 0.0,
-            ..flag()
+            ..WAVE
         };
-        let (position, normal) = still.sample(0.9, 0.3, phases);
+        let (position, normal) = still.sample(4.0, 2.0, 0.9, 0.3, phases);
         assert_eq!(
             (position, normal),
             ([4.0 * 0.9, 2.0 * 0.3, 0.0], [0.0, 0.0, -1.0])
@@ -263,8 +296,11 @@ mod tests {
         let tifo = Flag {
             width: 36.0,
             height: 13.5,
-            amplitude: 5.0,
-            frequency: 1.35,
+            motion: FlagMotion::Wave(Wave {
+                amplitude: 5.0,
+                frequency: 1.35,
+                ..WAVE
+            }),
             ..flag()
         };
         for flag in [flag(), tifo] {
@@ -273,17 +309,21 @@ mod tests {
     }
 
     fn check_normals_and_bounds(flag: Flag) {
+        let FlagMotion::Wave(wave) = flag.motion else {
+            unreachable!("a SimpleWave flag")
+        };
         let bounds = flag.local_bounds().unwrap();
-        let phases = flag.phases(7.0);
+        let phases = wave.phases(7.0);
+        let sample = |u, v| wave.sample(flag.width, flag.height, u, v, phases);
         let h = 1e-6;
         for (u, v) in [(0.1, 0.2), (0.8, 0.7), (0.97, 0.05)] {
-            let (p, n) = flag.sample(u, v, phases);
+            let (p, n) = sample(u, v);
             for (axis, value) in p.into_iter().enumerate() {
                 assert!(bounds.min()[axis] <= value && value <= bounds.max()[axis]);
             }
             for [du, dv] in [[h, 0.0], [0.0, h]] {
-                let (ahead, _) = flag.sample(u + du, v + dv, phases);
-                let (behind, _) = flag.sample(u - du, v - dv, phases);
+                let (ahead, _) = sample(u + du, v + dv);
+                let (behind, _) = sample(u - du, v - dv);
                 let along: f64 = (0..3)
                     .map(|i| (ahead[i] - behind[i]) / (2.0 * h) * n[i])
                     .sum();
@@ -294,30 +334,53 @@ mod tests {
 
     #[test]
     fn phases_wrap_without_changing_the_surface() {
-        let flag = flag();
-        let late = flag.phases(86_400.0 * 30.0);
+        let late = WAVE.phases(86_400.0 * 30.0);
         assert!(late.iter().all(|p| (0.0..TAU).contains(p)));
         let unwrapped = [1.6, 2.3, 0.9].map(|w| w * 1000.0);
-        let (a, _) = flag.sample(0.2, 0.3, flag.phases(1000.0));
-        let (b, _) = flag.sample(0.2, 0.3, unwrapped);
+        let (a, _) = WAVE.sample(4.0, 2.0, 0.2, 0.3, WAVE.phases(1000.0));
+        let (b, _) = WAVE.sample(4.0, 2.0, 0.2, 0.3, unwrapped);
         assert!((0..3).all(|i| (a[i] - b[i]).abs() < 1e-9));
     }
 
     #[test]
     fn invalid_flags_are_rejected() {
+        let wave = |wave| Flag {
+            motion: FlagMotion::Wave(wave),
+            ..flag()
+        };
+        let cloth = Cloth {
+            wind_speed: 7.0,
+            wind_direction: 25.0,
+            auto_direction: true,
+            tension: 0.65,
+            seconds: 1.0,
+        };
+        let native = |cloth| Flag {
+            motion: FlagMotion::Cloth(cloth),
+            ..flag()
+        };
+        assert_eq!(native(cloth).validate(), Ok(()));
         for bad in [
             Flag {
                 width: 0.0,
                 ..flag()
             },
             Flag {
+                height: f32::INFINITY,
+                ..native(cloth)
+            },
+            wave(Wave {
                 amplitude: -1.0,
-                ..flag()
-            },
-            Flag {
+                ..WAVE
+            }),
+            wave(Wave {
                 speed: f32::NAN,
-                ..flag()
-            },
+                ..WAVE
+            }),
+            native(Cloth {
+                wind_speed: 30.0,
+                ..cloth
+            }),
             Flag {
                 artwork_turns: 4,
                 ..flag()

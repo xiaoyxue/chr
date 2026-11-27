@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chr_renderer::{
     coordinates::ImageExtent,
     scene::{
-        AreaShape, EnvironmentMap, FLAG_VERTICES, Flag, FlagShading, Light, Lighting, MeshData,
-        ModelMatrix, PbrMaterial, Scene, SceneError, SkyLight,
+        AreaShape, EnvironmentMap, FLAG_VERTICES, Flag, FlagMotion, FlagShading, Light, Lighting,
+        MeshData, ModelMatrix, PbrMaterial, Scene, SceneError, SkyLight, Wave,
     },
 };
 
@@ -222,9 +222,11 @@ fn flags_wave_only_the_shared_grid_and_widen_their_bounds() {
     let flag = Flag {
         width: 3.2,
         height: 2.0,
-        amplitude: 0.5,
-        frequency: 1.35,
-        speed: 1.0,
+        motion: FlagMotion::Wave(Wave {
+            amplitude: 0.5,
+            frequency: 1.35,
+            speed: 1.0,
+        }),
         shading: FlagShading::Pbr,
         artwork_turns: 0,
         revealed: 1.0,

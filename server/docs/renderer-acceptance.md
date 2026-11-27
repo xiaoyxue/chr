@@ -29,6 +29,7 @@ not frame-rate promises.
 | Shadow catcher | Extension | Luminance ratio of shadowed/unshadowed light over footage; the catcher is the real ground and holds out geometry below it; no wire field |
 | Ground decal (#113) | Extension | Unlit, premultiplied-alpha blend over opaque CG in instance order, before shadow catchers so CG shadows darken it; no depth write, no cast shadow; exact in linear light before the scene tone map; no wire field |
 | Waving flag (#126) | Extension | SimpleWave closed-form surface on a shared 96x60-cell grid: centre line pinned, no pole or cloth solver; a compute pass evaluates it per frame from media time (phases reduced in f64) for the main and shadow passes; `simple` (fixed key light) or `pbr` look; optional wire `flag` on instances |
+| Native flag (#219) | Extension, labelled approximation | Port of the AER WebGPU cloth (xiaoyxue/Simulation `ff9c934`): 65x41 PBD particles, top and bottom rows pinned, 10% slack, gusting wind relative to the flag, fixed 1/120 s steps with 36 Jacobi iterations; state persists per instance and follows the scene's clock (at most 8 steps a frame, 3 s warm-up when first drawn); a surface pass resamples it onto the flag grid for the same draws and shadows; visually tuned, no ground contact or self-collision |
 | Point/spot PCSS source radius | Preview approximation | Soft-shadow source size, not finite-emitter shading |
 | Physical atmosphere (#28), sky visibility (#29) | Optional (owner decision) | Not required for this acceptance |
 | Brown-Conrady tangential distortion | Deferred | Native-pixel radial model selected instead |
@@ -43,6 +44,7 @@ not frame-rate promises.
 | Coordinate preservation, camera equivalence | `camera`, `mesh_gpu`, `orthographic_gpu` |
 | Model transforms, GLB | `scene`, `glb`, `mesh_gpu` |
 | Waving flags | `scene::flag` unit tests (pinned centre, normals, bounds, phase wrap), `flag::tests` compute readback against the CPU reference, `flag_gpu` (media time, shadow redraw, simple and PBR looks), runtime `description` |
+| Native flags | `scene::cloth` unit tests (rest arc, wind schedule matching the reference, direction, ranges), `flag_cloth::tests` (pinned rows exact, finite and within bounds under 18 m/s at either tension, wind direction, determinism, clock restart, warm-up and frame cap, surface sampling), `flag_gpu` (clock-driven motion, shadow redraw, pinned edge), runtime `description` |
 | Distortion | `distortion_gpu` (identity, sub-0.3 px markers for both models, unwarped footage, non-invertible pixels, guard-band budget, output resizing), unit tests in `distortion`, CPU reference `distortion_reference` |
 | Depth and composition | `composition_gpu`, `distortion_gpu`, `shadow_catcher_gpu`, `decal_gpu` |
 | Direct lights, PBR | `pbr_gpu`, `texture_filtering_gpu` (anisotropic detail at grazing angles) |

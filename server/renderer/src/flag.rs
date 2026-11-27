@@ -1,14 +1,17 @@
-//! GPU evaluation of SimpleWave flags: one compute dispatch per visible flag writes
-//! its flag-local surface into a storage buffer that the main and shadow passes
-//! read by vertex index (`flag_surface.wgsl`).
+//! GPU evaluation of flag surfaces: one compute dispatch per visible SimpleWave flag
+//! writes its flag-local surface into a storage buffer that the main and shadow
+//! passes read by vertex index (`flag_surface.wgsl`); native flags write the same
+//! surface from their cloth simulation (`flag_cloth.rs`).
 
 use std::num::NonZeroU64;
 
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, mesh_renderer,
-    scene::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag},
+    Gpu,
+    flag_cloth::{ClothDraw, ClothGpu},
+    mesh_renderer,
+    scene::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagMotion, InstanceId, ModelMatrix},
 };
 
 /// Bytes of one surface vertex: position, normal, tangent and artwork UV as `vec4<f32>`.
@@ -17,31 +20,66 @@ const VERTEX_BYTES: u64 = 64;
 pub(crate) const PARAMS: usize = 12;
 const WORKGROUP: u32 = 64;
 
-/// WGSL constants shared by the compute and draw shaders.
+/// WGSL constants and helpers shared by the surface passes and the flag draws.
 pub(crate) fn prelude() -> String {
-    format!("const FLAG_COLUMNS: u32 = {FLAG_COLUMNS}u;\nconst FLAG_ROWS: u32 = {FLAG_ROWS}u;\n")
+    format!(
+        "const FLAG_COLUMNS: u32 = {FLAG_COLUMNS}u;\nconst FLAG_ROWS: u32 = {FLAG_ROWS}u;\n{}\n",
+        include_str!("flag_shared.wgsl")
+    )
 }
 
-/// Compute parameters of one flag: size and wave, its phases at the frame time, then
+/// Surface parameters of one flag: size and wave, its phases at the frame time, then
 /// its revealed fraction, artwork turns and reveal direction code. A flat flag keeps
-/// fixed phases, so its unchanged surface keeps cached shadows.
+/// fixed phases, so its unchanged surface keeps cached shadows; a native flag has no
+/// wave.
 pub(crate) fn params(flag: Flag, seconds: f64) -> [f32; PARAMS] {
-    let seconds = if flag.amplitude == 0.0 { 0.0 } else { seconds };
-    let [a, b, c] = flag.phases(seconds).map(|phase| phase as f32);
+    let (wave, phases) = match flag.motion {
+        FlagMotion::Wave(wave) => {
+            let seconds = if wave.amplitude == 0.0 { 0.0 } else { seconds };
+            (
+                [wave.amplitude, wave.frequency],
+                wave.phases(seconds).map(|phase| phase as f32),
+            )
+        }
+        FlagMotion::Cloth(_) => ([0.0; 2], [0.0; 3]),
+    };
     [
         flag.width,
         flag.height,
-        flag.amplitude,
-        flag.frequency,
-        a,
-        b,
-        c,
+        wave[0],
+        wave[1],
+        phases[0],
+        phases[1],
+        phases[2],
         0.0,
         flag.revealed,
         f32::from(flag.artwork_turns),
         f32::from(flag.reveal_direction as u8),
         0.0,
     ]
+}
+
+/// One visible flag of a frame, in draw order.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FlagDraw {
+    params: [f32; PARAMS],
+    cloth: Option<ClothDraw>,
+}
+
+impl FlagDraw {
+    /// Flag `flag` of instance `id`, drawn with `model` at animation time `seconds`.
+    pub(crate) fn new(id: InstanceId, flag: Flag, model: ModelMatrix, seconds: f64) -> Self {
+        let cloth = match flag.motion {
+            FlagMotion::Wave(_) => None,
+            FlagMotion::Cloth(cloth) => {
+                Some(ClothDraw::new(id, [flag.width, flag.height], cloth, model))
+            }
+        };
+        Self {
+            params: params(flag, seconds),
+            cloth,
+        }
+    }
 }
 
 struct Slot {
@@ -58,7 +96,10 @@ pub(crate) struct FlagGpu {
     slots: Vec<Slot>,
     /// Draw groups of this frame's flags, in draw order.
     draws: Vec<wgpu::BindGroup>,
+    /// This frame's SimpleWave slots; the cloth passes write the others.
+    waves: Vec<usize>,
     last: Vec<[f32; PARAMS]>,
+    cloth: ClothGpu,
 }
 
 impl FlagGpu {
@@ -120,7 +161,9 @@ impl FlagGpu {
             draw_layout,
             slots: Vec::new(),
             draws: Vec::new(),
+            waves: Vec::new(),
             last: Vec::new(),
+            cloth: ClothGpu::new(device),
         }
     }
 
@@ -130,7 +173,7 @@ impl FlagGpu {
     pub(crate) fn prepare(
         &mut self,
         gpu: &Gpu,
-        flags: &[[f32; PARAMS]],
+        flags: &[FlagDraw],
         objects: &wgpu::Buffer,
         instances: &wgpu::Buffer,
     ) -> bool {
@@ -168,16 +211,24 @@ impl FlagGpu {
                 compute,
             });
         }
-        for (slot, params) in self.slots.iter().zip(flags) {
+        let params: Vec<_> = flags.iter().map(|flag| flag.params).collect();
+        let mut moved = self.last != params;
+        self.waves.clear();
+        self.cloth.begin();
+        for (index, (slot, flag)) in self.slots.iter().zip(flags).enumerate() {
             gpu.queue
-                .write_buffer(&slot.params, 0, bytemuck::cast_slice(params));
+                .write_buffer(&slot.params, 0, bytemuck::cast_slice(&flag.params));
+            match flag.cloth {
+                None => self.waves.push(index),
+                Some(cloth) => moved |= self.cloth.plan(gpu, cloth, &slot.params, &slot.vertices),
+            }
         }
+        self.cloth.finish();
         self.draws = self.slots[..flags.len()]
             .iter()
             .map(|slot| self.draw_group(&gpu.device, objects, &slot.vertices, instances))
             .collect();
-        let moved = self.last != flags;
-        self.last = flags.to_vec();
+        self.last = params;
         moved
     }
 
@@ -208,8 +259,9 @@ impl FlagGpu {
         })
     }
 
-    /// Records the surface evaluation; it must precede every pass that draws flags.
-    pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
+    /// Records the surface evaluation, including the native flags' simulation steps;
+    /// it must precede every pass that draws flags.
+    pub(crate) fn encode(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if self.draws.is_empty() {
             return;
         }
@@ -218,10 +270,11 @@ impl FlagGpu {
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
-        for slot in &self.slots[..self.draws.len()] {
-            pass.set_bind_group(0, &slot.compute, &[]);
+        for &index in &self.waves {
+            pass.set_bind_group(0, &self.slots[index].compute, &[]);
             pass.dispatch_workgroups(FLAG_VERTICES.div_ceil(WORKGROUP), 1, 1);
         }
+        self.cloth.encode(&mut pass);
     }
 
     pub(crate) fn group(&self, slot: usize) -> &wgpu::BindGroup {
@@ -232,7 +285,7 @@ impl FlagGpu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::FlagShading;
+    use crate::scene::{FlagShading, Wave};
 
     #[test]
     #[ignore = "requires a hardware GPU"]
@@ -240,12 +293,15 @@ mod tests {
         use crate::scene::RevealDirection::*;
         let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
         assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
-        let flag = Flag {
-            width: 3.2,
-            height: 2.0,
+        let wave = Wave {
             amplitude: 0.7,
             frequency: 3.0,
             speed: 2.5,
+        };
+        let flag = Flag {
+            width: 3.2,
+            height: 2.0,
+            motion: FlagMotion::Wave(wave),
             shading: FlagShading::Simple,
             artwork_turns: 1,
             revealed: 0.6,
@@ -253,6 +309,12 @@ mod tests {
         };
         // A day of media time: phases are reduced on the CPU before reaching f32.
         let seconds = 86_400.25;
+        let draw = |flag| {
+            [FlagDraw {
+                params: params(flag, seconds),
+                cloth: None,
+            }]
+        };
         let buffer = |size, usage| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -264,8 +326,8 @@ mod tests {
         let objects = buffer(mesh_renderer::OBJECT_BYTES, wgpu::BufferUsages::UNIFORM);
         let instances = buffer(256, wgpu::BufferUsages::STORAGE);
         let mut flags = FlagGpu::new(&gpu.device);
-        assert!(flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances));
-        assert!(!flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances));
+        assert!(flags.prepare(&gpu, &draw(flag), &objects, &instances));
+        assert!(!flags.prepare(&gpu, &draw(flag), &objects, &instances));
         let bytes = VERTEX_BYTES * u64::from(FLAG_VERTICES);
         let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -285,7 +347,7 @@ mod tests {
                 reveal_direction: direction,
                 ..flag
             };
-            flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances);
+            flags.prepare(&gpu, &draw(flag), &objects, &instances);
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             flags.encode(&mut encoder);
             encoder.copy_buffer_to_buffer(&flags.slots[0].vertices, 0, &readback, 0, bytes);
@@ -298,14 +360,14 @@ mod tests {
                 .unwrap();
             let data = readback.slice(..).get_mapped_range().unwrap();
             let vertices: &[[f32; 16]] = bytemuck::cast_slice(&data);
-            let phases = flag.phases(seconds);
+            let phases = wave.phases(seconds);
             let columns = FLAG_COLUMNS + 1;
             for (index, vertex) in (0..).zip(vertices) {
                 let [u, v] = flag.revealed_uv(
                     f64::from(index % columns) / f64::from(FLAG_COLUMNS),
                     f64::from(index / columns) / f64::from(FLAG_ROWS),
                 );
-                let (position, normal) = flag.sample(u, v, phases);
+                let (position, normal) = wave.sample(flag.width, flag.height, u, v, phases);
                 let uv = flag.artwork_uv(u, v);
                 for axis in 0..2 {
                     let error = (f64::from(vertex[12 + axis]) - uv[axis]).abs();

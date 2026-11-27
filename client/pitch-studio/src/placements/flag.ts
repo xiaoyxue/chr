@@ -5,7 +5,7 @@
 // the image of a 2D local ad. The artwork reads unmirrored from the side the normal
 // points away from (like image x right, y down, z into the screen); the other side
 // shows it mirrored, as a real flag does.
-import type { AdPlane, FlagSettings, Vector3Tuple } from './local-ad.ts';
+import type { AdPlane, FlagSettings, NativeFlagSettings, Vector3Tuple } from './local-ad.ts';
 
 export type FlagRows = [number, number, number, number][];
 
@@ -20,6 +20,64 @@ export const FLAG_CLEARANCE = 0.5;
 export const TIFO_FLAG: FlagSettings = { amplitude: 1.1, frequency: 1.35, speed: 5.5, material: 'cloth' };
 /** A seeded tifo's distance from its surface: enough for its wave's peak to clear it. */
 export const TIFO_CLEARANCE = Math.max(FLAG_CLEARANCE, FLAG_PEAK * TIFO_FLAG.amplitude);
+
+/** A native flag's wind and fabric as the reference simulation (xiaoyxue/Simulation) starts them. */
+export const NATIVE_FLAG: NativeFlagSettings = { wind: 7, direction: 25, autoDirection: true, tension: 65 };
+/** Wind in m/s, base direction in whole degrees, tension in percent: the reference simulation's controls. */
+export const NATIVE_LIMITS = { wind: [0, 18], direction: [-180, 180], tension: [0, 100] } as const;
+/** A native flag's pinned span over its cloth's length down the flag: 10 % slack. */
+export const NATIVE_SLACK = 0.9;
+/** Rows of a native flag's cloth, whose segments make its rest arc. */
+const NATIVE_ROWS = 41;
+export const nativeSettings = (flag: FlagSettings) => flag.native ?? NATIVE_FLAG;
+
+/** The reference's fixed hash sequence of automatic wind offsets, within ±45°. */
+function autoOffset(segment: number) {
+  let value = Math.imul(segment + 1, 0x45d9f3b) ^ 0x6d2b79f5;
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  value ^= value >>> 16;
+  return ((value >>> 0) / 0xffffffff * 2 - 1) * 45;
+}
+
+/**
+ * The direction a native flag's wind blows towards after `seconds`, in degrees in
+ * [-180, 180): its base, or with `autoDirection` a smooth turn every 0.5 s to a new
+ * target within ±45° of it, the same sequence every run (the reference's `windDirectionAt`).
+ */
+export function windDirectionAt(seconds: number, { direction, autoDirection }: Pick<NativeFlagSettings, 'direction' | 'autoDirection'>) {
+  if (!autoDirection) return direction;
+  const sample = seconds / 0.5, segment = Math.floor(sample), fraction = sample - segment;
+  const blend = fraction * fraction * (3 - 2 * fraction);
+  const from = segment === 0 ? 0 : autoOffset(segment - 1), to = autoOffset(segment);
+  return ((direction + from + (to - from) * blend + 180) % 360 + 360) % 360 - 180;
+}
+
+/** Where a wind at `angle` degrees blows, relative to the flag: right or left along it, towards its front (reading side) or back. */
+export function windHeading(angle: number) {
+  const radians = angle * Math.PI / 180, x = Math.cos(radians), z = Math.sin(radians);
+  return [Math.abs(x) > 1e-6 ? (x > 0 ? '右' : '左') : '', Math.abs(z) > 1e-6 ? (z > 0 ? '正面' : '背面') : ''].filter(Boolean).join(' + ');
+}
+
+/**
+ * A native flag's cloth at rest, as the renderer starts it: pinned along its top and
+ * bottom edges, its rows of rest length bowed in an arc towards the side that reads
+ * the artwork (-Z). Returns the flag-local point at (`s` right, `t` down).
+ */
+export function nativeRest(width: number, height: number): (s: number, t: number) => Vector3Tuple {
+  const segments = NATIVE_ROWS - 1, segment = height / NATIVE_SLACK / segments;
+  let [low, high, turn] = [0, Math.PI, 0];
+  for (let i = 0; i < 40; i++) {
+    turn = (low + high) / 2;
+    if (segment * Math.sin(turn / 2) / Math.sin(turn / (2 * segments)) > height) low = turn;
+    else high = turn;
+  }
+  const radius = height / (2 * Math.sin(turn / 2));
+  return (s, t) => {
+    const angle = (t - 0.5) * turn;
+    return [width * s, height / 2 + radius * Math.sin(angle), radius * (Math.cos(turn / 2) - Math.cos(angle))];
+  };
+}
 
 const dot = (a: Vector3Tuple, b: Vector3Tuple) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a: Vector3Tuple, b: Vector3Tuple): Vector3Tuple => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
@@ -70,24 +128,51 @@ export function flagWave(s: number, t: number, width: number, height: number, fl
     amplitude * (Math.sin(a) + 0.35 * Math.sin(b) + 0.18 * Math.cos(c))];
 }
 
-/** A flag's wave fields as typed in the editor, before they are saved. */
-export interface FlagDraft { amplitude: string; frequency: string; speed: string; material: FlagSettings['material'] }
+/** A flag's motion fields as typed in the editor, before they are saved. */
+export interface FlagDraft {
+  type: FlagType;
+  amplitude: string; frequency: string; speed: string;
+  wind: string; direction: string; autoDirection: boolean; tension: string;
+  material: FlagSettings['material'];
+}
+export type FlagType = NonNullable<FlagSettings['type']>;
 const WAVE_FIELDS = [['amplitude', '振幅'], ['frequency', '频率'], ['speed', '速度']] as const;
+const NATIVE_FIELDS = [['wind', '风速'], ['direction', '风向'], ['tension', '布料张力']] as const;
 
-export const flagDraft = ({ amplitude, frequency, speed, material }: FlagSettings): FlagDraft =>
-  ({ amplitude: String(amplitude), frequency: String(frequency), speed: String(speed), material });
+export const flagDraft = (flag: FlagSettings): FlagDraft => {
+  const { amplitude, frequency, speed, material } = flag, native = nativeSettings(flag);
+  return { type: flag.type ?? 'default', amplitude: String(amplitude), frequency: String(frequency), speed: String(speed),
+    wind: String(native.wind), direction: String(native.direction), autoDirection: native.autoDirection, tension: String(native.tension), material };
+};
 
-/** Whether the typed fields differ from the saved flag; a cleared field counts as a change. */
+/** Whether the typed fields of the draft's type differ from the saved flag; a cleared field counts as a change. */
 export function flagDraftChanged(draft: FlagDraft, flag: FlagSettings) {
-  return draft.material !== flag.material || WAVE_FIELDS.some(([key]) => draft[key].trim() === '' || Number(draft[key]) !== flag[key]);
+  if (draft.type !== (flag.type ?? 'default') || draft.material !== flag.material) return true;
+  if (draft.type === 'default') return WAVE_FIELDS.some(([key]) => draft[key].trim() === '' || Number(draft[key]) !== flag[key]);
+  const native = nativeSettings(flag);
+  return draft.autoDirection !== native.autoDirection || NATIVE_FIELDS.some(([key]) => draft[key].trim() === '' || Number(draft[key]) !== native[key]);
 }
 
-/** The typed wave settings, or the first field outside its range. */
-export function parseFlagDraft(draft: FlagDraft): { wave: Pick<FlagSettings, 'amplitude' | 'frequency' | 'speed' | 'material'> } | { error: string } {
-  const wave = { amplitude: 0, frequency: 0, speed: 0, material: draft.material };
+/**
+ * The typed settings of the draft's type, or the first field outside its range. The
+ * other type's saved settings are kept, so switching back restores them.
+ */
+export function parseFlagDraft(draft: FlagDraft): { wave: Partial<FlagSettings> } | { error: string } {
+  const number = (text: string) => text.trim() === '' ? Number.NaN : Number(text);
+  if (draft.type === 'native') {
+    const native = { wind: 0, direction: 0, autoDirection: draft.autoDirection, tension: 0 };
+    for (const [key, label] of NATIVE_FIELDS) {
+      const value = number(draft[key]), [min, max] = NATIVE_LIMITS[key];
+      if (!(value >= min && value <= max) || (key === 'direction' && !Number.isInteger(value)))
+        return { error: `${label}应介于 ${min} – ${max}${key === 'direction' ? ' 之间的整数度' : ''}。` };
+      native[key] = value;
+    }
+    return { wave: { type: 'native', native, material: draft.material } };
+  }
+  const wave = { type: 'default' as const, amplitude: 0, frequency: 0, speed: 0, material: draft.material };
   for (const [key, label] of WAVE_FIELDS) {
-    const value = Number(draft[key]), [min, max] = FLAG_LIMITS[key];
-    if (draft[key].trim() === '' || !Number.isFinite(value) || value < min || value > max) return { error: `${label}应介于 ${min} – ${max}。` };
+    const value = number(draft[key]), [min, max] = FLAG_LIMITS[key];
+    if (!(value >= min && value <= max)) return { error: `${label}应介于 ${min} – ${max}。` };
     wave[key] = value;
   }
   return { wave };

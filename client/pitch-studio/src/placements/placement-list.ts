@@ -1,6 +1,7 @@
 // How the match's local placements (pitch and point cloud: 2D, 3D, flags) appear
 // in the overall placement list, and which of them the renderer can draw now.
-import type { LocalAd } from './local-ad.ts';
+import type { FlagSettings, LocalAd } from './local-ad.ts';
+import { nativeSettings } from './flag.ts';
 import { REVEAL_LABELS } from './reveal.ts';
 
 /**
@@ -42,10 +43,17 @@ export function localProblem(ad: LocalAd, clouds: CloudState): string | undefine
   if (ad.type !== '3D' && !/\.(png|jpe?g)$/i.test(ad.materialPath)) return '渲染器只读取 PNG / JPEG 图片';
 }
 
+/** A flag's motion in a few words: its wave, or its native cloth's wind and fabric. */
+function flagMotionSummary(flag: FlagSettings) {
+  if (flag.type !== 'native') return `振幅 ${number(flag.amplitude)} m · 频率 ${number(flag.frequency)} · 速度 ${number(flag.speed)}×`;
+  const { wind, direction, autoDirection, tension } = nativeSettings(flag);
+  return `物理模拟 · 风速 ${number(wind)} m/s · 风向 ${direction}°${autoDirection ? '（自动）' : ''} · 张力 ${tension}%`;
+}
+
 export function localRow(ad: LocalAd, clouds: CloudState): LocalRow {
   const size = `${number(ad.plane.width)} × ${number(ad.plane.height)} m`;
   const detail = ad.type === 'flag'
-    ? `振幅 ${number(ad.flag.amplitude)} m · 频率 ${number(ad.flag.frequency)} · 速度 ${number(ad.flag.speed)}× · ${{ pbr: 'PBR', cloth: '布料', simple: '简易光照' }[ad.flag.material]}`
+    ? `${flagMotionSummary(ad.flag)} · ${{ pbr: 'PBR', cloth: '布料', simple: '简易光照' }[ad.flag.material]}`
       + (ad.artworkRotation ? ` · 图片旋转 ${ad.artworkRotation}°` : '')
       + (ad.reveal ? ` · ${REVEAL_LABELS[ad.reveal.direction]} ${number(ad.reveal.duration)} s（${ad.reveal.start === 'cue' ? '手动触发' : '加载时'}）` : '')
     : ad.type === '3D' ? `缩放 ×${number(ad.scale)} · 朝向 ${number(ad.yaw)}°` : '';

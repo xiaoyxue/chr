@@ -5,7 +5,7 @@
 // coordinates: pitch-centred metres, ground Z = 0, up is negative Z.
 import * as THREE from 'three';
 import { fitFusionModel } from '../placements/fusion-creatives.ts';
-import { flagModel } from '../placements/flag.ts';
+import { flagModel, nativeSettings } from '../placements/flag.ts';
 import { wireMotion, type WireMotion } from '../placements/model-motion.ts';
 import { adRoot, modelFit } from '../placements/local-ad-transform.ts';
 import { imageOpacity, type LocalAd } from '../placements/local-ad.ts';
@@ -32,13 +32,23 @@ export interface DescribedLocal {
   bounds?: GlbBounds;
   blendAs?: 'mask';
 }
-/** `chr_common::scene_frame::Flag`: the flag's size in metres, its wave, artwork turn and reveal. */
+/**
+ * `chr_common::scene_frame::Flag`: the flag's size in metres, its motion, artwork turn
+ * and reveal. A `default` flag (no `type`) carries its wave; a `native` one its wind
+ * and fabric.
+ */
 export interface FlagParameters {
   width_m: number;
   height_m: number;
-  amplitude_m: number;
-  frequency: number;
-  speed: number;
+  type?: 'native';
+  amplitude_m?: number;
+  frequency?: number;
+  speed?: number;
+  wind_mps?: number;
+  wind_direction_deg?: number;
+  auto_direction?: boolean;
+  /** 0 (soft) to 1 (firm). */
+  tension?: number;
   material: 'simple' | 'pbr' | 'cloth';
   /** Clockwise degrees as the artwork reads; omitted when 0. */
   artwork_rotation?: 90 | 180 | 270;
@@ -172,8 +182,12 @@ export function describeScene(options: {
       scene.assets.push({ id: asset, kind: LOCAL_KIND[ad.type], source: { path: ad.materialPath }, sha256, ...(blendAs ? { blend_as: blendAs } : {}) });
     if (ad.type === 'flag') {
       const { width, height } = ad.plane, { amplitude, frequency, speed, material } = ad.flag, { artworkRotation, reveal } = ad;
+      const native = nativeSettings(ad.flag);
+      const motion = ad.flag.type === 'native'
+        ? { type: 'native' as const, wind_mps: native.wind, wind_direction_deg: native.direction, auto_direction: native.autoDirection, tension: native.tension / 100 }
+        : { amplitude_m: amplitude, frequency, speed };
       scene.instances.push({ id: flagInstanceId(ad), asset, model: flagModel(ad.plane, ad.offset), visible: ad.visible,
-        flag: { width_m: width, height_m: height, amplitude_m: amplitude, frequency, speed, material,
+        flag: { width_m: width, height_m: height, ...motion, material,
           ...(artworkRotation ? { artwork_rotation: artworkRotation } : {}),
           ...(reveal ? { reveal: { direction: reveal.direction, duration_s: reveal.duration, start: reveal.start } } : {}) } });
     } else if (ad.type === '2D') {

@@ -1,8 +1,7 @@
-// Flag draws, appended to mesh.wgsl. Group 1 adds the compute pass's flag-local
-// surface (flag.wgsl) to the object uniform and instances; the fragment stages are mesh.wgsl's,
-// except the simple look below.
+// Flag draws, appended to mesh.wgsl after flag_shared.wgsl. Group 1 adds the compute
+// passes' flag-local surface (flag.wgsl, flag_cloth.wgsl) to the object uniform and
+// instances; the fragment stages are mesh.wgsl's, except the simple look below.
 
-struct FlagVertex { position: vec4<f32>, normal: vec4<f32>, tangent: vec4<f32>, uv: vec4<f32> };
 @group(1) @binding(1) var<storage,read> flag_vertices: array<FlagVertex>;
 
 @vertex

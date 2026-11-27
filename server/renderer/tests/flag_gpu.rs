@@ -1,6 +1,6 @@
 //! Waving flags drawn from their compute-evaluated surface: placement by the instance
-//! model, media-time animation, shadows that follow the surface, and the simple and
-//! PBR looks. World metres, ground Z=0, upwards -Z.
+//! model, media-time animation, native cloth following its clock, shadows that follow
+//! the surface, and the simple and PBR looks. World metres, ground Z=0, upwards -Z.
 
 use std::sync::Arc;
 
@@ -9,8 +9,8 @@ use chr_renderer::{
     camera::Camera,
     coordinates::ImageExtent,
     scene::{
-        Filter, Flag, FlagShading, Light, Lighting, MaterialMaps, MeshData, ModelMatrix,
-        PbrMaterial, RevealDirection, Scene, TextureData, TextureSampler, Wrap,
+        Cloth, Filter, Flag, FlagMotion, FlagShading, Light, Lighting, MaterialMaps, MeshData,
+        ModelMatrix, PbrMaterial, RevealDirection, Scene, TextureData, TextureSampler, Wave, Wrap,
     },
 };
 
@@ -26,9 +26,11 @@ fn flag(amplitude: f32, shading: FlagShading) -> Flag {
     Flag {
         width: 3.2,
         height: 2.0,
-        amplitude,
-        frequency: 1.35,
-        speed: 1.0,
+        motion: FlagMotion::Wave(Wave {
+            amplitude,
+            frequency: 1.35,
+            speed: 1.0,
+        }),
         shading,
         artwork_turns: 0,
         revealed: 1.0,
@@ -200,6 +202,74 @@ fn flags_wave_with_media_time_and_redraw_their_shadows() {
         "a flat flag never moves"
     );
     assert_eq!(a, b);
+}
+
+/// A native flag in a breeze towards its reading side (-Y in [`scene`]), at `seconds`
+/// of its clock.
+fn native(seconds: f64) -> Flag {
+    Flag {
+        motion: FlagMotion::Cloth(Cloth {
+            wind_speed: 9.0,
+            wind_direction: 90.0,
+            auto_direction: true,
+            tension: 0.65,
+            seconds,
+        }),
+        ..flag(0.0, FlagShading::Pbr)
+    }
+}
+
+#[test]
+#[ignore = "requires a hardware GPU"]
+fn native_flags_follow_their_clock_and_redraw_their_shadows() {
+    let gpu = gpu();
+    let mut renderer = MeshRenderer::new(&gpu.device, OffscreenTarget::FORMAT);
+    let mut scene = scene(native(0.0), true);
+    let (id, _) = scene
+        .snapshot()
+        .instances()
+        .find(|(_, instance)| instance.flag().is_some())
+        .unwrap();
+    let first = render(&gpu, &mut renderer, &scene, 0.0);
+    assert!(renderer.shadow_passes_last_frame() > 0);
+    // The rest arc's top edge hangs pinned, 4 m up, tilted away from the sun.
+    let top = [0.0, 0.0, -3.97];
+    let [r, g, b] = at(&first, top);
+    assert!(
+        r > 20 && r > 3 * g.max(b),
+        "red flag at its top edge: {r} {g} {b}"
+    );
+    let same = render(&gpu, &mut renderer, &scene, 5.0);
+    assert_eq!(
+        renderer.shadow_passes_last_frame(),
+        0,
+        "animation time alone moves no cloth"
+    );
+    assert_eq!(first, same);
+    let mut previous = first;
+    for frame in 1..=25 {
+        scene
+            .set_flag(id, Some(native(f64::from(frame) / 25.0)))
+            .unwrap();
+        let pixels = render(&gpu, &mut renderer, &scene, 0.0);
+        assert!(
+            renderer.shadow_passes_last_frame() > 0,
+            "shadows follow the cloth"
+        );
+        assert_ne!(pixels, previous, "frame {frame} moved");
+        previous = pixels;
+    }
+    let changed = same.iter().zip(&previous).filter(|(a, b)| a != b).count();
+    assert!(
+        changed > 400,
+        "the cloth moved in a second: {changed} bytes changed"
+    );
+    // Its shading follows the cloth below, but the top edge stays where it was pinned.
+    let [r, g, b] = at(&previous, top);
+    assert!(
+        r > 20 && r > 3 * g.max(b),
+        "the top edge is pinned: {r} {g} {b}"
+    );
 }
 
 #[test]
