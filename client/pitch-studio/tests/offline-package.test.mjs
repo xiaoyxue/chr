@@ -249,9 +249,9 @@ test('importing seeds one editable flag per tifo, and importing again keeps the 
   const [kept, seeded] = seedTifoFlags([other], match, materials);
   assert.equal(kept, other);
   assert.deepEqual({ ...seeded, plane: undefined }, { id: 'tifo-PLC-tifo', name: 'Tifo 2', type: 'flag', space: 'cloud', cloudId: sha(ply),
-    plane: undefined, normalSign: -1, offset: -0.5, scale: 1, yaw: 0, visible: true,
+    plane: undefined, normalSign: -1, offset: -1.53 * 1.1, scale: 1, yaw: 0, visible: true,
     materialPath: materials['ASSET-tifo'].path, materialName: 'Demo Ground 01 BLUE', materialSha256: sha(image),
-    flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' }, artworkRotation: 90,
+    flag: { amplitude: 1.1, frequency: 1.35, speed: 5.5, material: 'cloth' }, artworkRotation: 90,
     reveal: { direction: 'center_horizontal', duration: 2, start: 'load' }, aspectLocked: false, fusionTifoId: 'PLC-tifo' });
   assert.deepEqual(seeded.plane, tifoPlane(corners));
   assert.ok(validLocalAd(seeded));

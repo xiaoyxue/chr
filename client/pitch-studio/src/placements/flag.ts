@@ -16,6 +16,10 @@ export const DEFAULT_FLAG: FlagSettings = { amplitude: 0.32, frequency: 1.35, sp
 export const FLAG_PEAK = 1.53;
 /** Default distance from the picked surface, enough for the default amplitude to clear it. */
 export const FLAG_CLEARANCE = 0.5;
+/** The wave of a flag seeded from a Fusion tifo: cloth, waving visibly at 26-36 m. */
+export const TIFO_FLAG: FlagSettings = { amplitude: 1.1, frequency: 1.35, speed: 5.5, material: 'cloth' };
+/** A seeded tifo's distance from its surface: enough for its wave's peak to clear it. */
+export const TIFO_CLEARANCE = Math.max(FLAG_CLEARANCE, FLAG_PEAK * TIFO_FLAG.amplitude);
 
 const dot = (a: Vector3Tuple, b: Vector3Tuple) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a: Vector3Tuple, b: Vector3Tuple): Vector3Tuple => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];

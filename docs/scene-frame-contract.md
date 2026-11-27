@@ -235,10 +235,10 @@ type RenderInstance = {
   flag?: {
     width_m: number;
     height_m: number;
-    amplitude_m: number;
-    frequency: number;
-    speed: number;
-    material: "simple" | "pbr" | "cloth";
+    amplitude_m?: number; // default 1.1
+    frequency?: number; // default 1.35
+    speed?: number; // default 5.5
+    material?: "simple" | "pbr" | "cloth"; // default "cloth"
     artwork_rotation?: 0 | 90 | 180 | 270; // clockwise turn of the artwork (#210)
     // Extension (#210, #215): absent, the flag is shown from the start.
     reveal?: {

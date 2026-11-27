@@ -41,9 +41,10 @@ ENTRY = re.compile(r"^(?:manifest\.json|assets/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(
                    r"|point-cloud/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.ply)$")
 EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "model/gltf-binary": ".glb"}
 MAX_INSTANCES = 63
-# The studio's flag defaults (client/pitch-studio/src/placements/flag.ts) for a seeded tifo.
-TIFO_FLAG = {"amplitude_m": 0.32, "frequency": 1.35, "speed": 1, "material": "simple"}
-TIFO_OFFSET = -0.5
+# The studio's wave and clearance of a seeded tifo (TIFO_FLAG and TIFO_CLEARANCE in
+# client/pitch-studio/src/placements/flag.ts): its peak, 1.53 x amplitude, clears the surface.
+TIFO_FLAG = {"amplitude_m": 1.1, "frequency": 1.35, "speed": 5.5, "material": "cloth"}
+TIFO_OFFSET = -max(0.5, 1.53 * TIFO_FLAG["amplitude_m"])
 # Fusion's tifoReveal.direction and the render description's flag reveal direction (#215).
 REVEAL_DIRECTIONS = {"left-to-right": "left_to_right", "right-to-left": "right_to_left",
                      "top-to-bottom": "top_to_bottom", "bottom-to-top": "bottom_to_top",

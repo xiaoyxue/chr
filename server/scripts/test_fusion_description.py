@@ -107,12 +107,14 @@ class TifoTests(unittest.TestCase):
         flag = instance["flag"]
         self.assertAlmostEqual(flag["width_m"], 20)
         self.assertAlmostEqual(flag["height_m"], 4 * math.sqrt(2))
-        self.assertEqual((flag["artwork_rotation"], flag["material"]), (90, "simple"))
+        self.assertEqual(flag["artwork_rotation"], 90)
+        self.assertEqual({key: flag[key] for key in ("amplitude_m", "frequency", "speed", "material")},
+                         {"amplitude_m": 1.1, "frequency": 1.35, "speed": 5.5, "material": "cloth"})
         self.assertEqual(flag["reveal"], {"direction": "center_horizontal", "duration_s": 2, "start": "load"})
         # u along -X, v down the rake, u x v away from a viewer above the stand; the
-        # top-left corner moved 0.5 m towards the viewer.
-        h = math.sqrt(0.5)
-        expected = [[-1, 0, 0, 10], [0, h, h, 40 - 0.5 * h], [0, h, -h, -6 + 0.5 * h], [0, 0, 0, 1]]
+        # top-left corner moved towards the viewer by the wave's peak, 1.53 x 1.1 m.
+        h, offset = math.sqrt(0.5), 1.53 * 1.1
+        expected = [[-1, 0, 0, 10], [0, h, h, 40 - offset * h], [0, h, -h, -6 + offset * h], [0, 0, 0, 1]]
         for row, want in zip(instance["model"], expected):
             for value, target in zip(row, want):
                 self.assertAlmostEqual(value, target)

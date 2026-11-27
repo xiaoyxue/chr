@@ -181,10 +181,14 @@ re-registers its asset.
 | Field | Meaning |
 | --- | --- |
 | `width_m`, `height_m` | Flag size in metres, positive |
-| `amplitude_m` | Wave coefficient in metres; the surface leaves its plane by at most 1.53 times this. Any value works, but the free edges fold over once 0.24 times it exceeds `height_m` |
-| `frequency` | Primary wave cycles from the pinned centre line to either free edge |
-| `speed` | Time scale; 0 freezes the wave |
-| `material` | `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
+| `amplitude_m` | Optional, 1.1: wave coefficient in metres; the surface leaves its plane by at most 1.53 times this. Any value works, but the free edges fold over once 0.24 times it exceeds `height_m` |
+| `frequency` | Optional, 1.35: primary wave cycles from the pinned centre line to either free edge |
+| `speed` | Optional, 5.5: time scale; 0 freezes the wave |
+| `material` | Optional, `"cloth"`: `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
+
+The defaults are the wave and material pitch-studio gives a tifo, within its
+limits (amplitude 0 to 5 m, frequency 0.3 to 3, speed 0 to 10), so
+`{"width_m": 36, "height_m": 13.5}` is a complete tifo flag.
 | `artwork_rotation` | Optional: 0, 90, 180 or 270 degrees, turning the artwork clockwise as it reads, like a 2D Fusion placement's `assetRotation`; the artwork stretches to the flag's size |
 | `reveal` | Optional: how the flag appears (#210, #215), `{"direction": "left_to_right", "duration_s": 2, "start": "load"}`; absent, the flag is shown from the start |
 
@@ -313,7 +317,8 @@ newer package keeps them:
   or replaced. Importing
   the ZIP seeds each tifo the match lacks as a point-cloud **flag** `tifo-<id>`
   of the package's cloud, which counts as confirmed: `u` along the top edge, `v`
-  down the left edge, offset -0.5 m, the flag defaults, the image from the store
+  down the left edge, a tifo wave (amplitude 1.1 m, frequency 1.35, speed 5.5,
+  `cloth`) offset by its peak, -1.53 x 1.1 = -1.683 m, the image from the store
   as its material, its rotation and its reveal (same direction and duration,
   starting on load), or none. From then on it is an
   ordinary flag the operator edits, and importing again neither duplicates it nor
