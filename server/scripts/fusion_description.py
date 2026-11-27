@@ -13,7 +13,8 @@ bounds), images by their pixel size, and assets read by chr-server from the ZIP.
 A package v2 Tifo (#210) becomes the flag the studio seeds from it, unedited and
 with its cloud taken as confirmed: on its corners' plane, with the studio's flag
 defaults, its artwork turned by assetRotation and revealed as its tifoReveal says
-(direction and duration) when the scene loads.
+(direction and duration) when the scene loads. Its corners are pitch coordinates,
+so the package needs no point cloud; one it carries is still checked (#217).
 
 Without --camera it writes `{"scene": …}`, the shape `description.load` takes; with
 --camera it writes a complete description for `chr-server --description` or
@@ -118,7 +119,6 @@ def placements(match, assets):
     for ad in match["ads"]:
         require(ad["type"] in ("2D", "3D", "Tifo"), "Unsupported Fusion Ad type.")
         if ad["type"] == "Tifo":
-            require(match["field"].get("pointCloud") is not None, "A Tifo needs the package's point cloud.")
             result.extend(tifo(source, assets) for source in ad["placements"])
             continue
         for source in ad["placements"]:

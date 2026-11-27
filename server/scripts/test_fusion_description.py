@@ -62,13 +62,15 @@ ABSENT = object()
 
 
 def tifo_package(corners=CORNERS, opacity=1, cloud=b"ply\nformat ascii 1.0\n", cloud_hash=None, reveal=CENTRE_REVEAL):
-    """A package v2 holding one Tifo on a raked plane, 20 m wide and 4 * sqrt(2) m high."""
+    """A package v2 holding one Tifo on a raked plane, 20 m wide and 4 * sqrt(2) m high,
+    with a point cloud unless `cloud` is None."""
     image = png(960, 360)
-    contents = {f"assets/{PNG_ID}.png": image, "point-cloud/field.ply": cloud}
+    contents = {f"assets/{PNG_ID}.png": image, **({} if cloud is None else {"point-cloud/field.ply": cloud})}
     match = {
         "schemaVersion": 2, "sport": "football",
-        "field": {"length": 105, "width": 68, "pointCloud": {"fileName": "field.ply", "byteLength": len(cloud),
-                                                            "contentPath": "point-cloud/field.ply"}},
+        "field": {"length": 105, "width": 68,
+                  **({} if cloud is None else {"pointCloud": {"fileName": "field.ply", "byteLength": len(cloud),
+                                                              "contentPath": "point-cloud/field.ply"}})},
         "coordinates": {"unit": "meters", "origin": "field-center", "x": "right", "y": "down-in-top-view",
                         "modelUp": "gltf-y-up", **fusion_description.V2_COORDINATES},
         "ads": [{"id": "AD-tifo", "type": "Tifo", "placements": [{
@@ -157,6 +159,10 @@ class TifoTests(unittest.TestCase):
                 self.describe(tifo_package(reveal=reveal))
             self.assertIn("Tifo PLC-tifo", str(raised.exception))
             self.assertIn(message, str(raised.exception))
+
+    def test_a_tifo_needs_no_point_cloud(self):
+        # The corners are already pitch coordinates: the package's cloud changes nothing (#217).
+        self.assertEqual(self.describe(tifo_package(cloud=None)), self.describe(tifo_package()))
 
     def test_tifos_off_their_rectangle_translucent_or_with_a_bad_cloud_are_refused(self):
         skewed = [CORNERS[0], CORNERS[1], (-9, 44, -2), CORNERS[3]]

@@ -322,7 +322,9 @@ newer package keeps them:
   as its material, its rotation and its reveal (same direction and duration,
   starting on load), or none. From then on it is an
   ordinary flag the operator edits, and importing again neither duplicates it nor
-  undoes edits. `server/scripts/fusion_description.py` maps a package the same way.
+  undoes edits. `server/scripts/fusion_description.py` maps a package the same way,
+  with or without its point cloud: the corners are pitch coordinates, so it needs
+  none and only checks one the package carries (#217).
   For example, `"tifoReveal": {"direction": "bottom-to-top", "duration": 3.5}`
   becomes the flag's `"reveal": {"direction": "bottom_to_top", "duration_s": 3.5,
   "start": "load"}`.
