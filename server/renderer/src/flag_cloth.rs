@@ -60,7 +60,8 @@ impl ClothDraw {
 }
 
 struct State {
-    size: [f32; 2],
+    /// Width and height, and slack, which together fix the rest shape.
+    shape: [f32; 3],
     particles: [wgpu::Buffer; 2],
     settings: wgpu::Buffer,
     /// Steps `settings` holds room for.
@@ -189,8 +190,8 @@ impl ClothGpu {
     }
 
     /// Plans a cloth for this frame: steps towards its clock, then its surface into
-    /// `vertices` with the flag's surface `params`. A cloth whose size changed or
-    /// whose clock went back restarts from its rest arc. Returns whether its surface
+    /// `vertices` with the flag's surface `params`. A cloth whose size or slack
+    /// changed or whose clock went back restarts from its rest arc. Returns whether its surface
     /// changes.
     pub(crate) fn plan(
         &mut self,
@@ -206,12 +207,13 @@ impl ClothGpu {
             gravity,
         } = draw;
         let target = (cloth.seconds / STEP).floor() as u64;
+        let shape = [size[0], size[1], cloth.slack];
         let restart = self
             .states
             .get(&id)
-            .is_none_or(|state| state.size != size || state.steps > target);
+            .is_none_or(|state| state.shape != shape || state.steps > target);
         if restart {
-            let state = self.state(gpu, size);
+            let state = self.state(gpu, shape);
             self.states.insert(id, state);
         }
         let state = self.states.get_mut(&id).expect("state inserted above");
@@ -237,7 +239,7 @@ impl ClothGpu {
             );
         }
         if steps > 0 {
-            let [across, down] = spacing(size[0], size[1]);
+            let [across, down] = spacing(size[0], size[1], cloth.slack);
             let mut bytes = vec![0_u8; (self.stride * steps) as usize];
             for (k, chunk) in bytes.chunks_exact_mut(self.stride as usize).enumerate() {
                 let seconds = (target - steps + k as u64) as f64 * STEP;
@@ -289,8 +291,8 @@ impl ClothGpu {
             .retain(|id, _| runs.iter().any(|run| run.id == *id));
     }
 
-    fn state(&self, gpu: &Gpu, size: [f32; 2]) -> State {
-        let rest: Vec<[f32; 8]> = initial_positions(size[0], size[1])
+    fn state(&self, gpu: &Gpu, shape: [f32; 3]) -> State {
+        let rest: Vec<[f32; 8]> = initial_positions(shape[0], shape[1], shape[2])
             .into_iter()
             .map(|p| {
                 let p = [p[0] as f32, p[1] as f32, p[2] as f32, 1.0];
@@ -320,7 +322,7 @@ impl ClothGpu {
         });
         let groups = solver_groups(&gpu.device, &self.solver_layout, &particles, &settings);
         State {
-            size,
+            shape,
             particles,
             settings,
             capacity: FRAME_STEPS,
@@ -397,6 +399,7 @@ mod tests {
             wind_direction,
             auto_direction: false,
             tension,
+            slack: 0.1,
             seconds: 0.0,
         }
     }
@@ -534,7 +537,7 @@ mod tests {
     }
 
     fn rest() -> Vec<[f32; 3]> {
-        initial_positions(SIZE[0], SIZE[1])
+        initial_positions(SIZE[0], SIZE[1], 0.1)
             .into_iter()
             .map(|p| p.map(|x| x as f32))
             .collect()
@@ -631,6 +634,13 @@ mod tests {
         // Time going back restarts from the rest arc.
         assert!(harness.frame(&[(0, at(0.0))]));
         assert_eq!(harness.positions(0), rest());
+        // So does a new slack, from its own rest shape: without slack it hangs flat.
+        let taut = Cloth {
+            slack: 0.0,
+            ..at(0.0)
+        };
+        assert!(harness.frame(&[(0, taut)]));
+        assert!(harness.positions(0).iter().all(|p| p[2] == 0.0));
     }
 
     #[test]

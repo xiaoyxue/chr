@@ -136,7 +136,8 @@ strings!(FlagType { Default => "default", Native => "native" });
 ///
 /// On the wire, `type` selects the motion (absent, as it is written for `default`)
 /// and only that motion's fields are accepted: `amplitude_m`, `frequency` and `speed` for `default`;
-/// `wind_mps`, `wind_direction_deg`, `auto_direction` and `tension` for `native`.
+/// `wind_mps`, `wind_direction_deg`, `auto_direction`, `tension` and `slack` for
+/// `native`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "FlagFields", into = "FlagFields")]
 pub struct Flag {
@@ -172,8 +173,8 @@ pub struct FlagWave {
 }
 
 /// A cloth pinned along its top (Y = 0) and bottom (Y = `height_m`) edges with free
-/// sides, 10 % longer than that span so it billows, blown by a gusting wind. Absent
-/// fields take the reference simulation's defaults.
+/// sides, longer than that span by its `slack` so it billows, blown by a gusting
+/// wind. Absent fields take the reference simulation's defaults.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlagCloth {
     /// Wind speed in m/s, 0 to 18; 7.
@@ -187,6 +188,9 @@ pub struct FlagCloth {
     pub auto_direction: bool,
     /// Bending stiffness from 0 (soft and flowing) to 1 (crisp and firm); 0.65.
     pub tension: Finite,
+    /// The part of the cloth's length the pinned edges do not span, 0 (taut) to 0.2;
+    /// 0.1, a cloth 11 % longer than `height_m`.
+    pub slack: Finite,
 }
 
 object!(@private FlagFields {
@@ -207,6 +211,8 @@ object!(@private FlagFields {
     auto_direction: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tension: Option<Finite>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    slack: Option<Finite>,
     /// `cloth`.
     #[serde(default = "cloth_material")]
     material: FlagMaterial,
@@ -227,12 +233,14 @@ impl TryFrom<FlagFields> for Flag {
             value.unwrap_or_else(|| Finite::try_from(default).expect("a finite literal"))
         };
         let wave = [f.amplitude_m, f.frequency, f.speed];
-        let cloth = [f.wind_mps, f.wind_direction_deg, f.tension];
+        let cloth = [f.wind_mps, f.wind_direction_deg, f.tension, f.slack];
         let motion = match f.kind.unwrap_or(FlagType::Default) {
             FlagType::Default
                 if cloth.iter().any(Option::is_some) || f.auto_direction.is_some() =>
             {
-                return Err(ValidationError("wind and tension are for native flags"));
+                return Err(ValidationError(
+                    "wind, tension and slack are for native flags",
+                ));
             }
             FlagType::Native if wave.iter().any(Option::is_some) => {
                 return Err(ValidationError(
@@ -249,6 +257,7 @@ impl TryFrom<FlagFields> for Flag {
                 wind_direction_deg: or(f.wind_direction_deg, 25.0),
                 auto_direction: f.auto_direction.unwrap_or(true),
                 tension: or(f.tension, 0.65),
+                slack: or(f.slack, 0.1),
             }),
         };
         Ok(Self {
@@ -275,6 +284,7 @@ impl From<Flag> for FlagFields {
             wind_direction_deg: None,
             auto_direction: None,
             tension: None,
+            slack: None,
             material: flag.material,
             artwork_rotation: flag.artwork_rotation,
             reveal: flag.reveal,
@@ -291,6 +301,7 @@ impl From<Flag> for FlagFields {
                 fields.wind_direction_deg = Some(cloth.wind_direction_deg);
                 fields.auto_direction = Some(cloth.auto_direction);
                 fields.tension = Some(cloth.tension);
+                fields.slack = Some(cloth.slack);
             }
         }
         fields

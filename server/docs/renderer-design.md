@@ -615,7 +615,8 @@ a flat or stopped flag keeps them. Bounds cover every phase.
 A flag's `FlagMotion` is either the SimpleWave above or a `Cloth`: a port of the
 AER WebGPU cloth (xiaoyxue/Simulation at `ff9c934`, raised state) in flag-local
 metres. 65 x 41 particles hang between the pinned top (Y = 0) and bottom
-(Y = height) rows, 10 % longer than that span; the reference's Y-up, +Z-front
+(Y = height) rows, longer than that span by `Cloth::slack` (the reference's 0.1, 11 %;
+0 hangs flat); the reference's Y-up, +Z-front
 constants turn to -Y and -Z, a proper rotation, and its floor contact is dropped.
 Gravity is world down turned into the flag's axes through the instance model; the
 wind is relative to the flag. `scene::cloth` holds the reference logic (rest arc,
@@ -634,7 +635,7 @@ runtime sets to the scene's time each frame, like a reveal. Each prepare plans t
 steps up to it (at most 8 a frame; at most 360, 3 s, for a cloth seen for the first
 time, so stills are reproducible) with per-step uniforms at dynamic offsets; the
 encode records them and only then advances the state, so a prepare without an
-encode loses nothing. A clock that goes back or a size change restarts the cloth.
+encode loses nothing. A clock that goes back or a change of size or slack restarts the cloth.
 Its bounds are its pinned rectangle grown by 1.5 times half its rest length; it
 counts as moving whenever it steps, which redraws cached shadows.
 

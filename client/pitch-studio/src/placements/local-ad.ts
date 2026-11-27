@@ -42,6 +42,11 @@ export interface NativeFlagSettings {
   autoDirection: boolean;
   /** Bending stiffness in percent, from soft and flowing to crisp and firm. */
   tension: number;
+  /**
+   * The part of the cloth's length its pinned top and bottom edges do not span, in
+   * percent, 0 (taut) to 20. Absent (as stored before it existed): the reference's 10.
+   */
+  slack?: number;
 }
 export interface LocalAd {
   id: string;
@@ -97,7 +102,8 @@ const within = (value: unknown, [min, max]: readonly [number, number]) => typeof
 function validNative(native: NativeFlagSettings) {
   return Boolean(native) && typeof native === 'object' && within(native.wind, NATIVE_LIMITS.wind)
     && within(native.direction, NATIVE_LIMITS.direction) && Number.isInteger(native.direction)
-    && within(native.tension, NATIVE_LIMITS.tension) && typeof native.autoDirection === 'boolean';
+    && within(native.tension, NATIVE_LIMITS.tension) && typeof native.autoDirection === 'boolean'
+    && (native.slack === undefined || within(native.slack, NATIVE_LIMITS.slack));
 }
 
 function validFlag(flag: StoredFlag) {

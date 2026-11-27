@@ -14,7 +14,7 @@ import { REVEAL_DIRECTIONS, REVEAL_DURATION, REVEAL_LABELS, isRevealDirection } 
 import { parseAspect, type Anchor } from './ground-edit.ts';
 import { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } from './plane-edit.ts';
 import {
-  DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, NATIVE_LIMITS, NATIVE_SLACK, flagDraft, flagDraftChanged, nativeSettings,
+  DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, NATIVE_LIMITS, flagDraft, flagDraftChanged, nativeBulge, nativeSettings,
   orientFlagPlane, parseFlagDraft, windDirectionAt, windHeading, type FlagDraft,
 } from './flag.ts';
 import type { AdPlane, AdSpace, LocalAd, Vector3Tuple } from './local-ad.ts';
@@ -22,14 +22,14 @@ import type { AdPlane, AdSpace, LocalAd, Vector3Tuple } from './local-ad.ts';
 type AdType = LocalAd['type'];
 const WAVE = [['amplitude', '振幅 / m', 0.01], ['frequency', '频率（中线到边缘周数）', 0.05], ['speed', '速度 / ×', 0.05]] as const;
 /** The draft fields typed in a number field and a slider. */
-const PAIRED = [...WAVE.map(([key]) => key), 'wind', 'direction', 'tension'] as const;
+const PAIRED = [...WAVE.map(([key]) => key), 'wind', 'direction', 'tension', 'slack'] as const;
 const FLAG_INPUTS = new Set(['flagType', 'flagMaterial', 'autoDirection', ...PAIRED.flatMap((key) => [key, `${key}Slider`])]);
 const typeLabel = (type: AdType) => type === 'flag' ? '旗帜' : type;
 const LOCKED = '已锁定：点击“🔒 已锁定”解锁后，才能修改位置、尺寸和素材。';
 
 /** A native flag's wind and fabric, laid out as the reference simulation's control panel. */
 function nativeMarkup(prefix: string) {
-  const slider = (key: 'wind' | 'tension', label: string, step: number, low: string, high: string) => {
+  const slider = (key: 'wind' | 'tension' | 'slack', label: string, step: number, low: string, high: string) => {
     const bounds = `min="${NATIVE_LIMITS[key][0]}" max="${NATIVE_LIMITS[key][1]}" step="${step}"`;
     return `<div class="on-slider-row"><label for="${prefix}flag-${key}">${label}</label>
       <input id="${prefix}flag-${key}" name="${key}Slider" type="range" ${bounds} />
@@ -58,7 +58,9 @@ function nativeMarkup(prefix: string) {
     <div class="on-wind-row"><input id="${prefix}flag-direction" name="directionSlider" type="range" min="${min}" max="${max}" step="1" aria-label="风向基准角" /></div>
     <div class="on-range-labels"><span>−180°</span><span>0° = 沿旗面向右</span><span>+180°</span></div>
     <p id="${prefix}wind-dial-help" class="on-help">拖动表盘设置基准角。实线箭头：当前风向；虚线箭头：基准。方向键 1°（Shift 10°），PageUp / PageDown 10°，Home / End 到 −180° / +180°。角度相对旗面：0° 沿旗面吹向右边（从读图侧看），+90° 吹向读图侧。</p>
-    ${slider('tension', '布料张力 / %', 1, '柔软飘逸', '挺括紧致')}`;
+    ${slider('tension', '布料张力 / %', 1, '柔软飘逸', '挺括紧致')}
+    ${slider('slack', '布料余量 / %', 0.5, '绷直', '宽松鼓起')}
+    <p class="on-help">布料比上下两边的间距长出的部分。参考模拟为 10%，小旗会鼓起飘动；大旗或斜放在看台上的旗会因此下垂、显得短，调到 1–3% 可拉直。</p>`;
 }
 
 function editorMarkup(space: AdSpace, prefix: string) {
@@ -319,6 +321,7 @@ export class LocalAdEditor {
     this.flagDraft = { id: selected.id, type: checked('flagType') === 'native' ? 'native' : 'default',
       amplitude: pair('amplitude').value, frequency: pair('frequency').value, speed: pair('speed').value,
       wind: pair('wind').value, direction: pair('direction').value, autoDirection: pair('autoDirection').checked, tension: pair('tension').value,
+      slack: pair('slack').value,
       material: (['pbr', 'cloth'] as const).find((value) => value === checked('flagMaterial')) ?? 'simple' };
     if (this.notice?.failed) this.notice = undefined;
     this.renderSaveState();
@@ -805,10 +808,13 @@ export class LocalAdEditor {
 
   private renderFlagNote(selected: LocalAd) {
     const note = this.form.querySelector('[data-flag-note]'), side = '旗面法线背向选面视角：法线偏移为负值时朝向观看侧';
-    if (this.draftOf(selected).type === 'native') {
-      const reach = (selected.plane.height / NATIVE_SLACK / 2).toFixed(2);
-      note.textContent = '上下两边固定、左右两侧自由的布料，比上下间距长 10%，由渲染器按风速、风向和张力实时物理模拟；'
-        + `本页预览只显示静止的初始弧形，飘动请在渲染输出中查看，保存并发送后生效。${side}，贴墙时建议 ≤ −${reach}。`;
+    const draft = this.draftOf(selected);
+    if (draft.type === 'native') {
+      const slack = Number(draft.slack), valid = draft.slack.trim() !== '' && slack >= NATIVE_LIMITS.slack[0] && slack <= NATIVE_LIMITS.slack[1];
+      const shown = valid ? slack : nativeSettings(selected.flag).slack, bulge = nativeBulge(selected.plane.height, shown).toFixed(2);
+      note.textContent = `上下两边固定、左右两侧自由的布料，比上下间距长 ${(100 / (1 - shown / 100) - 100).toFixed(1)}%，静止时鼓出约 ${bulge} m，`
+        + '由渲染器按风速、风向、张力实时物理模拟；本页预览只显示静止的初始弧形，飘动请在渲染输出中查看，保存并发送后生效。'
+        + `${side}，贴墙时建议 ≤ −${bulge}。`;
       return;
     }
     const parsed = this.flagDraft?.id === selected.id ? parseFlagDraft(this.flagDraft) : undefined;

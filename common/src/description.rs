@@ -323,8 +323,14 @@ mod tests {
             panic!("a native flag simulates cloth")
         };
         assert_eq!(
-            [cloth.wind_mps, cloth.wind_direction_deg, cloth.tension].map(|x| x.get()),
-            [12.0, 25.0, 0.65]
+            [
+                cloth.wind_mps,
+                cloth.wind_direction_deg,
+                cloth.tension,
+                cloth.slack
+            ]
+            .map(|x| x.get()),
+            [12.0, 25.0, 0.65, 0.1]
         );
         assert!(cloth.auto_direction);
         // Each type keeps exactly its own fields through a round trip.
@@ -339,6 +345,7 @@ mod tests {
             json!({"width_m": 1, "height_m": 1, "type": "native", "speed": 1}),
             json!({"width_m": 1, "height_m": 1, "amplitude_m": 1, "type": "native"}),
             json!({"width_m": 1, "height_m": 1, "tension": 0.5}),
+            json!({"width_m": 1, "height_m": 1, "slack": 0.02}),
             json!({"width_m": 1, "height_m": 1, "type": "default", "auto_direction": false}),
             json!({"width_m": 1, "height_m": 1, "type": "physical"}),
         ] {

@@ -19,7 +19,9 @@ use thiserror::Error;
 pub use appearance::{
     AreaShape, EnvironmentMap, Light, Lighting, MaterialLayers, PbrMaterial, ShadowMode, SkyLight,
 };
-pub use cloth::{CLOTH_COLUMNS, CLOTH_ROWS, Cloth, ITERATIONS, MAX_WIND, STEP, initial_positions};
+pub use cloth::{
+    CLOTH_COLUMNS, CLOTH_ROWS, Cloth, ITERATIONS, MAX_SLACK, MAX_WIND, STEP, initial_positions,
+};
 pub(crate) use cloth::{GRAVITY, spacing};
 pub use flag::{
     FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagMotion, FlagShading, RevealDirection, Wave,
@@ -61,7 +63,7 @@ pub enum SceneError {
     #[error("environment dimensions and finite nonnegative RGB radiance must agree")]
     InvalidEnvironment,
     #[error(
-        "flag size must be positive, its wave finite and nonnegative, and its cloth wind 0 to 18 m/s, tension 0 to 1 and time finite and nonnegative"
+        "flag size must be positive, its wave finite and nonnegative, and its cloth wind 0 to 18 m/s, tension 0 to 1, slack 0 to 0.2 and time finite and nonnegative"
     )]
     InvalidFlag,
     #[error("flag motion requires the flag grid mesh")]

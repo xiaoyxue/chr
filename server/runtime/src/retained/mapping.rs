@@ -599,6 +599,7 @@ fn scene_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
                 wind_direction: f(cloth.wind_direction_deg)?,
                 auto_direction: cloth.auto_direction,
                 tension: f(cloth.tension)?,
+                slack: f(cloth.slack)?,
                 seconds: 0.0,
             }),
         },
@@ -908,6 +909,7 @@ mod tests {
             wind_direction: 25.0,
             auto_direction: true,
             tension: 0.65,
+            slack: 0.1,
             seconds: 0.0,
         };
         let native = TimedFlag {

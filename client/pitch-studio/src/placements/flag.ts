@@ -22,14 +22,22 @@ export const TIFO_FLAG: FlagSettings = { amplitude: 1.1, frequency: 1.35, speed:
 export const TIFO_CLEARANCE = Math.max(FLAG_CLEARANCE, FLAG_PEAK * TIFO_FLAG.amplitude);
 
 /** A native flag's wind and fabric as the reference simulation (xiaoyxue/Simulation) starts them. */
-export const NATIVE_FLAG: NativeFlagSettings = { wind: 7, direction: 25, autoDirection: true, tension: 65 };
-/** Wind in m/s, base direction in whole degrees, tension in percent: the reference simulation's controls. */
-export const NATIVE_LIMITS = { wind: [0, 18], direction: [-180, 180], tension: [0, 100] } as const;
-/** A native flag's pinned span over its cloth's length down the flag: 10 % slack. */
-export const NATIVE_SLACK = 0.9;
+export const NATIVE_FLAG: Required<NativeFlagSettings> = { wind: 7, direction: 25, autoDirection: true, tension: 65, slack: 10 };
+/**
+ * Wind in m/s, base direction in whole degrees, tension in percent: the reference
+ * simulation's controls; and slack in percent, the part of the cloth's length its
+ * pinned edges do not span.
+ */
+export const NATIVE_LIMITS = { wind: [0, 18], direction: [-180, 180], tension: [0, 100], slack: [0, 20] } as const;
 /** Rows of a native flag's cloth, whose segments make its rest arc. */
 const NATIVE_ROWS = 41;
-export const nativeSettings = (flag: FlagSettings) => flag.native ?? NATIVE_FLAG;
+/** A flag's native settings, with the reference's for those it has none of. */
+export const nativeSettings = (flag: FlagSettings): Required<NativeFlagSettings> => ({ ...NATIVE_FLAG, ...flag.native });
+/** How far a native flag's cloth reaches off its plane at rest: its arc's depth, in metres. */
+export function nativeBulge(height: number, slack: number) {
+  const rest = nativeRest(1, height, slack);
+  return Math.max(...Array.from({ length: NATIVE_ROWS }, (_, row) => -rest(0, row / (NATIVE_ROWS - 1))[2]));
+}
 
 /** The reference's fixed hash sequence of automatic wind offsets, within ±45°. */
 function autoOffset(segment: number) {
@@ -62,10 +70,12 @@ export function windHeading(angle: number) {
 /**
  * A native flag's cloth at rest, as the renderer starts it: pinned along its top and
  * bottom edges, its rows of rest length bowed in an arc towards the side that reads
- * the artwork (-Z). Returns the flag-local point at (`s` right, `t` down).
+ * the artwork (-Z); flat without slack. `slack` is in percent. Returns the flag-local
+ * point at (`s` right, `t` down).
  */
-export function nativeRest(width: number, height: number): (s: number, t: number) => Vector3Tuple {
-  const segments = NATIVE_ROWS - 1, segment = height / NATIVE_SLACK / segments;
+export function nativeRest(width: number, height: number, slack: number): (s: number, t: number) => Vector3Tuple {
+  if (slack === 0) return (s, t) => [width * s, height * t, 0];
+  const segments = NATIVE_ROWS - 1, segment = height / (1 - slack / 100) / segments;
   let [low, high, turn] = [0, Math.PI, 0];
   for (let i = 0; i < 40; i++) {
     turn = (low + high) / 2;
@@ -132,17 +142,18 @@ export function flagWave(s: number, t: number, width: number, height: number, fl
 export interface FlagDraft {
   type: FlagType;
   amplitude: string; frequency: string; speed: string;
-  wind: string; direction: string; autoDirection: boolean; tension: string;
+  wind: string; direction: string; autoDirection: boolean; tension: string; slack: string;
   material: FlagSettings['material'];
 }
 export type FlagType = NonNullable<FlagSettings['type']>;
 const WAVE_FIELDS = [['amplitude', '振幅'], ['frequency', '频率'], ['speed', '速度']] as const;
-const NATIVE_FIELDS = [['wind', '风速'], ['direction', '风向'], ['tension', '布料张力']] as const;
+const NATIVE_FIELDS = [['wind', '风速'], ['direction', '风向'], ['tension', '布料张力'], ['slack', '布料余量']] as const;
 
 export const flagDraft = (flag: FlagSettings): FlagDraft => {
   const { amplitude, frequency, speed, material } = flag, native = nativeSettings(flag);
   return { type: flag.type ?? 'default', amplitude: String(amplitude), frequency: String(frequency), speed: String(speed),
-    wind: String(native.wind), direction: String(native.direction), autoDirection: native.autoDirection, tension: String(native.tension), material };
+    wind: String(native.wind), direction: String(native.direction), autoDirection: native.autoDirection, tension: String(native.tension),
+    slack: String(native.slack), material };
 };
 
 /** Whether the typed fields of the draft's type differ from the saved flag; a cleared field counts as a change. */
@@ -160,7 +171,7 @@ export function flagDraftChanged(draft: FlagDraft, flag: FlagSettings) {
 export function parseFlagDraft(draft: FlagDraft): { wave: Partial<FlagSettings> } | { error: string } {
   const number = (text: string) => text.trim() === '' ? Number.NaN : Number(text);
   if (draft.type === 'native') {
-    const native = { wind: 0, direction: 0, autoDirection: draft.autoDirection, tension: 0 };
+    const native = { wind: 0, direction: 0, autoDirection: draft.autoDirection, tension: 0, slack: 0 };
     for (const [key, label] of NATIVE_FIELDS) {
       const value = number(draft[key]), [min, max] = NATIVE_LIMITS[key];
       if (!(value >= min && value <= max) || (key === 'direction' && !Number.isInteger(value)))

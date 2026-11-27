@@ -366,7 +366,8 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
 
     // A native flag: its cloth's wind and fabric, stored as sent.
     let native = json!({"width_m": 3.2, "height_m": 4.8, "type": "native", "wind_mps": 9.0,
-        "wind_direction_deg": -40.0, "auto_direction": false, "tension": 0.3, "material": "cloth"});
+        "wind_direction_deg": -40.0, "auto_direction": false, "tension": 0.3, "slack": 0.02,
+        "material": "cloth"});
     loader
         .load(scene(
             &fixture,

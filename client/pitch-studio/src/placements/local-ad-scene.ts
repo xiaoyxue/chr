@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { simplifyForPreview } from './preview-simplify.ts';
-import { flagWave, nativeRest } from './flag.ts';
+import { flagWave, nativeRest, nativeSettings } from './flag.ts';
 import { revealedPoint } from './reveal.ts';
 import { adRoot, modelFit } from './local-ad-transform.ts';
 import type { GlbBounds } from '../render/render-description.ts';
@@ -79,7 +79,7 @@ export function artworkUv(s: number, t: number, rotation = 0): [number, number] 
 function waveFlag(geometry: THREE.BufferGeometry, ad: LocalAd, seconds: number) {
   const position = geometry.getAttribute('position') as THREE.BufferAttribute, uv = geometry.getAttribute('uv') as THREE.BufferAttribute;
   const { width, height } = ad.plane, start = ad.reveal && revealPreviews.get(ad.id);
-  const surface = ad.flag.type === 'native' ? nativeRest(width, height)
+  const surface = ad.flag.type === 'native' ? nativeRest(width, height, nativeSettings(ad.flag).slack)
     : (s: number, t: number) => flagWave(s, t, width, height, ad.flag, ad.flag.speed * seconds);
   const progress = start === undefined ? 1 : THREE.MathUtils.clamp((seconds - start) / ad.reveal.duration, 0, 1);
   for (let j = 0, k = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++, k++) {

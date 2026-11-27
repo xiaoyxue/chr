@@ -49,6 +49,8 @@ export interface FlagParameters {
   auto_direction?: boolean;
   /** 0 (soft) to 1 (firm). */
   tension?: number;
+  /** 0 (taut) to 0.2: the part of the cloth's length its pinned edges do not span. */
+  slack?: number;
   material: 'simple' | 'pbr' | 'cloth';
   /** Clockwise degrees as the artwork reads; omitted when 0. */
   artwork_rotation?: 90 | 180 | 270;
@@ -184,7 +186,8 @@ export function describeScene(options: {
       const { width, height } = ad.plane, { amplitude, frequency, speed, material } = ad.flag, { artworkRotation, reveal } = ad;
       const native = nativeSettings(ad.flag);
       const motion = ad.flag.type === 'native'
-        ? { type: 'native' as const, wind_mps: native.wind, wind_direction_deg: native.direction, auto_direction: native.autoDirection, tension: native.tension / 100 }
+        ? { type: 'native' as const, wind_mps: native.wind, wind_direction_deg: native.direction, auto_direction: native.autoDirection,
+          tension: native.tension / 100, slack: native.slack / 100 }
         : { amplitude_m: amplitude, frequency, speed };
       scene.instances.push({ id: flagInstanceId(ad), asset, model: flagModel(ad.plane, ad.offset), visible: ad.visible,
         flag: { width_m: width, height_m: height, ...motion, material,

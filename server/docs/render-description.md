@@ -195,6 +195,7 @@ are refused.
 | `wind_direction_deg` | Native flags. Optional, 25: base direction the wind blows towards, in degrees about the flag-local Y axis: 0 along +X (towards the right edge as the artwork reads), 90 along -Z (towards the side that reads it), -90 away from it |
 | `auto_direction` | Native flags. Optional, `true`: turn the wind smoothly to a new target within 45° of the base every 0.5 s, the same sequence every run |
 | `tension` | Native flags. Optional, 0.65: bending stiffness from 0 (soft and flowing) to 1 (crisp and firm) |
+| `slack` | Native flags. Optional, 0.1: the part of the cloth's length the pinned edges do not span, 0 (taut) to 0.2. The reference's 0.1 makes the cloth 11 % longer than `height_m` and bows it out by about a fifth of its height; a large flag lying along a stand sags by that much and looks short, so tifo-sized flags want 0.01 to 0.03 |
 | `material` | Optional, `"cloth"`: `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
 
 The default flag's defaults are the wave and material pitch-studio gives a tifo,
@@ -217,8 +218,10 @@ A native flag is the cloth of the AER WebGPU flag simulation
 ([xiaoyxue/Simulation](https://github.com/xiaoyxue/Simulation) at `ff9c934`, its
 raised state), ported to the renderer: 65 × 41 particles whose top row is pinned
 along the flag's top edge (Y = 0) and bottom row along its bottom edge
-(Y = `height_m`), with free sides. The cloth is 10 % longer than that span, so it
-billows; it starts as a slack arc bowed towards the side that reads the artwork.
+(Y = `height_m`), with free sides. The cloth is longer than that span by its
+`slack` (11 % at the default), so it billows; it starts as a slack arc bowed towards
+the side that reads the artwork, or flat without slack. Changing `slack` restarts
+the cloth.
 Each fixed 1/120 s step integrates the reference's visually tuned gravity
 (3.8 m/s², world down turned into the flag's axes through `model`), damping and an
 aerodynamic load from the gusting wind, then relaxes structural, shear and bending
@@ -442,7 +445,8 @@ switches between **默认（正弦飘动）**, whose wave (three sliders) is pre
 as an animated wave, and **物理模拟（布料）**, a native flag with the reference
 simulation's control panel: wind speed, a wind dial (drag, or arrow keys) with
 its base angle and slider, automatic direction (the dial's solid arrow shows it
-turning, the dashed one the base) and fabric tension. The page previews a native
+turning, the dashed one the base), fabric tension and **布料余量** (slack, 0–20 %,
+default 10 %; its note gives the resulting bulge). The page previews a native
 flag only at rest; its motion shows in the renderer's output. Switching type keeps
 the other type's settings. Both editors have undo and redo
 and **保存并发送到渲染器**; sending or exporting with unsaved edits asks to save

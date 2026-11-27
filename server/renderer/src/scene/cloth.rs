@@ -4,7 +4,7 @@
 //! The cloth is a grid of [`CLOTH_COLUMNS`] × [`CLOTH_ROWS`] particles in flag-local
 //! metres (X along the width, Y down, Z = X × Y). Its top row is pinned along Y = 0
 //! and its bottom row along Y = height; the sides are free. Its rest length down the
-//! flag is the pinned span divided by [`SLACK`], so it billows. Each fixed step of
+//! flag exceeds the pinned span by its [`Cloth::slack`], so it billows. Each fixed step of
 //! [`STEP`] seconds integrates gravity, damping and an aerodynamic load from the
 //! local normal and the gusting, wind-relative velocity (Verlet), then relaxes
 //! structural, shear and bending distances in [`ITERATIONS`] Jacobi iterations
@@ -23,8 +23,8 @@ pub const CLOTH_ROWS: u32 = 41;
 pub const STEP: f64 = 1.0 / 120.0;
 /// Jacobi constraint iterations per step.
 pub const ITERATIONS: u32 = 36;
-/// Pinned span over the cloth's rest length down the flag: 10 % slack.
-pub const SLACK: f64 = 0.9;
+/// The largest slack: a cloth 25 % longer than its pinned span.
+pub const MAX_SLACK: f32 = 0.2;
 /// The strongest wind the reference keeps stable at either tension, in m/s.
 pub const MAX_WIND: f32 = 18.0;
 /// The reference's visually tuned gravity in m/s², lighter than free fall.
@@ -52,6 +52,11 @@ pub struct Cloth {
     pub auto_direction: bool,
     /// Bending stiffness from 0 (soft and flowing) to 1 (crisp and firm).
     pub tension: f32,
+    /// The part of the cloth's rest length down the flag that the pinned edges do
+    /// not span, 0 (taut) to [`MAX_SLACK`]: the reference's 0.1 makes it 11 % longer
+    /// than the flag, so it billows; a large flag lying along a stand sags by as
+    /// much, about a fifth of its height.
+    pub slack: f32,
     /// Seconds since the cloth hung in its slack arc. The renderer simulates each
     /// cloth up to its time in fixed steps as frames are prepared (`flag_cloth`).
     pub seconds: f64,
@@ -62,6 +67,7 @@ impl Cloth {
         (0.0..=MAX_WIND).contains(&self.wind_speed)
             && self.wind_direction.is_finite()
             && (0.0..=1.0).contains(&self.tension)
+            && (0.0..=MAX_SLACK).contains(&self.slack)
             && self.seconds.is_finite()
             && self.seconds >= 0.0
     }
@@ -110,21 +116,34 @@ fn auto_offset(segment: u32) -> f64 {
     (f64::from(value) / f64::from(u32::MAX) * 2.0 - 1.0) * AUTO_RANGE
 }
 
+/// The cloth's rest length down a flag of `height` with `slack`.
+fn rest_length(height: f32, slack: f32) -> f64 {
+    f64::from(height) / (1.0 - f64::from(slack))
+}
+
 /// Rest spacing of neighbouring particles across and down a `width` × `height` flag.
-pub(crate) fn spacing(width: f32, height: f32) -> [f64; 2] {
+pub(crate) fn spacing(width: f32, height: f32, slack: f32) -> [f64; 2] {
     [
         f64::from(width) / f64::from(CLOTH_COLUMNS - 1),
-        f64::from(height) / SLACK / f64::from(CLOTH_ROWS - 1),
+        rest_length(height, slack) / f64::from(CLOTH_ROWS - 1),
     ]
 }
 
 /// The cloth at rest, row by row: a slack arc bulging towards the reading side (-Z)
 /// whose segments down the flag keep their rest length, as the reference's
-/// `initialParticles` (unfolded).
-pub fn initial_positions(width: f32, height: f32) -> Vec<[f64; 3]> {
+/// `initialParticles` (unfolded); flat without slack.
+pub fn initial_positions(width: f32, height: f32, slack: f32) -> Vec<[f64; 3]> {
     let span = f64::from(height);
-    let [across, segment] = spacing(width, height);
+    let [across, segment] = spacing(width, height, slack);
     let segments = f64::from(CLOTH_ROWS - 1);
+    if slack == 0.0 {
+        return (0..CLOTH_ROWS)
+            .flat_map(|row| {
+                (0..CLOTH_COLUMNS)
+                    .map(move |column| [f64::from(column) * across, f64::from(row) * segment, 0.0])
+            })
+            .collect();
+    }
     // The arc's turning angle: its chord of equal segments spans the pinned edges.
     let (mut low, mut high) = (0.0, std::f64::consts::PI);
     let mut turn = 0.0;
@@ -158,8 +177,8 @@ pub fn initial_positions(width: f32, height: f32) -> Vec<[f64; 3]> {
 /// Conservative flag-local bounds of a `width` × `height` cloth in any state: every
 /// particle stays within its stretched rest path of a pinned edge, at most half the
 /// rest length down the flag.
-pub(crate) fn local_bounds(width: f32, height: f32) -> Result<Aabb, SceneError> {
-    let reach = STRETCH * f64::from(height) / SLACK / 2.0;
+pub(crate) fn local_bounds(width: f32, height: f32, slack: f32) -> Result<Aabb, SceneError> {
+    let reach = STRETCH * rest_length(height, slack) / 2.0;
     Aabb::new(
         [-reach, -reach, -reach],
         [f64::from(width) + reach, f64::from(height) + reach, reach],
@@ -176,6 +195,7 @@ mod tests {
             wind_direction: 25.0,
             auto_direction: true,
             tension: 0.65,
+            slack: 0.1,
             seconds: 0.0,
         }
     }
@@ -183,9 +203,9 @@ mod tests {
     #[test]
     fn the_rest_arc_keeps_its_segments_and_pins_both_edges() {
         let (width, height) = (3.2, 4.8);
-        let positions = initial_positions(width, height);
+        let positions = initial_positions(width, height, 0.1);
         assert_eq!(positions.len(), (CLOTH_COLUMNS * CLOTH_ROWS) as usize);
-        let [across, down] = spacing(width, height);
+        let [across, down] = spacing(width, height, 0.1);
         let at = |column: u32, row: u32| positions[(row * CLOTH_COLUMNS + column) as usize];
         assert_eq!(at(0, 0), [0.0, 0.0, 0.0]);
         assert_eq!(
@@ -202,10 +222,27 @@ mod tests {
             assert!(b[2] <= 0.0, "the arc bulges towards -Z");
         }
         assert!((at(1, 9)[0] - at(0, 9)[0] - across).abs() < 1e-12);
-        let bounds = local_bounds(width, height).unwrap();
+        let bounds = local_bounds(width, height, 0.1).unwrap();
         for p in positions {
             assert!((0..3).all(|i| bounds.min()[i] <= p[i] && p[i] <= bounds.max()[i]));
         }
+    }
+
+    #[test]
+    fn less_slack_bulges_less_and_none_hangs_flat() {
+        // A tifo-sized flag: 10 % slack bows it out by about a fifth of its height.
+        let depth = |slack| {
+            initial_positions(26.0, 22.66, slack)
+                .into_iter()
+                .map(|p| -p[2])
+                .fold(0.0, f64::max)
+        };
+        assert!((4.5..4.9).contains(&depth(0.1)), "{}", depth(0.1));
+        assert!((1.8..2.2).contains(&depth(0.02)), "{}", depth(0.02));
+        let flat = initial_positions(26.0, 22.66, 0.0);
+        let last = flat[flat.len() - 1];
+        assert_eq!(last, [26.0, f64::from(22.66_f32), 0.0]);
+        assert!(flat.iter().all(|p| p[2] == 0.0));
     }
 
     #[test]
@@ -299,6 +336,14 @@ mod tests {
             },
             Cloth {
                 seconds: -0.1,
+                ..cloth()
+            },
+            Cloth {
+                slack: 0.25,
+                ..cloth()
+            },
+            Cloth {
+                slack: -0.01,
                 ..cloth()
             },
         ] {

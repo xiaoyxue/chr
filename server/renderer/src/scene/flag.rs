@@ -146,7 +146,7 @@ impl Flag {
                     ],
                 )
             }
-            FlagMotion::Cloth(_) => cloth::local_bounds(self.width, self.height),
+            FlagMotion::Cloth(cloth) => cloth::local_bounds(self.width, self.height, cloth.slack),
         }
     }
 }
@@ -353,6 +353,7 @@ mod tests {
             wind_direction: 25.0,
             auto_direction: true,
             tension: 0.65,
+            slack: 0.1,
             seconds: 1.0,
         };
         let native = |cloth| Flag {

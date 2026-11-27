@@ -46,8 +46,8 @@ export function localProblem(ad: LocalAd, clouds: CloudState): string | undefine
 /** A flag's motion in a few words: its wave, or its native cloth's wind and fabric. */
 function flagMotionSummary(flag: FlagSettings) {
   if (flag.type !== 'native') return `振幅 ${number(flag.amplitude)} m · 频率 ${number(flag.frequency)} · 速度 ${number(flag.speed)}×`;
-  const { wind, direction, autoDirection, tension } = nativeSettings(flag);
-  return `物理模拟 · 风速 ${number(wind)} m/s · 风向 ${direction}°${autoDirection ? '（自动）' : ''} · 张力 ${tension}%`;
+  const { wind, direction, autoDirection, tension, slack } = nativeSettings(flag);
+  return `物理模拟 · 风速 ${number(wind)} m/s · 风向 ${direction}°${autoDirection ? '（自动）' : ''} · 张力 ${tension}% · 余量 ${number(slack)}%`;
 }
 
 export function localRow(ad: LocalAd, clouds: CloudState): LocalRow {
