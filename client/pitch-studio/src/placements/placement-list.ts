@@ -1,6 +1,7 @@
 // How the match's local placements (pitch and point cloud: 2D, 3D, flags) appear
 // in the overall placement list, and which of them the renderer can draw now.
 import type { LocalAd } from './local-ad.ts';
+import { REVEAL_LABELS } from './reveal.ts';
 
 /**
  * The match's point clouds as far as sending is concerned: each cloud's saved
@@ -46,7 +47,7 @@ export function localRow(ad: LocalAd, clouds: CloudState): LocalRow {
   const detail = ad.type === 'flag'
     ? `振幅 ${number(ad.flag.amplitude)} m · 频率 ${number(ad.flag.frequency)} · 速度 ${number(ad.flag.speed)}× · ${{ pbr: 'PBR', cloth: '布料', simple: '简易光照' }[ad.flag.material]}`
       + (ad.artworkRotation ? ` · 图片旋转 ${ad.artworkRotation}°` : '')
-      + (ad.reveal ? ` · 中线展开 ${number(ad.reveal.duration)} s（${ad.reveal.start === 'cue' ? '手动触发' : '加载时'}）` : '')
+      + (ad.reveal ? ` · ${REVEAL_LABELS[ad.reveal.direction]} ${number(ad.reveal.duration)} s（${ad.reveal.start === 'cue' ? '手动触发' : '加载时'}）` : '')
     : ad.type === '3D' ? `缩放 ×${number(ad.scale)} · 朝向 ${number(ad.yaw)}°` : '';
   return {
     id: ad.id, space: ad.space === 'pitch' ? 'pitch' : 'cloud', type: ad.type, badge: ad.type === 'flag' ? '旗帜' : ad.type,

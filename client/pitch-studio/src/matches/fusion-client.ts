@@ -1,4 +1,5 @@
 import { validateModelPose } from '../placements/model-motion.ts';
+import { fusionReveal } from '../placements/reveal.ts';
 import type { ArtworkRotation, FusionAdapter, FusionTifo, Match, Placement, FusionAsset } from '../shared/types.ts';
 import { validateMatch } from './match-domain.ts';
 
@@ -40,7 +41,8 @@ const V2_COORDINATES: Record<string, string> = { z: 'down', swingSpace: 'field',
 
 /**
  * A Tifo placement (#210): one PNG / JPEG on the rectangle of four point-cloud corners,
- * opaque, revealed from its centre line. validateMatch checks its geometry.
+ * opaque, revealed as its tifoReveal says (#215) or static without one. validateMatch
+ * checks its geometry.
  */
 function mapTifo(raw: unknown, adId: string, adName: string, assets: Map<string, FusionAsset>): FusionTifo {
   const source = object(raw), sourceId = id(source.id);
@@ -50,14 +52,13 @@ function mapTifo(raw: unknown, adId: string, adName: string, assets: Map<string,
     if (!asset || !['image/png', 'image/jpeg'].includes(asset.contentType)) throw new Error('needs exactly one PNG or JPEG image.');
     if (source.assetOpacity !== undefined && source.assetOpacity !== 1)
       throw new Error(`assetOpacity ${JSON.stringify(source.assetOpacity)} is not supported: chr flags are opaque, so it must be 1 or absent.`);
-    const reveal = object(source.tifoReveal);
-    if (reveal.direction !== 'center-horizontal') throw new Error(`unsupported tifoReveal direction ${JSON.stringify(reveal.direction)}.`);
+    const reveal = fusionReveal(source.tifoReveal);
     const corners = array(source.corners).map((corner): [number, number, number] => {
       const point = object(corner);
       return [number(point.x), number(point.y), number(point.z)];
     });
     return { id: sourceId, name: text(source.name), adId, adName, asset, corners, width: number(source.width), height: number(source.height),
-      assetRotation: number(source.assetRotation) as ArtworkRotation, reveal: { direction: 'center_horizontal', duration: number(reveal.duration) } };
+      assetRotation: number(source.assetRotation) as ArtworkRotation, ...(reveal ? { reveal } : {}) };
   } catch (error) { throw new Error(`Tifo placement ${sourceId}: ${(error as Error).message}`); }
 }
 

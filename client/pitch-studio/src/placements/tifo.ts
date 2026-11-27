@@ -3,7 +3,7 @@
 // (metres, pitch centre, z down), ordered top-left, top-right, bottom-right,
 // bottom-left as the artwork reads; u = c1 - c0 and v = c3 - c0 then give the flag
 // plane directly, its normal u × v pointing away from the reading side.
-import { DEFAULT_FLAG, FLAG_CLEARANCE } from './flag.ts';
+import { TIFO_CLEARANCE, TIFO_FLAG } from './flag.ts';
 import type { AdPlane, LocalAd, Vector3Tuple } from './local-ad.ts';
 import type { FusionTifo, Match } from '../shared/types.ts';
 
@@ -42,15 +42,16 @@ export const tifoFlagId = (tifo: Pick<FusionTifo, 'id'>) => `tifo-${tifo.id}`;
 /**
  * The tifo as an editable point-cloud flag: its artwork is the package's stored image
  * (`material`: server path and SHA-256) stretched to the rectangle, revealed as Fusion
- * says from the scene load, in front of the surface like a flag picked from the reading side.
+ * says (direction and duration) from the scene load or static without a tifoReveal, in
+ * front of the surface like a flag picked from the reading side.
  */
 export function tifoFlag(tifo: FusionTifo, cloudId: string, material: { path: string; sha256: string }): LocalAd {
   return {
     id: tifoFlagId(tifo), name: `Tifo ${tifo.name}`, type: 'flag', space: 'cloud', cloudId,
-    plane: tifoPlane(tifo.corners), normalSign: -1, offset: -FLAG_CLEARANCE, scale: 1, yaw: 0, visible: true,
+    plane: tifoPlane(tifo.corners), normalSign: -1, offset: -TIFO_CLEARANCE, scale: 1, yaw: 0, visible: true,
     materialPath: material.path, materialName: tifo.asset.name, materialSha256: material.sha256,
-    flag: { ...DEFAULT_FLAG }, artworkRotation: tifo.assetRotation,
-    reveal: { ...tifo.reveal, start: 'load' }, aspectLocked: false, fusionTifoId: tifo.id,
+    flag: { ...TIFO_FLAG }, artworkRotation: tifo.assetRotation,
+    ...(tifo.reveal ? { reveal: { ...tifo.reveal, start: 'load' } } : {}), aspectLocked: false, fusionTifoId: tifo.id,
   };
 }
 

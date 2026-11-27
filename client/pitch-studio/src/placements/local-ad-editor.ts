@@ -9,6 +9,7 @@ import { serverSha256, uploadFile } from '../shared/studio-store.ts';
 import { materialFacts } from '../render/send-materials.ts';
 import { fetchServerFile, serverPath } from '../shared/server-files.ts';
 import { glbBounds, planeFromPoints, previewReveal, validateLocalAdMaterial } from './local-ad-scene.ts';
+import { REVEAL_DIRECTIONS, REVEAL_DURATION, REVEAL_LABELS, isRevealDirection } from './reveal.ts';
 import { parseAspect, type Anchor } from './ground-edit.ts';
 import { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } from './plane-edit.ts';
 import { DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, flagDraft, flagDraftChanged, orientFlagPlane, parseFlagDraft, type FlagDraft } from './flag.ts';
@@ -59,10 +60,10 @@ function editorMarkup(space: AdSpace, prefix: string) {
         <p class="on-help" data-aspect-input>输入 16:9 或 1.78 后按 Enter：保持宽和锚点，按比例调整高。</p></div>
       <div data-flag-group class="on-inspector-group"><h3>旗帜图片与展开</h3>
         <div class="on-field-grid"><label>图片旋转（顺时针）<select name="artworkRotation" aria-label="图片旋转">${[0, 90, 180, 270].map((angle) => `<option value="${angle}">${angle}°</option>`).join('')}</select></label>
-        <label>展开<select name="revealDirection" aria-label="展开方式"><option value="">无（直接显示）</option><option value="center_horizontal">中线水平展开</option></select></label>
-        <label data-reveal-only>时长 / s<input name="revealDuration" type="number" min="0.1" max="60" step="0.1" required /></label>
+        <label>展开<select name="revealDirection" aria-label="展开方式"><option value="">无（直接显示）</option>${REVEAL_DIRECTIONS.map((direction) => `<option value="${direction}">${REVEAL_LABELS[direction]}</option>`).join('')}</select></label>
+        <label data-reveal-only>时长 / s<input name="revealDuration" type="number" min="0.01" step="any" required /></label>
         <label data-reveal-only>开始<select name="revealStart" aria-label="展开开始"><option value="load">加载时</option><option value="cue">手动触发</option></select></label></div>
-        <p class="on-help">图片按所选角度顺时针旋转后拉伸到矩形；锁定宽高比时，矩形按（旋转后的）图片比例调整高度。中线水平展开从竖直中线向两侧打开。</p></div>
+        <p class="on-help">图片按所选角度顺时针旋转后拉伸到矩形；锁定宽高比时，矩形按（旋转后的）图片比例调整高度。展开方向以旗帜矩形为准（左上角起，宽向右、高向下），与 Fusion 预览一致，不随图片旋转；尚未展开的部分收在展开边缘，图片只被裁切、不会被压缩，展开完成后保持完整显示。</p></div>
       <div data-model-group class="on-inspector-group"><h3>模型</h3>
         <div class="on-field-grid">${field('scale', '整体缩放 / ×', 'min="0.01" max="1000"')}${field('yaw', '朝向 / °', 'min="-360" max="360"')}</div>
         ${pitch ? '' : '<label class="on-check"><input name="flip" type="checkbox" /> 反转模型立起方向（平面法线）</label>'}</div>
@@ -530,7 +531,8 @@ export class LocalAdEditor {
         return { next: await fitImage({ ...selected, aspectLocked: input.checked }), action: input.checked ? '锁定宽高比' : '解除宽高比锁定' };
       case 'revealDirection': {
         const { reveal, ...rest } = selected;
-        return { next: input.value ? { ...rest, reveal: { duration: 2, start: 'load', ...reveal, direction: 'center_horizontal' } } : rest, action: '设置展开' };
+        if (input.value && !isRevealDirection(input.value)) throw new Error(`未知的展开方式：${input.value}`);
+        return { next: isRevealDirection(input.value) ? { ...rest, reveal: { duration: REVEAL_DURATION, start: 'load', ...reveal, direction: input.value } } : rest, action: '设置展开' };
       }
       case 'revealDuration': return { next: { ...selected, reveal: { ...selected.reveal, duration: input.valueAsNumber } }, action: '设置展开时长' };
       case 'revealStart': return { next: { ...selected, reveal: { ...selected.reveal, start: input.value === 'cue' ? 'cue' : 'load' } }, action: '设置展开开始' };
@@ -566,7 +568,7 @@ export class LocalAdEditor {
     if ((input.type === 'number' && !Number.isFinite(input.valueAsNumber)) || (input.name === 'aspect' && !parseAspect(input.value)))
       return refuse(input.name === 'aspect' ? '宽高比请输入 16:9 这样的 W:H，或 1.78 这样的正数。' : '请输入数值。');
     if (input.type === 'number' && ((input.min && input.valueAsNumber < Number(input.min)) || (input.max && input.valueAsNumber > Number(input.max))))
-      return refuse(`该数值应介于 ${input.min} – ${input.max}。`);
+      return refuse(input.max ? `该数值应介于 ${input.min} – ${input.max}。` : `该数值应不小于 ${input.min}。`);
     let edit: { next: LocalAd; action: string };
     try { edit = await this.edited(selected, input); }
     catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
@@ -751,7 +753,7 @@ export class LocalAdEditor {
       select('artworkRotation', String(selected.artworkRotation ?? 0));
       select('revealDirection', selected.reveal?.direction ?? '');
       select('revealStart', selected.reveal?.start ?? 'load');
-      set('revealDuration', selected.reveal?.duration ?? 2);
+      set('revealDuration', selected.reveal?.duration ?? REVEAL_DURATION);
       const aspectLocked = form.elements.namedItem('aspectLocked') as HTMLInputElement;
       aspectLocked.checked = aspectLocked.defaultChecked = Boolean(selected.aspectLocked);
       const cue = selected.reveal?.start === 'cue';
@@ -759,9 +761,10 @@ export class LocalAdEditor {
       const cueButton = this.element<HTMLButtonElement>('cue-reveal');
       cueButton.hidden = !cue || !this.options.cue;
       cueButton.disabled = !open || !selected.visible;
+      const how = selected.reveal ? REVEAL_LABELS[selected.reveal.direction] : '';
       actions.querySelector('[data-reveal-note]').textContent = cue
-        ? '手动触发：发送到渲染器后旗帜保持隐藏，点“触发展开”后从中线展开；再次点击重新展开。修改需先保存并发送。'
-        : '加载时：场景载入渲染器后自动从中线展开。“预览展开”只在本页预览中播放。';
+        ? `手动触发：发送到渲染器后旗帜保持隐藏，点“触发展开”后${how}；再次点击只重新展开这面旗。修改需先保存并发送。`
+        : `加载时：场景载入渲染器后自动${how}。“预览展开”只在本页预览中播放。`;
       // Unsaved typed values win over the saved flag, so a re-render never loses them.
       const draft = this.flagDraft?.id === selected.id ? this.flagDraft : flagDraft(selected.flag);
       for (const [key] of WAVE) for (const name of [key, `${key}Slider`]) {

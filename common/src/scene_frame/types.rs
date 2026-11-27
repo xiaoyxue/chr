@@ -133,14 +133,20 @@ object!(
     /// edge and Z their cross product; the instance `model` maps it to the world and
     /// should be rigid. The artwork reads upright from the -Z side and mirrored from
     /// the other. The centre line stays pinned; both halves wave outwards.
+    /// The wave and material default to a tifo's in pitch-studio (`TIFO_FLAG`).
     Flag {
     width_m: Finite, height_m: Finite,
-    /// Wave coefficient, not the peak displacement (at most 1.53 times this).
+    /// Wave coefficient, not the peak displacement (at most 1.53 times this); 1.1.
+    #[serde(default = "flag_default::amplitude")]
     amplitude_m: Finite,
-    /// Primary wave cycles from the centre line to either free edge.
+    /// Primary wave cycles from the centre line to either free edge; 1.35.
+    #[serde(default = "flag_default::frequency")]
     frequency: Finite,
-    /// Time scale of the wave.
+    /// Time scale of the wave; 5.5.
+    #[serde(default = "flag_default::speed")]
     speed: Finite,
+    /// `cloth`.
+    #[serde(default = "flag_default::material")]
     material: FlagMaterial,
     /// Clockwise turn of the artwork within the flag as it reads, in degrees: 0, 90,
     /// 180 or 270. The flag's size stays; the artwork stretches to it.
@@ -150,11 +156,38 @@ object!(
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reveal: Option<FlagReveal>,
 });
-strings!(RevealDirection { CenterHorizontal => "center_horizontal" });
+mod flag_default {
+    use super::{Finite, FlagMaterial};
+
+    fn finite(value: f64) -> Finite {
+        Finite::try_from(value).expect("a finite literal")
+    }
+    pub(super) fn amplitude() -> Finite {
+        finite(1.1)
+    }
+    pub(super) fn frequency() -> Finite {
+        finite(1.35)
+    }
+    pub(super) fn speed() -> Finite {
+        finite(5.5)
+    }
+    pub(super) fn material() -> FlagMaterial {
+        FlagMaterial::Cloth
+    }
+}
+strings!(RevealDirection {
+    LeftToRight => "left_to_right", RightToLeft => "right_to_left",
+    TopToBottom => "top_to_bottom", BottomToTop => "bottom_to_top",
+    CenterHorizontal => "center_horizontal", CenterVertical => "center_vertical",
+});
 strings!(RevealStart { Load => "load", Cue => "cue" });
 object!(
-    /// A flag appearing over `duration_s` seconds. `center_horizontal` shows the part
-    /// within `|2 x / width - 1| <= t / duration_s` of the centre line, opening outwards.
+    /// A flag appearing over `duration_s` seconds (finite, above 0): at progress
+    /// `p = t / duration_s` it shows the part of its rectangle that `direction` has
+    /// opened, in flag-local `x / width` and `y / height` (from the top-left corner,
+    /// whatever the artwork rotation): `left_to_right` `x <= p`, `right_to_left`
+    /// `x >= 1 - p`, `top_to_bottom` `y <= p`, `bottom_to_top` `y >= 1 - p`,
+    /// `center_horizontal` `|2 x - 1| <= p` and `center_vertical` `|2 y - 1| <= p`.
     /// `load` starts with the scene (the motion's time zero); `cue` hides the flag
     /// until a cue starts it (`description.cue_reveal`).
     FlagReveal {

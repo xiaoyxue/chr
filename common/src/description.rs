@@ -258,6 +258,13 @@ mod tests {
         let flag = json!({"width_m": 1, "height_m": 1, "amplitude_m": 0, "frequency": 1,
                           "speed": 1, "material": "simple"});
         assert!(serde_json::from_value::<Flag>(flag.clone()).is_ok());
+        // Without a wave or material, a flag takes a tifo's: 1.1 m, 1.35, 5.5, cloth.
+        let bare: Flag = serde_json::from_value(json!({"width_m": 36, "height_m": 13.5})).unwrap();
+        assert_eq!(
+            [bare.amplitude_m, bare.frequency, bare.speed].map(|x| x.get()),
+            [1.1, 1.35, 5.5]
+        );
+        assert_eq!(bare.material, crate::scene_frame::FlagMaterial::Cloth);
         let mut tifo = flag.clone();
         tifo["artwork_rotation"] = json!(90);
         tifo["reveal"] = json!({"direction": "center_horizontal", "duration_s": 2, "start": "cue"});
@@ -267,12 +274,32 @@ mod tests {
             tifo.reveal.unwrap().start,
             crate::scene_frame::RevealStart::Cue
         );
+        for direction in [
+            "left_to_right",
+            "right_to_left",
+            "top_to_bottom",
+            "bottom_to_top",
+            "center_horizontal",
+            "center_vertical",
+        ] {
+            let mut revealed = flag.clone();
+            revealed["reveal"] = json!({"direction": direction, "duration_s": 90, "start": "load"});
+            let parsed: Flag = serde_json::from_value(revealed).unwrap();
+            assert_eq!(
+                serde_json::to_value(parsed.reveal.unwrap().direction).unwrap(),
+                direction
+            );
+        }
         for (key, value) in [
             ("pole", json!(true)),
             ("material", json!("silk")),
             (
                 "reveal",
                 json!({"direction": "center-horizontal", "duration_s": 2, "start": "load"}),
+            ),
+            (
+                "reveal",
+                json!({"direction": "left-to-right", "duration_s": 2, "start": "load"}),
             ),
             (
                 "reveal",

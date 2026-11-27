@@ -23,8 +23,8 @@ pub(crate) fn prelude() -> String {
 }
 
 /// Compute parameters of one flag: size and wave, its phases at the frame time, then
-/// its revealed fraction and artwork turns. A flat flag keeps fixed phases, so its
-/// unchanged surface keeps cached shadows.
+/// its revealed fraction, artwork turns and reveal direction code. A flat flag keeps
+/// fixed phases, so its unchanged surface keeps cached shadows.
 pub(crate) fn params(flag: Flag, seconds: f64) -> [f32; PARAMS] {
     let seconds = if flag.amplitude == 0.0 { 0.0 } else { seconds };
     let [a, b, c] = flag.phases(seconds).map(|phase| phase as f32);
@@ -39,7 +39,7 @@ pub(crate) fn params(flag: Flag, seconds: f64) -> [f32; PARAMS] {
         0.0,
         flag.revealed,
         f32::from(flag.artwork_turns),
-        0.0,
+        f32::from(flag.reveal_direction as u8),
         0.0,
     ]
 }
@@ -237,6 +237,7 @@ mod tests {
     #[test]
     #[ignore = "requires a hardware GPU"]
     fn the_compute_surface_matches_the_reference() {
+        use crate::scene::RevealDirection::*;
         let gpu = pollster::block_on(Gpu::request(&Gpu::instance(), None)).unwrap();
         assert_ne!(gpu.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
         let flag = Flag {
@@ -248,6 +249,7 @@ mod tests {
             shading: FlagShading::Simple,
             artwork_turns: 1,
             revealed: 0.6,
+            reveal_direction: CenterHorizontal,
         };
         // A day of media time: phases are reduced on the CPU before reaching f32.
         let seconds = 86_400.25;
@@ -271,41 +273,70 @@ mod tests {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        flags.encode(&mut encoder);
-        encoder.copy_buffer_to_buffer(&flags.slots[0].vertices, 0, &readback, 0, bytes);
-        gpu.queue.submit([encoder.finish()]);
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        gpu.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        let data = readback.slice(..).get_mapped_range().unwrap();
-        let vertices: &[[f32; 16]] = bytemuck::cast_slice(&data);
-        let phases = flag.phases(seconds);
-        let columns = FLAG_COLUMNS + 1;
-        for (index, vertex) in (0..).zip(vertices) {
-            let u = flag.revealed_u(f64::from(index % columns) / f64::from(FLAG_COLUMNS));
-            let v = f64::from(index / columns) / f64::from(FLAG_ROWS);
-            let (position, normal) = flag.sample(u, v, phases);
-            let uv = flag.artwork_uv(u, v);
-            for axis in 0..2 {
-                let error = (f64::from(vertex[12 + axis]) - uv[axis]).abs();
-                assert!(error < 1e-6, "vertex {index} uv {axis} is {error} off");
+        for direction in [
+            CenterHorizontal,
+            CenterVertical,
+            LeftToRight,
+            RightToLeft,
+            TopToBottom,
+            BottomToTop,
+        ] {
+            let flag = Flag {
+                reveal_direction: direction,
+                ..flag
+            };
+            flags.prepare(&gpu, &[params(flag, seconds)], &objects, &instances);
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            flags.encode(&mut encoder);
+            encoder.copy_buffer_to_buffer(&flags.slots[0].vertices, 0, &readback, 0, bytes);
+            gpu.queue.submit([encoder.finish()]);
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            let data = readback.slice(..).get_mapped_range().unwrap();
+            let vertices: &[[f32; 16]] = bytemuck::cast_slice(&data);
+            let phases = flag.phases(seconds);
+            let columns = FLAG_COLUMNS + 1;
+            for (index, vertex) in (0..).zip(vertices) {
+                let [u, v] = flag.revealed_uv(
+                    f64::from(index % columns) / f64::from(FLAG_COLUMNS),
+                    f64::from(index / columns) / f64::from(FLAG_ROWS),
+                );
+                let (position, normal) = flag.sample(u, v, phases);
+                let uv = flag.artwork_uv(u, v);
+                for axis in 0..2 {
+                    let error = (f64::from(vertex[12 + axis]) - uv[axis]).abs();
+                    assert!(
+                        error < 1e-6,
+                        "{direction:?}: vertex {index} uv {axis} is {error} off"
+                    );
+                }
+                for axis in 0..3 {
+                    let error = (f64::from(vertex[axis]) - position[axis]).abs();
+                    assert!(
+                        error < 1e-4,
+                        "{direction:?}: vertex {index} axis {axis} is {error} m off"
+                    );
+                }
+                let cosine: f64 = (0..3).map(|i| f64::from(vertex[4 + i]) * normal[i]).sum();
+                assert!(
+                    cosine > 0.9999,
+                    "{direction:?}: vertex {index} normal is off: {cosine}"
+                );
             }
-            for axis in 0..3 {
-                let error = (f64::from(vertex[axis]) - position[axis]).abs();
-                assert!(error < 1e-4, "vertex {index} axis {axis} is {error} m off");
+            if direction == CenterHorizontal {
+                let centre = vertices[(FLAG_COLUMNS / 2) as usize];
+                let pinned = [1.6, 0.0, 0.0];
+                assert!(
+                    (0..3).all(|i| (centre[i] - pinned[i]).abs() < 1e-6),
+                    "{centre:?}"
+                );
             }
-            let cosine: f64 = (0..3).map(|i| f64::from(vertex[4 + i]) * normal[i]).sum();
-            assert!(cosine > 0.9999, "vertex {index} normal is off: {cosine}");
+            drop(data);
+            readback.unmap();
         }
-        let centre = vertices[(FLAG_COLUMNS / 2) as usize];
-        let pinned = [1.6, 0.0, 0.0];
-        assert!(
-            (0..3).all(|i| (centre[i] - pinned[i]).abs() < 1e-6),
-            "{centre:?}"
-        );
     }
 }

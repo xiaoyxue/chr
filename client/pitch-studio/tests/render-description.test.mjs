@@ -8,6 +8,7 @@ const { RpcError, blendedMaterials, describeScene, sendDescription, glbModel, lo
 const { fitFusionModel } = await server.ssrLoadModule('/src/placements/fusion-creatives.ts');
 const { flagDraft, flagDraftChanged, flagModel, orientFlagPlane, parseFlagDraft } = await server.ssrLoadModule('/src/placements/flag.ts');
 const { localRow, sendScope } = await server.ssrLoadModule('/src/placements/placement-list.ts');
+const { revealedPoint } = await server.ssrLoadModule('/src/placements/reveal.ts');
 const { fusionAssets, localMaterials } = await server.ssrLoadModule('/src/render/send-materials.ts');
 
 const apply = (rows, [x, y, z]) => rows.slice(0, 3).map((row) => row[0] * x + row[1] * y + row[2] * z + row[3]);
@@ -148,6 +149,11 @@ test('flags with the same artwork share one asset but keep their own size and wa
   assert.deepEqual(turned.flag, { width_m: 4, height_m: 2, amplitude_m: 0.32, frequency: 1.35, speed: 1, material: 'simple',
     artwork_rotation: 90, reveal: { direction: 'center_horizontal', duration_s: 2, start: 'cue' } });
   assert.deepEqual(unturned.flag, { width_m: 4, height_m: 2, amplitude_m: 0.32, frequency: 1.35, speed: 1, material: 'simple' });
+  // Every direction and any positive duration go out as they are (#215), as fusion_description.py writes them.
+  for (const direction of ['left_to_right', 'right_to_left', 'top_to_bottom', 'bottom_to_top', 'center_horizontal', 'center_vertical']) {
+    const [instance] = describeScene({ ...options, locals: [{ ad: { ...tifo, reveal: { direction, duration: 90, start: 'load' } }, sha256: sha }] }).instances;
+    assert.deepEqual(instance.flag.reveal, { direction, duration_s: 90, start: 'load' }, direction);
+  }
   const many = Array.from({ length: 64 }, (_, i) => ({ ad: { ...ad, id: `f${i}` }, sha256: sha }));
   assert.throws(() => describeScene({ ...options, locals: many }), /最多放置 63 个实例/);
 });
@@ -361,5 +367,24 @@ test('sends reuse one control connection and reopen it after it drops', async ()
     assert.equal(loaded.assets_reused, 1);
   } finally {
     globalThis.WebSocket = original;
+  }
+});
+
+test("the preview opens each reveal direction as the renderer's Flag::revealed_uv does", () => {
+  // Half way: the grid's corners and centre, and a point, moved onto the shown part (scene/flag.rs).
+  const points = [[0, 0], [1, 1], [0.5, 0.5], [0.3, 0.7]];
+  for (const [direction, half] of [
+    ['center_horizontal', [[0.25, 0], [0.75, 1], [0.5, 0.5], [0.3, 0.7]]],
+    ['center_vertical', [[0, 0.25], [1, 0.75], [0.5, 0.5], [0.3, 0.7]]],
+    ['left_to_right', [[0, 0], [0.5, 1], [0.5, 0.5], [0.3, 0.7]]],
+    ['right_to_left', [[0.5, 0], [1, 1], [0.5, 0.5], [0.5, 0.7]]],
+    ['top_to_bottom', [[0, 0], [1, 0.5], [0.5, 0.5], [0.3, 0.5]]],
+    ['bottom_to_top', [[0, 0.5], [1, 1], [0.5, 0.5], [0.3, 0.7]]],
+  ]) {
+    assert.deepEqual(points.map(([s, t]) => revealedPoint(s, t, direction, 0.5)), half, direction);
+    assert.deepEqual(points.map(([s, t]) => revealedPoint(s, t, direction, 1)), points, `${direction} complete`);
+    // Hidden: every point on one line, so the flag covers no area.
+    const axis = ['center_horizontal', 'left_to_right', 'right_to_left'].includes(direction) ? 0 : 1;
+    assert.equal(new Set(points.map(([s, t]) => revealedPoint(s, t, direction, 0)[axis])).size, 1, `${direction} hidden`);
   }
 });

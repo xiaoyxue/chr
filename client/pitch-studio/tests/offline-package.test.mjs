@@ -171,15 +171,20 @@ test("a v2 package's point cloud is checked like a material, and v1 packages acc
   await assert.rejects(parseOfflinePackage(archive(v1)), /Tifo placement PLC-tifo/);
 });
 
-test('a Tifo must be an opaque PNG / JPEG on a rectangle of its stated size, revealed from the centre line', async () => {
+test('a Tifo must be an opaque PNG / JPEG on a rectangle of its stated size, with a known reveal direction and a positive duration', async () => {
   for (const [change, error] of [
     [(data) => { tifoPlacement(data).corners[2].z += 0.01; }, /PLC-tifo: corners do not form a rectangle/],
     [(data) => { tifoPlacement(data).width += 0.01; }, /PLC-tifo: width × height/],
     [(data) => { tifoPlacement(data).assetOpacity = 0.5; }, /PLC-tifo: assetOpacity 0.5 is not supported/],
     [(data) => { tifoPlacement(data).assetRotation = 45; }, /PLC-tifo: assetRotation/],
     [(data) => { tifoPlacement(data).coordinateSpace = 'pitch'; }, /PLC-tifo: coordinateSpace/],
-    [(data) => { tifoPlacement(data).tifoReveal.direction = 'left-to-right'; }, /PLC-tifo: unsupported tifoReveal direction/],
-    [(data) => { tifoPlacement(data).tifoReveal.duration = 0; }, /PLC-tifo: tifoReveal/],
+    [(data) => { tifoPlacement(data).tifoReveal.direction = 'diagonal'; }, /PLC-tifo: unsupported tifoReveal direction "diagonal"; expected one of left-to-right, /],
+    [(data) => { tifoPlacement(data).tifoReveal.direction = 'left_to_right'; }, /PLC-tifo: unsupported tifoReveal direction "left_to_right"/],
+    [(data) => { delete tifoPlacement(data).tifoReveal.direction; }, /PLC-tifo: unsupported tifoReveal direction undefined/],
+    [(data) => { tifoPlacement(data).tifoReveal.duration = 0; }, /PLC-tifo: tifoReveal duration 0 must be a finite number of seconds above 0/],
+    [(data) => { tifoPlacement(data).tifoReveal.duration = -1; }, /PLC-tifo: tifoReveal duration -1/],
+    [(data) => { tifoPlacement(data).tifoReveal.duration = '2'; }, /PLC-tifo: tifoReveal duration "2"/],
+    [(data) => { tifoPlacement(data).tifoReveal = 'left-to-right'; }, /PLC-tifo: tifoReveal must be an object or null/],
     [(data) => { tifoPlacement(data).assetIds = ['ASSET-model']; }, /PLC-tifo: needs exactly one PNG or JPEG/],
     [({ manifest, files }) => { delete manifest.match.field.pointCloud; delete manifest.sha256['point-cloud/field.ply']; delete files['point-cloud/field.ply']; },
       /Tifo placements need the offline package's point cloud/],
@@ -190,6 +195,36 @@ test('a Tifo must be an opaque PNG / JPEG on a rectangle of its stated size, rev
   const data = fixtureV2();
   delete tifoPlacement(data).assetOpacity;
   assert.equal((await parseOfflinePackage(archive(data))).match.tifos.length, 1);
+});
+
+test('each Fusion reveal direction keeps its direction and duration from the package to the seeded flag; no reveal stays static (#215)', async () => {
+  const materials = { 'ASSET-tifo': { path: `/data/files/${sha(image)}.png`, sha256: sha(image) } };
+  const imported = async (change) => {
+    const data = fixtureV2(); change(tifoPlacement(data));
+    const { match } = await parseOfflinePackage(archive(data));
+    // Stored and read back as the match library does, then seeded as the import does.
+    assert.deepEqual(validateMatch(JSON.parse(JSON.stringify(match))), match);
+    const [seeded] = seedTifoFlags([], match, materials);
+    assert.ok(validLocalAd(seeded));
+    return [match.tifos[0], seeded];
+  };
+  for (const [fusion, direction, duration] of [['left-to-right', 'left_to_right', 2], ['right-to-left', 'right_to_left', 0.25],
+    ['top-to-bottom', 'top_to_bottom', 90], ['bottom-to-top', 'bottom_to_top', 3600], ['center-horizontal', 'center_horizontal', 2.5],
+    ['center-vertical', 'center_vertical', 7]]) {
+    const [tifo, seeded] = await imported((placement) => { placement.tifoReveal = { direction: fusion, duration }; });
+    assert.deepEqual(tifo.reveal, { direction, duration }, fusion);
+    assert.deepEqual(seeded.reveal, { direction, duration, start: 'load' }, fusion);
+    assert.equal(seeded.artworkRotation, 90, fusion);
+  }
+  for (const change of [(placement) => { delete placement.tifoReveal; }, (placement) => { placement.tifoReveal = null; }]) {
+    const [tifo, seeded] = await imported(change);
+    assert.equal('reveal' in tifo, false);
+    assert.equal('reveal' in seeded, false);
+  }
+  for (const duration of [undefined, null]) {
+    const [tifo] = await imported((placement) => { placement.tifoReveal = { direction: 'top-to-bottom', duration }; });
+    assert.deepEqual(tifo.reveal, { direction: 'top_to_bottom', duration: 2 }, `duration ${duration}`);
+  }
 });
 
 test("a tifo's corners give the flag plane directly: u along the top edge, v down, u x v away from its audience", () => {
@@ -214,9 +249,9 @@ test('importing seeds one editable flag per tifo, and importing again keeps the 
   const [kept, seeded] = seedTifoFlags([other], match, materials);
   assert.equal(kept, other);
   assert.deepEqual({ ...seeded, plane: undefined }, { id: 'tifo-PLC-tifo', name: 'Tifo 2', type: 'flag', space: 'cloud', cloudId: sha(ply),
-    plane: undefined, normalSign: -1, offset: -0.5, scale: 1, yaw: 0, visible: true,
+    plane: undefined, normalSign: -1, offset: -1.53 * 1.1, scale: 1, yaw: 0, visible: true,
     materialPath: materials['ASSET-tifo'].path, materialName: 'Demo Ground 01 BLUE', materialSha256: sha(image),
-    flag: { amplitude: 0.32, frequency: 1.35, speed: 1, material: 'simple' }, artworkRotation: 90,
+    flag: { amplitude: 1.1, frequency: 1.35, speed: 5.5, material: 'cloth' }, artworkRotation: 90,
     reveal: { direction: 'center_horizontal', duration: 2, start: 'load' }, aspectLocked: false, fusionTifoId: 'PLC-tifo' });
   assert.deepEqual(seeded.plane, tifoPlane(corners));
   assert.ok(validLocalAd(seeded));

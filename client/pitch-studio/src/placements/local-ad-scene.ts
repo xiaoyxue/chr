@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { simplifyForPreview } from './preview-simplify.ts';
 import { flagWave } from './flag.ts';
+import { revealedPoint } from './reveal.ts';
 import { adRoot, modelFit } from './local-ad-transform.ts';
 import type { GlbBounds } from '../render/render-description.ts';
 import { imageOpacity, type AdPlane, type LocalAd, type Vector3Tuple } from './local-ad.ts';
@@ -71,15 +72,15 @@ export function artworkUv(s: number, t: number, rotation = 0): [number, number] 
 
 /**
  * Moves the flag's vertices to the renderer's wave after `seconds`, in flag-local metres,
- * with its artwork turned; during a previewed reveal the columns beyond the revealed
- * width collapse onto its edge, as the renderer draws them.
+ * with its artwork turned; during a previewed reveal the points not shown yet collapse
+ * onto the edge of the shown part in the reveal's direction, as the renderer draws them.
  */
 function waveFlag(geometry: THREE.BufferGeometry, ad: LocalAd, seconds: number) {
   const position = geometry.getAttribute('position') as THREE.BufferAttribute, uv = geometry.getAttribute('uv') as THREE.BufferAttribute;
   const { width, height } = ad.plane, start = ad.reveal && revealPreviews.get(ad.id);
-  const half = start === undefined ? 0.5 : 0.5 * THREE.MathUtils.clamp((seconds - start) / ad.reveal.duration, 0, 1);
+  const progress = start === undefined ? 1 : THREE.MathUtils.clamp((seconds - start) / ad.reveal.duration, 0, 1);
   for (let j = 0, k = 0; j <= FLAG_ROWS; j++) for (let i = 0; i <= FLAG_COLUMNS; i++, k++) {
-    const s = 0.5 + THREE.MathUtils.clamp(i / FLAG_COLUMNS - 0.5, -half, half), t = j / FLAG_ROWS;
+    const [s, t] = start === undefined ? [i / FLAG_COLUMNS, j / FLAG_ROWS] : revealedPoint(i / FLAG_COLUMNS, j / FLAG_ROWS, ad.reveal.direction, progress);
     position.setXYZ(k, ...flagWave(s, t, width, height, ad.flag, ad.flag.speed * seconds));
     uv.setXY(k, ...artworkUv(s, t, ad.artworkRotation));
   }
