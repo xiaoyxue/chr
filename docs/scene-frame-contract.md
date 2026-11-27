@@ -246,6 +246,7 @@ type RenderInstance = {
     auto_direction?: boolean; // native: wander within 45 degrees; default true
     tension?: number; // native: 0..1, default 0.65
     slack?: number; // native: unspanned part of the cloth's length, 0..0.2, default 0.1
+    raise?: { duration_s: number; start: "load" | "cue" }; // native: raised from folded
     material?: "simple" | "pbr" | "cloth"; // default "cloth"
     artwork_rotation?: 0 | 90 | 180 | 270; // clockwise turn of the artwork (#210)
     // Extension (#210, #215): absent, the flag is shown from the start.

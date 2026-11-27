@@ -635,7 +635,11 @@ runtime sets to the scene's time each frame, like a reveal. Each prepare plans t
 steps up to it (at most 8 a frame; at most 360, 3 s, for a cloth seen for the first
 time, so stills are reproducible) with per-step uniforms at dynamic offsets; the
 encode records them and only then advances the state, so a prepare without an
-encode loses nothing. A clock that goes back or a change of size or slack restarts the cloth.
+encode loses nothing. A clock that goes back or a change of size, slack or raise restarts the cloth.
+A raised cloth (`Cloth::raise`) starts folded in the reference's accordion folds just
+above its bottom edge; each step's uniforms carry the top edge's flag-local Y
+(`Cloth::top_at`, a smoothstep to 0 over the raise), which `predict` pins the top row
+to, so the cloth unfolds through the solver rather than a transform.
 Its bounds are its pinned rectangle grown by 1.5 times half its rest length; it
 counts as moving whenever it steps, which redraws cached shadows.
 

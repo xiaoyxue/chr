@@ -26,7 +26,7 @@
 | 面光源阴影 | 扩展，带标签的近似 | `area-shadow-pcss-v1`：中心立方体阴影图 + PCSS；半影不随光源轮廓变化，也不按光滑 BRDF 加权 |
 | 阴影接收面（shadow catcher） | 扩展 | 按亮度计算有/无阴影的光照比例，叠加到素材上；接收面代表真实地面，遮住其下方的几何体；无线协议字段 |
 | 地面贴花（ground decal，#113） | 扩展 | 不受光照，按预乘 alpha 叠加在不透明 CG 上，按实例顺序绘制，并先于阴影接收面绘制，因此 CG 阴影会压暗贴花；不写深度、不投影；在场景 tone map 之前的线性光照中精确；无线协议字段 |
-| 原生旗帜（#219） | 扩展，标注为近似 | 移植自 AER WebGPU 布料（xiaoyxue/Simulation `ff9c934`）：65x41 个 PBD 粒子，上下两行固定，余量可调（默认 10%），相对旗面的阵风，固定 1/120 s 步长、36 次 Jacobi 迭代；状态按实例跨帧保留，跟随场景时钟（每帧最多 8 步，首次绘制时最多预热 3 s）；表面 pass 把它重采样到旗帜网格，沿用相同的绘制与阴影；视觉调参，无地面接触与自碰撞 |
+| 原生旗帜（#219） | 扩展，标注为近似 | 移植自 AER WebGPU 布料（xiaoyxue/Simulation `ff9c934`）：65x41 个 PBD 粒子，上下两行固定，余量可调（默认 10%），可从折叠状态升旗，相对旗面的阵风，固定 1/120 s 步长、36 次 Jacobi 迭代；状态按实例跨帧保留，跟随场景时钟（每帧最多 8 步，首次绘制时最多预热 3 s）；表面 pass 把它重采样到旗帜网格，沿用相同的绘制与阴影；视觉调参，无地面接触与自碰撞 |
 | 飘动旗帜（#126） | 扩展 | SimpleWave 闭式曲面，共享 96x60 网格：中线固定，无旗杆、无布料求解；compute pass 按媒体时间逐帧求值（相位在 f64 中取模），主 pass 与阴影 pass 共用；`simple`（固定主光）或 `pbr` 外观；实例上可选的线协议字段 `flag` |
 | 点光源/聚光灯的 PCSS 光源半径 | 预览近似 | 只是软阴影的光源尺寸，不是有限面积着色 |
 | 物理大气（#28）、天空可见性（#29） | 可选（所有者决定） | 本次验收不要求 |
@@ -42,7 +42,7 @@
 | 坐标保持、相机等价 | `camera`、`mesh_gpu`、`orthographic_gpu` |
 | 模型变换、GLB | `scene`、`glb`、`mesh_gpu` |
 | 飘动旗帜 | `scene::flag` 单元测试（中线固定、法线、包围盒、相位取模），`flag::tests` compute 回读与 CPU 参考对比，`flag_gpu`（媒体时间、阴影重绘、simple 与 PBR 外观），runtime `description` |
-| 原生旗帜 | `scene::cloth` 单元测试（初始弧形、随余量变化的鼓出深度与无余量时平直、与参考一致的风向序列、方向、取值范围），`flag_cloth::tests`（固定行精确不动；18 m/s、两种张力下有限且在包围盒内；风向；确定性；时钟回退重启、预热与每帧上限；表面采样），`flag_gpu`（随时钟运动、阴影重绘、上边固定），runtime `description` |
+| 原生旗帜 | `scene::cloth` 单元测试（初始弧形、随余量变化的鼓出深度与无余量时平直、与参考一致的风向序列、方向、取值范围），`flag_cloth::tests`（升旗：从折叠开始、上边按时程升起、下边不动；固定行精确不动；18 m/s、两种张力下有限且在包围盒内；风向；确定性；时钟回退重启、预热与每帧上限；表面采样），`flag_gpu`（随时钟运动、阴影重绘、上边固定），runtime `description` |
 | 畸变 | `distortion_gpu`（恒等、两种模型下标记点误差 < 0.3 px、素材不被扭曲、无原像像素、guard band 预算、输出缩放），`distortion` 单元测试，CPU 参考 `distortion_reference` |
 | 深度与合成 | `composition_gpu`、`distortion_gpu`、`shadow_catcher_gpu`、`decal_gpu` |
 | 直接光源、PBR | `pbr_gpu`、`texture_filtering_gpu`（掠射角下的各向异性细节） |

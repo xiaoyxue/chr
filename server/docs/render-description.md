@@ -195,6 +195,7 @@ are refused.
 | `wind_direction_deg` | Native flags. Optional, 25: base direction the wind blows towards, in degrees about the flag-local Y axis: 0 along +X (towards the right edge as the artwork reads), 90 along -Z (towards the side that reads it), -90 away from it |
 | `auto_direction` | Native flags. Optional, `true`: turn the wind smoothly to a new target within 45° of the base every 0.5 s, the same sequence every run |
 | `tension` | Native flags. Optional, 0.65: bending stiffness from 0 (soft and flowing) to 1 (crisp and firm) |
+| `raise` | Native flags. Optional: `{"duration_s": 6, "start": "load"}` raises the flag from folded over `duration_s` seconds (finite, above 0), starting with the scene (`load`) or with a cue (`cue`, `description.cue_reveal`); absent, it hangs raised from the start |
 | `slack` | Native flags. Optional, 0.1: the part of the cloth's length the pinned edges do not span, 0 (taut) to 0.2. The reference's 0.1 makes the cloth 11 % longer than `height_m` and bows it out by about a fifth of its height; a large flag lying along a stand sags by that much and looks short, so tifo-sized flags want 0.01 to 0.03 |
 | `material` | Optional, `"cloth"`: `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
 
@@ -238,6 +239,14 @@ skipped, not made up). A cloth first drawn late, such as a still render of
 show a cloth in the wind. Hiding a native flag (`visible: false`) forgets its
 state; it restarts at rest when shown again. Reveals and artwork rotation work as
 for default flags; a native flag's shadows follow it every frame.
+
+A **raise** is the reference's lift. The cloth starts folded in accordion folds just
+above its pinned bottom edge (over 5.2 % of `height_m`, the reference's 0.25 m of
+4.8 m); its top edge then rises to the flag's top on a smoothstep over
+`duration_s` and stays, while the wind keeps blowing. The bottom edge never moves.
+With `"start": "load"` the raise starts with the scene; with `"cue"` the flag waits
+folded until `description.cue_reveal` names its instance, and every further cue folds
+it and raises it again. A raise and a reveal may share an instance's cue.
 
 A **reveal** opens the flag once over `duration_s` seconds (any finite number
 above 0; there is no upper limit, as in Fusion) and then keeps it whole. At
@@ -445,8 +454,9 @@ switches between **默认（正弦飘动）**, whose wave (three sliders) is pre
 as an animated wave, and **物理模拟（布料）**, a native flag with the reference
 simulation's control panel: wind speed, a wind dial (drag, or arrow keys) with
 its base angle and slider, automatic direction (the dial's solid arrow shows it
-turning, the dashed one the base), fabric tension and **布料余量** (slack, 0–20 %,
-default 10 %; its note gives the resulting bulge). The page previews a native
+turning, the dashed one the base), fabric tension, **布料余量** (slack, 0–20 %,
+default 10 %; its note gives the resulting bulge) and **升旗** (raise from folded: its
+duration and whether it starts on load or on **触发升旗**). The page previews a native
 flag only at rest; its motion shows in the renderer's output. Switching type keeps
 the other type's settings. Both editors have undo and redo
 and **保存并发送到渲染器**; sending or exporting with unsaved edits asks to save
