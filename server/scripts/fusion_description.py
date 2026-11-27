@@ -23,6 +23,8 @@ Without --camera it writes `{"scene": …}`, the shape `description.load` takes;
 inspector does: they move it in pitch metres; scale a 3D model about its bottom centre
 (`scaleX`) or a 2D area about its centre; and turn it by `rz` degrees, a model about its
 own up axis without refitting it, an area about its centre.
+The scene is lit as the studio's default preset sends it: chr-server's default rig and,
+with --ibl <server path of fly-studio-03_4K.exr>, its panorama at gain 0.5.
 
     uv run server/scripts/fusion_description.py MATCH.zip --camera start.json \\
         --move PLC-… 0 10 --scale PLC-… 0.5 --rotate PLC-… 30 --output scene.json
@@ -367,8 +369,29 @@ def quad_model(slot, width, height):
     return [[c * w, -s * h, 0, slot["x"]], [s * w, c * h, 0, slot["y"]], [0, 0, 1, -0.02], [0, 0, 0, 1]]
 
 
-def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), rotations=()):
-    """The description scene of the ZIP's Fusion placements, assets read from `package_path`."""
+def default_lighting(field, environment=None):
+    """describeLighting of the studio's default preset (client/pitch-studio/src/lighting/lighting.ts):
+    chr-server's default rig of four corner towers and the sun, lit by `environment`, the asset ID
+    of its fly-studio panorama, at gain 0.5 when given."""
+    length, width = number(field["length"]), number(field["width"])
+    towers = [{"light_id": f"spot-tower-{index}", "shadow_mode": None, "kind": "spot",
+               "position": [sx * length / 2, sy * width / 2, -35], "intensity": [16000, 16800, 20000],
+               "source_radius": 0.5, "direction": [-sx * length / 2, -sy * width / 2, 35],
+               "inner_angle": 0.4, "outer_angle": 0.9}
+              for index, (sx, sy) in enumerate([(-1, -1), (-1, 1), (1, -1), (1, 1)])]
+    # The sun travels along [0.5, 0.6, 1.0], given as the studio's azimuth and elevation.
+    azimuth, elevation = math.atan2(-0.6, -0.5), math.atan2(1, math.hypot(0.5, 0.6))
+    sun = {"light_id": "directional-sun", "shadow_mode": None, "kind": "directional",
+           "direction": [-math.cos(elevation) * math.cos(azimuth), -math.cos(elevation) * math.sin(azimuth),
+                         math.sin(elevation)],
+           "irradiance": [2.5, 2.35, 2.1], "angular_radius": 0.00465}
+    return {"lights": [*towers, sun],
+            "environment": environment and {"asset_ref": environment, "gain": 0.5, "rotation": 0, "visible": False}}
+
+
+def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), rotations=(), ibl=None):
+    """The description scene of the ZIP's Fusion placements, assets read from `package_path`, lit
+    as the studio's default preset; `ibl` is the server path of its panorama (fly-studio-03_4K.exr)."""
     match, assets = read_package(zip_path)
     every = placements(match, assets)
     slots = {slot["id"]: slot for slot in every if slot["type"] != "Tifo"}
@@ -431,6 +454,13 @@ def describe_scene(zip_path, package_path=None, moves=(), hidden=(), scales=(), 
         scene["instances"].append({"id": f"flag-tifo-{slot['id']}", "asset": asset_id,
                                    "model": flag_model(slot, TIFO_OFFSET), "visible": slot["id"] not in hidden,
                                    "flag": flag})
+    environment = None
+    if ibl:
+        sha256 = hashlib.sha256(Path(ibl).read_bytes()).hexdigest()
+        environment = f"IBL-{sha256[:16]}"
+        scene["assets"].append({"id": environment, "kind": "environment", "source": {"path": str(ibl)},
+                                "sha256": sha256})
+    scene["lighting"] = default_lighting(field, environment)
     require(len(scene["instances"]) <= MAX_INSTANCES,
             f"chr-server places at most {MAX_INSTANCES} instances; this match has {len(scene['instances'])}.")
     return scene
@@ -451,14 +481,17 @@ def main(argv=None):
                         help="turn a placement about its up axis (a model) or centre (an area)")
     parser.add_argument("--hide", action="append", default=[], metavar="PLACEMENT",
                         help="send a placement as visible: false")
+    parser.add_argument("--ibl", type=Path,
+                        help="the default preset's panorama (fly-studio-03_4K.exr), read and named by this path; "
+                             "without it the default rig has no environment")
     parser.add_argument("--output", type=Path, help="output JSON file [default: stdout]")
     args = parser.parse_args(argv)
     try:
         moves = [(placement, float(dx), float(dy)) for placement, dx, dy in args.move]
         scales = [(placement, float(factor)) for placement, factor in args.scale]
         rotations = [(placement, float(degrees)) for placement, degrees in args.rotate]
-        scene = describe_scene(args.zip, args.package_path, moves, args.hide, scales, rotations)
-    except (ConversionError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        scene = describe_scene(args.zip, args.package_path, moves, args.hide, scales, rotations, args.ibl)
+    except (ConversionError, ValueError, KeyError, zipfile.BadZipFile, OSError) as error:
         sys.exit(f"error: {error}")
     if args.camera:
         camera = json.loads(args.camera.read_text())["camera"]
