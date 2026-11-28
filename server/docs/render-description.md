@@ -252,9 +252,10 @@ it and raises it again. A raise and a reveal may share an instance's cue.
 **Tuned settings.** On the deyang broadcast clip with the H1 v6.2 tracking, the
 look of the reference's strong-breeze preset (a soft cloth billowing and folding
 in a gusting wind across it) comes from these settings on a 25 × 25 m upright
-flag behind the goal stand. Its bottom edge stands on the ground (Z = 0), centred
-on X = 0 at Y ≈ -62.3, and the whole flag stays in frame at the clip's deepest
-zoom (focal length 2668 px):
+flag above the stand opposite the camera
+([Jensen native flag scene](../../docs/test-scenes.md#jensen-native-flag-deyang-h1)).
+Its bottom edge stands on the ground (Z = 0), centred on X = 0 at Y ≈ -62.3, and
+the whole flag stays in frame at the clip's deepest zoom (focal length 2668 px):
 
 | Field | Value | pitch-studio |
 | --- | --- | --- |
