@@ -196,7 +196,7 @@ are refused.
 | `auto_direction` | Native flags. Optional, `true`: turn the wind smoothly to a new target within 45° of the base every 0.5 s, the same sequence every run |
 | `tension` | Native flags. Optional, 0.65: bending stiffness from 0 (soft and flowing) to 1 (crisp and firm) |
 | `raise` | Native flags. Optional: `{"duration_s": 6, "start": "load"}` raises the flag from folded over `duration_s` seconds (finite, above 0), starting with the scene (`load`) or with a cue (`cue`, `description.cue_reveal`); absent, it hangs raised from the start |
-| `slack` | Native flags. Optional, 0.1: the part of the cloth's length the pinned edges do not span, 0 (taut) to 0.2. The reference's 0.1 makes the cloth 11 % longer than `height_m` and bows it out by about a fifth of its height; a large flag lying along a stand sags by that much and looks short, so tifo-sized flags want 0.01 to 0.03 |
+| `slack` | Native flags. Optional, 0.1: the part of the cloth's length the pinned edges do not span, 0 (taut) to 0.2. The reference's 0.1 makes the cloth 11 % longer than `height_m` and bows it out by about a fifth of its height. Upright flags keep it ([tuned settings](#native-flags)); a flag lying along a stand sags by that much and looks short, so it wants 0.01 to 0.03 |
 | `material` | Optional, `"cloth"`: `"simple"` (a fixed two-sided key light, no scene lights or shadows), `"pbr"` (the scene's lights, environment and shadows) or `"cloth"` (PBR fabric: matte, a weak highlight and a soft sheen at grazing angles) |
 
 The default flag's defaults are the wave and material pitch-studio gives a tifo,
@@ -248,6 +248,39 @@ above its pinned bottom edge (over 5.2 % of `height_m`, the reference's 0.25 m o
 With `"start": "load"` the raise starts with the scene; with `"cue"` the flag waits
 folded until `description.cue_reveal` names its instance, and every further cue folds
 it and raises it again. A raise and a reveal may share an instance's cue.
+
+**Tuned settings.** On the deyang broadcast clip with the H1 v6.2 tracking, the
+look of the reference's strong-breeze preset (a soft cloth billowing and folding
+in a gusting wind across it) comes from these settings on a 25 × 25 m upright
+flag behind the goal stand. Its bottom edge stands on the ground (Z = 0), centred
+on X = 0 at Y ≈ -62.3, and the whole flag stays in frame at the clip's deepest
+zoom (focal length 2668 px):
+
+| Field | Value | pitch-studio |
+| --- | --- | --- |
+| `width_m`, `height_m` | 25, 25 | 宽 / 高 25 m |
+| `wind_mps` | 16 | 风速 16 m/s |
+| `wind_direction_deg` | -13: across the flag towards its right edge, slightly away from the reading side | 风向 −13° |
+| `auto_direction` | `true` | 自动风向 |
+| `tension` | 0.24 | 布料张力 24 % |
+| `slack` | 0.1 | 布料余量 10 % |
+| `material` | `"cloth"` | 材质：布料 |
+| `reveal` | `bottom_to_top`, 2 s, `load` | 展开 |
+
+```json
+{
+  "model": [[1, 0, 0, -12.5], [0, 0, -1, -62.317], [0, 1, 0, -25], [0, 0, 0, 1]],
+  "flag": {
+    "width_m": 25, "height_m": 25, "type": "native",
+    "wind_mps": 16, "wind_direction_deg": -13, "auto_direction": true,
+    "tension": 0.24, "slack": 0.1, "material": "cloth",
+    "reveal": {"direction": "bottom_to_top", "duration_s": 2, "start": "load"}
+  }
+}
+```
+
+A near-taut cloth (`slack` 0.01) has no length to fold and hangs on the same flag
+like a rigid board.
 
 A **reveal** opens the flag once over `duration_s` seconds (any finite number
 above 0; there is no upper limit, as in Fusion) and then keeps it whole. At
