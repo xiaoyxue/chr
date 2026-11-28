@@ -18,37 +18,61 @@ use super::{incompatible, motion::Motion, reject};
 /// An animated instance: its neutral model and its motion.
 pub(super) type Animated = (scene::InstanceId, ModelMatrix, Motion);
 
-/// A flag that appears over `duration` seconds: its instance and its fully shown
-/// flag. A cued flag waits for a cue of its scene instance `cue`; the others
-/// start with the scene.
+/// A flag that changes with its scene's time, from `flag` fully shown: one that
+/// appears over a reveal, or a native flag, whose cloth runs on the scene's clock, or
+/// from the latest cue of `raise_cue` for a raise that waits for one.
 #[derive(Clone, Debug)]
-pub(super) struct Revealing {
+pub(super) struct TimedFlag {
     pub id: scene::InstanceId,
     pub flag: scene::Flag,
+    pub reveal: Option<Reveal>,
+    pub raise_cue: Option<w::Id>,
+}
+
+/// A reveal over `duration` seconds. A cued reveal waits for a cue of its scene
+/// instance `cue`; the others start with the scene.
+#[derive(Clone, Debug)]
+pub(super) struct Reveal {
     pub duration: f64,
     pub cue: Option<w::Id>,
 }
 
-impl Revealing {
+impl TimedFlag {
     /// The flag `seconds` after its scene started, with the cue start times of its
     /// scene's instances.
     pub fn at(&self, seconds: f64, cues: &HashMap<w::Id, f64>) -> scene::Flag {
-        let start = match &self.cue {
-            None => Some(0.0),
-            Some(instance) => cues.get(instance).copied(),
-        };
-        let revealed = start.map_or(0.0, |start| {
-            ((seconds - start) / self.duration).clamp(0.0, 1.0)
+        let revealed = self.reveal.as_ref().map_or(1.0, |reveal| {
+            let start = match &reveal.cue {
+                None => Some(0.0),
+                Some(instance) => cues.get(instance).copied(),
+            };
+            start.map_or(0.0, |start| {
+                ((seconds - start) / reveal.duration).clamp(0.0, 1.0)
+            })
         });
+        let motion = match self.flag.motion {
+            scene::FlagMotion::Cloth(cloth) => {
+                // Folded until the cue; a later cue's clock starts over, so it folds again.
+                let seconds = match &self.raise_cue {
+                    None => seconds,
+                    Some(instance) => cues
+                        .get(instance)
+                        .map_or(0.0, |start| (seconds - start).max(0.0)),
+                };
+                scene::FlagMotion::Cloth(scene::Cloth { seconds, ..cloth })
+            }
+            wave => wave,
+        };
         scene::Flag {
             revealed: revealed as f32,
+            motion,
             ..self.flag
         }
     }
 }
 
 /// A bound scene's view with its camera and the instances that change per frame.
-pub(super) type Prepared = (SceneView, Option<Camera>, Vec<Animated>, Vec<Revealing>);
+pub(super) type Prepared = (SceneView, Option<Camera>, Vec<Animated>, Vec<TimedFlag>);
 use chr_tracker::pose::rows3;
 
 /// Immutable native binding for a declared calibration context. No calibration is inferred.
@@ -175,7 +199,7 @@ impl Registrations {
         let mut scene = Scene::new().map_err(incompatible)?;
         let mut meshes = HashMap::new();
         let mut animated = Vec::new();
-        let mut revealing = Vec::new();
+        let mut timed = Vec::new();
         for instance in &state.instances {
             let asset = self.models.get(&instance.asset_ref).ok_or_else(|| {
                 reject(w::RejectionKind::NotFound, "model asset is not registered")
@@ -242,31 +266,37 @@ impl Registrations {
                         e.message
                     ))
                 };
-                let native = native_flag(flag).map_err(named)?;
-                let shown = match &flag.reveal {
-                    None => native,
+                let reveal = match &flag.reveal {
+                    None => None,
                     Some(reveal) => {
                         let duration = reveal.duration_s.get();
                         if duration <= 0.0 {
                             return Err(named(incompatible("reveal duration_s must be above 0")));
                         }
-                        let native = scene::Flag {
-                            reveal_direction: reveal_direction(reveal.direction),
-                            ..native
-                        };
-                        revealing.push(Revealing {
-                            id,
-                            flag: native,
+                        Some(Reveal {
                             duration,
                             cue: (reveal.start == w::RevealStart::Cue)
                                 .then(|| instance.instance_id.clone()),
-                        });
-                        scene::Flag {
-                            revealed: 0.0,
-                            ..native
-                        }
+                        })
                     }
                 };
+                let raise_cue = match &flag.motion {
+                    w::FlagMotion::Native(w::FlagCloth {
+                        raise: Some(raise), ..
+                    }) if raise.start == w::RevealStart::Cue => Some(instance.instance_id.clone()),
+                    _ => None,
+                };
+                let flag = TimedFlag {
+                    id,
+                    flag: scene_flag(flag).map_err(named)?,
+                    reveal,
+                    raise_cue,
+                };
+                let shown = flag.at(0.0, &HashMap::new());
+                if flag.reveal.is_some() || matches!(flag.flag.motion, scene::FlagMotion::Cloth(_))
+                {
+                    timed.push(flag);
+                }
                 scene.set_flag(id, Some(shown)).map_err(incompatible)?;
             }
             if let Some(motion) = &instance.motion {
@@ -336,7 +366,7 @@ impl Registrations {
         }
         scene.set_lighting(lighting).map_err(incompatible)?;
         shadow_budget(config, state)?;
-        Ok((scene.snapshot(), camera, animated, revealing))
+        Ok((scene.snapshot(), camera, animated, timed))
     }
 
     pub(super) fn frame_camera(
@@ -570,13 +600,32 @@ fn float(n: f64) -> Result<f32, ErrorObject> {
 fn f(n: w::Finite) -> Result<f32, ErrorObject> {
     float(n.get())
 }
-fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
+fn scene_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
     Ok(scene::Flag {
         width: f(flag.width_m)?,
         height: f(flag.height_m)?,
-        amplitude: f(flag.amplitude_m)?,
-        frequency: f(flag.frequency)?,
-        speed: f(flag.speed)?,
+        motion: match flag.motion {
+            w::FlagMotion::Wave(wave) => scene::FlagMotion::Wave(scene::Wave {
+                amplitude: f(wave.amplitude_m)?,
+                frequency: f(wave.frequency)?,
+                speed: f(wave.speed)?,
+            }),
+            w::FlagMotion::Native(cloth) => scene::FlagMotion::Cloth(scene::Cloth {
+                wind_speed: f(cloth.wind_mps)?,
+                wind_direction: f(cloth.wind_direction_deg)?,
+                auto_direction: cloth.auto_direction,
+                tension: f(cloth.tension)?,
+                slack: f(cloth.slack)?,
+                raise: cloth
+                    .raise
+                    .map(|raise| match raise.duration_s.get() {
+                        duration if duration > 0.0 => f(raise.duration_s),
+                        _ => Err(incompatible("raise duration_s must be above 0")),
+                    })
+                    .transpose()?,
+                seconds: 0.0,
+            }),
+        },
         shading: match flag.material {
             w::FlagMaterial::Simple => scene::FlagShading::Simple,
             w::FlagMaterial::Pbr | w::FlagMaterial::Cloth => scene::FlagShading::Pbr,
@@ -593,7 +642,12 @@ fn native_flag(flag: &w::Flag) -> Result<scene::Flag, ErrorObject> {
             }
         },
         revealed: 1.0,
-        reveal_direction: scene::RevealDirection::CenterHorizontal,
+        reveal_direction: flag
+            .reveal
+            .as_ref()
+            .map_or(scene::RevealDirection::CenterHorizontal, |reveal| {
+                reveal_direction(reveal.direction)
+            }),
     })
 }
 fn reveal_direction(direction: w::RevealDirection) -> scene::RevealDirection {
@@ -824,9 +878,11 @@ mod tests {
         let flag = scene::Flag {
             width: 4.0,
             height: 2.0,
-            amplitude: 0.3,
-            frequency: 1.35,
-            speed: 1.0,
+            motion: scene::FlagMotion::Wave(scene::Wave {
+                amplitude: 0.3,
+                frequency: 1.35,
+                speed: 1.0,
+            }),
             shading: scene::FlagShading::Simple,
             artwork_turns: 1,
             revealed: 1.0,
@@ -839,14 +895,14 @@ mod tests {
         let instance = scene
             .add_instance(grid, vec![material], ModelMatrix::IDENTITY)
             .unwrap();
-        let revealing = |cue: Option<w::Id>| Revealing {
+        let revealing = |cue: Option<w::Id>| TimedFlag {
             id: instance,
             flag,
-            duration: 2.0,
-            cue,
+            reveal: Some(Reveal { duration: 2.0, cue }),
+            raise_cue: None,
         };
         let revealed =
-            |r: &Revealing, seconds, cues: &HashMap<w::Id, f64>| r.at(seconds, cues).revealed;
+            |r: &TimedFlag, seconds, cues: &HashMap<w::Id, f64>| r.at(seconds, cues).revealed;
         let none = HashMap::new();
         let loaded = revealing(None);
         assert_eq!(
@@ -865,5 +921,53 @@ mod tests {
             cued.at(4.0, &cues).reveal_direction,
             scene::RevealDirection::BottomToTop
         );
+        assert_eq!(
+            cued.at(4.0, &cues).motion,
+            flag.motion,
+            "a wave keeps its motion"
+        );
+
+        // A native flag's cloth runs on the scene's clock, revealed or not.
+        let cloth = scene::Cloth {
+            wind_speed: 7.0,
+            wind_direction: 25.0,
+            auto_direction: true,
+            tension: 0.65,
+            slack: 0.1,
+            raise: None,
+            seconds: 0.0,
+        };
+        let native = TimedFlag {
+            id: instance,
+            flag: scene::Flag {
+                motion: scene::FlagMotion::Cloth(cloth),
+                ..flag
+            },
+            reveal: None,
+            raise_cue: None,
+        };
+        let at = native.at(7.5, &none);
+        assert_eq!(at.revealed, 1.0);
+        assert_eq!(
+            at.motion,
+            scene::FlagMotion::Cloth(scene::Cloth {
+                seconds: 7.5,
+                ..cloth
+            })
+        );
+
+        // A raise that waits for a cue keeps its cloth's clock at zero, folded, until
+        // the cue, and runs it from the latest cue.
+        let cued = TimedFlag {
+            raise_cue: Some(id("jensen")),
+            ..native
+        };
+        let clock = |seconds, cues: &HashMap<w::Id, f64>| match cued.at(seconds, cues).motion {
+            scene::FlagMotion::Cloth(cloth) => cloth.seconds,
+            scene::FlagMotion::Wave(_) => unreachable!("a native flag"),
+        };
+        assert_eq!(clock(9.0, &none), 0.0);
+        let cues = HashMap::from([(id("jensen"), 4.0)]);
+        assert_eq!([clock(3.0, &cues), clock(10.5, &cues)], [0.0, 6.5]);
     }
 }

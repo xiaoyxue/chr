@@ -21,8 +21,9 @@ pub const PROFILE: &str = "chr-render-description-v1";
 /// Result: [`Loaded`]. The lens and native extent stay as started.
 pub const LOAD: &str = "description.load";
 
-/// Starts the reveal of a flag instance whose `reveal.start` is `cue`, at the next
-/// rendered frame; a repeated cue restarts it. A new scene clears the cues.
+/// Starts the reveal of a flag instance whose `reveal.start` is `cue`, and the raise
+/// of a native one whose `raise.start` is `cue`, at the next rendered frame; a repeated
+/// cue restarts them. A new scene clears the cues.
 /// Params: [`CueRevealParams`]. Result: [`CueRevealed`].
 pub const CUE_REVEAL: &str = "description.cue_reveal";
 
@@ -231,6 +232,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::scene_frame::FlagMotion;
 
     #[test]
     fn sources_and_defaults_parse_strictly() {
@@ -258,10 +260,13 @@ mod tests {
         let flag = json!({"width_m": 1, "height_m": 1, "amplitude_m": 0, "frequency": 1,
                           "speed": 1, "material": "simple"});
         assert!(serde_json::from_value::<Flag>(flag.clone()).is_ok());
-        // Without a wave or material, a flag takes a tifo's: 1.1 m, 1.35, 5.5, cloth.
+        // Without a type, wave or material, a flag takes a tifo's: 1.1 m, 1.35, 5.5, cloth.
         let bare: Flag = serde_json::from_value(json!({"width_m": 36, "height_m": 13.5})).unwrap();
+        let FlagMotion::Wave(wave) = bare.motion else {
+            panic!("a flag without a type is a default flag")
+        };
         assert_eq!(
-            [bare.amplitude_m, bare.frequency, bare.speed].map(|x| x.get()),
+            [wave.amplitude_m, wave.frequency, wave.speed].map(|x| x.get()),
             [1.1, 1.35, 5.5]
         );
         assert_eq!(bare.material, crate::scene_frame::FlagMaterial::Cloth);
@@ -309,6 +314,63 @@ mod tests {
             let mut bad = flag.clone();
             bad[key] = value;
             assert!(serde_json::from_value::<Flag>(bad).is_err(), "{key}");
+        }
+        // A native flag takes the reference simulation's wind and fabric.
+        let native: Flag = serde_json::from_value(
+            json!({"width_m": 3.2, "height_m": 4.8, "type": "native", "wind_mps": 12}),
+        )
+        .unwrap();
+        let FlagMotion::Native(cloth) = native.motion else {
+            panic!("a native flag simulates cloth")
+        };
+        assert_eq!(
+            [
+                cloth.wind_mps,
+                cloth.wind_direction_deg,
+                cloth.tension,
+                cloth.slack
+            ]
+            .map(|x| x.get()),
+            [12.0, 25.0, 0.65, 0.1]
+        );
+        assert!(cloth.auto_direction);
+        assert_eq!(cloth.raise, None);
+        assert!(!native.cued());
+        // A native flag may be raised, from the scene load or on a cue.
+        let raised: Flag = serde_json::from_value(json!({"width_m": 40, "height_m": 40,
+            "type": "native", "raise": {"duration_s": 8, "start": "cue"}}))
+        .unwrap();
+        let FlagMotion::Native(cloth) = &raised.motion else {
+            panic!("a native flag simulates cloth")
+        };
+        assert_eq!(cloth.raise.as_ref().unwrap().duration_s.get(), 8.0);
+        assert!(raised.cued());
+        // Each type keeps exactly its own fields through a round trip.
+        for parsed in [
+            native,
+            raised,
+            serde_json::from_value(flag.clone()).unwrap(),
+        ] {
+            let wire = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(serde_json::from_value::<Flag>(wire).unwrap(), parsed);
+        }
+        // A default flag is written as before native flags.
+        let wire = serde_json::to_value(bare).unwrap();
+        assert!(wire.get("type").is_none() && wire.get("wind_mps").is_none());
+        for bad in [
+            json!({"width_m": 1, "height_m": 1, "type": "native", "speed": 1}),
+            json!({"width_m": 1, "height_m": 1, "amplitude_m": 1, "type": "native"}),
+            json!({"width_m": 1, "height_m": 1, "tension": 0.5}),
+            json!({"width_m": 1, "height_m": 1, "slack": 0.02}),
+            json!({"width_m": 1, "height_m": 1, "raise": {"duration_s": 6, "start": "load"}}),
+            json!({"width_m": 1, "height_m": 1, "type": "native", "raise": {"duration_s": 6}}),
+            json!({"width_m": 1, "height_m": 1, "type": "default", "auto_direction": false}),
+            json!({"width_m": 1, "height_m": 1, "type": "physical"}),
+        ] {
+            assert!(
+                serde_json::from_value::<Flag>(bad.clone()).is_err(),
+                "{bad}"
+            );
         }
         for bad in [
             json!({"path": "a.png", "entry": "x"}),

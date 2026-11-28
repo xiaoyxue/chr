@@ -116,7 +116,7 @@ const localEditor = new LocalAdEditor({
   recordUndo: (label, restore, reapply) => undo.push({ label, restore, reapply }),
   send: () => sendToRenderer(),
   cue: (ad) => rendererAction('正在触发展开…', async () =>
-    `已触发“${ad.name}”展开（本场景第 ${await cueReveal(rendererUrl(), flagInstanceId(ad))} 次）。`, '触发展开失败'),
+    `已触发“${ad.name}”（本场景第 ${await cueReveal(rendererUrl(), flagInstanceId(ad))} 次）。`, '触发失败'),
 });
 resultReview.onChange = () => renderAnalysis();
 resultReview.onSource = (matchId, source) => remember('result', source, matchId);

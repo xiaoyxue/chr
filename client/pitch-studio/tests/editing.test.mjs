@@ -109,6 +109,17 @@ test('stored flags must carry valid wave settings; older ads stay loadable', () 
   for (const [key, value] of [['amplitude', 5.5], ['frequency', Number.NaN], ['speed', -1], ['material', 'silk'], ['artworkPath', 'flag.png']]) {
     assert.equal(validLocalAd({ ...flag, flag: { ...flag.flag, [key]: value } }), false, key);
   }
+  // A native flag's type and wind and fabric; its saved wave stays valid for switching back.
+  const native = { ...flag, flag: { ...flag.flag, type: 'native', native: { wind: 7, direction: 25, autoDirection: true, tension: 65 } } };
+  for (const valid of [native, { ...native, flag: { ...native.flag, native: undefined } }, { ...native, flag: { ...native.flag, type: 'default' } }]) assert.ok(validLocalAd(valid));
+  assert.ok(validLocalAd({ ...native, flag: { ...native.flag, native: { ...native.flag.native, slack: 2.5 } } }));
+  assert.ok(validLocalAd({ ...native, flag: { ...native.flag, native: { ...native.flag.native, raise: { duration: 6, start: 'cue' } } } }));
+  for (const raise of [{ duration: 0, start: 'load' }, { duration: 6, start: 'later' }, { duration: Infinity, start: 'load' }, 6])
+    assert.equal(validLocalAd({ ...native, flag: { ...native.flag, native: { ...native.flag.native, raise } } }), false, JSON.stringify(raise));
+  for (const [key, value] of [['wind', 18.5], ['direction', 12.5], ['direction', -181], ['tension', 101], ['autoDirection', 'yes'], ['slack', 21], ['slack', -1]]) {
+    assert.equal(validLocalAd({ ...native, flag: { ...native.flag, native: { ...native.flag.native, [key]: value } } }), false, `${key} ${value}`);
+  }
+  assert.equal(validLocalAd({ ...native, flag: { ...native.flag, type: 'physical' } }), false);
   assert.equal(validLocalAd({ ...flag, flag: undefined }), false);
   assert.equal(validLocalAd({ ...ad, flag: flag.flag }), false);
   assert.ok(validLocalAd({ ...ad, materialPath: '/srv/logo.png' }));

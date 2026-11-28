@@ -1,7 +1,8 @@
 // The editor of one space's local placements: 2D images and 3D models on the
 // pitch; images, models and flags on point-cloud planes. Both spaces share the inspector: position, size and
 // material (and a flag's artwork rotation, aspect lock and reveal) are protected by
-// the lock and saved as soon as a field changes; a flag's wave is editable while
+// the lock and saved as soon as a field changes; a flag's motion (its wave, or a
+// native flag's wind panel after the reference simulation's) is editable while
 // locked and saved explicitly.
 import { imageOpacity, withoutPitchFlags } from './local-ad.ts';
 import { localAdStore } from './local-ad-store.ts';
@@ -12,14 +13,60 @@ import { glbBounds, planeFromPoints, previewReveal, validateLocalAdMaterial } fr
 import { REVEAL_DIRECTIONS, REVEAL_DURATION, REVEAL_LABELS, isRevealDirection } from './reveal.ts';
 import { parseAspect, type Anchor } from './ground-edit.ts';
 import { movePlaneAnchor, planeAnchor, planeWithAspect, resizePlane } from './plane-edit.ts';
-import { DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, flagDraft, flagDraftChanged, orientFlagPlane, parseFlagDraft, type FlagDraft } from './flag.ts';
+import {
+  DEFAULT_FLAG, FLAG_CLEARANCE, FLAG_LIMITS, FLAG_PEAK, NATIVE_LIMITS, flagDraft, flagDraftChanged, nativeBulge, nativeSettings,
+  orientFlagPlane, parseFlagDraft, windDirectionAt, windHeading, type FlagDraft,
+} from './flag.ts';
 import type { AdPlane, AdSpace, LocalAd, Vector3Tuple } from './local-ad.ts';
 
 type AdType = LocalAd['type'];
 const WAVE = [['amplitude', '振幅 / m', 0.01], ['frequency', '频率（中线到边缘周数）', 0.05], ['speed', '速度 / ×', 0.05]] as const;
-const FLAG_INPUTS = new Set(['flagMaterial', ...WAVE.flatMap(([key]) => [key, `${key}Slider`])]);
+/** The draft fields typed in a number field and a slider. */
+const PAIRED = [...WAVE.map(([key]) => key), 'wind', 'direction', 'tension', 'slack'] as const;
+const FLAG_INPUTS = new Set(['flagType', 'flagMaterial', 'autoDirection', 'raise', 'raiseDuration', 'raiseStart',
+  ...PAIRED.flatMap((key) => [key, `${key}Slider`])]);
 const typeLabel = (type: AdType) => type === 'flag' ? '旗帜' : type;
 const LOCKED = '已锁定：点击“🔒 已锁定”解锁后，才能修改位置、尺寸和素材。';
+
+/** A native flag's wind and fabric, laid out as the reference simulation's control panel. */
+function nativeMarkup(prefix: string) {
+  const slider = (key: 'wind' | 'tension' | 'slack', label: string, step: number, low: string, high: string) => {
+    const bounds = `min="${NATIVE_LIMITS[key][0]}" max="${NATIVE_LIMITS[key][1]}" step="${step}"`;
+    return `<div class="on-slider-row"><label for="${prefix}flag-${key}">${label}</label>
+      <input id="${prefix}flag-${key}" name="${key}Slider" type="range" ${bounds} />
+      <input name="${key}" type="number" ${bounds} aria-label="${label} 数值" required /></div>
+      <div class="on-range-labels"><span>${low}</span><span>${high}</span></div>`;
+  };
+  const [min, max] = NATIVE_LIMITS.direction;
+  return `${slider('wind', '风速 / m/s', 0.1, '静风', '强风')}
+    <div class="on-slider-row"><span>风向</span><label class="on-check"><input name="autoDirection" type="checkbox" /> 自动风向</label></div>
+    <p class="on-help">每 0.5 秒在基准角 ±45° 内选取新目标并平滑转向；每次播放的顺序相同。</p>
+    <div class="on-wind-editor">
+      <div data-wind-dial class="on-wind-dial" role="slider" tabindex="0" aria-label="风向表盘" aria-valuemin="${min}" aria-valuemax="${max}" aria-describedby="${prefix}wind-dial-help">
+        <svg viewBox="0 0 140 140" aria-hidden="true">
+          <circle class="dial-ring" cx="70" cy="70" r="44"/><path class="dial-axis" d="M70 26v88"/><path class="dial-cloth" d="M26 70h88"/>
+          <text x="70" y="12">正面（读图侧）</text><text x="70" y="23">+90°</text>
+          <text x="128" y="73">0°</text><text x="12" y="73">180°</text>
+          <text x="70" y="126">−90°</text><text x="70" y="138">背面</text>
+          <g data-wind-base><path class="dial-base-arrow" d="M70 70h38m-7-5 7 5-7 5"/></g>
+          <g data-wind-arrow><path class="dial-arrow" d="M70 70h33m-8-7 8 7-8 7"/><circle class="dial-handle" cx="103" cy="70" r="5"/></g>
+          <circle class="dial-center" cx="70" cy="70" r="3"/>
+        </svg></div>
+      <div class="on-wind-entry"><label>基准角 / °<input name="direction" type="number" min="${min}" max="${max}" step="1" required /></label>
+        <span>吹向</span><output data-wind-heading></output><output data-wind-current></output><span>俯视 · 相对旗面</span></div>
+    </div>
+    <p data-direction-error class="on-form-error" role="status" hidden>请输入 −180° 到 +180° 之间的整数角度；表盘保持上一个有效角度，Esc 恢复。</p>
+    <div class="on-wind-row"><input id="${prefix}flag-direction" name="directionSlider" type="range" min="${min}" max="${max}" step="1" aria-label="风向基准角" /></div>
+    <div class="on-range-labels"><span>−180°</span><span>0° = 沿旗面向右</span><span>+180°</span></div>
+    <p id="${prefix}wind-dial-help" class="on-help">拖动表盘设置基准角。实线箭头：当前风向；虚线箭头：基准。方向键 1°（Shift 10°），PageUp / PageDown 10°，Home / End 到 −180° / +180°。角度相对旗面：0° 沿旗面吹向右边（从读图侧看），+90° 吹向读图侧。</p>
+    ${slider('tension', '布料张力 / %', 1, '柔软飘逸', '挺括紧致')}
+    ${slider('slack', '布料余量 / %', 0.5, '绷直', '宽松鼓起')}
+    <p class="on-help">布料比上下两边的间距长出的部分。参考模拟为 10%，小旗会鼓起飘动；大旗或斜放在看台上的旗会因此下垂、显得短，调到 1–3% 可拉直。</p>
+    <div class="on-slider-row"><span>升旗</span><label class="on-check"><input name="raise" type="checkbox" /> 从折叠状态升起</label></div>
+    <div class="on-field-grid"><label>升起时长 / s<input name="raiseDuration" type="number" min="0.1" step="0.1" required /></label>
+      <label>开始<select name="raiseStart" aria-label="升旗开始"><option value="load">加载时</option><option value="cue">手动触发</option></select></label></div>
+    <p class="on-help">和参考模拟一样：旗子先折叠在底边上方，上边在设定的时长内平滑升到顶后固定，风一直在吹。手动触发时保持折叠，点“触发升旗”才升起，再点一次会重新折叠并升起。</p>`;
+}
 
 function editorMarkup(space: AdSpace, prefix: string) {
   const pitch = space === 'pitch', id = (name: string) => `id="${prefix}${name}"`;
@@ -74,7 +121,9 @@ function editorMarkup(space: AdSpace, prefix: string) {
         <p class="on-help">图片自身的透明度再乘以此值：0 全透明，1 保持图片原样；未设置时为 0.5。</p></div>
       <p ${id('local-ad-readonly')} class="on-readonly"></p>
     </fieldset>
-    <fieldset ${id('local-flag-controls')} class="on-inspector-group"><h3>旗帜飘动</h3>${wave}
+    <fieldset ${id('local-flag-controls')} class="on-inspector-group"><h3>旗帜飘动</h3>
+      <div class="on-slider-row"><span>类型</span><div class="on-segmented" role="radiogroup" aria-label="旗帜类型"><label><input type="radio" name="flagType" value="default" />默认（正弦飘动）</label><label><input type="radio" name="flagType" value="native" />物理模拟（布料）</label></div></div>
+      <div data-flag-wave>${wave}</div><div data-flag-native>${nativeMarkup(prefix)}</div>
       <div class="on-slider-row"><span>材质</span><div class="on-segmented" role="radiogroup" aria-label="旗帜材质"><label><input type="radio" name="flagMaterial" value="simple" />简易双面光照</label><label><input type="radio" name="flagMaterial" value="pbr" />PBR</label><label><input type="radio" name="flagMaterial" value="cloth" />布料</label></div></div>
       <p data-flag-note class="on-help"></p></fieldset>
     <div ${id('local-reveal-actions')} class="on-inspector-group"><div class="on-action-row">
@@ -115,8 +164,12 @@ export class LocalAdEditor {
   private unlocked = false;
   private anchor: Anchor = 'top-left';
   private keepAspect = true;
-  /** Typed but unsaved wave fields of one flag; the preview already shows them. */
+  /** Typed but unsaved motion fields of one flag; the preview already shows them. */
   private flagDraft?: FlagDraft & { id: string };
+  /** The animation frame that turns the wind dial's current arrow under automatic wind. */
+  private windFrame = 0;
+  /** The last valid base angle shown for a flag, which the dial keeps while the typed angle is invalid. */
+  private lastWind?: { id: string; angle: number };
   /** The last save or send outcome shown under the save buttons. */
   private notice?: { id: string; text: string; failed?: boolean };
   /** Said once after loading, until the next save. */
@@ -179,6 +232,7 @@ export class LocalAdEditor {
       event.preventDefault();
       void this.save();
     });
+    this.listenToWindDial();
     this.element('preview-reveal').addEventListener('click', () => { if (this.selectedId) previewReveal(this.selectedId); });
     this.element('cue-reveal').addEventListener('click', () => { void this.cue(); });
     this.element('save-local').addEventListener('click', () => { void this.save(); });
@@ -265,15 +319,117 @@ export class LocalAdEditor {
     const selected = this.selected(), form = this.form;
     if (selected?.type !== 'flag') return;
     const pair = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
+    const checked = (name: string) => form.querySelector<HTMLInputElement>(`[name=${name}]:checked`)?.value;
     // A slider and its number field show one value.
     if (input.name.endsWith('Slider')) pair(input.name.slice(0, -'Slider'.length)).value = input.value;
-    else if (input.type === 'number') pair(`${input.name}Slider`).value = input.value;
-    this.flagDraft = { id: selected.id, amplitude: pair('amplitude').value, frequency: pair('frequency').value, speed: pair('speed').value,
-      material: (['pbr', 'cloth'] as const).find((value) => value === form.querySelector<HTMLInputElement>('[name=flagMaterial]:checked')?.value) ?? 'simple' };
+    else if (input.type === 'number' && (PAIRED as readonly string[]).includes(input.name)) pair(`${input.name}Slider`).value = input.value;
+    this.flagDraft = { id: selected.id, type: checked('flagType') === 'native' ? 'native' : 'default',
+      amplitude: pair('amplitude').value, frequency: pair('frequency').value, speed: pair('speed').value,
+      wind: pair('wind').value, direction: pair('direction').value, autoDirection: pair('autoDirection').checked, tension: pair('tension').value,
+      slack: pair('slack').value, raise: pair('raise').checked, raiseDuration: pair('raiseDuration').value,
+      raiseStart: pair('raiseStart').value === 'cue' ? 'cue' : 'load',
+      material: (['pbr', 'cloth'] as const).find((value) => value === checked('flagMaterial')) ?? 'simple' };
     if (this.notice?.failed) this.notice = undefined;
     this.renderSaveState();
-    this.renderFlagNote(selected);
+    this.renderFlagMotion(selected);
     void this.publish().catch(this.options.error);
+  }
+
+  /** The selected flag's typed draft, or its saved settings as one. */
+  private draftOf(selected: LocalAd) {
+    return this.flagDraft?.id === selected.id ? this.flagDraft : flagDraft(selected.flag);
+  }
+
+  /** The wind's base direction the dial shows: the typed angle while it is valid, else the last valid one. */
+  private windBase(selected: LocalAd) {
+    const typed = this.draftOf(selected).direction, angle = Number(typed), [min, max] = NATIVE_LIMITS.direction;
+    if (typed.trim() !== '' && Number.isInteger(angle) && angle >= min && angle <= max) {
+      this.lastWind = { id: selected.id, angle };
+      return { valid: true, angle };
+    }
+    return { valid: false, angle: this.lastWind?.id === selected.id ? this.lastWind.angle : nativeSettings(selected.flag).direction };
+  }
+
+  /** Drag, arrow keys and Escape on the wind dial and its angle, as in the reference simulation. */
+  private listenToWindDial() {
+    const dial = this.form.querySelector<HTMLElement>('[data-wind-dial]'), field = this.form.elements.namedItem('direction') as HTMLInputElement;
+    const enabled = () => !this.element<HTMLFieldSetElement>('local-flag-controls').disabled && this.selected()?.type === 'flag';
+    const setDirection = (angle: number) => { field.value = String(angle); this.readFlagDraft(field); };
+    let pointer: number | undefined;
+    const point = (event: PointerEvent) => {
+      const bounds = dial.getBoundingClientRect(), x = event.clientX - (bounds.left + bounds.width / 2), z = bounds.top + bounds.height / 2 - event.clientY;
+      if (Math.hypot(x, z) >= 8) setDirection(Math.round(Math.atan2(z, x) * 180 / Math.PI));
+    };
+    dial.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || pointer !== undefined || !enabled()) return;
+      event.preventDefault();
+      pointer = event.pointerId;
+      dial.focus({ preventScroll: true });
+      dial.setPointerCapture(event.pointerId);
+      point(event);
+    });
+    dial.addEventListener('pointermove', (event) => { if (event.pointerId === pointer) point(event); });
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture'] as const)
+      dial.addEventListener(name, (event) => { if (event.pointerId === pointer) pointer = undefined; });
+    dial.addEventListener('keydown', (event) => {
+      const selected = this.selected(), [min, max] = NATIVE_LIMITS.direction;
+      if (!enabled() || !selected) return;
+      let angle = this.windBase(selected).angle;
+      const step = event.shiftKey ? 10 : 1;
+      switch (event.key) {
+        case 'ArrowUp': case 'ArrowRight': angle += step; break;
+        case 'ArrowDown': case 'ArrowLeft': angle -= step; break;
+        case 'PageUp': angle += 10; break;
+        case 'PageDown': angle -= 10; break;
+        case 'Home': angle = min; break;
+        case 'End': angle = max; break;
+        default: return;
+      }
+      event.preventDefault();
+      setDirection(angle > max ? angle - 360 : angle < min ? angle + 360 : angle);
+    });
+    field.addEventListener('keydown', (event) => {
+      const selected = this.selected();
+      if (event.key !== 'Escape' || !selected) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setDirection(this.windBase(selected).angle);
+    });
+  }
+
+  /** Shows the selected flag's motion fields for its type, its wind dial and its note. */
+  private renderFlagMotion(selected: LocalAd) {
+    const draft = this.draftOf(selected), native = draft.type === 'native';
+    for (const [selector, visible] of [['[data-flag-wave]', !native], ['[data-flag-native]', native]] as const) {
+      const group = this.form.querySelector<HTMLElement>(selector);
+      group.hidden = !visible;
+      group.querySelectorAll('input').forEach((input) => { input.disabled = !visible; });
+    }
+    for (const name of ['raiseDuration', 'raiseStart'])
+      (this.form.elements.namedItem(name) as HTMLInputElement).disabled = !native || !draft.raise;
+    this.renderFlagNote(selected);
+    this.renderWind();
+  }
+
+  /** The wind dial: the base arrow, and the current wind turning under automatic wind on this page's clock. */
+  private renderWind() {
+    cancelAnimationFrame(this.windFrame);
+    const selected = this.selected();
+    if (selected?.type !== 'flag' || this.draftOf(selected).type !== 'native') return;
+    const form = this.form, dial = form.querySelector<HTMLElement>('[data-wind-dial]'), { autoDirection } = this.draftOf(selected);
+    const { valid, angle: base } = this.windBase(selected);
+    form.querySelector<HTMLElement>('[data-direction-error]').hidden = valid;
+    (form.elements.namedItem('direction') as HTMLInputElement).setAttribute('aria-invalid', String(!valid));
+    dial.setAttribute('aria-valuenow', String(base));
+    dial.setAttribute('aria-valuetext', `基准风向 ${base}°`);
+    const baseArrow = dial.querySelector<SVGGElement>('[data-wind-base]');
+    baseArrow.style.display = autoDirection ? '' : 'none';
+    baseArrow.setAttribute('transform', `rotate(${-base} 70 70)`);
+    const current = windDirectionAt(performance.now() / 1000, { direction: base, autoDirection });
+    dial.querySelector('[data-wind-arrow]').setAttribute('transform', `rotate(${-current} 70 70)`);
+    form.querySelector('[data-wind-heading]').textContent = windHeading(current);
+    form.querySelector('[data-wind-current]').textContent = `当前：${current.toFixed(1)}°`;
+    if (autoDirection && dial.isConnected) this.windFrame = requestAnimationFrame(() => this.renderWind());
   }
 
   /** Drops unsaved edits, asking first; false when the operator keeps them. */
@@ -659,10 +815,19 @@ export class LocalAdEditor {
   }
 
   private renderFlagNote(selected: LocalAd) {
+    const note = this.form.querySelector('[data-flag-note]'), side = '旗面法线背向选面视角：法线偏移为负值时朝向观看侧';
+    const draft = this.draftOf(selected);
+    if (draft.type === 'native') {
+      const slack = Number(draft.slack), valid = draft.slack.trim() !== '' && slack >= NATIVE_LIMITS.slack[0] && slack <= NATIVE_LIMITS.slack[1];
+      const shown = valid ? slack : nativeSettings(selected.flag).slack, bulge = nativeBulge(selected.plane.height, shown).toFixed(2);
+      note.textContent = `上下两边固定、左右两侧自由的布料，比上下间距长 ${(100 / (1 - shown / 100) - 100).toFixed(1)}%，静止时鼓出约 ${bulge} m，`
+        + '由渲染器按风速、风向、张力实时物理模拟；本页预览只显示静止的初始弧形，飘动请在渲染输出中查看，保存并发送后生效。'
+        + `${side}，贴墙时建议 ≤ −${bulge}。`;
+      return;
+    }
     const parsed = this.flagDraft?.id === selected.id ? parseFlagDraft(this.flagDraft) : undefined;
-    const amplitude = parsed && 'wave' in parsed ? parsed.wave.amplitude : selected.flag.amplitude, peak = (FLAG_PEAK * amplitude).toFixed(2);
-    this.form.querySelector('[data-flag-note]').textContent = `中线固定、两侧向外飘动，最大摆幅约 ${peak} m（离开平面两侧）；拖动滑块即在预览中试看，保存后才生效。`
-      + `旗面法线背向选面视角：法线偏移为负值时朝向观看侧，贴墙时建议 ≤ −${peak}。`;
+    const amplitude = (parsed && 'wave' in parsed ? parsed.wave.amplitude : undefined) ?? selected.flag.amplitude, peak = (FLAG_PEAK * amplitude).toFixed(2);
+    note.textContent = `中线固定、两侧向外飘动，最大摆幅约 ${peak} m（离开平面两侧）；拖动滑块即在预览中试看，保存后才生效。${side}，贴墙时建议 ≤ −${peak}。`;
   }
 
   private render() {
@@ -691,6 +856,7 @@ export class LocalAdEditor {
     const flagGroup = this.element<HTMLFieldSetElement>('local-flag-controls');
     flagGroup.hidden = !flag;
     flagGroup.disabled = !flag || !open;
+    if (!flag) cancelAnimationFrame(this.windFrame);
     this.element('save-send-local').hidden = !this.options.send;
     this.element('local-ad-count').textContent = `${this.ads.length} 个${pitch ? '球场本地' : '点云'}广告位`;
     this.element('local-ad-empty').hidden = Boolean(this.ads.length);
@@ -747,7 +913,8 @@ export class LocalAdEditor {
       : flag ? `旗帜，图片从选面一侧正读，上边沿 v 反方向${selected.fusionTifoId ? ` · 由 Fusion Tifo ${selected.fusionTifoId} 导入，可自由编辑` : ''}`
       : `模型从平面${pitch ? '向上' : '沿法线'}立起，可调缩放与朝向`;
     const actions = this.element('local-reveal-actions');
-    actions.hidden = !flag || !selected.reveal;
+    const raise = flag && selected.flag.type === 'native' ? nativeSettings(selected.flag).raise : undefined;
+    actions.hidden = !flag || !(selected.reveal || raise?.start === 'cue');
     if (flag) {
       const select = (name: string, value: string) => { (form.elements.namedItem(name) as HTMLSelectElement).value = value; };
       select('artworkRotation', String(selected.artworkRotation ?? 0));
@@ -756,23 +923,34 @@ export class LocalAdEditor {
       set('revealDuration', selected.reveal?.duration ?? REVEAL_DURATION);
       const aspectLocked = form.elements.namedItem('aspectLocked') as HTMLInputElement;
       aspectLocked.checked = aspectLocked.defaultChecked = Boolean(selected.aspectLocked);
-      const cue = selected.reveal?.start === 'cue';
-      this.element<HTMLButtonElement>('preview-reveal').disabled = !open || !selected.visible;
+      const cue = selected.reveal?.start === 'cue', raiseCue = raise?.start === 'cue';
+      const preview = this.element<HTMLButtonElement>('preview-reveal');
+      preview.hidden = !selected.reveal;
+      preview.disabled = !open || !selected.visible;
       const cueButton = this.element<HTMLButtonElement>('cue-reveal');
-      cueButton.hidden = !cue || !this.options.cue;
+      cueButton.hidden = !(cue || raiseCue) || !this.options.cue;
       cueButton.disabled = !open || !selected.visible;
+      cueButton.textContent = cue && raiseCue ? '触发展开与升旗' : raiseCue ? '触发升旗' : '触发展开';
       const how = selected.reveal ? REVEAL_LABELS[selected.reveal.direction] : '';
-      actions.querySelector('[data-reveal-note]').textContent = cue
-        ? `手动触发：发送到渲染器后旗帜保持隐藏，点“触发展开”后${how}；再次点击只重新展开这面旗。修改需先保存并发送。`
-        : `加载时：场景载入渲染器后自动${how}。“预览展开”只在本页预览中播放。`;
+      const notes = selected.reveal ? [cue
+        ? `手动触发：发送到渲染器后旗帜保持隐藏，点“${cueButton.textContent}”后${how}；再次点击只重新展开这面旗。修改需先保存并发送。`
+        : `加载时：场景载入渲染器后自动${how}。“预览展开”只在本页预览中播放。`] : [];
+      if (raiseCue) notes.push(`升旗手动触发：发送后旗子折叠等待，点“${cueButton.textContent}”后在 ${raise.duration} s 内升起；再次点击会重新折叠并升起。`);
+      actions.querySelector('[data-reveal-note]').textContent = notes.join(' ');
       // Unsaved typed values win over the saved flag, so a re-render never loses them.
-      const draft = this.flagDraft?.id === selected.id ? this.flagDraft : flagDraft(selected.flag);
-      for (const [key] of WAVE) for (const name of [key, `${key}Slider`]) {
+      const draft = this.draftOf(selected);
+      for (const key of PAIRED) for (const name of [key, `${key}Slider`]) {
         const input = form.elements.namedItem(name) as HTMLInputElement;
         if (input !== document.activeElement) input.value = draft[key];
       }
+      (form.elements.namedItem('autoDirection') as HTMLInputElement).checked = draft.autoDirection;
+      (form.elements.namedItem('raise') as HTMLInputElement).checked = draft.raise;
+      const raiseDuration = form.elements.namedItem('raiseDuration') as HTMLInputElement;
+      if (raiseDuration !== document.activeElement) raiseDuration.value = draft.raiseDuration;
+      (form.elements.namedItem('raiseStart') as HTMLSelectElement).value = draft.raiseStart;
+      for (const radio of form.querySelectorAll<HTMLInputElement>('[name=flagType]')) radio.checked = radio.value === draft.type;
       for (const radio of form.querySelectorAll<HTMLInputElement>('[name=flagMaterial]')) radio.checked = radio.value === draft.material;
-      this.renderFlagNote(selected);
+      this.renderFlagMotion(selected);
     }
     this.element('save-local').textContent = flag ? '保存旗帜属性' : '保存属性';
     this.renderSaveState();

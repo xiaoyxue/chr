@@ -8,9 +8,9 @@ use chr_renderer::{
     camera::Camera,
     coordinates::ImageExtent,
     scene::{
-        AreaShape, EnvironmentMap, Filter, Flag, FlagShading, Light, Lighting, MapSlot,
+        AreaShape, EnvironmentMap, Filter, Flag, FlagMotion, FlagShading, Light, Lighting, MapSlot,
         MaterialLayers, MaterialMaps, MeshAttributes, MeshData, ModelMatrix, PbrMaterial, Scene,
-        SkyLight, TextureData, TextureSampler, UvTransform, Wrap,
+        SkyLight, TextureData, TextureSampler, UvTransform, Wave, Wrap,
     },
 };
 use std::{path::Path, sync::Arc};
@@ -624,9 +624,11 @@ fn golden_base_decal_shadow_catcher_and_flag() {
             Some(Flag {
                 width: 2.4,
                 height: 1.6,
-                amplitude: 0.2,
-                frequency: 1.35,
-                speed: 1.0,
+                motion: FlagMotion::Wave(Wave {
+                    amplitude: 0.2,
+                    frequency: 1.35,
+                    speed: 1.0,
+                }),
                 shading: FlagShading::Pbr,
                 artwork_turns: 0,
                 revealed: 1.0,

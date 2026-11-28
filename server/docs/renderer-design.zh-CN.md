@@ -476,6 +476,32 @@ chr 世界坐标：对齐次列向量，`world_position = model * local_position
 精度不变。旗帜运动时重绘缓存的阴影图；静止或振幅为零的旗帜保留缓存。
 包围盒覆盖所有相位。
 
+### 原生旗帜（#219）
+
+旗帜的 `FlagMotion` 要么是上面的 SimpleWave，要么是 `Cloth`：把 AER WebGPU 布料
+（xiaoyxue/Simulation `ff9c934`，升起后的状态）移植到旗帜局部坐标（米）。
+65 x 41 个粒子悬在固定的上边（Y = 0）与下边（Y = 高）两行之间，布长比该间距长出
+`Cloth::slack` 决定的部分（参考值 0.1，即长 11%；为 0 时平直）；
+参考实现 Y 向上、+Z 为正面的常量转为 -Y 与 -Z（真旋转），并去掉了地面接触。
+重力是世界向下方向经实例 model 转到旗帜坐标；风相对于旗面。`scene::cloth` 存放参考逻辑
+（初始弧形、确定性的自动风向序列、包围盒），`flag_cloth.wgsl` 是求解器：每个固定
+1/120 s 步长在两个 ping-pong 粒子 buffer 上做一次 Verlet `predict` 和 36 次加权 Jacobi
+`constrain` dispatch，然后 `surface` pass 把粒子双线性采样（位置和逐粒子的曲面方向，
+因此法线平滑）到共享旗帜网格上，展开收拢与图片旋转沿用与 SimpleWave pass 共享的
+`flag_shared.wgsl`。每块布料都按旗帜宽高比、以 `SIMULATED_HEIGHT`（4.8 m，参考实现的
+跨度）的高度模拟，`surface` pass 再按旗帜高度与它之比缩放位置，因此任意大小的旗帜
+都和参考实现一样褶皱深、动得快。绘制、阴影和外观不变。
+
+与 SimpleWave 不同，布料有状态。`FlagGpu` 在原生旗帜被绘制期间按 `InstanceId`
+跨帧保留其粒子；新场景的实例 ID 不同，因此从静止开始。布料时钟是 `Cloth::seconds`，
+由 runtime 每帧设为场景时间（与展开相同）。每次 prepare 规划到该时间的步数（每帧最多
+8 步；首次出现的布料最多 360 步即 3 s，使静帧可复现），每步的 uniform 位于动态偏移处；
+encode 记录这些步并在此时才推进状态，因此只 prepare 不 encode 不会丢失状态。
+时钟回退、尺寸、余量或升旗变化会让布料重新开始。升旗的布料（`Cloth::raise`）从参考实现的
+手风琴式折叠开始，位于下边上方；每步的 uniform 带上边的旗帜局部 Y（`Cloth::top_at`，在升旗时长内
+按 smoothstep 降到 0），`predict` 把最上一行固定到这里，因此布料是由求解器展开的，而不是变换。其包围盒是固定矩形向外扩展半个静止长度的
+1.5 倍；只要有步进就视为运动，从而重绘缓存的阴影。
+
 ### Mesh storage 的参考与适配
 
 同时参考 `xiaoyxue/Gyunity` 的 `7361064`，具体为

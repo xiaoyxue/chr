@@ -3,6 +3,7 @@
 //! Handles are process-local and scene-scoped, never protocol/resource IDs.
 
 mod appearance;
+mod cloth;
 mod flag;
 mod geometry;
 mod storage;
@@ -18,7 +19,14 @@ use thiserror::Error;
 pub use appearance::{
     AreaShape, EnvironmentMap, Light, Lighting, MaterialLayers, PbrMaterial, ShadowMode, SkyLight,
 };
-pub use flag::{FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagShading, RevealDirection};
+pub use cloth::{
+    CLOTH_COLUMNS, CLOTH_ROWS, Cloth, ITERATIONS, MAX_SLACK, MAX_WIND, SIMULATED_HEIGHT, STEP,
+    initial_positions,
+};
+pub(crate) use cloth::{GRAVITY, simulated_size, spacing};
+pub use flag::{
+    FLAG_COLUMNS, FLAG_ROWS, FLAG_VERTICES, Flag, FlagMotion, FlagShading, RevealDirection, Wave,
+};
 pub use geometry::{Aabb, MeshAttributes, MeshData, ModelMatrix};
 use storage::{Key, Store};
 pub use texture::{Filter, MapSlot, MaterialMaps, TextureData, TextureSampler, UvTransform, Wrap};
@@ -55,7 +63,9 @@ pub enum SceneError {
     InvalidLighting,
     #[error("environment dimensions and finite nonnegative RGB radiance must agree")]
     InvalidEnvironment,
-    #[error("flag size must be positive and its motion finite and nonnegative")]
+    #[error(
+        "flag size must be positive, its wave finite and nonnegative, and its cloth wind 0 to 18 m/s, tension 0 to 1, slack 0 to 0.2 and time finite and nonnegative"
+    )]
     InvalidFlag,
     #[error("flag motion requires the flag grid mesh")]
     FlagMesh,

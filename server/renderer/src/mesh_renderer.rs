@@ -11,7 +11,7 @@ use crate::{
     coordinates::ImageExtent,
     diagnostics::{DiagnosticView, Overlays, RenderSettings, line_indices},
     environment::{self, EnvironmentGpu, EnvironmentSettings},
-    flag::{self, FlagGpu},
+    flag::{self, FlagDraw, FlagGpu},
     material_maps::{MaterialMapCache, fullscreen_pipeline, texture_entry},
     offscreen::BoxError,
     scene::{
@@ -875,7 +875,8 @@ impl MeshRenderer {
     }
 
     /// Time of the next prepared frame in seconds, for animated content such as
-    /// flags. Use the frame's own media time so renders are reproducible.
+    /// SimpleWave flags. Use the frame's own media time so renders are reproducible.
+    /// Native flags run on their own clock (`scene::Cloth::seconds`).
     pub fn set_animation_time(&mut self, seconds: f64) {
         self.animation_seconds = seconds;
     }
@@ -1015,12 +1016,17 @@ impl MeshRenderer {
         let mut used_materials = HashSet::new();
         let unlit_maps = MaterialMaps::default();
         let mut flags = Vec::new();
-        for (_, instance) in scene.instances().filter(|(_, i)| i.visible()) {
+        for (instance_id, instance) in scene.instances().filter(|(_, i)| i.visible()) {
             let mesh = scene.mesh(instance.mesh())?;
             let id = mesh.content_key();
             // A flag grid has one part, so each flag instance is one draw and one slot.
             let flag = instance.flag().map(|flag| {
-                flags.push(flag::params(flag, self.animation_seconds));
+                flags.push(FlagDraw::new(
+                    instance_id,
+                    flag,
+                    instance.model(),
+                    self.animation_seconds,
+                ));
                 (flags.len() - 1, flag.shading)
             });
             let rows = instance.model().rows();

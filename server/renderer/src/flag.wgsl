@@ -1,5 +1,5 @@
-// SimpleWave flag surface, evaluated once per frame per flag instance.
-// FLAG_COLUMNS and FLAG_ROWS are prepended from chr_renderer::scene.
+// SimpleWave flag surface, evaluated once per frame per flag instance, after
+// flag_shared.wgsl.
 // Flag-local metres: X along the width from the left edge, Y down from the top edge,
 // Z = X x Y. The front normal (-Z at rest) faces the side that reads the artwork
 // upright. The centre line u = 0.5 stays pinned; both halves wave outwards. A partly
@@ -14,31 +14,14 @@ struct FlagParams {
     // Revealed fraction, artwork quarter turns, reveal direction (scene::RevealDirection).
     artwork: vec4<f32>,
 };
-struct FlagVertex { position: vec4<f32>, normal: vec4<f32>, tangent: vec4<f32>, uv: vec4<f32> };
 
 @group(0) @binding(0) var<uniform> params: FlagParams;
 @group(0) @binding(1) var<storage,read_write> vertices: array<FlagVertex>;
 
-// Grid coordinates moved onto the part of the flag a reveal has opened, as
-// Flag::revealed_uv: what is not shown yet collapses onto the edge of what is.
-fn revealed_uv(grid: vec2<f32>, p: f32, direction: u32) -> vec2<f32> {
-    let centred = vec2(0.5) + clamp(grid - vec2(0.5), vec2(-0.5 * p), vec2(0.5 * p));
-    switch direction {
-        case 1u: { return vec2(grid.x, centred.y); }
-        case 2u: { return vec2(min(grid.x, p), grid.y); }
-        case 3u: { return vec2(max(grid.x, 1.0 - p), grid.y); }
-        case 4u: { return vec2(grid.x, min(grid.y, p)); }
-        case 5u: { return vec2(grid.x, max(grid.y, 1.0 - p)); }
-        default: { return vec2(centred.x, grid.y); }
-    }
-}
-
 @compute @workgroup_size(64)
 fn cs_flag(@builtin(global_invocation_id) id: vec3<u32>) {
-    let columns = FLAG_COLUMNS + 1u;
-    if id.x >= columns * (FLAG_ROWS + 1u) { return; }
-    let grid = vec2(f32(id.x % columns) / f32(FLAG_COLUMNS), f32(id.x / columns) / f32(FLAG_ROWS));
-    let shown = revealed_uv(grid, params.artwork.x, u32(params.artwork.z));
+    if id.x >= (FLAG_COLUMNS + 1u) * (FLAG_ROWS + 1u) { return; }
+    let shown = revealed_uv(flag_grid(id.x), params.artwork.x, u32(params.artwork.z));
     let u = shown.x;
     let v = shown.y;
     let width = params.size_wave.x;
@@ -73,13 +56,4 @@ fn cs_flag(@builtin(global_invocation_id) id: vec3<u32>) {
         vec4(normalize(du), -1.0),
         vec4(artwork_uv(u, v, u32(params.artwork.y)), 0.0, 0.0)
     );
-}
-
-fn artwork_uv(u: f32, v: f32, turns: u32) -> vec2<f32> {
-    switch turns {
-        case 1u: { return vec2(v, 1.0 - u); }
-        case 2u: { return vec2(1.0 - u, 1.0 - v); }
-        case 3u: { return vec2(1.0 - v, u); }
-        default: { return vec2(u, v); }
-    }
 }

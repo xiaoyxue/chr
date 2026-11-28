@@ -579,17 +579,13 @@ impl Loader {
                 .map_err(|e| ErrorObject::internal(e.to_string()))?;
         let cued = scene.state.instances.iter().any(|instance| {
             instance.instance_id == params.instance
-                && instance
-                    .flag
-                    .as_ref()
-                    .and_then(|flag| flag.reveal.as_ref())
-                    .is_some_and(|reveal| reveal.start == w::RevealStart::Cue)
+                && instance.flag.as_ref().is_some_and(w::Flag::cued)
         });
         if !cued {
             return Err(reject(
                 w::RejectionKind::NotFound,
                 format!(
-                    "instance {} is not a flag whose reveal starts on a cue",
+                    "instance {} is not a flag whose reveal or raise starts on a cue",
                     params.instance.as_str()
                 ),
             ));

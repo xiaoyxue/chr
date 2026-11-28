@@ -235,9 +235,18 @@ type RenderInstance = {
   flag?: {
     width_m: number;
     height_m: number;
-    amplitude_m?: number; // default 1.1
-    frequency?: number; // default 1.35
-    speed?: number; // default 5.5
+    // Extension (#219): absent, "default" (SimpleWave). Only the chosen type's
+    // fields are accepted.
+    type?: "default" | "native";
+    amplitude_m?: number; // default: default 1.1
+    frequency?: number; // default: default 1.35
+    speed?: number; // default: default 5.5
+    wind_mps?: number; // native: 0..18, default 7
+    wind_direction_deg?: number; // native: about flag-local Y, 0 = +X, 90 = -Z; default 25
+    auto_direction?: boolean; // native: wander within 45 degrees; default true
+    tension?: number; // native: 0..1, default 0.65
+    slack?: number; // native: unspanned part of the cloth's length, 0..0.2, default 0.1
+    raise?: { duration_s: number; start: "load" | "cue" }; // native: raised from folded
     material?: "simple" | "pbr" | "cloth"; // default "cloth"
     artwork_rotation?: 0 | 90 | 180 | 270; // clockwise turn of the artwork (#210)
     // Extension (#210, #215): absent, the flag is shown from the start.

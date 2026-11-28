@@ -364,8 +364,31 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
         .unwrap();
     assert_eq!(state["state"]["instances"][2]["flag"], motion);
 
+    // A native flag: its cloth's wind and fabric, stored as sent.
+    let native = json!({"width_m": 3.2, "height_m": 4.8, "type": "native", "wind_mps": 9.0,
+        "wind_direction_deg": -40.0, "auto_direction": false, "tension": 0.3, "slack": 0.02,
+        "material": "cloth"});
+    loader
+        .load(scene(
+            &fixture,
+            json!([artwork]),
+            json!([flag("flag", Some(native.clone()))]),
+        ))
+        .await
+        .unwrap();
+    let state = control
+        .call(
+            w::SCENE_GET,
+            Some(json!({"runtime_id": program.configuration.runtime_id, "scene_id": program.scene_id})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state["state"]["instances"][2]["flag"], native);
+
     let mut flat = motion.clone();
     flat["width_m"] = json!(0);
+    let mut gale = native.clone();
+    gale["wind_mps"] = json!(30);
     for (case, instance) in [
         ("a flag without motion", flag("flag", None)),
         (
@@ -373,6 +396,7 @@ async fn flag_instances_need_flag_assets_and_flag_parameters() {
             flag("ad", Some(motion.clone())),
         ),
         ("a zero-width flag", flag("flag", Some(flat))),
+        ("a native flag in a gale", flag("flag", Some(gale))),
     ] {
         let error = loader
             .load(scene(&fixture, json!([]), json!([instance])))

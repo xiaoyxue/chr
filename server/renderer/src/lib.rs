@@ -9,6 +9,7 @@ pub use diagnostics::{DiagnosticOverlays, DiagnosticView, RenderSettings};
 mod environment;
 pub mod exr;
 mod flag;
+mod flag_cloth;
 pub use environment::EnvironmentSettings;
 pub mod glb;
 mod gpu;

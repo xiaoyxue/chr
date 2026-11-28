@@ -610,6 +610,42 @@ media time (`MeshRenderer::set_animation_time`); phases are reduced modulo 2 pi 
 f64 so long-running clocks keep precision. Moving flags redraw cached shadow maps;
 a flat or stopped flag keeps them. Bounds cover every phase.
 
+### Native flags (#219)
+
+A flag's `FlagMotion` is either the SimpleWave above or a `Cloth`: a port of the
+AER WebGPU cloth (xiaoyxue/Simulation at `ff9c934`, raised state) in flag-local
+metres. 65 x 41 particles hang between the pinned top (Y = 0) and bottom
+(Y = height) rows, longer than that span by `Cloth::slack` (the reference's 0.1, 11 %;
+0 hangs flat); the reference's Y-up, +Z-front
+constants turn to -Y and -Z, a proper rotation, and its floor contact is dropped.
+Gravity is world down turned into the flag's axes through the instance model; the
+wind is relative to the flag. `scene::cloth` holds the reference logic (rest arc,
+the deterministic automatic-wind sequence, bounds) and `flag_cloth.wgsl` the
+solver: a Verlet `predict` and 36 weighted Jacobi `constrain` dispatches per fixed
+1/120 s step over two ping-pong particle buffers, then a `surface` pass that samples
+the particles bilinearly (positions and per-particle surface directions, so normals
+are smooth) onto the shared flag grid, after the reveal collapse and artwork turns
+that `flag_shared.wgsl` shares with the SimpleWave pass. Every cloth is simulated
+`SIMULATED_HEIGHT` (4.8 m, the reference's span) tall at its flag's aspect, and the
+`surface` pass scales its positions by the flag's height over it, so a flag of any
+size folds as deeply and as quickly as the reference's. Draws, shadows and looks
+are unchanged.
+
+Unlike SimpleWave, the cloth is stateful. `FlagGpu` keeps each native flag's
+particles by `InstanceId` across frames while it is drawn; a new scene has new
+instance IDs and starts at rest. The cloth's clock is `Cloth::seconds`, which the
+runtime sets to the scene's time each frame, like a reveal. Each prepare plans the
+steps up to it (at most 8 a frame; at most 360, 3 s, for a cloth seen for the first
+time, so stills are reproducible) with per-step uniforms at dynamic offsets; the
+encode records them and only then advances the state, so a prepare without an
+encode loses nothing. A clock that goes back or a change of size, slack or raise restarts the cloth.
+A raised cloth (`Cloth::raise`) starts folded in the reference's accordion folds just
+above its bottom edge; each step's uniforms carry the top edge's flag-local Y
+(`Cloth::top_at`, a smoothstep to 0 over the raise), which `predict` pins the top row
+to, so the cloth unfolds through the solver rather than a transform.
+Its bounds are its pinned rectangle grown by 1.5 times half its rest length; it
+counts as moving whenever it steps, which redraws cached shadows.
+
 ### Mesh storage reference and adaptation
 
 Also reference `xiaoyxue/Gyunity` at `7361064`, specifically
