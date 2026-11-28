@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, webcrypto } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import { after, test } from 'node:test';
 import { zipSync, strToU8 } from 'fflate';
 import { createServer } from 'vite';
@@ -8,6 +9,7 @@ globalThis.crypto ??= webcrypto;
 const server = await createServer({ configFile: false, server: { middlewareMode: true } });
 after(() => server.close());
 const { parseOfflinePackage } = await server.ssrLoadModule('/src/matches/offline-package.ts');
+const { readOfflinePackage } = await server.ssrLoadModule('/src/matches/offline-reader.ts');
 const { validateLibrary, validateMatch } = await server.ssrLoadModule('/src/matches/match-domain.ts');
 const { seedTifoFlags, tifoPlane } = await server.ssrLoadModule('/src/placements/tifo.ts');
 const { validLocalAd } = await server.ssrLoadModule('/src/placements/local-ad.ts');
@@ -107,6 +109,83 @@ test('images over 4 MB, such as a full-size tifo, are read like any material', a
   data.manifest.match.assets.find((asset) => asset.id === 'ASSET-image').byteLength = bytes.length;
   data.manifest.sha256['assets/ASSET-image.png'] = createHash('sha256').update(bytes).digest('hex');
   await assert.rejects(() => parseOfflinePackage(archive(data)), /Invalid PNG material/);
+});
+
+const MiB = 1024 * 1024, GiB = 1024 * MiB;
+/**
+ * A stored ZIP written with ZIP64 records only, as writers do for archives above 4 GiB. An entry's
+ * `size` may claim more than its bytes, to describe a huge package without allocating it.
+ */
+function zip64(entries) {
+  const parts = [], central = [];
+  let offset = 0;
+  const u64 = (value) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(value)); return b; };
+  for (const { name, bytes, size = bytes.length } of entries) {
+    const nameBytes = Buffer.from(name), crc = crc32(bytes);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(45, 4); local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(0xffffffff, 18); local.writeUInt32LE(0xffffffff, 22);
+    local.writeUInt16LE(nameBytes.length, 26); local.writeUInt16LE(20, 28);
+    const localExtra = Buffer.concat([Buffer.from([1, 0, 16, 0]), u64(size), u64(bytes.length)]);
+    const record = Buffer.alloc(46);
+    record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(45, 4); record.writeUInt16LE(45, 6); record.writeUInt32LE(crc, 16);
+    record.writeUInt32LE(0xffffffff, 20); record.writeUInt32LE(0xffffffff, 24); record.writeUInt16LE(nameBytes.length, 28);
+    record.writeUInt16LE(28, 30); record.writeUInt32LE(0xffffffff, 42);
+    central.push(record, nameBytes, Buffer.concat([Buffer.from([1, 0, 24, 0]), u64(size), u64(bytes.length), u64(offset)]));
+    parts.push(local, nameBytes, localExtra, bytes);
+    offset += 30 + nameBytes.length + 20 + bytes.length;
+  }
+  const directory = Buffer.concat(central);
+  const end64 = Buffer.concat([Buffer.from([0x50, 0x4b, 6, 6]), u64(44), Buffer.from([45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    u64(entries.length), u64(entries.length), u64(directory.length), u64(offset)]);
+  const locator = Buffer.concat([Buffer.from([0x50, 0x4b, 6, 7, 0, 0, 0, 0]), u64(offset + directory.length), Buffer.from([1, 0, 0, 0])]);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0xffff, 8); end.writeUInt16LE(0xffff, 10);
+  end.writeUInt32LE(0xffffffff, 12); end.writeUInt32LE(0xffffffff, 16);
+  return new Uint8Array(Buffer.concat([...parts, directory, end64, locator, end]));
+}
+const packageEntries = ({ manifest, files }) => [...Object.entries(files).map(([name, bytes]) => ({ name, bytes })),
+  { name: 'manifest.json', bytes: strToU8(JSON.stringify(manifest)) }];
+/** Reads by offset, as the page server does, noting each range read. */
+function tracked(bytes) {
+  const reads = [];
+  return { reads, source: { size: bytes.length, read: async (offset, length) => { reads.push([offset, length]); return bytes.subarray(offset, offset + length); } } };
+}
+
+test('a ZIP64 package, as written above 4 GiB, reads like any other', async () => {
+  const result = await parseOfflinePackage(new Blob([zip64(packageEntries(fixture()))]));
+  assert.equal(result.match.placements.length, 4);
+  assert.deepEqual(new Uint8Array(await result.assets.get('ASSET-image').arrayBuffer()), image);
+  const damaged = zip64(packageEntries(fixture()));
+  damaged[80] ^= 1; // inside the first entry's bytes, after its 72-byte local header
+  await assert.rejects(parseOfflinePackage(new Blob([damaged])), /damaged/);
+});
+
+test('materials above 5 GiB together, or 256 MiB alone, are refused from the ZIP directory before anything is unpacked (#214)', async () => {
+  const data = fixture(), model = 'assets/ASSET-model.glb';
+  const models = Array.from({ length: 21 }, (_, i) => ({ name: `assets/ASSET-m${i}.glb`, bytes: data.files[model], size: 255 * MiB }));
+  const { reads, source } = tracked(zip64([...packageEntries(data), ...models]));
+  await assert.rejects(readOfflinePackage(source),
+    new RegExp(`materials total 5\\.2 GiB \\(${21 * 255 * MiB + image.length + data.files[model].length} bytes\\), over the offline package limit of 5 GiB \\(${5 * GiB} bytes\\)`));
+  assert.equal(reads.length, 3, 'only the end records and the central directory are read');
+  const large = tracked(zip64(packageEntries(data).map((entry) => entry.name === model ? { ...entry, size: 256 * MiB + 1 } : entry)));
+  await assert.rejects(readOfflinePackage(large.source), new RegExp(`ASSET-model\\.glb is 256 MiB \\(${256 * MiB + 1} bytes\\); each may be at most 256 MiB`));
+  assert.equal(large.reads.length, 3);
+});
+
+test('a package of more than 256 MiB of materials, such as a multi-ad 3D campaign, is read (#214)', async () => {
+  const data = fixture(), models = ['ASSET-big-a', 'ASSET-big-b'];
+  for (const id of models) {
+    const bytes = new Uint8Array(130 * MiB), path = `assets/${id}.glb`;
+    bytes.set(glb(), 0);
+    new DataView(bytes.buffer).setUint32(8, bytes.length, true);
+    data.files[path] = bytes;
+    data.manifest.sha256[path] = createHash('sha256').update(bytes).digest('hex');
+    data.manifest.match.assets.push({ id, name: id, contentType: 'model/gltf-binary', byteLength: bytes.length, contentPath: path });
+  }
+  const { assets } = await readOfflinePackage(new Blob([zipSync({ ...data.files, 'manifest.json': strToU8(JSON.stringify(data.manifest)) }, { level: 0 })]),
+    (asset) => ({ id: asset.id, size: asset.bytes.length }));
+  assert.deepEqual(assets.slice(2), models.map((id) => ({ id, size: 130 * MiB })));
 });
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');

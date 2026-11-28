@@ -24,7 +24,7 @@
             <div class="on-section-heading"><div><p class="on-eyebrow">GET STARTED</p><h2>添加比赛场次</h2></div><span class="on-step-number">01</span></div>
             <form id="match-lookup-form"><label for="match-lookup-id">比赛场次 ID，或现场服务器上的离线 ZIP 路径</label><div class="on-lookup-row"><input id="match-lookup-id" placeholder="Fusion 比赛 ID，或 /home/…/match.zip" maxlength="1024" required autocomplete="off" /><button class="on-button primary" id="match-lookup-submit" type="submit">核验并添加</button><button id="import-offline-package" class="on-button" type="button">选择本地 ZIP</button></div></form>
             <input id="offline-package-file" type="file" accept=".zip,application/zip" hidden />
-            <p class="on-help">Enter a Fusion MATCH or CMP identifier to fetch the latest saved Ads, placements and assigned materials. An absolute path (starting with /) loads an offline Fusion ZIP from the onsite server; “选择本地 ZIP” picks one on this computer. Offline packages include images and GLB models, need no API connection, hold up to 256 MB of materials and are saved in the studio store on the onsite server.</p>
+            <p class="on-help">Enter a Fusion MATCH or CMP identifier to fetch the latest saved Ads, placements and assigned materials. An absolute path (starting with /) loads an offline Fusion ZIP from the onsite server; “选择本地 ZIP” picks one on this computer. Offline packages include images and GLB models, need no API connection, hold up to 5 GiB of materials (each up to 256 MiB) and are saved in the studio store on the onsite server.</p>
             <p id="lookup-status" role="status" class="on-help"></p>
             <p id="offline-package-status" class="on-help" role="status"></p>
           </section>

@@ -23,11 +23,15 @@ function packageMatch(source: Record<string, unknown>, assetIds: string[], point
   return { id, match };
 }
 
-/** A ZIP chosen on this computer: read and verified here, its materials stored by storeOfflineAssets. */
+/**
+ * A ZIP chosen on this computer: read and verified here by offset, never whole, its materials stored
+ * by storeOfflineAssets. Each verified material becomes a Blob at once, so its bytes can be released.
+ */
 export async function parseOfflinePackage(file: Blob): Promise<OfflinePackage> {
-  const { source, assets, pointCloud } = await readOfflinePackage(new Uint8Array(await file.arrayBuffer()));
+  const { source, assets, pointCloud } = await readOfflinePackage(file,
+    (asset) => ({ id: asset.id, blob: new Blob([new Uint8Array(asset.bytes)], { type: asset.contentType }) }));
   const { id, match } = packageMatch(source, assets.map((asset) => asset.id), pointCloud?.sha256);
-  return { id, match, assets: new Map(assets.map((asset) => [asset.id, new Blob([new Uint8Array(asset.bytes).buffer], { type: asset.contentType })])),
+  return { id, match, assets: new Map(assets.map((asset) => [asset.id, asset.blob])),
     ...(pointCloud ? { pointCloud: new Blob([new Uint8Array(pointCloud.bytes).buffer]) } : {}) };
 }
 

@@ -1,15 +1,19 @@
 // The studio store's JSON documents and how each is validated, shared by the
 // server (scripts/studio-store.ts), which refuses invalid writes, and the page.
 import { validateLibrary } from '../matches/match-domain.ts';
+import { MAX_ASSET_BYTES, MAX_PACKAGE_BYTES } from '../matches/offline-limits.ts';
 import { validateStoredLocalAds } from '../placements/local-ad.ts';
 import { validateSession } from '../app/session.ts';
 import { validateLightingLibrary } from '../lighting/lighting.ts';
 import type { MatchRecord } from './types.ts';
 
 const MB = 1024 * 1024;
-/** Upload limits by file extension: materials, offline ZIPs and their point clouds (MAX_PLY_BYTES). */
+/**
+ * Upload limits by file extension: materials, offline ZIPs (offline-limits.ts, the same limits
+ * the package reader applies) and their point clouds (MAX_PLY_BYTES).
+ */
 export const FILE_LIMITS: Readonly<Record<string, number>> = {
-  '.png': 64 * MB, '.jpg': 64 * MB, '.jpeg': 64 * MB, '.webp': 64 * MB, '.glb': 256 * MB, '.zip': 1024 * MB, '.ply': 64 * MB,
+  '.png': 64 * MB, '.jpg': 64 * MB, '.jpeg': 64 * MB, '.webp': 64 * MB, '.glb': MAX_ASSET_BYTES, '.zip': MAX_PACKAGE_BYTES, '.ply': 64 * MB,
 };
 
 /** Match ids that can name a directory of the store. */
