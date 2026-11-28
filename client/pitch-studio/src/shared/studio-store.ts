@@ -4,6 +4,7 @@
 // based on stale data is refused instead of overwriting another page's changes.
 import { serverPath } from './server-files.ts';
 import { FILE_LIMITS } from './store-documents.ts';
+import { formatBytes } from '../matches/offline-limits.ts';
 
 /** Another page saved the document first; reload it before changing it again. */
 export class StoreConflict extends Error {}
@@ -73,7 +74,7 @@ export async function serverSha256(path: string): Promise<string> {
 export async function uploadFile(file: Blob, name: string): Promise<string> {
   const limit = FILE_LIMITS[name.slice(name.lastIndexOf('.')).toLowerCase()];
   if (!limit) throw new Error(`不能存储 ${name}：只接受 PNG / JPEG / WebP 图片、GLB 模型、离线 ZIP 或其 PLY 点云。`);
-  if (file.size > limit) throw new Error(`${name} 超过 ${limit / 1024 / 1024} MB 上限，未上传。`);
+  if (file.size > limit) throw new Error(`${name} 超过 ${formatBytes(limit)} 上限，未上传。`);
   const response = await request(`/studio-store/files?name=${encodeURIComponent(name)}`, { method: 'POST', body: file,
     headers: { 'Content-Type': 'application/octet-stream' } });
   return ((await response.json()) as { path: string }).path;

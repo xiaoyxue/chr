@@ -418,8 +418,10 @@ library and Fusion drafts), `package-paths.json` (offline ZIP paths),
 `matches/<matchId>/local-ads.json` and `session.json` (placements made onsite and
 the operator's session, kept apart from the Fusion package),
 `matches/<matchId>/exports/` (the default folder for exports), and
-`files/<sha256>.<ext>` (uploaded materials up to 64 MB and offline ZIPs up to 1
-GB). An offline ZIP given by server path (inside `LOCAL_FILES_ROOTS` or the store) is
+`files/<sha256>.<ext>` (uploaded images up to 64 MB, models up to 256 MiB and offline ZIPs
+up to about 5 GiB). An offline ZIP may hold 5 GiB of materials, each at most 256 MiB (chr-server's
+asset limit), in one definition for the page and its server (`src/matches/offline-limits.ts`); both
+read it by offset, ZIP64 included, one material at a time, never the whole archive. An offline ZIP given by server path (inside `LOCAL_FILES_ROOTS` or the store) is
 imported there: `POST /studio-store/packages` reads and verifies it by the page's
 rules (`src/matches/offline-reader.ts`, shared by both), stores its materials and
 answers only the manifest's match, so no material crosses the network; a ZIP picked

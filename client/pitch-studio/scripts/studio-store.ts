@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import type { IncomingMessage } from 'node:http';
+import { mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import type { IncomingMessage, Server } from 'node:http';
 import { extname, join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -9,6 +9,7 @@ import type { Connect, Plugin } from 'vite';
 import { Failure, writeProblem } from './request-guard.ts';
 import { realRoots, sharedPath } from './local-files.ts';
 import { EXTENSIONS, blendedMaterials, readOfflinePackage } from '../src/matches/offline-reader.ts';
+import { formatBytes } from '../src/matches/offline-limits.ts';
 import { FILE_LIMITS, MATCH_ID, documentValidator } from '../src/shared/store-documents.ts';
 
 // The studio's data on the onsite server, in one directory (STUDIO_DATA_DIR):
@@ -121,14 +122,14 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
   const upload = async (req: IncomingMessage, name: string | null) => {
     const extension = extname(name ?? '').toLowerCase(), limit = limits[extension];
     if (!limit) throw new Failure(415, '只能上传 PNG / JPEG / WebP 图片、GLB 模型、离线 ZIP 或其 PLY 点云。');
-    if (Number(req.headers['content-length']) > limit) throw new Failure(413, `文件超过 ${limit / MB} MB 上限。`);
+    if (Number(req.headers['content-length']) > limit) throw new Failure(413, `文件超过 ${formatBytes(limit)} 上限。`);
     const files = join(await ready, 'files'), temporary = join(files, `upload-${randomUUID()}.part`);
     const hash = createHash('sha256');
     let size = 0;
     try {
       await pipeline(req, new Transform({
         transform(chunk: Buffer, _encoding, callback) {
-          if ((size += chunk.length) > limit) { callback(new Failure(413, `文件超过 ${limit / MB} MB 上限。`)); return; }
+          if ((size += chunk.length) > limit) { callback(new Failure(413, `文件超过 ${formatBytes(limit)} 上限。`)); return; }
           hash.update(chunk);
           callback(null, chunk);
         },
@@ -156,7 +157,8 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
   /**
    * Reads an offline ZIP by its server path, verifies it as the page does
    * (readOfflinePackage) and stores its materials and point cloud, so none crosses the network.
-   * Answers with the manifest's match, which the page maps and checks.
+   * The ZIP is read by offset and each material stored once verified, so a package of several
+   * GiB never sits in memory. Answers with the manifest's match, which the page maps and checks.
    */
   const importPackage = async (req: IncomingMessage) => {
     let body: { path?: unknown };
@@ -165,20 +167,29 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
     if (typeof body?.path !== 'string' || extname(body.path).toLowerCase() !== '.zip')
       throw new Failure(400, '请给出现场服务器上离线 ZIP 的绝对路径。');
     const path = await sharedPath(body.path, [...await readableRoots, await ready]);
-    const info = await stat(path);
-    if (!info.isFile() || info.size > FILE_LIMITS['.zip']) throw new Failure(400, `不是可导入的离线 ZIP：${body.path}`);
-    let read: Awaited<ReturnType<typeof readOfflinePackage>>;
-    try { read = await readOfflinePackage(new Uint8Array(await readFile(path))); }
-    catch (error) { throw new Failure(400, error instanceof Error ? error.message : String(error)); }
-    const assets = [];
-    for (const asset of read.assets) {
-      const stored = await keep(asset.bytes, asset.sha256, EXTENSIONS[asset.contentType]);
-      assets.push({ id: asset.id, path: stored,
-        ...(asset.contentType === 'model/gltf-binary' ? { blended: blendedMaterials(asset.bytes) } : {}) });
-    }
-    const cloud = read.pointCloud;
-    return { source: read.source, assets,
-      ...(cloud ? { pointCloud: { path: await keep(cloud.bytes, cloud.sha256, '.ply'), sha256: cloud.sha256 } } : {}) };
+    if (!(await stat(path)).isFile()) throw new Failure(400, `不是可导入的离线 ZIP：${body.path}`);
+    const file = await open(path);
+    try {
+      const { size } = await file.stat();
+      const archive = { size, read: async (position: number, length: number) => {
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await file.read(buffer, 0, length, position);
+        return new Uint8Array(buffer.buffer, buffer.byteOffset, bytesRead);
+      } };
+      // A stored material that fails is the server's fault (500); anything else the reader refused is the package's (400).
+      const store = (bytes: Uint8Array, sha256: string, extension: string) => keep(bytes, sha256, extension).catch((error: unknown) => {
+        throw new Failure(500, `现场服务器存储失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+      const read = await readOfflinePackage(archive, async (asset) => ({ id: asset.id,
+        path: await store(asset.bytes, asset.sha256, EXTENSIONS[asset.contentType]),
+        ...(asset.contentType === 'model/gltf-binary' ? { blended: blendedMaterials(asset.bytes) } : {}) }))
+        .catch((error: unknown) => {
+          throw error instanceof Failure ? error : new Failure(400, error instanceof Error ? error.message : String(error));
+        });
+      const cloud = read.pointCloud;
+      return { source: read.source, assets: read.assets,
+        ...(cloud ? { pointCloud: { path: await store(cloud.bytes, cloud.sha256, '.ply'), sha256: cloud.sha256 } } : {}) };
+    } finally { await file.close(); }
   };
 
   /** Any regular file inside the data directory, by absolute path; never a hidden one. */
@@ -236,10 +247,24 @@ export function studioStoreMiddleware(directory: string, { limits = FILE_LIMITS,
   };
 }
 
+/**
+ * Node ends a request still arriving after 5 minutes (`requestTimeout`); an offline ZIP of
+ * several GiB uploaded from the operator's computer, often through an SSH tunnel, may take longer.
+ */
+function allowLongUploads(server: Server | null) {
+  if (server) server.requestTimeout = 0;
+}
+
 export function studioStore(directory: string, packageRoots: string[]): Plugin {
   return {
     name: 'studio-store',
-    configureServer(server) { server.middlewares.use(studioStoreMiddleware(directory, { packageRoots })); },
-    configurePreviewServer(server) { server.middlewares.use(studioStoreMiddleware(directory, { packageRoots })); },
+    configureServer(server) {
+      allowLongUploads(server.httpServer as Server | null);
+      server.middlewares.use(studioStoreMiddleware(directory, { packageRoots }));
+    },
+    configurePreviewServer(server) {
+      allowLongUploads(server.httpServer as Server);
+      server.middlewares.use(studioStoreMiddleware(directory, { packageRoots }));
+    },
   };
 }
