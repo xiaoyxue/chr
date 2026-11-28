@@ -63,9 +63,7 @@ async function sha256(bytes: Uint8Array) {
 
 /** The ZIP's entries by name, each within its own limit and the materials within theirs together, before any is unpacked. */
 async function packageEntries(archive: RandomAccess) {
-  if (!archive.size || archive.size > MAX_PACKAGE_BYTES)
-    throw new Error(`Select a nonempty Fusion ZIP package up to ${formatBytes(MAX_PACKAGE_BYTES)} (${formatBytes(MAX_MATERIAL_BYTES)} of materials, `
-      + `${formatBytes(MAX_PLY_BYTES)} of point cloud); this one is ${formatBytes(archive.size)}.`);
+  if (!archive.size) throw new Error('Select a nonempty Fusion ZIP package.');
   const entries = new Map<string, ZipEntry>();
   let materials = 0;
   for (const entry of await centralDirectory(archive, 1025)) {
@@ -79,6 +77,9 @@ async function packageEntries(archive: RandomAccess) {
   if (materials > MAX_MATERIAL_BYTES)
     throw new Error(`The Fusion materials total ${formatBytes(materials)} (${materials} bytes), over the offline package limit of `
       + `${formatBytes(MAX_MATERIAL_BYTES)} (${MAX_MATERIAL_BYTES} bytes).`);
+  if (archive.size > MAX_PACKAGE_BYTES)
+    throw new Error(`The offline ZIP is ${formatBytes(archive.size)}, over its ${formatBytes(MAX_PACKAGE_BYTES)} limit `
+      + `(${formatBytes(MAX_MATERIAL_BYTES)} of materials, ${formatBytes(MAX_PLY_BYTES)} of point cloud).`);
   return entries;
 }
 
